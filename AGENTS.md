@@ -10,6 +10,8 @@ Liepin and Zhilian are connected to the same full CLI path as 51job and are main
 
 The CLI also supports `--platform all`, which expands to the stable supported platform order `51job`, `liepin`, then `zhilian`. All-platform runs execute the same single-platform workflow once per platform, sequentially, with a separate browser session and platform-scoped storage for each platform. If one platform fails, the all-platform run stops and propagates that error.
 
+The CLI supports batch execution through `--jobs-file`. A jobs file is a JSON array whose items contain `keyword` plus optional `jd`, `jdFile`, `email`, and `cc`. Batch mode runs jobs in file order. With `--platform all`, the outer loop is the jobs-file order and the inner loop is the supported platform order (`51job`, `liepin`, `zhilian`). Batch mode cannot be combined with single-job `--keyword`, `--jd`, or `--jd-file` arguments.
+
 The current implemented path is:
 
 1. Parse a freeform JD text block, either inline or from `--jd-file`, into a normalized JSON record only when the keyword-derived `jobKey` is new; reruns reuse the persisted JD payload.
@@ -20,7 +22,7 @@ The current implemented path is:
 6. Open only new resumes, parse structured fields from the page text/DOM, and persist snapshots plus parsed JSON.
 7. Mark successfully captured candidates as seen before scoring; candidates that fail detail opening or extraction remain retryable on later runs.
 8. Score captured resumes afterward from stored resume JSON. Model scoring failures persist `status: failed` score artifacts and do not undo the seen state.
-9. Export a markdown report and optionally email the latest run summary, including the existing no-new-candidates email path when zero new candidates are found.
+9. Export a markdown report and optionally email the latest run summary, including the existing no-new-candidates email path when zero new candidates are found. For Zhilian, resume parsing copies the colleague-forward share link from the detail modal and report emails use that copied link instead of the internal candidate ID.
 
 The repository currently implements resume scoring, markdown export, and SMTP email delivery in `src/`, alongside the browser capture flow.
 
@@ -36,11 +38,14 @@ The repository currently implements resume scoring, markdown export, and SMTP em
 - `npm run dev -- --platform zhilian --keyword "优衣库" [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — rerun an existing Zhilian keyword-derived job key by reusing the stored `jd.json`.
 - `npm run dev -- --platform all --keyword "东南亚 销售" --jd "<JD text>" [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — run 51job, Liepin, then Zhilian sequentially from source. The same JD input seeds platforms without an existing `jd.json`; platforms that already have the keyword-derived job key reuse their own stored JD payload.
 - `npm run dev -- --platform all --keyword "东南亚 销售" [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — rerun all supported platforms only when every platform already has the keyword-derived `jd.json`; otherwise the first missing platform fails with the normal missing-JD error.
+- `npm run dev -- --platform 51job --jobs-file ./jobs.json [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — run multiple jobs from a JSON file from source. Each item uses `keyword` plus optional `jd`, `jdFile`, `email`, and `cc`; per-item email settings override the CLI defaults.
+- `npm run dev -- --platform all --jobs-file ./jobs.json [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — run every jobs-file item across 51job, Liepin, then Zhilian, with jobs as the outer loop and platforms as the inner loop.
 - `npm run build` — compile TypeScript into `dist/`.
 - `npm start -- --platform 51job --keyword "东南亚 销售" --jd "<JD text>" [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — run the compiled CLI with inline JD text for a first-time job key.
 - `npm start -- --platform 51job --keyword "东南亚 销售" --jd-file ./fixtures/jd.txt [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — run the compiled CLI with a JD file for a first-time job key.
 - `npm start -- --platform 51job --keyword "东南亚 销售" [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — rerun an existing keyword-derived job key by reusing the stored `jd.json` without JD parsing.
 - `npm start -- --platform all --keyword "东南亚 销售" --jd "<JD text>" [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — run the compiled CLI across all supported platforms in the same sequential order.
+- `npm start -- --platform all --jobs-file ./jobs.json [--email "user@example.com"] [--cc "cc1@example.com,cc2@example.com"]` — run the compiled CLI in batch mode across all supported platforms.
 - `npm run reparse:resumes -- <platform> <jobKey>` — rebuild parsed resume JSON from stored snapshots for one job.
 - `npm run score:stored -- <platform> <jobKey>` — rescore locally stored resumes for one job.
 - `npm run export:results -- <platform> <jobKey>` — export the latest run’s markdown report for one job.
@@ -92,7 +97,7 @@ The repository currently implements resume scoring, markdown export, and SMTP em
 
 ### Entry flow
 
-`src/index.ts` is the orchestration layer. It parses `--platform`, `--keyword`, optional `--email` / `--cc`, and JD input that is required only for first-time job keys. It derives a keyword-first `jobKey`, reuses the persisted `jd.json` without JD parsing when that key already exists, persists the job record, runs the browser workflow through the resolved platform adapter, captures and saves all new resumes first, updates `seen-ids.json` for successful captures, then scores the captured resumes from local JSON before writing a lightweight run summary. `--platform all` is handled at this layer by expanding to `listSupportedPlatforms()` and invoking the same concrete-platform flow serially for each supported platform.
+`src/index.ts` is the orchestration layer. It parses `--platform`, single-job `--keyword`, batch `--jobs-file`, optional `--email` / `--cc`, and JD input that is required only for first-time job keys. It derives a keyword-first `jobKey`, reuses the persisted `jd.json` without JD parsing when that key already exists, persists the job record, runs the browser workflow through the resolved platform adapter, captures and saves all new resumes first, updates `seen-ids.json` for successful captures, then scores the captured resumes from local JSON before writing a lightweight run summary. `--platform all` is handled at this layer by expanding to `listSupportedPlatforms()` and invoking the same concrete-platform flow serially for each supported platform. In `--jobs-file` mode, `src/index.ts` validates the JSON array and invokes the same single-platform flow for each job/platform pair without changing the underlying capture semantics.
 
 ### JD normalization
 
@@ -128,7 +133,15 @@ Zhilian-specific behavior lives in `src/platforms/zhilian-adapter.ts`:
 - authenticated search entry opens `https://rd6.zhaopin.com/app/search`, not `https://rd6.zhaopin.com/desktop`
 - search entry must click a saved recruiter quick-search tag whose text contains the original raw `--keyword`
 - resume detail stays on the same `/app/search` page as a modal overlay after the URL changes, so the parser must read the modal subtree instead of the underlying search list text
+- resume detail parsing clicks `转给同事`, chooses `链接转发`, copies the generated link, and stores it as `candidateShareUrl`
 - candidate extraction is DOM-first and only waits for the candidate API fallback when DOM extraction yields no candidates; modal parsing uses a short readiness confirmation instead of repeating a full detail wait
+
+Zhilian report email behavior:
+
+- successful resume captures should persist `candidateShareUrl` on the parsed resume and score artifact
+- `src/scripts/send-job-report-email.ts` requires current-run Zhilian score artifacts to have copied share links and rejects duplicate copied links
+- Zhilian report markdown rendered for email prefers `candidateShareUrl` over the internal `candidateId`
+- no-new-candidates Zhilian emails do not require candidate share links because there are no current-run artifacts to render
 
 Liepin manual-login polling is intentionally constrained:
 
@@ -197,6 +210,7 @@ The repository already contains real captured data under `data/<platform>/jobs/`
 - Resume scoring, markdown export, and report emailing are already implemented in `src/`.
 - Report delivery persists both recipient email and CC email lists per `jobKey` unless explicitly overridden on a later run.
 - Exported markdown reports and no-new-candidates email bodies should preserve a visible platform-source label so multi-platform runs remain distinguishable.
+- Zhilian scored-candidate report emails should use copied colleague-forward resume share links. Missing or duplicated current-run Zhilian share links are treated as report-delivery errors instead of silently falling back to internal IDs.
 - The latest run-result files intentionally stay lightweight and are meant to support export/email filtering via candidate IDs rather than storing full candidate card snapshots.
 - The 51job browser automation is still built around the subscription-search interaction: hover a saved subscription keyword, click the search trigger after a single centralized readiness check, then harvest candidate IDs from the “不感兴趣” area/card markup.
 - Explicit empty-result text, including 51job filtered-empty pages like `没有搜索到相关的人才`, or a stable visible empty candidate list is a successful run outcome, not an extraction error; that path should still write a run result, export the latest markdown when possible, and send the no-new-candidates email when a recipient is configured.

@@ -4,6 +4,110 @@ import test from 'node:test';
 import { config } from '../config.js';
 import { zhilianAdapter, zhilianTestExports } from '../platforms/zhilian-adapter.js';
 
+const zhilianShareLinkSelector = [
+  'input',
+  'textarea',
+  '[contenteditable="true"]',
+  'a[href*="zhaopin.com"]',
+  '[data-clipboard-text]',
+  '[data-clipboard]',
+  '[data-copy]',
+  '[data-url]',
+  '[title*="zhaopin.com"]',
+].join(', ');
+
+function restoreGlobalProperty(propertyName: 'window' | 'navigator' | 'document', originalDescriptor: PropertyDescriptor | undefined): void {
+  if (originalDescriptor) {
+    Object.defineProperty(globalThis, propertyName, originalDescriptor);
+    return;
+  }
+
+  delete (globalThis as Record<string, unknown>)[propertyName];
+}
+
+function defineGlobalProperty(propertyName: 'window' | 'navigator' | 'document', value: unknown): () => void {
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, propertyName);
+  Object.defineProperty(globalThis, propertyName, {
+    configurable: true,
+    writable: true,
+    value,
+  });
+  return () => restoreGlobalProperty(propertyName, originalDescriptor);
+}
+
+function createZhilianShareLinkPageStubs(
+  clickCalls: string[] = [],
+  shareUrl = 'https://m.zhaopin.com/b/resume-package?zhaopinToken=share-token-from-copy',
+) {
+  let copiedText = '';
+  let interceptedClipboardText = '';
+  let clipboardInstalled = false;
+
+  const clickVisibleText = async (pattern: RegExp) => {
+    clickCalls.push(pattern.source);
+    if (/复制链接|复制/.test(pattern.source)) {
+      copiedText = shareUrl;
+      interceptedClipboardText = shareUrl;
+    }
+  };
+
+  return {
+    keyboard: {
+      press: async (key: string) => {
+        clickCalls.push(`key:${key}`);
+      },
+    },
+    context: () => ({
+      grantPermissions: async () => undefined,
+    }),
+    evaluate: async <T>(callback: () => T | Promise<T>): Promise<T> => {
+      const windowStub = {
+        __autorecruitZhilianCopiedText: interceptedClipboardText,
+        __autorecruitZhilianClipboardInstalled: clipboardInstalled,
+        location: { href: 'https://rd6.zhaopin.com/app/search' },
+        getSelection: () => ({ toString: () => '' }),
+      };
+      const navigatorStub = {
+        clipboard: {
+          readText: async () => copiedText,
+          writeText: async (value: string) => {
+            copiedText = value;
+            interceptedClipboardText = value;
+            windowStub.__autorecruitZhilianCopiedText = value;
+          },
+        },
+      };
+      const documentStub = {
+        addEventListener: () => undefined,
+      };
+      const restoreWindow = defineGlobalProperty('window', windowStub);
+      const restoreNavigator = defineGlobalProperty('navigator', navigatorStub);
+      const restoreDocument = defineGlobalProperty('document', documentStub);
+
+      try {
+        return await callback();
+      } finally {
+        interceptedClipboardText = windowStub.__autorecruitZhilianCopiedText ?? '';
+        clipboardInstalled = Boolean(windowStub.__autorecruitZhilianClipboardInstalled);
+        restoreDocument();
+        restoreNavigator();
+        restoreWindow();
+      }
+    },
+    getByText: (pattern: RegExp) => ({
+      count: async () => 1,
+      nth: () => ({
+        isVisible: async () => true,
+        click: async () => clickVisibleText(pattern),
+      }),
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => clickVisibleText(pattern),
+      }),
+    }),
+  };
+}
+
 test('zhilian adapter exposes the expected platform metadata', () => {
   assert.equal(zhilianAdapter.platform, 'zhilian');
   assert.equal(zhilianAdapter.displayName, 'Zhilian');
@@ -1256,26 +1360,36 @@ test('zhilian adapter clicks the result content area instead of the outer card r
 });
 
 test('zhilian resume parser preserves section text without inventing same-company sub-records', async () => {
+  const shareLinkStubs = createZhilianShareLinkPageStubs();
   const page = {
+    ...shareLinkStubs,
     url: () => 'https://rd6.zhaopin.com/resume/detail?resumeId=R123456',
     waitForLoadState: async () => undefined,
     waitForFunction: async () => undefined,
-    locator: () => ({
-      waitFor: async () => undefined,
-      innerText: async () => [
-        '智联招聘 简历管理 候选人',
-        '张三',
-        '本科',
-        '现居住地：上海',
-        '工作经历',
-        '2020.01-至今',
-        '上海测试科技有限公司',
-        '海外销售经理',
-        '负责东南亚渠道开发',
-        '教育经历',
-        '2015.09-2019.06 上海大学 本科 国际贸易',
-      ].join('\n'),
-    }),
+    locator: (selector: string) => {
+      if (selector === zhilianShareLinkSelector) {
+        return {
+          evaluateAll: async () => [],
+        };
+      }
+
+      return {
+        waitFor: async () => undefined,
+        innerText: async () => [
+          '智联招聘 简历管理 候选人',
+          '张三',
+          '本科',
+          '现居住地：上海',
+          '工作经历',
+          '2020.01-至今',
+          '上海测试科技有限公司',
+          '海外销售经理',
+          '负责东南亚渠道开发',
+          '教育经历',
+          '2015.09-2019.06 上海大学 本科 国际贸易',
+        ].join('\n'),
+      };
+    },
   } as never;
 
   const resume = await zhilianAdapter.parseResumeDetail(page, {
@@ -1319,7 +1433,9 @@ test('zhilian resume parser reads modal resume detail content instead of the und
     '个人优势',
     '勤奋好学有责任心，有较强的销售能力',
   ].join('\n');
+  const shareLinkStubs = createZhilianShareLinkPageStubs();
   const page = {
+    ...shareLinkStubs,
     url: () => 'https://rd6.zhaopin.com/app/search?resumeNumber=resume-no-1',
     waitForLoadState: async () => undefined,
     waitForFunction: async () => undefined,
@@ -1329,6 +1445,12 @@ test('zhilian resume parser reads modal resume detail content instead of the und
           first: () => ({
             innerText: async () => modalResumeText,
           }),
+        };
+      }
+
+      if (selector === zhilianShareLinkSelector) {
+        return {
+          evaluateAll: async () => [],
         };
       }
 
@@ -1365,4 +1487,60 @@ test('zhilian resume parser reads modal resume detail content instead of the und
   assert.equal(resume.education, '大专');
   assert.match(resume.workExperiences[0].details.join('\n'), /名创优品科技（广州）有限公司/);
   assert.doesNotMatch(resume.workExperiences[0].details.join('\n'), /方女士/);
+});
+
+test('zhilian resume parser copies colleague-forward share links', async () => {
+  const modalResumeText = [
+    '黄先生',
+    '要附件简历',
+    '大专',
+    '工作经历',
+    '名创优品科技（广州）有限公司',
+    '门店店长',
+    '教育经历',
+    '岳阳职业技术学院',
+  ].join('\n');
+  const clickCalls: string[] = [];
+  const shareLinkStubs = createZhilianShareLinkPageStubs(clickCalls);
+  const page = {
+    ...shareLinkStubs,
+    url: () => 'https://rd6.zhaopin.com/app/search?resumeNumber=resume-no-1',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.km-modal__wrapper.new-shortcut-resume__modal') {
+        return {
+          first: () => ({
+            innerText: async () => modalResumeText,
+          }),
+        };
+      }
+
+      if (selector === zhilianShareLinkSelector) {
+        return {
+          evaluateAll: async () => [],
+        };
+      }
+
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => `智联招聘 搜索 人才管理\n${modalResumeText}`,
+        };
+      }
+
+      throw new Error(`unexpected selector: ${selector}`);
+    },
+  } as never;
+
+  const resume = await zhilianAdapter.parseResumeDetail(page, {
+    candidateId: '1151819900',
+    resumeUrl: 'https://rd6.zhaopin.com/app/search?resumeNumber=resume-no-1',
+    name: undefined,
+    currentCompany: undefined,
+    currentTitle: undefined,
+  });
+
+  assert.equal(resume.candidateShareUrl, 'https://m.zhaopin.com/b/resume-package?zhaopinToken=share-token-from-copy');
+  assert.deepEqual(clickCalls, ['转给同事', '链接转发', '复制链接|复制', 'key:Escape']);
 });

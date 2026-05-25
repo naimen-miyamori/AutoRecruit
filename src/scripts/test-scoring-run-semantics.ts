@@ -19,7 +19,7 @@ import { zhilianAdapter } from '../platforms/zhilian-adapter.js';
 import { extractCandidateScoreFromTextResponse } from '../scoring/score-resume.js';
 import { openResumeByUrl } from './capture-resume-dom-snapshot.js';
 import { runManualLoginSessionSave } from './login-and-save-session.js';
-import type { AllPlatformsRunSummary, MainResult } from '../index.js';
+import type { AllPlatformsRunSummary, BatchJobRunSummary, MainResult } from '../index.js';
 
 const tempDirs: string[] = [];
 const originalDataDir = config.dataDir;
@@ -95,6 +95,11 @@ function buildScore() {
 function assertAllPlatformsSummary(result: MainResult): AllPlatformsRunSummary[] {
   assert.equal(Array.isArray(result), true);
   return result as AllPlatformsRunSummary[];
+}
+
+function assertBatchSummary(result: MainResult): BatchJobRunSummary[] {
+  assert.equal(Array.isArray(result), true);
+  return result as BatchJobRunSummary[];
 }
 
 function buildArgs(options: { includeEmail?: boolean; ccArg?: string | null; jdText?: string; jdFilePath?: string; platform?: string } = {}) {
@@ -4000,6 +4005,67 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(result.runResult.failedCandidates, []);
   });
 
+  it('carries parsed Zhilian share links into score artifacts', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-zhilian-share-link';
+    const fetchedAt = '2026-04-20T12:34:56.000Z';
+    const candidateShareUrl = 'https://m.zhaopin.com/b/resume-package?zhaopinToken=artifact-token';
+    const searchPage = createSearchPage();
+    const detailPage = createDetailPage();
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('zhilian'),
+      openSubscribeSearch: async () => searchPage,
+      extractCandidateList: async () => ({
+        candidates: [{ candidateId: 'cand-share-link' }],
+      }),
+      openResumeDetail: async () => detailPage,
+      parseResumeDetail: async () => ({
+        candidateId: 'cand-share-link',
+        candidateShareUrl,
+        regions: [],
+        pr: [],
+        workExperiences: [],
+        projectExperiences: [],
+        educationExperiences: [],
+        skill: [],
+        certificates: [],
+      }),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
+
+    await indexModule.runResumeCaptureFlow(
+      'zhilian',
+      jobKey,
+      {
+        title: 'Test Job',
+        majors: [],
+        languageRequirements: [],
+        responsibilities: [],
+        hardRequirements: [],
+        preferredRequirements: [],
+        regionPreferences: [],
+        industryTags: [],
+      },
+      'search keyword',
+      store,
+      {
+        page: { id: 'root-page' },
+        context: { id: 'browser-context' },
+      } as never,
+      fetchedAt,
+      adapter,
+    );
+
+    const artifacts = await store.listStoredScoreArtifacts('zhilian', jobKey);
+
+    assert.equal(artifacts.length, 1);
+    assert.equal(artifacts[0]?.candidateId, 'cand-share-link');
+    assert.equal(artifacts[0]?.candidateShareUrl, candidateShareUrl);
+  });
+
   it('keeps upstream extraction failures retryable by not marking them as seen', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
@@ -4276,6 +4342,183 @@ describe('scoring run semantics', () => {
     assert.equal(fiftyOneJobRecord.rawText, '职位名称：多平台测试');
     assert.equal(liepinJobRecord.rawText, '职位名称：多平台测试');
     assert.equal(zhilianJobRecord.rawText, '职位名称：多平台测试');
+  });
+
+  it('runs batch jobs in file order with their own JD payloads', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const jobsFilePath = path.join(tempDir, 'jobs.json');
+    const jdFilePath = path.join(tempDir, 'jd-file.txt');
+    const parsedTexts: string[] = [];
+
+    await fs.writeFile(jdFilePath, '职位名称：第二批量岗位', 'utf8');
+    await fs.writeFile(jobsFilePath, JSON.stringify([
+      { keyword: 'batch keyword one', jd: '职位名称：第一批量岗位' },
+      { keyword: 'batch keyword two', jdFile: jdFilePath },
+    ], null, 2), 'utf8');
+
+    stubSuccessfulRun(indexModule);
+    indexModule.parseJobDescriptionRef.fn = async (rawText: string) => {
+      parsedTexts.push(rawText);
+      return buildNormalizedJob();
+    };
+
+    const output = await captureConsole(async () => {
+      const result = assertBatchSummary(await indexModule.main([
+        '--platform',
+        '51job',
+        '--jobs-file',
+        jobsFilePath,
+      ]));
+
+      assert.deepStrictEqual(result.map((entry) => entry.keyword), ['batch keyword one', 'batch keyword two']);
+      assert.deepStrictEqual(result.map((entry) => entry.platform), ['51job', '51job']);
+      assert.deepStrictEqual(result.map((entry) => entry.summary.jobKey), ['batch-keyword-one', 'batch-keyword-two']);
+    });
+
+    const printedSummary = JSON.parse(output.stdout.at(-1) ?? '[]') as Array<{
+      keyword: string;
+      platform: string;
+      summary: { jobKey: string };
+    }>;
+    const store = new indexModule.JobStore();
+    const firstJobRecord = await store.readJobRecord('51job', 'batch-keyword-one');
+    const secondJobRecord = await store.readJobRecord('51job', 'batch-keyword-two');
+
+    assert.deepStrictEqual(parsedTexts, ['职位名称：第一批量岗位', '职位名称：第二批量岗位']);
+    assert.deepStrictEqual(printedSummary.map((entry) => `${entry.keyword}:${entry.platform}:${entry.summary.jobKey}`), [
+      'batch keyword one:51job:batch-keyword-one',
+      'batch keyword two:51job:batch-keyword-two',
+    ]);
+    assert.equal(firstJobRecord.rawText, '职位名称：第一批量岗位');
+    assert.equal(secondJobRecord.rawText, '职位名称：第二批量岗位');
+  });
+
+  it('runs batch jobs outer and supported platforms inner for --platform all', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const jobsFilePath = path.join(tempDir, 'jobs-all.json');
+    const exportOrder: string[] = [];
+
+    await fs.writeFile(jobsFilePath, JSON.stringify([
+      { keyword: 'batch all one', jd: '职位名称：批量全平台一' },
+      { keyword: 'batch all two', jd: '职位名称：批量全平台二' },
+    ], null, 2), 'utf8');
+
+    stubSuccessfulRun(indexModule);
+    indexModule.exportJobResultsRef.fn = async (platform: string, jobKey: string) => {
+      exportOrder.push(`${jobKey}:${platform}`);
+      return {
+        jobKey,
+        exportPath: `/tmp/${platform}-${jobKey}.md`,
+        summary: { candidateCount: 1, successCount: 1, failureCount: 0 },
+        markdown: '# export',
+      };
+    };
+
+    const output = await captureConsole(async () => {
+      const result = assertBatchSummary(await indexModule.main([
+        '--platform',
+        'all',
+        '--jobs-file',
+        jobsFilePath,
+      ]));
+
+      assert.deepStrictEqual(result.map((entry) => `${entry.summary.jobKey}:${entry.platform}`), [
+        'batch-all-one:51job',
+        'batch-all-one:liepin',
+        'batch-all-one:zhilian',
+        'batch-all-two:51job',
+        'batch-all-two:liepin',
+        'batch-all-two:zhilian',
+      ]);
+    });
+
+    const printedSummary = JSON.parse(output.stdout.at(-1) ?? '[]') as Array<{ platform: string; summary: { jobKey: string } }>;
+
+    assert.deepStrictEqual(exportOrder, [
+      'batch-all-one:51job',
+      'batch-all-one:liepin',
+      'batch-all-one:zhilian',
+      'batch-all-two:51job',
+      'batch-all-two:liepin',
+      'batch-all-two:zhilian',
+    ]);
+    assert.deepStrictEqual(printedSummary.map((entry) => `${entry.summary.jobKey}:${entry.platform}`), exportOrder);
+  });
+
+  it('allows batch reruns without JD input when the jobKey already exists', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobsFilePath = path.join(tempDir, 'jobs-existing.json');
+    const existingRecord: import('../types/job.js').JobRecord = {
+      jobKey: 'batch-existing-keyword',
+      platform: '51job',
+      searchKeyword: 'batch existing keyword',
+      rawText: '已保存批量JD',
+      normalizedJob: buildNormalizedJob(),
+      createdAt: '2026-04-01T00:00:00.000Z',
+    };
+
+    await store.saveJobRecord('51job', existingRecord);
+    await fs.writeFile(jobsFilePath, JSON.stringify([
+      { keyword: 'batch existing keyword' },
+    ], null, 2), 'utf8');
+
+    stubSuccessfulRun(indexModule);
+    indexModule.parseJobDescriptionRef.fn = async () => {
+      throw new Error('JD parser should not run for an existing batch jobKey');
+    };
+
+    const output = await captureConsole(async () => {
+      const result = assertBatchSummary(await indexModule.main([
+        '--platform',
+        '51job',
+        '--jobs-file',
+        jobsFilePath,
+      ]));
+
+      assert.deepStrictEqual(result.map((entry) => entry.summary.jobKey), ['batch-existing-keyword']);
+    });
+
+    const printedSummary = JSON.parse(output.stdout.at(-1) ?? '[]') as Array<{ summary: { jobKey: string } }>;
+    const savedRecord = await store.readJobRecord('51job', 'batch-existing-keyword');
+
+    assert.deepStrictEqual(printedSummary.map((entry) => entry.summary.jobKey), ['batch-existing-keyword']);
+    assert.equal(savedRecord.rawText, '已保存批量JD');
+  });
+
+  it('rejects --jobs-file combined with single-job arguments before browser work starts', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const jobsFilePath = path.join(tempDir, 'jobs.json');
+    let browserCalls = 0;
+    let parseCalls = 0;
+
+    await fs.writeFile(jobsFilePath, JSON.stringify([
+      { keyword: 'batch keyword', jd: '职位名称：批量岗位' },
+    ], null, 2), 'utf8');
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => {
+      browserCalls += 1;
+      throw new Error('browser should not start before jobs-file validation rejects');
+    };
+    indexModule.parseJobDescriptionRef.fn = async () => {
+      parseCalls += 1;
+      throw new Error('JD parser should not run before jobs-file validation rejects');
+    };
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--jobs-file',
+        jobsFilePath,
+        '--keyword',
+        'single keyword',
+      ]),
+      /--jobs-file cannot be combined with --keyword, --jd, or --jd-file/,
+    );
+    assert.equal(browserCalls, 0);
+    assert.equal(parseCalls, 0);
   });
 
   it('allows reruns without JD arguments when the jobKey already exists', async () => {

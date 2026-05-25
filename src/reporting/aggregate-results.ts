@@ -11,6 +11,10 @@ interface AggregateJobResultsParams {
   generatedAt?: string;
 }
 
+interface RenderJobResultsMarkdownOptions {
+  preferCandidateShareUrl?: boolean;
+}
+
 function selectNewestArtifactsByCandidateId(scoreArtifacts: CandidateScoreArtifact[]): CandidateScoreArtifact[] {
   const artifactsByCandidateId = new Map<string, CandidateScoreArtifact>();
 
@@ -55,6 +59,7 @@ export function aggregateJobResults({
       if (artifact.status === 'success') {
         return {
           candidateId: artifact.candidateId,
+          ...(artifact.candidateShareUrl ? { candidateShareUrl: artifact.candidateShareUrl } : {}),
           status: artifact.status,
           model: artifact.model,
           scoredAt: artifact.scoredAt,
@@ -67,6 +72,7 @@ export function aggregateJobResults({
 
       return {
         candidateId: artifact.candidateId,
+        ...(artifact.candidateShareUrl ? { candidateShareUrl: artifact.candidateShareUrl } : {}),
         status: artifact.status,
         model: artifact.model,
         scoredAt: artifact.scoredAt,
@@ -90,18 +96,35 @@ export function aggregateJobResults({
   };
 }
 
-function renderSuccessCandidateOverview(candidate: JobResultsMarkdownCandidate, rank: number): string {
+function renderCandidateDisplayId(
+  candidate: JobResultsMarkdownCandidate,
+  options: RenderJobResultsMarkdownOptions = {},
+): string {
+  return options.preferCandidateShareUrl && candidate.candidateShareUrl
+    ? candidate.candidateShareUrl
+    : candidate.candidateId;
+}
+
+function renderSuccessCandidateOverview(
+  candidate: JobResultsMarkdownCandidate,
+  rank: number,
+  options: RenderJobResultsMarkdownOptions = {},
+): string {
   if (candidate.totalScore === undefined) {
     throw new Error(`Missing total score for successful candidate ${candidate.candidateId}`);
   }
 
+  const displayId = renderCandidateDisplayId(candidate, options);
   return [
-    `- ${rank}. ${candidate.candidateId} — ${candidate.totalScore}`,
+    `- ${rank}. ${displayId} — ${candidate.totalScore}`,
     `  - 摘要: ${candidate.summary || '无'}`,
   ].join('\n');
 }
 
-function renderSuccessCandidate(candidate: JobResultsMarkdownCandidate): string {
+function renderSuccessCandidate(
+  candidate: JobResultsMarkdownCandidate,
+  options: RenderJobResultsMarkdownOptions = {},
+): string {
   const dimensions = candidate.dimensionScores;
   if (!dimensions || candidate.totalScore === undefined) {
     throw new Error(`Missing score details for successful candidate ${candidate.candidateId}`);
@@ -110,9 +133,10 @@ function renderSuccessCandidate(candidate: JobResultsMarkdownCandidate): string 
   const risks = candidate.risks && candidate.risks.length > 0
     ? candidate.risks.map((risk) => `  - ${risk}`).join('\n')
     : '  - 无';
+  const displayId = renderCandidateDisplayId(candidate, options);
 
   return [
-    `### ${candidate.candidateId} — ${candidate.totalScore}`,
+    `### ${displayId} — ${candidate.totalScore}`,
     '',
     `- 评分时间: ${candidate.scoredAt}`,
     `- 摘要: ${candidate.summary || '无'}`,
@@ -128,9 +152,13 @@ function renderSuccessCandidate(candidate: JobResultsMarkdownCandidate): string 
   ].join('\n');
 }
 
-function renderFailedCandidate(candidate: JobResultsMarkdownCandidate): string {
+function renderFailedCandidate(
+  candidate: JobResultsMarkdownCandidate,
+  options: RenderJobResultsMarkdownOptions = {},
+): string {
+  const displayId = renderCandidateDisplayId(candidate, options);
   return [
-    `### ${candidate.candidateId}`,
+    `### ${displayId}`,
     '',
     `- 模型: ${candidate.model}`,
     `- 评分时间: ${candidate.scoredAt}`,
@@ -138,7 +166,10 @@ function renderFailedCandidate(candidate: JobResultsMarkdownCandidate): string {
   ].join('\n');
 }
 
-export function renderJobResultsMarkdown(exportData: JobResultsMarkdownExport): string {
+export function renderJobResultsMarkdown(
+  exportData: JobResultsMarkdownExport,
+  options: RenderJobResultsMarkdownOptions = {},
+): string {
   const successCandidates = exportData.candidates.filter((candidate) => candidate.status === 'success');
   const failedCandidates = exportData.candidates.filter((candidate) => candidate.status === 'failed');
 
@@ -163,7 +194,7 @@ export function renderJobResultsMarkdown(exportData: JobResultsMarkdownExport): 
   if (successCandidates.length === 0) {
     sections.push('暂无成功评分结果。');
   } else {
-    sections.push(successCandidates.map((candidate, index) => renderSuccessCandidateOverview(candidate, index + 1)).join('\n'));
+    sections.push(successCandidates.map((candidate, index) => renderSuccessCandidateOverview(candidate, index + 1, options)).join('\n'));
   }
 
   sections.push('', '## 排名结果', '');
@@ -171,12 +202,12 @@ export function renderJobResultsMarkdown(exportData: JobResultsMarkdownExport): 
   if (successCandidates.length === 0) {
     sections.push('暂无成功评分结果。');
   } else {
-    sections.push(successCandidates.map((candidate) => renderSuccessCandidate(candidate)).join('\n\n'));
+    sections.push(successCandidates.map((candidate) => renderSuccessCandidate(candidate, options)).join('\n\n'));
   }
 
   if (failedCandidates.length > 0) {
     sections.push('', '## 评分失败', '');
-    sections.push(failedCandidates.map((candidate) => renderFailedCandidate(candidate)).join('\n\n'));
+    sections.push(failedCandidates.map((candidate) => renderFailedCandidate(candidate, options)).join('\n\n'));
   }
 
   return `${sections.join('\n').trim()}\n`;

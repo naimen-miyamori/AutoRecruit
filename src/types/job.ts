@@ -149,6 +149,7 @@ export interface LanguageSkill {
 export interface CandidateResume {
   candidateId: string;
   resumeUrl?: string;
+  candidateShareUrl?: string;
   name?: string;
   age?: number;
   education?: string;
@@ -236,6 +237,7 @@ export interface CandidateScoreInputSummary {
 
 export interface CandidateScoreArtifactBase {
   candidateId: string;
+  candidateShareUrl?: string;
   model: string;
   scoredAt: string;
 }
@@ -260,6 +262,7 @@ export interface JobResultsMarkdownSummary {
 
 export interface JobResultsMarkdownCandidate {
   candidateId: string;
+  candidateShareUrl?: string;
   status: CandidateScoreArtifact['status'];
   model: string;
   scoredAt: string;

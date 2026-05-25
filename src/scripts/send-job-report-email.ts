@@ -35,6 +35,32 @@ function assertCurrentRunArtifactsFound(filteredArtifacts: CandidateScoreArtifac
   throw new Error(buildMissingArtifactsMessage(latestRun));
 }
 
+function assertZhilianShareLinksAvailable(scoreArtifacts: CandidateScoreArtifact[]): void {
+  const missingShareLink = scoreArtifacts.find((artifact) => !artifact.candidateShareUrl);
+  if (!missingShareLink) {
+    return;
+  }
+
+  throw new Error(`Missing Zhilian copied share link for candidate ${missingShareLink.candidateId}`);
+}
+
+function assertZhilianShareLinksUnique(scoreArtifacts: CandidateScoreArtifact[]): void {
+  const candidateIdByShareLink = new Map<string, string>();
+
+  for (const artifact of scoreArtifacts) {
+    if (!artifact.candidateShareUrl) {
+      continue;
+    }
+
+    const existingCandidateId = candidateIdByShareLink.get(artifact.candidateShareUrl);
+    if (existingCandidateId) {
+      throw new Error(`Duplicate Zhilian copied share link for candidates ${existingCandidateId} and ${artifact.candidateId}: ${artifact.candidateShareUrl}`);
+    }
+
+    candidateIdByShareLink.set(artifact.candidateShareUrl, artifact.candidateId);
+  }
+}
+
 export async function sendJobReport(
   platform: SupportedPlatform,
   jobKey: string,
@@ -86,12 +112,18 @@ export async function sendJobReport(
 
   const currentRunArtifacts = filterArtifactsForRun(scoreArtifacts, latestRun);
   assertCurrentRunArtifactsFound(currentRunArtifacts, latestRun);
+  if (platform === 'zhilian') {
+    assertZhilianShareLinksAvailable(currentRunArtifacts);
+    assertZhilianShareLinksUnique(currentRunArtifacts);
+  }
 
   const exportData = aggregateJobResults({
     jobRecord,
     scoreArtifacts: currentRunArtifacts,
   });
-  const markdown = renderJobResultsMarkdown(exportData);
+  const markdown = renderJobResultsMarkdown(exportData, {
+    preferCandidateShareUrl: platform === 'zhilian',
+  });
   const subject = buildJobReportEmailSubject(exportData.jobTitle, exportData.summary);
   const result = await sendJobReportEmailRef.fn({
     recipient,

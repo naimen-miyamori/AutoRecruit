@@ -51,11 +51,12 @@ afterEach(async () => {
 async function seedJobRecord(
   jobKey: string,
   reportDelivery: ReportDeliveryOptions = {},
+  platform: '51job' | 'liepin' | 'zhilian' = '51job',
 ) {
   const store = new JobStore();
   const jobRecord: JobRecord = {
     jobKey,
-    platform: '51job',
+    platform,
     searchKeyword: '东南亚 销售',
     recipientEmail: reportDelivery.recipientEmail,
     ccEmails: reportDelivery.ccEmails,
@@ -73,12 +74,12 @@ async function seedJobRecord(
     createdAt: '2026-04-21T00:00:00.000Z',
   };
 
-  await store.saveJobRecord('51job', jobRecord);
+  await store.saveJobRecord(platform, jobRecord);
   return { store, jobRecord };
 }
 
-async function saveRunResult(store: JobStore, jobKey: string, runResult: RunResult) {
-  await store.saveRunResult('51job', jobKey, runResult);
+async function saveRunResult(store: JobStore, jobKey: string, runResult: RunResult, platform: '51job' | 'liepin' | 'zhilian' = '51job') {
+  await store.saveRunResult(platform, jobKey, runResult);
 }
 
 function assertSinglePlatformSummary(result: MainResult): MainRunSummary {
@@ -392,6 +393,132 @@ describe('sendJobReport', () => {
     await assert.rejects(
       () => sendJobReport('51job', jobKey),
       /No score artifacts found for latest run of job key .*expected candidate IDs: cand-new/,
+    );
+  });
+
+  it('uses Zhilian copied share links in report emails', async () => {
+    const jobKey = `job-email-zhilian-share-${Date.now()}`;
+    const { store } = await seedJobRecord(jobKey, { recipientEmail: 'saved@example.com' }, 'zhilian');
+    await store.saveCandidateScoreArtifact('zhilian', jobKey, {
+      candidateId: 'cand-zhilian-1',
+      candidateShareUrl: 'https://m.zhaopin.com/b/resume-package?zhaopinToken=share-token-1',
+      model: 'claude-test',
+      scoredAt: '2026-04-21T00:00:01.000Z',
+      status: 'success',
+      score: {
+        totalScore: 88,
+        dimensionScores: {
+          education: { score: 88, reason: 'ok' },
+          language: { score: 88, reason: 'ok' },
+          experience: { score: 88, reason: 'ok' },
+          industryMatch: { score: 88, reason: 'ok' },
+          regionMatch: { score: 88, reason: 'ok' },
+          responsibilityMatch: { score: 88, reason: 'ok' },
+        },
+        risks: [],
+        summary: 'good fit with share link',
+      },
+    });
+    await saveRunResult(store, jobKey, {
+      jobKey,
+      platform: 'zhilian',
+      fetchedAt: '2026-04-21T00:00:02.000Z',
+      totalCandidates: 1,
+      newCandidateIds: ['cand-zhilian-1'],
+      scoredCandidates: ['cand-zhilian-1'],
+      failedCandidates: [],
+    }, 'zhilian');
+
+    const sent: Array<{ markdown: string }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, subject, markdown }) => {
+      sent.push({ markdown });
+      return { recipient, subject };
+    };
+
+    await sendJobReport('zhilian', jobKey);
+
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]?.markdown ?? '', /https:\/\/m\.zhaopin\.com\/b\/resume-package\?zhaopinToken=share-token-1/);
+    assert.doesNotMatch(sent[0]?.markdown ?? '', /### cand-zhilian-1/);
+  });
+
+  it('fails Zhilian report emails when a current-run artifact has no copied share link', async () => {
+    const jobKey = `job-email-zhilian-missing-share-${Date.now()}`;
+    const { store } = await seedJobRecord(jobKey, { recipientEmail: 'saved@example.com' }, 'zhilian');
+    await store.saveCandidateScoreArtifact('zhilian', jobKey, {
+      candidateId: 'cand-zhilian-missing',
+      model: 'claude-test',
+      scoredAt: '2026-04-21T00:00:01.000Z',
+      status: 'success',
+      score: {
+        totalScore: 88,
+        dimensionScores: {
+          education: { score: 88, reason: 'ok' },
+          language: { score: 88, reason: 'ok' },
+          experience: { score: 88, reason: 'ok' },
+          industryMatch: { score: 88, reason: 'ok' },
+          regionMatch: { score: 88, reason: 'ok' },
+          responsibilityMatch: { score: 88, reason: 'ok' },
+        },
+        risks: [],
+        summary: 'missing share link',
+      },
+    });
+    await saveRunResult(store, jobKey, {
+      jobKey,
+      platform: 'zhilian',
+      fetchedAt: '2026-04-21T00:00:02.000Z',
+      totalCandidates: 1,
+      newCandidateIds: ['cand-zhilian-missing'],
+      scoredCandidates: ['cand-zhilian-missing'],
+      failedCandidates: [],
+    }, 'zhilian');
+
+    await assert.rejects(
+      () => sendJobReport('zhilian', jobKey),
+      /Missing Zhilian copied share link for candidate cand-zhilian-missing/,
+    );
+  });
+
+  it('fails Zhilian report emails when copied share links are duplicated', async () => {
+    const jobKey = `job-email-zhilian-duplicate-share-${Date.now()}`;
+    const { store } = await seedJobRecord(jobKey, { recipientEmail: 'saved@example.com' }, 'zhilian');
+    const duplicateShareLink = 'https://m.zhaopin.com/b/resume-package?zhaopinToken=duplicate-token';
+    for (const candidateId of ['cand-zhilian-a', 'cand-zhilian-b']) {
+      await store.saveCandidateScoreArtifact('zhilian', jobKey, {
+        candidateId,
+        candidateShareUrl: duplicateShareLink,
+        model: 'claude-test',
+        scoredAt: `2026-04-21T00:00:0${candidateId.endsWith('a') ? '1' : '2'}.000Z`,
+        status: 'success',
+        score: {
+          totalScore: 88,
+          dimensionScores: {
+            education: { score: 88, reason: 'ok' },
+            language: { score: 88, reason: 'ok' },
+            experience: { score: 88, reason: 'ok' },
+            industryMatch: { score: 88, reason: 'ok' },
+            regionMatch: { score: 88, reason: 'ok' },
+            responsibilityMatch: { score: 88, reason: 'ok' },
+          },
+          risks: [],
+          summary: 'duplicate share link',
+        },
+      });
+    }
+    await saveRunResult(store, jobKey, {
+      jobKey,
+      platform: 'zhilian',
+      fetchedAt: '2026-04-21T00:00:03.000Z',
+      totalCandidates: 2,
+      newCandidateIds: ['cand-zhilian-a', 'cand-zhilian-b'],
+      scoredCandidates: ['cand-zhilian-a', 'cand-zhilian-b'],
+      failedCandidates: [],
+    }, 'zhilian');
+
+    await assert.rejects(
+      () => sendJobReport('zhilian', jobKey),
+      /Duplicate Zhilian copied share link for candidates cand-zhilian-a and cand-zhilian-b/,
     );
   });
 

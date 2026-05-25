@@ -30,12 +30,28 @@ interface CandidateScoringResult {
 
 type CliPlatformSelection = SupportedPlatform | 'all';
 
-interface CliInput extends ReportDeliveryOptions {
-  platform: CliPlatformSelection;
+interface RunnableJobInput extends ReportDeliveryOptions {
   searchKeyword: string;
   jobDescriptionText?: string;
   jobDescriptionFilePath?: string;
 }
+
+interface SingleJobCliInput extends RunnableJobInput {
+  mode: 'single';
+  platform: CliPlatformSelection;
+}
+
+interface BatchCliInput extends ReportDeliveryOptions {
+  mode: 'batch';
+  platform: CliPlatformSelection;
+  jobsFilePath: string;
+}
+
+interface BatchRunnableJobInput extends RunnableJobInput {
+  sourceIndex: number;
+}
+
+type CliInput = SingleJobCliInput | BatchCliInput;
 
 interface SinglePlatformCliInput extends ReportDeliveryOptions {
   platform: SupportedPlatform;
@@ -66,7 +82,13 @@ export interface AllPlatformsRunSummary {
   summary: MainRunSummary;
 }
 
-export type MainResult = MainRunSummary | AllPlatformsRunSummary[];
+export interface BatchJobRunSummary {
+  keyword: string;
+  platform: SupportedPlatform;
+  summary: MainRunSummary;
+}
+
+export type MainResult = MainRunSummary | AllPlatformsRunSummary[] | BatchJobRunSummary[];
 
 export const parseJobDescriptionRef = { fn: parseJobDescription };
 export const extractionBoundary = createProductionExtractionBoundary();
@@ -115,6 +137,88 @@ function parsePlatformSelection(platform?: string): CliPlatformSelection {
   return parsePlatformArg(platform);
 }
 
+function parseBatchCcEmails(value: unknown, itemIndex: number): string[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === 'string') {
+    return parseEmailList(value);
+  }
+
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+    return parseEmailList(value.join(','));
+  }
+
+  throw new Error(`Invalid jobs-file item at index ${itemIndex}: cc must be a string or string array`);
+}
+
+function parseOptionalString(value: unknown, fieldName: string, itemIndex: number): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: ${fieldName} must be a string`);
+  }
+
+  return value;
+}
+
+function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInput): BatchRunnableJobInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: item must be an object`);
+  }
+
+  const item = value as Record<string, unknown>;
+  const keyword = parseOptionalString(item.keyword, 'keyword', itemIndex)?.trim();
+  const jd = parseOptionalString(item.jd, 'jd', itemIndex);
+  const jdFile = parseOptionalString(item.jdFile, 'jdFile', itemIndex);
+  const email = parseOptionalString(item.email, 'email', itemIndex);
+  const itemCcEmails = parseBatchCcEmails(item.cc, itemIndex);
+
+  if (!keyword) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: keyword must be a non-empty string`);
+  }
+
+  if (jd !== undefined && jdFile !== undefined) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: jd and jdFile are mutually exclusive`);
+  }
+
+  return {
+    sourceIndex: itemIndex,
+    searchKeyword: keyword,
+    recipientEmail: email ?? input.recipientEmail,
+    ccEmails: item.cc === undefined ? input.ccEmails : itemCcEmails,
+    jobDescriptionText: jd,
+    jobDescriptionFilePath: jdFile,
+  };
+}
+
+async function loadBatchJobInputs(input: BatchCliInput): Promise<BatchRunnableJobInput[]> {
+  let payload: unknown;
+
+  try {
+    payload = JSON.parse(await readFile(input.jobsFilePath, 'utf8'));
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Invalid JSON in --jobs-file ${input.jobsFilePath}: ${error.message}`);
+    }
+
+    throw error;
+  }
+
+  if (!Array.isArray(payload)) {
+    throw new Error('--jobs-file must contain a JSON array');
+  }
+
+  return payload.map((item, index) => parseBatchJobItem(item, index, input));
+}
+
+function listSelectedPlatforms(platform: CliPlatformSelection): SupportedPlatform[] {
+  return platform === 'all' ? listSupportedPlatforms() : [platform];
+}
+
 function parseArgs(argv: readonly string[]): CliInput {
   const values = new Map<string, string>();
   const flagPresence = new Set<string>();
@@ -138,10 +242,25 @@ function parseArgs(argv: readonly string[]): CliInput {
 
   const searchKeyword = values.get('keyword');
   const platform = parsePlatformSelection(values.get('platform'));
+  const jobsFilePath = values.get('jobs-file');
   const jobDescriptionText = values.get('jd');
   const jobDescriptionFilePath = values.get('jd-file');
   const recipientEmail = values.get('email');
   const ccEmails = flagPresence.has('cc') ? parseEmailList(values.get('cc')) : undefined;
+
+  if (jobsFilePath) {
+    if (flagPresence.has('keyword') || flagPresence.has('jd') || flagPresence.has('jd-file')) {
+      throw new Error('--jobs-file cannot be combined with --keyword, --jd, or --jd-file');
+    }
+
+    return {
+      mode: 'batch',
+      platform,
+      jobsFilePath,
+      recipientEmail,
+      ccEmails,
+    };
+  }
 
   if (!searchKeyword) {
     throw new Error('Missing required argument --keyword');
@@ -152,6 +271,7 @@ function parseArgs(argv: readonly string[]): CliInput {
   }
 
   return {
+    mode: 'single',
     platform,
     searchKeyword,
     recipientEmail,
@@ -161,7 +281,7 @@ function parseArgs(argv: readonly string[]): CliInput {
   };
 }
 
-function buildSinglePlatformInput(input: CliInput, platform: SupportedPlatform): SinglePlatformCliInput {
+function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPlatform): SinglePlatformCliInput {
   return {
     platform,
     searchKeyword: input.searchKeyword,
@@ -247,6 +367,7 @@ async function scoreCapturedResumes(
     const scoredAt = new Date().toISOString();
     const scoreArtifactBase = {
       candidateId: resume.candidateId,
+      candidateShareUrl: resume.candidateShareUrl,
       model: config.scoring.model,
       scoredAt,
     };
@@ -454,8 +575,30 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
   }
 }
 
+async function runBatchJobs(input: BatchCliInput): Promise<BatchJobRunSummary[]> {
+  const jobs = await loadBatchJobInputs(input);
+  const summaries: BatchJobRunSummary[] = [];
+
+  for (const job of jobs) {
+    for (const platform of listSelectedPlatforms(input.platform)) {
+      summaries.push({
+        keyword: job.searchKeyword,
+        platform,
+        summary: await runSinglePlatform(buildSinglePlatformInput(job, platform), { printSummary: false }),
+      });
+    }
+  }
+
+  console.log(JSON.stringify(summaries, null, 2));
+  return summaries;
+}
+
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<MainResult> {
   const input = parseArgs(argv);
+
+  if (input.mode === 'batch') {
+    return runBatchJobs(input);
+  }
 
   if (input.platform === 'all') {
     const summaries: AllPlatformsRunSummary[] = [];
