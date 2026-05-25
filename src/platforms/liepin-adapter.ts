@@ -28,6 +28,8 @@ const liepinAuthenticatedUrl = 'https://h.liepin.com/search/getConditionItem';
 const observedLiepinSearchApiCandidates = new WeakMap<Page, CandidateListItem[]>();
 const observedLiepinSearchApiSeenPages = new WeakSet<Page>();
 const observedLiepinSearchApiListenerPages = new WeakSet<Page>();
+const observedLiepinSearchApiGenerations = new WeakMap<Page, number>();
+const observedLiepinSearchApiMinRequestStartTimes = new WeakMap<Page, number>();
 const liepinDetailPollIntervalMs = 250;
 
 function createDeadline(timeoutMs = config.playwright.resumeDetailTimeoutMs): number {
@@ -577,23 +579,84 @@ function isLiepinSearchResumesApiResponse(response: Pick<Response, 'url' | 'stat
     && response.status() < 400;
 }
 
-async function cacheLiepinSearchResumesApiResponse(page: Page, response: Pick<Response, 'url' | 'status' | 'text'>): Promise<void> {
-  if (!isLiepinSearchResumesApiResponse(response)) {
+function getLiepinSearchResumesApiRequestStartTime(
+  response: Partial<Pick<Response, 'request'>>,
+): number | undefined {
+  try {
+    const startTime = response.request?.().timing().startTime;
+    return typeof startTime === 'number' && Number.isFinite(startTime) ? startTime : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isLiepinSearchResumesApiResponseBeforeMinimumRequestStart(
+  page: Page,
+  response: Partial<Pick<Response, 'request'>>,
+): boolean {
+  const minimumStartTime = observedLiepinSearchApiMinRequestStartTimes.get(page);
+  if (minimumStartTime === undefined) {
+    return false;
+  }
+
+  const requestStartTime = getLiepinSearchResumesApiRequestStartTime(response);
+  return requestStartTime === undefined || requestStartTime < minimumStartTime;
+}
+
+function isEligibleLiepinSearchResumesApiResponse(
+  page: Page,
+  response: Pick<Response, 'url' | 'status'> & Partial<Pick<Response, 'request'>>,
+): boolean {
+  return isLiepinSearchResumesApiResponse(response)
+    && !isLiepinSearchResumesApiResponseBeforeMinimumRequestStart(page, response);
+}
+
+function getObservedLiepinSearchApiGeneration(page: Page): number {
+  return observedLiepinSearchApiGenerations.get(page) ?? 0;
+}
+
+function bumpObservedLiepinSearchApiGeneration(page: Page): void {
+  observedLiepinSearchApiGenerations.set(page, getObservedLiepinSearchApiGeneration(page) + 1);
+}
+
+async function cacheLiepinSearchResumesApiResponse(
+  page: Page,
+  response: Pick<Response, 'url' | 'status' | 'text'> & Partial<Pick<Response, 'request'>>,
+  generation = getObservedLiepinSearchApiGeneration(page),
+): Promise<void> {
+  if (!isEligibleLiepinSearchResumesApiResponse(page, response)) {
     return;
   }
 
+  let candidates: CandidateListItem[];
   try {
-    observedLiepinSearchApiCandidates.set(page, parseLiepinSearchResumesApiCandidates(await response.text()));
+    candidates = parseLiepinSearchResumesApiCandidates(await response.text());
   } catch {
-    observedLiepinSearchApiCandidates.set(page, []);
+    candidates = [];
   }
 
+  if (getObservedLiepinSearchApiGeneration(page) !== generation) {
+    return;
+  }
+
+  observedLiepinSearchApiCandidates.set(page, candidates);
   observedLiepinSearchApiSeenPages.add(page);
 }
 
 function clearObservedLiepinSearchResumesApi(page: Page): void {
   observedLiepinSearchApiCandidates.delete(page);
   observedLiepinSearchApiSeenPages.delete(page);
+  bumpObservedLiepinSearchApiGeneration(page);
+}
+
+function resetObservedLiepinSearchResumesApi(page: Page): void {
+  observedLiepinSearchApiMinRequestStartTimes.delete(page);
+  clearObservedLiepinSearchResumesApi(page);
+}
+
+function clearObservedLiepinSearchResumesApiBeforeNextAction(page: Page): void {
+  observedLiepinSearchApiMinRequestStartTimes.set(page, Date.now());
+  clearObservedLiepinSearchResumesApi(page);
 }
 
 function attachLiepinSearchResumesApiObserver(page: Page): void {
@@ -606,7 +669,7 @@ function attachLiepinSearchResumesApiObserver(page: Page): void {
 
   observedLiepinSearchApiListenerPages.add(page);
   observablePage.on('response', (response) => {
-    void cacheLiepinSearchResumesApiResponse(page, response);
+    void cacheLiepinSearchResumesApiResponse(page, response, getObservedLiepinSearchApiGeneration(page));
   });
 }
 
@@ -623,7 +686,7 @@ async function waitForLiepinSearchResumesApi(page: Page, timeoutMs?: number): Pr
 
   const effectiveTimeoutMs = Math.max(timeoutMs ?? config.playwright.searchPageTimeoutMs, 1);
   const responsePromise = waitForResponse(
-    (candidateResponse) => isLiepinSearchResumesApiResponse(candidateResponse),
+    (candidateResponse) => isEligibleLiepinSearchResumesApiResponse(page, candidateResponse),
     { timeout: effectiveTimeoutMs },
   ).catch(() => undefined);
   const response = await withTimeout(responsePromise, effectiveTimeoutMs, undefined);
@@ -668,6 +731,222 @@ async function clickLiepinQuickSearchTag(page: Page, keyword: string, deadline: 
 
     await tag.click();
   });
+}
+
+type LiepinHideViewedState = {
+  found: boolean;
+  checked: boolean;
+  clickSelector?: string;
+  searchButtonSelector?: string;
+  bodyText?: string;
+};
+
+function getLiepinHideViewedControlState(): LiepinHideViewedState {
+  const normalizeNodeText = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+  const isVisible = (element: Element | null | undefined): element is HTMLElement => {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    return rect.width > 0
+      && rect.height > 0
+      && style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && style.opacity !== '0';
+  };
+  const selectorForElement = (element: Element): string | undefined => {
+    const escapeCssString = (value: string) => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    if (element.id) {
+      return `[id="${escapeCssString(element.id)}"]`;
+    }
+
+    const className = typeof element.className === 'string' ? element.className : '';
+    if (/\bhide-view-checkbox\b/.test(className)) {
+      return 'label.hide-view-checkbox';
+    }
+    if (element.tagName.toLowerCase() === 'button' && /\bsearch-btn\b/.test(className)) {
+      return 'button.search-btn';
+    }
+
+    const dataAttributes = [
+      'data-testid',
+      'data-test-id',
+      'data-tlg-elem-id',
+      'name',
+    ];
+    for (const attributeName of dataAttributes) {
+      const value = element.getAttribute(attributeName);
+      if (value) {
+        return `${element.tagName.toLowerCase()}[${attributeName}="${escapeCssString(value)}"]`;
+      }
+    }
+
+    return undefined;
+  };
+  const isChecked = (element: Element): boolean => {
+    if (element instanceof HTMLInputElement) {
+      return element.checked;
+    }
+
+    const ariaChecked = element.getAttribute('aria-checked');
+    if (ariaChecked === 'true') {
+      return true;
+    }
+    if (ariaChecked === 'false') {
+      return false;
+    }
+
+    const className = typeof element.className === 'string' ? element.className : '';
+    return /\b(?:checked|selected|active|is-checked|is-active|ant-checkbox-checked|ant-switch-checked|semi-checkbox-checked|semi-switch-checked)\b/i.test(className);
+  };
+  const bodyText = normalizeNodeText(document.body?.innerText);
+  const searchButton = Array.from(document.querySelectorAll<HTMLElement>('button.search-btn, button'))
+    .find((element) => isVisible(element) && /搜\s*索|搜索/.test(normalizeNodeText(element.innerText ?? element.textContent)));
+  const searchButtonSelector = searchButton ? selectorForElement(searchButton) : undefined;
+  const textNodes = Array.from(document.querySelectorAll<HTMLElement>('body *'))
+    .filter((element) => normalizeNodeText(element.textContent).includes('隐藏已查看'))
+    .filter((element) => !Array.from(element.children).some((child) => normalizeNodeText(child.textContent).includes('隐藏已查看')));
+
+  for (const textNode of textNodes) {
+    if (!isVisible(textNode)) {
+      continue;
+    }
+
+    const containers = [
+      textNode.closest('label'),
+      textNode.closest('[role="checkbox"], [role="switch"]'),
+      textNode.closest('li, div, section, span'),
+      textNode.parentElement,
+    ].filter((element): element is Element => Boolean(element));
+
+    for (const container of containers) {
+      const input = container.querySelector<HTMLInputElement>('input[type="checkbox"], input[type="radio"], input');
+      const ariaControl = container.matches('[role="checkbox"], [role="switch"]')
+        ? container
+        : container.querySelector('[role="checkbox"], [role="switch"]');
+      const classControl = container.querySelector('[class*="checkbox"], [class*="switch"]');
+      const control = input ?? ariaControl ?? classControl ?? container;
+      const clickTarget = [
+        input,
+        ariaControl,
+        classControl,
+        container,
+        textNode,
+      ].find(isVisible);
+      const checked = input ? input.checked : isChecked(control);
+      const clickSelector = clickTarget ? (selectorForElement(clickTarget) ?? selectorForElement(container)) : selectorForElement(container);
+
+      return {
+        found: true,
+        checked,
+        clickSelector,
+        searchButtonSelector,
+        bodyText,
+      };
+    }
+  }
+
+  return {
+    found: false,
+    checked: false,
+    searchButtonSelector,
+    bodyText,
+  };
+}
+
+async function readLiepinHideViewedState(page: Page): Promise<LiepinHideViewedState> {
+  return page.evaluate(getLiepinHideViewedControlState);
+}
+
+async function waitForLiepinHideViewedState(page: Page, deadline: number): Promise<LiepinHideViewedState> {
+  const state = await readLiepinHideViewedState(page);
+  if (state.found) {
+    return state;
+  }
+
+  const waitForFunction = (page as Partial<Pick<Page, 'waitForFunction'>>).waitForFunction?.bind(page);
+  if (waitForFunction) {
+    await waitForFunction(
+      () => (document.body?.innerText ?? '').includes('隐藏已查看'),
+      undefined,
+      { timeout: remainingTime(deadline), polling: 250 },
+    ).catch(() => undefined);
+  }
+
+  return readLiepinHideViewedState(page);
+}
+
+async function clickLiepinSearchButtonIfHideViewedMissing(page: Page, deadline: number): Promise<boolean> {
+  const state = await readLiepinHideViewedState(page);
+  if (state.found || !state.searchButtonSelector) {
+    return false;
+  }
+
+  const searchButton = page.locator(state.searchButtonSelector).first();
+  await searchButton.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+  await searchButton.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/unexpected argument|too many arguments/i.test(message)) {
+      throw error;
+    }
+
+    await searchButton.click();
+  });
+  return true;
+}
+
+async function ensureLiepinHideViewedChecked(
+  page: Page,
+  deadline: number,
+  options: { beforeClick?: () => void } = {},
+): Promise<boolean> {
+  const state = await waitForLiepinHideViewedState(page, deadline);
+  if (!state.found) {
+    throw new Error(`Could not find Liepin "隐藏已查看" filter. Page text: ${(state.bodyText ?? '').slice(0, 500)}`);
+  }
+
+  if (state.checked) {
+    return false;
+  }
+
+  const verifyChecked = async () => {
+    const nextState = await waitForLiepinHideViewedState(page, deadline);
+    if (!nextState.checked) {
+      throw new Error(`Liepin "隐藏已查看" filter was clicked but did not become checked. Page text: ${(nextState.bodyText ?? '').slice(0, 500)}`);
+    }
+  };
+
+  if (state.clickSelector) {
+    const control = page.locator(state.clickSelector).first();
+    await control.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+    options.beforeClick?.();
+    await control.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/unexpected argument|too many arguments/i.test(message)) {
+        throw error;
+      }
+
+      await control.click();
+    });
+    await verifyChecked();
+    return true;
+  }
+
+  const filterText = page.getByText('隐藏已查看', { exact: false }).first();
+  await filterText.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+  options.beforeClick?.();
+  await filterText.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/unexpected argument|too many arguments/i.test(message)) {
+      throw error;
+    }
+
+    await filterText.click();
+  });
+  await verifyChecked();
+  return true;
 }
 
 async function waitForLiepinResumeDetailReady(page: Page, deadline = createDeadline()): Promise<void> {
@@ -1132,7 +1411,7 @@ export const liepinAdapter: PlatformAdapter = {
   assertAuthenticated: assertLiepinAuthenticated,
   openSubscribeSearch: async (page, keyword, options) => {
     const deadline = createSearchDeadline(options);
-    clearObservedLiepinSearchResumesApi(page);
+    resetObservedLiepinSearchResumesApi(page);
     attachLiepinSearchResumesApiObserver(page);
 
     if (!isLiepinSearchUrl(page.url())) {
@@ -1147,6 +1426,16 @@ export const liepinAdapter: PlatformAdapter = {
 
     await waitForLiepinPageReady(page, { deadline });
     await clickLiepinQuickSearchTag(page, keyword, deadline);
+    await waitForLiepinPageReady(page, { deadline });
+    if (await clickLiepinSearchButtonIfHideViewedMissing(page, deadline)) {
+      await waitForLiepinPageReady(page, { deadline });
+    }
+    const clickedHideViewed = await ensureLiepinHideViewedChecked(page, deadline, {
+      beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+    });
+    if (clickedHideViewed) {
+      await waitForLiepinSearchResumesApi(page, boundedTimeout(deadline, config.playwright.apiFallbackTimeoutMs)).catch(() => []);
+    }
     await waitForLiepinPageReady(page, { deadline });
     return page;
   },

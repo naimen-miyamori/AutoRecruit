@@ -135,7 +135,9 @@ Liepin manual-login polling is intentionally constrained:
 - before authenticated recruiter cookies exist, it must not probe unrelated pages or other login pages in the same context
 - once authenticated cookies exist, it may probe non-login recruiter pages and a dedicated fresh probe page to confirm recruiter-search readiness
 
-Liepin detail opening uses the same total detail deadline style as 51job. Its search-page readiness now shares the main search deadline across initial-data, shell, quick-search tag, DOM extraction, and `search-resumes` API fallback waits; it should not add multiple fixed 15s waits in series.
+Liepin search entry must click the requested quick-search tag and then ensure the `隐藏已查看` filter is checked before candidate ID extraction. On the live page this filter may only appear after clicking the results-page search button, so preserve the existing fallback that clicks the search button when the filter is missing but a visible search button exists. When the filter is clicked, stale `search-resumes` responses from before that click must not be reused: keep the cache reset/request-start barrier so late pre-filter API responses cannot populate the candidate list after hide-viewed is applied. Local `seen-ids.json` dedupe remains the final guard and should not be replaced by Liepin's platform-side viewed filter.
+
+Liepin detail opening uses the same total detail deadline style as 51job. Its search-page readiness now shares the main search deadline across initial-data, shell, quick-search tag, hide-viewed filtering, DOM extraction, and `search-resumes` API fallback waits; it should not add multiple fixed 15s waits in series.
 
 When changing selectors, preserve the current strategy of using several DOM fallbacks rather than assuming one stable 51job structure.
 
@@ -201,3 +203,4 @@ The repository already contains real captured data under `data/<platform>/jobs/`
 - Successfully captured resumes are marked seen before scoring; extraction/open failures stay retryable.
 - Model scoring failures persist failed score artifacts and remain visible to export/email without reverting the candidate's seen state.
 - Platform-aware auth/session handling now lives on `PlatformAdapter`; 51job, Liepin, and Zhilian are the current supported runtime paths, with platform-specific diagnostics kept in separate commands.
+- Liepin candidate extraction must happen after `隐藏已查看` is checked; stale `search-resumes` API responses captured before that filter is applied must be discarded before DOM/API candidate extraction proceeds.

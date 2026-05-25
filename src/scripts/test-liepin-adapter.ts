@@ -9,6 +9,17 @@ function runInIsolatedPageContext<TArg, TResult>(fn: (arg: TArg) => TResult, arg
   return vm.runInNewContext(`(${fn.toString()})(arg)`, { arg }) as TResult;
 }
 
+const liepinSearchReadyText = '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 隐藏已查看';
+
+function liepinHideViewedState(checked = true, bodyText = liepinSearchReadyText) {
+  return {
+    found: true,
+    checked,
+    clickSelector: '#hide-viewed',
+    bodyText,
+  };
+}
+
 test('liepin adapter clicks the matching Liepin quick-search tag before treating search as ready', async () => {
   const clickCalls: string[] = [];
   const gotoCalls: Array<{ url: string; waitUntil?: string }> = [];
@@ -20,6 +31,7 @@ test('liepin adapter clicks the matching Liepin quick-search tag before treating
     waitForLoadState: async () => undefined,
     waitForResponse: async () => undefined,
     waitForFunction: async () => undefined,
+    evaluate: async () => liepinHideViewedState(true),
     getByText: (text: string, options?: { exact?: boolean }) => {
       assert.equal(text, '优衣库');
       assert.equal(options?.exact, true);
@@ -36,7 +48,7 @@ test('liepin adapter clicks the matching Liepin quick-search tag before treating
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅',
+          innerText: async () => liepinSearchReadyText,
         };
       }
 
@@ -51,6 +63,424 @@ test('liepin adapter clicks the matching Liepin quick-search tag before treating
   await assert.doesNotReject(() => liepinAdapter.openSubscribeSearch(page, '优衣库'));
   assert.deepStrictEqual(gotoCalls, []);
   assert.deepStrictEqual(clickCalls, ['优衣库']);
+});
+
+test('liepin adapter enables hide-viewed after clicking the quick-search tag and waits for final readiness', async () => {
+  const calls: string[] = [];
+  let hideViewedChecked = false;
+  const page = {
+    goto: async () => undefined,
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
+    waitForLoadState: async () => undefined,
+    waitForResponse: async () => undefined,
+    waitForFunction: async () => {
+      calls.push('ready');
+    },
+    evaluate: async () => liepinHideViewedState(hideViewedChecked),
+    getByText: (text: string, options?: { exact?: boolean }) => {
+      assert.equal(text, '优衣库');
+      assert.equal(options?.exact, true);
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+          click: async () => {
+            calls.push('quick-search');
+          },
+        }),
+      };
+    },
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => liepinSearchReadyText,
+        };
+      }
+
+      if (selector === '#hide-viewed') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              hideViewedChecked = true;
+              calls.push('hide-viewed');
+            },
+          }),
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+      };
+    },
+  } as never;
+
+  await assert.doesNotReject(() => liepinAdapter.openSubscribeSearch(page, '优衣库'));
+  assert.deepStrictEqual(calls, ['ready', 'quick-search', 'ready', 'hide-viewed', 'ready']);
+});
+
+test('liepin adapter clicks the search button when hide-viewed is only available on the results list', async () => {
+  const calls: string[] = [];
+  let resultListVisible = false;
+  let hideViewedChecked = false;
+  const page = {
+    goto: async () => undefined,
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
+    waitForLoadState: async () => undefined,
+    waitForResponse: async () => undefined,
+    waitForFunction: async () => {
+      calls.push('ready');
+    },
+    evaluate: async () => resultListVisible
+      ? liepinHideViewedState(hideViewedChecked)
+      : {
+        found: false,
+        checked: false,
+        searchButtonSelector: '#search-button',
+        bodyText: '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 搜 索',
+      },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => {
+          calls.push('quick-search');
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => resultListVisible ? liepinSearchReadyText : '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 搜 索',
+        };
+      }
+
+      if (selector === '#search-button') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              resultListVisible = true;
+              calls.push('search-button');
+            },
+          }),
+        };
+      }
+
+      if (selector === '#hide-viewed') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              hideViewedChecked = true;
+              calls.push('hide-viewed');
+            },
+          }),
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+      };
+    },
+  } as never;
+
+  await assert.doesNotReject(() => liepinAdapter.openSubscribeSearch(page, '优衣库'));
+  assert.deepStrictEqual(calls, ['ready', 'quick-search', 'ready', 'search-button', 'ready', 'hide-viewed', 'ready']);
+});
+
+test('liepin adapter does not click hide-viewed again when it is already checked', async () => {
+  const calls: string[] = [];
+  const page = {
+    goto: async () => undefined,
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
+    waitForLoadState: async () => undefined,
+    waitForResponse: async () => undefined,
+    waitForFunction: async () => {
+      calls.push('ready');
+    },
+    evaluate: async () => liepinHideViewedState(true),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => {
+          calls.push('quick-search');
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => liepinSearchReadyText,
+        };
+      }
+
+      if (selector === '#hide-viewed') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              calls.push('hide-viewed');
+            },
+          }),
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+      };
+    },
+  } as never;
+
+  await assert.doesNotReject(() => liepinAdapter.openSubscribeSearch(page, '优衣库'));
+  assert.deepStrictEqual(calls, ['ready', 'quick-search', 'ready', 'ready']);
+});
+
+test('liepin adapter discards quick-search search-resumes responses before hide-viewed is applied', async () => {
+  let responseListener: ((response: { url(): string; status(): number; text(): string }) => void) | undefined;
+  let resultListVisible = false;
+  let hideViewedChecked = false;
+  const makeSearchResponse = (candidateId: string) => ({
+    url: () => 'https://api-h.liepin.com/api/com.liepin.searchfront4r.h.search-resumes',
+    status: () => 200,
+    request: () => ({
+      timing: () => ({ startTime: Date.now() + 1 }),
+    }),
+    text: () => JSON.stringify({
+      data: {
+        resList: [
+          {
+            resIdEncode: candidateId,
+            resName: candidateId,
+            detailUrl: `/resume/showresumedetail/?res_id_encode=${candidateId}`,
+          },
+        ],
+      },
+    }),
+  });
+  const page = {
+    goto: async () => undefined,
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    on: (event: string, listener: (response: { url(): string; status(): number; text(): string }) => void) => {
+      assert.equal(event, 'response');
+      responseListener = listener;
+    },
+    evaluate: async () => resultListVisible
+      ? liepinHideViewedState(hideViewedChecked)
+      : {
+        found: false,
+        checked: false,
+        searchButtonSelector: '#search-button',
+        bodyText: '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 搜 索',
+      },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => {
+          responseListener?.(makeSearchResponse('stale-candidate'));
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => resultListVisible
+            ? '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 隐藏已查看 共1位人选'
+            : '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 搜 索',
+        };
+      }
+
+      if (selector === '#search-button') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              resultListVisible = true;
+            },
+          }),
+        };
+      }
+
+      if (selector === '#hide-viewed') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              hideViewedChecked = true;
+              responseListener?.(makeSearchResponse('filtered-candidate'));
+            },
+          }),
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+        evaluateAll: async () => [],
+      };
+    },
+  } as never;
+
+  const searchPage = await liepinAdapter.openSubscribeSearch(page, '优衣库');
+  const result = await liepinAdapter.extractCandidateList(searchPage);
+
+  assert.deepStrictEqual(result.candidates.map((candidate) => candidate.candidateId), ['filtered-candidate']);
+});
+
+test('liepin adapter ignores delayed pre-filter search-resumes responses after hide-viewed is clicked', async () => {
+  let responseListener: ((response: { url(): string; status(): number; text(): string; request(): { timing(): { startTime: number } } }) => void) | undefined;
+  let resultListVisible = false;
+  let hideViewedChecked = false;
+  const makeSearchResponse = (candidateId: string, startTime: number) => ({
+    url: () => 'https://api-h.liepin.com/api/com.liepin.searchfront4r.h.search-resumes',
+    status: () => 200,
+    request: () => ({
+      timing: () => ({ startTime }),
+    }),
+    text: () => JSON.stringify({
+      data: {
+        resList: [
+          {
+            resIdEncode: candidateId,
+            resName: candidateId,
+            detailUrl: `/resume/showresumedetail/?res_id_encode=${candidateId}`,
+          },
+        ],
+      },
+    }),
+  });
+  const page = {
+    goto: async () => undefined,
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async (
+      predicate: (response: { url(): string; status(): number; text(): string; request(): { timing(): { startTime: number } } }) => boolean,
+    ) => {
+      const staleResponse = makeSearchResponse('late-stale-candidate', 100);
+      responseListener?.(staleResponse);
+      assert.equal(predicate(staleResponse), false);
+
+      const filteredResponse = makeSearchResponse('filtered-candidate', Date.now() + 1);
+      responseListener?.(filteredResponse);
+      return predicate(filteredResponse) ? filteredResponse : Promise.reject(new Error('filtered response was rejected'));
+    },
+    on: (event: string, listener: (response: { url(): string; status(): number; text(): string; request(): { timing(): { startTime: number } } }) => void) => {
+      assert.equal(event, 'response');
+      responseListener = listener;
+    },
+    evaluate: async () => resultListVisible
+      ? liepinHideViewedState(hideViewedChecked)
+      : {
+        found: false,
+        checked: false,
+        searchButtonSelector: '#search-button',
+        bodyText: '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 搜 索',
+      },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => {
+          responseListener?.(makeSearchResponse('quick-search-stale-candidate', 50));
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => resultListVisible
+            ? '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 隐藏已查看 共1位人选'
+            : '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 搜 索',
+        };
+      }
+
+      if (selector === '#search-button') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              resultListVisible = true;
+            },
+          }),
+        };
+      }
+
+      if (selector === '#hide-viewed') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              hideViewedChecked = true;
+            },
+          }),
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+        evaluateAll: async () => [],
+      };
+    },
+  } as never;
+
+  const searchPage = await liepinAdapter.openSubscribeSearch(page, '优衣库');
+  const result = await liepinAdapter.extractCandidateList(searchPage);
+
+  assert.deepStrictEqual(result.candidates.map((candidate) => candidate.candidateId), ['filtered-candidate']);
+});
+
+test('liepin adapter rejects with diagnostic page text when hide-viewed is missing', async () => {
+  const page = {
+    goto: async () => undefined,
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
+    waitForLoadState: async () => undefined,
+    waitForResponse: async () => undefined,
+    waitForFunction: async () => undefined,
+    evaluate: async () => ({
+      found: false,
+      checked: false,
+      bodyText: '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 目前城市 不限',
+    }),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => undefined,
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 目前城市 不限',
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+      };
+    },
+  } as never;
+
+  await assert.rejects(
+    () => liepinAdapter.openSubscribeSearch(page, '优衣库'),
+    /Could not find Liepin "隐藏已查看" filter\. Page text: 搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 目前城市 不限/,
+  );
 });
 
 test('liepin adapter rejects when quick-search click does not lead to refreshed ready state', async () => {
@@ -102,6 +532,7 @@ test('liepin adapter opens the recruiter authenticated search home instead of th
     waitForLoadState: async () => undefined,
     waitForResponse: async () => undefined,
     waitForFunction: async () => undefined,
+    evaluate: async () => liepinHideViewedState(true),
     getByText: (text: string, options?: { exact?: boolean }) => {
       assert.equal(text, '优衣库');
       assert.equal(options?.exact, true);
@@ -118,7 +549,7 @@ test('liepin adapter opens the recruiter authenticated search home instead of th
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅',
+          innerText: async () => liepinSearchReadyText,
         };
       }
 
@@ -151,11 +582,12 @@ test('liepin adapter waits for the initial-data API before treating search as re
       assert.equal(predicate(response), true);
     },
     waitForFunction: async () => undefined,
+    evaluate: async () => liepinHideViewedState(true),
     locator: (selector: string) => {
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅',
+          innerText: async () => liepinSearchReadyText,
         };
       }
 
@@ -171,6 +603,7 @@ test('liepin adapter waits for the initial-data API before treating search as re
   assert.deepStrictEqual(responseUrls, [
     'https://api-h.liepin.com/api/com.liepin.recruitbff.clt.search.get-initial-data',
     'https://api-h.liepin.com/api/com.liepin.recruitbff.clt.search.get-initial-data',
+    'https://api-h.liepin.com/api/com.liepin.recruitbff.clt.search.get-initial-data',
   ]);
 });
 
@@ -183,11 +616,12 @@ test('liepin adapter tolerates a missing initial-data response when the recruite
       throw new Error('initial-data timeout');
     },
     waitForFunction: async () => undefined,
+    evaluate: async () => liepinHideViewedState(true),
     locator: (selector: string) => {
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅',
+          innerText: async () => liepinSearchReadyText,
         };
       }
 
@@ -362,7 +796,7 @@ test('liepin adapter waits for the Liepin SPA shell to hydrate before treating s
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅',
+          innerText: async () => liepinSearchReadyText,
         };
       }
 
@@ -372,10 +806,11 @@ test('liepin adapter waits for the Liepin SPA shell to hydrate before treating s
         }),
       };
     },
+    evaluate: async () => liepinHideViewedState(true),
   } as never;
 
   await assert.doesNotReject(() => liepinAdapter.openSubscribeSearch(page, '优衣库'));
-  assert.equal(readyChecks, 4);
+  assert.equal(readyChecks, 5);
 });
 
 test('liepin adapter accepts the real post-login recruiter shell when main-container stays empty and loading scaffolding is hidden', async () => {
@@ -565,11 +1000,20 @@ test('liepin adapter tolerates aborted recruiter search navigation when the page
     },
     url: () => currentUrl,
     waitForLoadState: async () => undefined,
+    waitForResponse: async () => undefined,
+    waitForFunction: async () => undefined,
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => undefined,
+      }),
+    }),
+    evaluate: async () => liepinHideViewedState(true),
     locator: (selector: string) => {
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '猎聘\n搜简历\n搜索条件\n人才搜索',
+          innerText: async () => liepinSearchReadyText,
         };
       }
 
@@ -594,11 +1038,20 @@ test('liepin adapter reuses the current recruiter search URL and authenticates a
     },
     url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
     waitForLoadState: async () => undefined,
+    waitForResponse: async () => undefined,
+    waitForFunction: async () => undefined,
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => undefined,
+      }),
+    }),
+    evaluate: async () => liepinHideViewedState(true),
     locator: (selector: string) => {
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '猎聘\n搜简历\n搜索条件\n人才搜索',
+          innerText: async () => liepinSearchReadyText,
         };
       }
 
