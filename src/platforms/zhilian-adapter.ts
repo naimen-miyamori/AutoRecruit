@@ -1,7 +1,7 @@
 import type { BrowserContext, Page } from 'playwright';
 import { config } from '../config.js';
 import type { CandidateListItem, CandidateResume, EducationExperience, WorkExperience } from '../types/job.js';
-import type { PlatformAdapter } from './types.js';
+import type { PlatformAdapter, SearchWaitOptions } from './types.js';
 
 const zhilianLoginUrl = 'https://passport.zhaopin.com/org/login';
 const zhilianDesktopShellUrl = 'https://rd6.zhaopin.com/desktop';
@@ -68,8 +68,33 @@ function createDeadline(timeoutMs = config.playwright.resumeDetailTimeoutMs): nu
   return Date.now() + Math.max(timeoutMs, 1);
 }
 
+function createSearchDeadline(options?: SearchWaitOptions): number {
+  return options?.deadline ?? createDeadline(config.playwright.searchPageTimeoutMs);
+}
+
 function remainingTime(deadline: number): number {
   return Math.max(deadline - Date.now(), 1);
+}
+
+function boundedTimeout(deadline: number, maxTimeoutMs = Number.POSITIVE_INFINITY): number {
+  return Math.max(1, Math.min(remainingTime(deadline), maxTimeoutMs));
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timeout = setTimeout(resolve, Math.max(timeoutMs, 1), fallback);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function normalizeText(value: string | null | undefined): string {
@@ -178,7 +203,8 @@ async function closeExistingZhilianResumeModal(page: Page): Promise<void> {
   }
 }
 
-async function waitForZhilianRecruiterShell(page: Page): Promise<void> {
+async function waitForZhilianRecruiterShell(page: Page, options: { deadline?: number; timeoutMs?: number } = {}): Promise<void> {
+  const deadline = options.deadline ?? createDeadline(options.timeoutMs ?? config.playwright.searchPageTimeoutMs);
   const waitForFunction = (page as Partial<Pick<Page, 'waitForFunction'>>).waitForFunction?.bind(page);
   if (!waitForFunction) {
     await assertZhilianAuthenticated(page);
@@ -204,27 +230,28 @@ async function waitForZhilianRecruiterShell(page: Page): Promise<void> {
         || isBlankRd6Shell;
     },
     undefined,
-    { timeout: 15000, polling: 250 },
+    { timeout: remainingTime(deadline), polling: 250 },
   );
 
   await assertZhilianAuthenticated(page);
 }
 
-async function openZhilianRecruiterHome(page: Page): Promise<void> {
+async function openZhilianRecruiterHome(page: Page, options?: SearchWaitOptions): Promise<void> {
+  const deadline = createSearchDeadline(options);
   if (isZhilianSearchUrl(page.url())) {
-    await waitForZhilianRecruiterShell(page);
+    await waitForZhilianRecruiterShell(page, { deadline });
     return;
   }
 
   try {
-    await page.goto(zhilianAuthenticatedHomeUrl, { waitUntil: 'domcontentloaded' });
+    await page.goto(zhilianAuthenticatedHomeUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
   } catch (error) {
     if (!isAbortNavigationError(error) || !isZhilianRecruiterUrl(page.url())) {
       throw error;
     }
   }
 
-  await waitForZhilianRecruiterShell(page);
+  await waitForZhilianRecruiterShell(page, { deadline });
 }
 
 async function listVisibleZhilianQuickSearchTags(page: Page): Promise<string[]> {
@@ -253,19 +280,26 @@ function keywordToLoosePattern(keyword: string): RegExp {
   return new RegExp(pattern, 'i');
 }
 
-async function clickSavedZhilianQuickSearchTag(page: Page, keyword: string): Promise<void> {
+async function clickSavedZhilianQuickSearchTag(page: Page, keyword: string, deadline: number): Promise<void> {
   const keywordPattern = keywordToLoosePattern(keyword);
   const quickSearchTag = page.getByText(keywordPattern, { exact: false }).first();
 
   try {
-    await quickSearchTag.waitFor({ state: 'visible', timeout: 5000 });
-    await quickSearchTag.click();
+    await quickSearchTag.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+    await quickSearchTag.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/unexpected argument|too many arguments/i.test(message)) {
+        throw error;
+      }
+
+      await quickSearchTag.click();
+    });
   } catch {
     const visibleTags = await listVisibleZhilianQuickSearchTags(page);
     throw new Error(`Could not find a saved Zhilian quick-search tag containing keyword "${keyword}". Visible tags: ${visibleTags.join(', ') || '(none)'}.`);
   }
 
-  await waitForZhilianRecruiterShell(page);
+  await waitForZhilianRecruiterShell(page, { deadline });
 }
 
 function clearObservedZhilianCandidateApi(page: Page): void {
@@ -432,7 +466,7 @@ function attachZhilianCandidateApiObserver(page: Page): void {
   });
 }
 
-async function waitForZhilianCandidateApi(page: Page): Promise<CandidateListItem[]> {
+async function waitForZhilianCandidateApi(page: Page, timeoutMs?: number): Promise<CandidateListItem[]> {
   if (observedZhilianSearchApiSeenPages.has(page)) {
     return observedZhilianSearchApiCandidates.get(page) ?? [];
   }
@@ -443,10 +477,12 @@ async function waitForZhilianCandidateApi(page: Page): Promise<CandidateListItem
     return observedZhilianSearchApiCandidates.get(page) ?? [];
   }
 
-  const response = await waitForResponse(
+  const effectiveTimeoutMs = Math.max(timeoutMs ?? config.playwright.searchPageTimeoutMs, 1);
+  const responsePromise = waitForResponse(
     (candidateResponse) => isZhilianCandidateApiResponse(candidateResponse),
-    { timeout: 15000 },
+    { timeout: effectiveTimeoutMs },
   ).catch(() => undefined);
+  const response = await withTimeout(responsePromise, effectiveTimeoutMs, undefined);
 
   if (response) {
     await cacheZhilianCandidateApiResponse(page, response);
@@ -566,6 +602,15 @@ async function collectZhilianCards(page: Page): Promise<CandidateListItem[]> {
   }));
 
   return parseZhilianDomCandidateSnapshots(snapshots);
+}
+
+function isZhilianExplicitEmptyText(text: string): boolean {
+  return /暂无(?:符合条件的)?人才|暂无.*候选人|暂无.*简历|暂无.*结果|没有找到.*(?:人才|候选人|简历|结果)|未找到.*(?:人才|候选人|简历|结果)|无结果/.test(normalizeText(text));
+}
+
+async function hasZhilianExplicitEmptyResults(page: Page): Promise<boolean> {
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  return isZhilianExplicitEmptyText(bodyText);
 }
 
 async function clickZhilianSearchResultCard(searchPage: Page, candidate: CandidateListItem, deadline = createDeadline()): Promise<boolean> {
@@ -726,25 +771,48 @@ export const zhilianAdapter: PlatformAdapter = {
     return page;
   },
   assertAuthenticated: assertZhilianAuthenticated,
-  openSubscribeSearch: async (page, keyword) => {
+  openSubscribeSearch: async (page, keyword, options) => {
+    const deadline = createSearchDeadline(options);
     clearObservedZhilianCandidateApi(page);
     attachZhilianCandidateApiObserver(page);
-    await openZhilianRecruiterHome(page);
-    await clickSavedZhilianQuickSearchTag(page, keyword);
+    await openZhilianRecruiterHome(page, { deadline });
+    await clickSavedZhilianQuickSearchTag(page, keyword, deadline);
     return page;
   },
-  extractCandidateList: async (page) => {
+  extractCandidateList: async (page, options) => {
+    const deadline = createSearchDeadline(options);
     attachZhilianCandidateApiObserver(page);
-    const apiCandidatesPromise = waitForZhilianCandidateApi(page).catch(() => [] as CandidateListItem[]);
-    await waitForZhilianRecruiterShell(page);
+    await waitForZhilianRecruiterShell(page, { deadline });
 
     const domCandidates = await collectZhilianCards(page);
     if (domCandidates.length > 0) {
       return { candidates: domCandidates };
     }
 
-    const apiCandidates = await apiCandidatesPromise;
-    return { candidates: apiCandidates };
+    while (Date.now() <= deadline) {
+      const apiCandidates = await waitForZhilianCandidateApi(
+        page,
+        boundedTimeout(deadline, config.playwright.apiFallbackTimeoutMs),
+      ).catch(() => []);
+      if (apiCandidates.length > 0) {
+        return { candidates: apiCandidates };
+      }
+
+      const nextDomCandidates = await collectZhilianCards(page);
+      if (nextDomCandidates.length > 0) {
+        return { candidates: nextDomCandidates };
+      }
+
+      if (await hasZhilianExplicitEmptyResults(page)) {
+        return { candidates: [] };
+      }
+
+      if (observedZhilianSearchApiSeenPages.has(page)) {
+        return { candidates: [] };
+      }
+    }
+
+    return { candidates: observedZhilianSearchApiCandidates.get(page) ?? [] };
   },
   openResumeDetail: async (context, searchPage, candidate) => {
     const deadline = createDeadline();

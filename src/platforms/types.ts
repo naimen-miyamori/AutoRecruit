@@ -5,6 +5,10 @@ export const SUPPORTED_PLATFORMS = ['51job', 'liepin', 'zhilian'] as const;
 
 export type SupportedPlatform = (typeof SUPPORTED_PLATFORMS)[number];
 
+export interface SearchWaitOptions {
+  deadline?: number;
+}
+
 export interface PlatformAdapter {
   platform: SupportedPlatform;
   displayName: string;
@@ -14,8 +18,8 @@ export interface PlatformAdapter {
   openLoginPage(page: Page): Promise<void>;
   openAuthenticatedHome(page: Page): Promise<Page>;
   assertAuthenticated(page: Page): Promise<void>;
-  openSubscribeSearch(page: Page, keyword: string): Promise<Page>;
-  extractCandidateList(page: Page): Promise<{ candidates: CandidateListItem[] }>;
+  openSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
+  extractCandidateList(page: Page, options?: SearchWaitOptions): Promise<{ candidates: CandidateListItem[] }>;
   openResumeDetail(context: BrowserContext, searchPage: Page, candidate: CandidateListItem): Promise<Page>;
   parseResumeDetail(page: Page, candidate: CandidateListItem): Promise<CandidateResume>;
 }

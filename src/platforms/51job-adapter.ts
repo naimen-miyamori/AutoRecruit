@@ -20,7 +20,7 @@ export const fiftyOneJobAdapter: PlatformAdapter = {
   },
   assertAuthenticated: assertAuthenticatedPage,
   openSubscribeSearch,
-  extractCandidateList: async (page) => ({ candidates: await collectCandidateList(page) }),
+  extractCandidateList: async (page, options) => ({ candidates: await collectCandidateList(page, options) }),
   openResumeDetail,
   parseResumeDetail: async (page, candidate) => (await parseResumeDetail(page, candidate)).resume,
 };

@@ -1,11 +1,14 @@
 import { Page } from 'playwright';
+import { config } from '../config.js';
+import type { SearchWaitOptions } from '../platforms/types.js';
 import { CandidateListItem } from '../types/job.js';
 
 export const candidateCardSelector = 'div[id^="no_interested_"]';
 const recommendationBoundaryText = '未找到更多，为你推荐人才';
 const resultListSelector = '.virtual_list';
 const candidateContainerSelector = '.talent-card, .resume-card, .candidate-card, li, .item, .result-item, [class*="card"]';
-const emptyResultsPattern = /暂无人才|暂无搜索结果|没有找到.*人才|未找到.*人才|无结果/;
+const emptyResultsPattern = /暂无(?:符合条件的)?人才|暂无.*人才|暂无搜索结果|暂无.*结果|没有找到.*人才|没有.*结果|未找到.*人才|无结果/;
+const candidateListPollIntervalMs = 100;
 
 export type CandidateListSourceCard = {
   elementId?: string;
@@ -81,91 +84,192 @@ export function isRecommendationBoundaryText(text: string | null | undefined): b
   return (text ?? '').replace(/\s+/g, '').includes(recommendationBoundaryText);
 }
 
-async function isVisibleResultListEmpty(page: Page): Promise<boolean> {
-  const resultList = page.locator(resultListSelector).first();
+function resolveSearchDeadline(options?: SearchWaitOptions): number {
+  return options?.deadline ?? Date.now() + config.playwright.searchPageTimeoutMs;
+}
 
+function remainingTime(deadline: number): number {
+  return Math.max(deadline - Date.now(), 0);
+}
+
+async function waitForPageTimeout(page: Page, timeoutMs: number): Promise<void> {
+  if (timeoutMs <= 0) {
+    return;
+  }
+
+  const waitForTimeout = (page as Partial<Pick<Page, 'waitForTimeout'>>).waitForTimeout?.bind(page);
+  if (waitForTimeout) {
+    await waitForTimeout(timeoutMs);
+    return;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, timeoutMs));
+}
+
+async function isLocatorVisible(page: Page, selector: string): Promise<boolean> {
   try {
-    await resultList.waitFor({ state: 'visible', timeout: 10000 });
+    await page.locator(selector).first().waitFor({ state: 'visible', timeout: 1 });
+    return true;
   } catch {
     return false;
   }
-
-  return (await page.locator(candidateCardSelector).count()) === 0;
 }
 
-async function waitForKnownCandidateListState(page: Page): Promise<'candidates' | 'empty' | 'empty-list'> {
-  const firstCandidateCard = page.locator(candidateCardSelector).first();
+async function isAnyLoadingVisible(page: Page): Promise<boolean> {
+  const selectors = ['.base-page-loading', '.el-loading-mask'];
+  for (const selector of selectors) {
+    if (await isLocatorVisible(page, selector)) {
+      return true;
+    }
+  }
 
-  return Promise.race([
-    firstCandidateCard.waitFor({ state: 'visible', timeout: 10000 }).then(() => 'candidates' as const),
-    page.locator('body').innerText()
-      .then((bodyText) => (emptyResultsPattern.test(bodyText) ? 'empty' as const : new Promise<never>(() => undefined))),
-    isVisibleResultListEmpty(page).then((isEmpty) => (isEmpty ? 'empty-list' as const : new Promise<never>(() => undefined))),
-  ]);
+  return false;
+}
+
+class CandidateListStateTimeout extends Error {
+  constructor(readonly stableEmptyListObservedMs: number) {
+    super('Candidate list state did not become ready before deadline.');
+  }
+}
+
+async function waitForKnownCandidateListState(page: Page, deadline: number): Promise<'candidates' | 'empty' | 'empty-list'> {
+  let stableEmptyListStartedAt: number | undefined;
+  let stableEmptyListObservedMs = 0;
+
+  while (Date.now() <= deadline) {
+    const candidateCardCount = await page.locator(candidateCardSelector).count().catch(() => 0);
+    if (candidateCardCount > 0) {
+      return 'candidates';
+    }
+
+    const bodyText = await page.locator('body').innerText().catch(() => '');
+    if (emptyResultsPattern.test(bodyText)) {
+      return 'empty';
+    }
+
+    const resultListVisible = await isLocatorVisible(page, resultListSelector);
+    const loadingVisible = await isAnyLoadingVisible(page);
+    if (resultListVisible && !loadingVisible) {
+      const now = Date.now();
+      stableEmptyListStartedAt ??= now;
+      stableEmptyListObservedMs = now - stableEmptyListStartedAt;
+
+      if (stableEmptyListObservedMs >= config.playwright.emptyResultsStableMs) {
+        return 'empty-list';
+      }
+    } else {
+      stableEmptyListStartedAt = undefined;
+      stableEmptyListObservedMs = 0;
+    }
+
+    const waitMs = Math.min(candidateListPollIntervalMs, remainingTime(deadline));
+    if (waitMs <= 0) {
+      break;
+    }
+
+    await waitForPageTimeout(page, waitMs);
+  }
+
+  throw new CandidateListStateTimeout(stableEmptyListObservedMs);
 }
 
 async function collectCandidateListDiagnostics(page: Page): Promise<{
   url: string;
   bodyTextLength: number;
+  emptyTextMatched: boolean;
   loadingVisible: boolean;
   resultListVisible: boolean;
   appRootCount: number;
   candidateCardCount: number;
+  stableEmptyListObservedMs: number;
+  deadlineRemainingMs: number;
+}> {
+  return collectCandidateListDiagnosticsWithState(page, {
+    stableEmptyListObservedMs: 0,
+    deadline: Date.now(),
+  });
+}
+
+async function collectCandidateListDiagnosticsWithState(page: Page, state: {
+  stableEmptyListObservedMs: number;
+  deadline: number;
+}): Promise<{
+  url: string;
+  bodyTextLength: number;
+  emptyTextMatched: boolean;
+  loadingVisible: boolean;
+  resultListVisible: boolean;
+  appRootCount: number;
+  candidateCardCount: number;
+  stableEmptyListObservedMs: number;
+  deadlineRemainingMs: number;
 }> {
   const bodyText = await page.locator('body').innerText().catch(() => '');
-  const loadingVisible = await page.locator('.base-page-loading').count().then((count) => count > 0).catch(() => false);
-  const resultListVisible = await page.locator(resultListSelector).count().then((count) => count > 0).catch(() => false);
+  const loadingVisible = await isAnyLoadingVisible(page);
+  const resultListVisible = await isLocatorVisible(page, resultListSelector);
   const appRootCount = await page.locator('#app, #root, [data-testid="app-root"]').count().catch(() => 0);
   const candidateCardCount = await page.locator(candidateCardSelector).count().catch(() => 0);
 
   return {
     url: page.url(),
     bodyTextLength: bodyText.trim().length,
+    emptyTextMatched: emptyResultsPattern.test(bodyText),
     loadingVisible,
     resultListVisible,
     appRootCount,
     candidateCardCount,
+    stableEmptyListObservedMs: state.stableEmptyListObservedMs,
+    deadlineRemainingMs: remainingTime(state.deadline),
   };
 }
 
 function buildCandidateListTimeoutMessage(diagnostics: {
   url: string;
   bodyTextLength: number;
+  emptyTextMatched: boolean;
   loadingVisible: boolean;
   resultListVisible: boolean;
   appRootCount: number;
   candidateCardCount: number;
+  stableEmptyListObservedMs: number;
+  deadlineRemainingMs: number;
 }): string {
   return [
     'Candidate list did not render before timeout.',
     `url=${diagnostics.url}`,
     `bodyTextLength=${diagnostics.bodyTextLength}`,
+    `emptyTextMatched=${diagnostics.emptyTextMatched}`,
     `loadingVisible=${diagnostics.loadingVisible}`,
     `resultListVisible=${diagnostics.resultListVisible}`,
     `appRootCount=${diagnostics.appRootCount}`,
     `candidateCardCount=${diagnostics.candidateCardCount}`,
+    `stableEmptyListObservedMs=${diagnostics.stableEmptyListObservedMs}`,
+    `deadlineRemainingMs=${diagnostics.deadlineRemainingMs}`,
   ].join(' ');
 }
 
-export async function waitForCandidateResultsReady(page: Page): Promise<void> {
+export async function waitForCandidateResultsReady(page: Page, options?: SearchWaitOptions): Promise<void> {
+  const deadline = resolveSearchDeadline(options);
   await page.waitForLoadState('domcontentloaded');
 
   try {
-    await waitForKnownCandidateListState(page);
+    await waitForKnownCandidateListState(page, deadline);
     return;
-  } catch {
-    const diagnostics = await collectCandidateListDiagnostics(page);
-
-    if (diagnostics.resultListVisible && diagnostics.candidateCardCount === 0) {
-      return;
-    }
+  } catch (error) {
+    const stableEmptyListObservedMs = error instanceof CandidateListStateTimeout
+      ? error.stableEmptyListObservedMs
+      : 0;
+    const diagnostics = await collectCandidateListDiagnosticsWithState(page, {
+      stableEmptyListObservedMs,
+      deadline,
+    });
 
     throw new Error(buildCandidateListTimeoutMessage(diagnostics));
   }
 }
 
-export async function collectCandidateList(page: Page): Promise<CandidateListItem[]> {
-  await waitForCandidateResultsReady(page);
+export async function collectCandidateList(page: Page, options?: SearchWaitOptions): Promise<CandidateListItem[]> {
+  await waitForCandidateResultsReady(page, options);
 
   const firstResultList = page.locator(resultListSelector).first();
   const cards = await firstResultList.locator(candidateCardSelector).evaluateAll((elements, containerSelector) => {

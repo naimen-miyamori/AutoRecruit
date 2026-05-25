@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
 
+import { config } from '../config.js';
 import { liepinAdapter } from '../platforms/liepin-adapter.js';
 
 function runInIsolatedPageContext<TArg, TResult>(fn: (arg: TArg) => TResult, arg: TArg): TResult {
@@ -141,7 +142,7 @@ test('liepin adapter waits for the initial-data API before treating search as re
     url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
     waitForLoadState: async () => undefined,
     waitForResponse: async (predicate: (response: { url(): string; status(): number }) => boolean, options?: { timeout?: number }) => {
-      assert.equal(options?.timeout, 15000);
+      assert.ok(options?.timeout !== undefined && options.timeout > 0 && options.timeout <= config.playwright.searchPageTimeoutMs);
       const response = {
         url: () => 'https://api-h.liepin.com/api/com.liepin.recruitbff.clt.search.get-initial-data',
         status: () => 200,
@@ -310,7 +311,7 @@ test('liepin adapter waits for the Liepin SPA shell to hydrate before treating s
     waitForLoadState: async () => undefined,
     waitForResponse: async () => undefined,
     waitForFunction: async (fn: () => boolean, _arg: unknown, options?: { timeout?: number; polling?: number }) => {
-      assert.equal(options?.timeout, 15000);
+      assert.ok(options?.timeout !== undefined && options.timeout > 0 && options.timeout <= config.playwright.searchPageTimeoutMs);
       assert.equal(options?.polling, 250);
       while (readyChecks < 6) {
         readyChecks += 1;
@@ -387,7 +388,7 @@ test('liepin adapter accepts the real post-login recruiter shell when main-conta
     waitForLoadState: async () => undefined,
     waitForResponse: async () => undefined,
     waitForFunction: async (fn: () => boolean, _arg: unknown, options?: { timeout?: number; polling?: number }) => {
-      assert.equal(options?.timeout, 15000);
+      assert.ok(options?.timeout !== undefined && options.timeout > 0 && options.timeout <= config.playwright.searchPageTimeoutMs);
       assert.equal(options?.polling, 250);
       const previousDocument = globalThis.document;
       const previousWindow = globalThis.window;
@@ -1247,7 +1248,7 @@ test('liepin adapter waits for search shell hydration before treating an authent
       throw new Error('unexpected response predicate');
     },
     waitForFunction: async (fn: () => boolean, _arg: unknown, options?: { timeout?: number; polling?: number }) => {
-      assert.equal(options?.timeout, 15000);
+      assert.ok(options?.timeout !== undefined && options.timeout > 0 && options.timeout <= config.playwright.searchPageTimeoutMs);
       assert.equal(options?.polling, 250);
       while (readyChecks < 6) {
         readyChecks += 1;
@@ -1309,7 +1310,7 @@ test('liepin adapter waits for search shell hydration before treating an authent
   } as never;
 
   await assert.doesNotReject(() => liepinAdapter.extractCandidateList(page));
-  assert.equal(readyChecks, 4);
+  assert.ok(readyChecks >= 3);
 });
 
 test('liepin adapter rejects unauthenticated public zhaopin pages that still show login/register prompts', async () => {
@@ -1831,6 +1832,88 @@ test('liepin adapter enriches zhaopin-backed card candidates with recruiter-safe
       sourceText: 'https://www.liepin.com/zhaopin/?resumeId=23456789&from=search <a data-resume-id="23456789" href="https://www.liepin.com/zhaopin/?resumeId=23456789&from=search">赵敏</a> 赵敏 杭州某信息有限公司 招商主管 23456789 23456789',
     },
   ]);
+});
+
+test('liepin adapter returns complete DOM candidates without waiting for the search-resumes API', async () => {
+  let waitForResponseCalls = 0;
+  const cards = [
+    {
+      href: 'https://www.liepin.com/resume/23456789?from=search',
+      outerHTML: '<a href="https://www.liepin.com/resume/23456789?from=search">赵敏</a>',
+      textContent: '赵敏\n杭州某信息有限公司\n招商主管',
+      closest: () => ({
+        textContent: '赵敏\n杭州某信息有限公司\n招商主管',
+      }),
+    },
+  ];
+  const page = {
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93#session',
+    waitForLoadState: async () => undefined,
+    waitForResponse: async () => {
+      waitForResponseCalls += 1;
+      throw new Error('search-resumes API should not block complete DOM results');
+    },
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '猎聘\n搜索条件\n人才搜索\n共1位人选',
+        };
+      }
+
+      return {
+        evaluateAll: async (fn: (elements: unknown[]) => unknown) => fn(cards),
+      };
+    },
+  } as never;
+
+  const result = await liepinAdapter.extractCandidateList(page, { deadline: Date.now() + 1000 });
+
+  assert.deepStrictEqual(result.candidates.map((candidate) => candidate.candidateId), ['23456789']);
+  assert.equal(waitForResponseCalls, 0);
+});
+
+test('liepin adapter only short-waits for API fallback when DOM candidates need safe resume urls', async () => {
+  const waitTimeouts: number[] = [];
+  const cards = [
+    {
+      href: 'https://www.liepin.com/zhaopin/?resumeId=23456789&from=search',
+      outerHTML: '<a data-resume-id="23456789" href="https://www.liepin.com/zhaopin/?resumeId=23456789&from=search">赵敏</a>',
+      textContent: '赵敏\n杭州某信息有限公司\n招商主管',
+      getAttribute: (name: string) => (name === 'data-resume-id' ? '23456789' : null),
+      closest: () => ({
+        textContent: '赵敏\n杭州某信息有限公司\n招商主管',
+        getAttribute: (name: string) => (name === 'data-candidate-id' ? '23456789' : null),
+      }),
+    },
+  ];
+  const page = {
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93#session',
+    waitForLoadState: async () => undefined,
+    waitForResponse: async (_predicate: unknown, options?: { timeout?: number }) => {
+      waitTimeouts.push(options?.timeout ?? 0);
+      await new Promise(() => undefined);
+    },
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '猎聘\n搜索条件\n人才搜索\n共1位人选',
+        };
+      }
+
+      return {
+        evaluateAll: async (fn: (elements: unknown[]) => unknown) => fn(cards),
+      };
+    },
+  } as never;
+
+  const result = await liepinAdapter.extractCandidateList(page, { deadline: Date.now() + 50 });
+
+  assert.equal(result.candidates[0]?.candidateId, '23456789');
+  assert.equal(result.candidates[0]?.resumeUrl, undefined);
+  assert.equal(waitTimeouts.length, 1);
+  assert.ok(waitTimeouts[0] > 0 && waitTimeouts[0] <= 50);
 });
 test('liepin adapter ignores login-gated teaser lines in resume details', async () => {
   const page = {

@@ -1,6 +1,7 @@
 import { Locator, Page } from 'playwright';
 import { config } from '../config.js';
 import { openAuthenticatedHome as openAuthenticatedSubscribePage } from './session.js';
+import type { SearchWaitOptions, SupportedPlatform } from '../platforms/types.js';
 
 const searchButtonSelector = 'button.to-talent-search-button';
 const searchLinkSelector = 'a.to-talent-search-button, a[href*="/Revision/talent/search"]';
@@ -33,7 +34,7 @@ export const waitForAuthenticatedSubscribeReadyRef = {
   fn: waitForAuthenticatedSubscribeReady,
 };
 export const openAuthenticatedSubscribePageRef = {
-  fn: openAuthenticatedSubscribePage,
+  fn: openAuthenticatedSubscribePageWithDeadline,
 };
 export const waitForSearchTriggerReadyRef = {
   fn: waitForSearchTriggerReady,
@@ -51,6 +52,27 @@ function normalizeText(value: string | null | undefined): string {
 
 function getRemainingTimeout(deadline: number): number {
   return Math.max(1, deadline - Date.now());
+}
+
+function resolveSearchDeadline(options?: SearchWaitOptions): number {
+  return options?.deadline ?? Date.now() + config.playwright.searchPageTimeoutMs;
+}
+
+async function openAuthenticatedSubscribePageWithDeadline(
+  page: Page,
+  platform: SupportedPlatform,
+  options?: SearchWaitOptions,
+): Promise<Page> {
+  if (platform === '51job' && options?.deadline) {
+    await page.goto(config.playwright.subscribeUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: getRemainingTimeout(options.deadline),
+    });
+    await waitForAuthenticatedSubscribeReadyRef.fn(page, options);
+    return page;
+  }
+
+  return openAuthenticatedSubscribePage(page, platform);
 }
 
 async function raceSuccessfulWaits<T>(operations: Array<() => Promise<T>>): Promise<T | undefined> {
@@ -75,7 +97,7 @@ async function raceSuccessfulWaits<T>(operations: Array<() => Promise<T>>): Prom
   });
 }
 
-export async function waitForAuthenticatedSubscribeReady(page: Page): Promise<void> {
+export async function waitForAuthenticatedSubscribeReady(page: Page, options?: SearchWaitOptions): Promise<void> {
   await page.waitForLoadState('domcontentloaded');
 
   if (await isLoginPage(page)) {
@@ -83,7 +105,7 @@ export async function waitForAuthenticatedSubscribeReady(page: Page): Promise<vo
   }
 
   const cards = page.locator(cardSelector);
-  const deadline = Date.now() + config.playwright.authCheckTimeoutMs;
+  const deadline = resolveSearchDeadline(options);
   const readiness = await raceSuccessfulWaits([
     async () => {
       await cards.first().waitFor({ state: 'visible', timeout: getRemainingTimeout(deadline) });
@@ -119,23 +141,24 @@ async function listVisibleCardTitles(page: Page): Promise<string[]> {
   return titles;
 }
 
-async function waitForSearchTriggerReady(page: Page, searchTrigger: Locator): Promise<void> {
-  await searchTrigger.waitFor({ state: 'attached', timeout: config.playwright.authCheckTimeoutMs });
-  await searchTrigger.waitFor({ state: 'visible', timeout: config.playwright.authCheckTimeoutMs });
+async function waitForSearchTriggerReady(page: Page, searchTrigger: Locator, options?: SearchWaitOptions): Promise<void> {
+  const deadline = resolveSearchDeadline(options);
+  await searchTrigger.waitFor({ state: 'attached', timeout: getRemainingTimeout(deadline) });
+  await searchTrigger.waitFor({ state: 'visible', timeout: getRemainingTimeout(deadline) });
   const loadingMask = page.locator(loadingMaskSelector).filter({ visible: true }).first();
   await loadingMask.waitFor({ state: 'hidden', timeout: 1 }).catch(() => undefined);
 }
 
-async function resolveSearchTriggerFromTier(candidates: Locator[]): Promise<Locator | undefined> {
+async function resolveSearchTriggerFromTier(candidates: Locator[], deadline: number): Promise<Locator | undefined> {
   return raceSuccessfulWaits(candidates.map((searchTrigger) => async () => {
-    await searchTrigger.waitFor({ state: 'attached', timeout: 2000 });
+    await searchTrigger.waitFor({ state: 'attached', timeout: Math.min(2000, getRemainingTimeout(deadline)) });
     return searchTrigger;
   }));
 }
 
-async function resolveSearchTrigger(page: Page, card: Locator): Promise<Locator> {
+async function resolveSearchTrigger(page: Page, card: Locator, deadline: number): Promise<Locator> {
   const selectorCandidates = searchTriggerSelectors.map((selector) => card.locator(selector).first());
-  const selectorMatch = await resolveSearchTriggerFromTier(selectorCandidates);
+  const selectorMatch = await resolveSearchTriggerFromTier(selectorCandidates, deadline);
   if (selectorMatch) {
     return selectorMatch;
   }
@@ -145,13 +168,13 @@ async function resolveSearchTrigger(page: Page, card: Locator): Promise<Locator>
     card.getByRole('button', { name: /人才搜索|搜索/ }).first(),
     card.getByRole('link', { name: /人才搜索|搜索/ }).first(),
   ];
-  const textMatch = await resolveSearchTriggerFromTier(textCandidates);
+  const textMatch = await resolveSearchTriggerFromTier(textCandidates, deadline);
   if (textMatch) {
     return textMatch;
   }
 
   const pageSelectorCandidates = pageLevelSearchSelectors.map((selector) => page.locator(selector).filter({ visible: true }).first());
-  const pageSelectorMatch = await resolveSearchTriggerFromTier(pageSelectorCandidates);
+  const pageSelectorMatch = await resolveSearchTriggerFromTier(pageSelectorCandidates, deadline);
   if (pageSelectorMatch) {
     return pageSelectorMatch;
   }
@@ -161,7 +184,7 @@ async function resolveSearchTrigger(page: Page, card: Locator): Promise<Locator>
     page.getByRole('button', { name: /人才搜索|搜索/ }).first(),
     page.getByRole('link', { name: /人才搜索|搜索/ }).first(),
   ];
-  const pageTextMatch = await resolveSearchTriggerFromTier(pageTextCandidates);
+  const pageTextMatch = await resolveSearchTriggerFromTier(pageTextCandidates, deadline);
   if (pageTextMatch) {
     return pageTextMatch;
   }
@@ -169,15 +192,15 @@ async function resolveSearchTrigger(page: Page, card: Locator): Promise<Locator>
   throw new Error('Talent search entry did not appear within the matched subscribe card.');
 }
 
-async function clickSearchTrigger(page: Page, searchTrigger: Locator): Promise<void> {
-  const deadline = Date.now() + config.playwright.authCheckTimeoutMs;
+async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: SearchWaitOptions): Promise<void> {
+  const deadline = resolveSearchDeadline(options);
   let lastError: unknown;
 
   while (Date.now() < deadline) {
-    await waitForSearchTriggerReadyRef.fn(page, searchTrigger);
+    await waitForSearchTriggerReadyRef.fn(page, searchTrigger, { deadline });
 
     try {
-      await searchTrigger.click({ timeout: Math.max(1000, deadline - Date.now()) });
+      await searchTrigger.click({ timeout: getRemainingTimeout(deadline) });
       return;
     } catch (error) {
       lastError = error;
@@ -189,9 +212,14 @@ async function clickSearchTrigger(page: Page, searchTrigger: Locator): Promise<v
     : new Error('Talent search button did not become clickable before timing out.');
 }
 
-async function findSubscriptionCard(page: Page, searchKeyword: string): Promise<Locator> {
-  await waitForAuthenticatedSubscribeReadyRef.fn(page);
-  await page.waitForTimeout(subscriptionCardsSettleDelayMs);
+async function findSubscriptionCard(page: Page, searchKeyword: string, options?: SearchWaitOptions): Promise<Locator> {
+  const deadline = resolveSearchDeadline(options);
+  await waitForAuthenticatedSubscribeReadyRef.fn(page, { deadline });
+
+  const settleDelayMs = Math.min(subscriptionCardsSettleDelayMs, Math.max(0, deadline - Date.now()));
+  if (settleDelayMs > 0) {
+    await page.waitForTimeout(settleDelayMs);
+  }
 
   const cards = page.locator(cardSelector);
   const count = await cards.count();
@@ -252,39 +280,37 @@ export async function assertAuthenticatedPage(page: Page): Promise<void> {
   await waitForAuthenticatedSubscribeReadyRef.fn(page);
 }
 
-export async function openSubscribeSearch(page: Page, searchKeyword: string): Promise<Page> {
-  await openAuthenticatedSubscribePageRef.fn(page, '51job');
+export async function openSubscribeSearch(page: Page, searchKeyword: string, options?: SearchWaitOptions): Promise<Page> {
+  const deadline = resolveSearchDeadline(options);
+  await openAuthenticatedSubscribePageRef.fn(page, '51job', { deadline });
 
-  const card = await findSubscriptionCardRef.fn(page, searchKeyword);
+  const card = await findSubscriptionCardRef.fn(page, searchKeyword, { deadline });
   await card.scrollIntoViewIfNeeded();
   await card.hover();
 
-  const searchTrigger = await resolveSearchTrigger(page, card);
+  const searchTrigger = await resolveSearchTrigger(page, card, deadline);
 
   const originalUrl = page.url();
-  const popupPromise = page.context().waitForEvent('page', { timeout: 10000 }).catch(() => null);
-  const navigationPromise = page.waitForURL((url) => url.toString() !== originalUrl, { timeout: 10000 }).then(() => page).catch(() => null);
+  const popupPromise = page.context().waitForEvent('page', { timeout: getRemainingTimeout(deadline) }).catch(() => null);
+  const navigationPromise = page.waitForURL((url) => url.toString() !== originalUrl, { timeout: getRemainingTimeout(deadline) }).then(() => page).catch(() => null);
 
-  await clickSearchTriggerRef.fn(page, searchTrigger);
+  await clickSearchTriggerRef.fn(page, searchTrigger, { deadline });
 
-  const targetPage = await Promise.race([popupPromise, navigationPromise]);
-  const popupPage = await popupPromise;
+  const openOutcome = await Promise.race([
+    popupPromise.then((popupPage) => (popupPage ? { page: popupPage } : null)),
+    navigationPromise.then((navigatedPage) => (navigatedPage ? { page: navigatedPage } : null)),
+  ]);
 
-  if (popupPage) {
-    await popupPage.waitForLoadState('domcontentloaded');
-    return popupPage;
-  }
-
-  if (targetPage) {
-    await targetPage.waitForLoadState('domcontentloaded');
-    return targetPage;
+  if (openOutcome) {
+    await openOutcome.page.waitForLoadState('domcontentloaded', { timeout: getRemainingTimeout(deadline) });
+    return openOutcome.page;
   }
 
   const searchLinkHref = await searchTrigger.getAttribute('href').catch(() => null);
   if (searchLinkHref) {
-    await page.goto(searchLinkHref, { waitUntil: 'domcontentloaded' });
+    await page.goto(searchLinkHref, { waitUntil: 'domcontentloaded', timeout: getRemainingTimeout(deadline) });
     return page;
   }
 
-  throw new Error('Talent search did not open a popup or navigate the current page within 10 seconds.');
+  throw new Error('Talent search did not open a popup or navigate the current page before the shared search deadline.');
 }

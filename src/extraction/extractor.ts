@@ -1,4 +1,5 @@
 import { Page } from 'playwright';
+import type { SearchWaitOptions } from '../platforms/types.js';
 import { CandidateListItem, CandidateResume, ResumeDomSnapshot } from '../types/job.js';
 import { RawPageSource } from './page-source.js';
 
@@ -14,7 +15,7 @@ export interface ResumeExtractionResult {
 }
 
 export interface CandidateListExtractor {
-  extractCandidateListFromPage: (page: Page) => Promise<CandidateListExtractionResult>;
+  extractCandidateListFromPage: (page: Page, options?: SearchWaitOptions) => Promise<CandidateListExtractionResult>;
   extractCandidateListFromSource: (source: RawPageSource) => Promise<CandidateListExtractionResult>;
 }
 

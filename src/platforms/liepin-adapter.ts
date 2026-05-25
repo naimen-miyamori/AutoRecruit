@@ -1,7 +1,7 @@
 import type { BrowserContext, Page, Response } from 'playwright';
 import { config } from '../config.js';
 import type { CandidateListItem, CandidateResume, EducationExperience, ProjectExperience, WorkExperience } from '../types/job.js';
-import type { PlatformAdapter } from './types.js';
+import type { PlatformAdapter, SearchWaitOptions } from './types.js';
 
 const candidateLinkSelector = [
   'a[href*="/resume/"]',
@@ -34,8 +34,42 @@ function createDeadline(timeoutMs = config.playwright.resumeDetailTimeoutMs): nu
   return Date.now() + Math.max(timeoutMs, 1);
 }
 
+function createSearchDeadline(options?: SearchWaitOptions): number {
+  return options?.deadline ?? createDeadline(config.playwright.searchPageTimeoutMs);
+}
+
 function remainingTime(deadline: number): number {
   return Math.max(deadline - Date.now(), 1);
+}
+
+function boundedTimeout(deadline: number, maxTimeoutMs = Number.POSITIVE_INFINITY): number {
+  return Math.max(1, Math.min(remainingTime(deadline), maxTimeoutMs));
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((resolve) => {
+        timeout = setTimeout(resolve, Math.max(timeoutMs, 1), fallback);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function throwLastAggregateError(error: unknown): never {
+  if (error instanceof AggregateError && error.errors.length > 0) {
+    const lastError = error.errors[error.errors.length - 1];
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  throw error instanceof Error ? error : new Error(String(error));
 }
 
 function normalizeText(value: string | null | undefined): string {
@@ -410,18 +444,21 @@ function isLiepinSearchUrl(url: string): boolean {
   return /^https:\/\/h\.liepin\.com\/search\/getconditionitem(?:[/?#].*)?$/i.test(url);
 }
 
-async function waitForLiepinInitialData(page: Page): Promise<void> {
+async function waitForLiepinInitialData(page: Page, deadline: number): Promise<void> {
   const waitForResponse = (page as Partial<Pick<Page, 'waitForResponse'>>).waitForResponse?.bind(page);
   if (!waitForResponse) {
     return;
   }
 
-  await waitForResponse(
+  const response = await waitForResponse(
     (response) => /api-h\.liepin\.com\/api\/com\.liepin\.recruitbff\.clt\.search\.get-initial-data/.test(response.url())
       && response.status() >= 200
       && response.status() < 400,
-    { timeout: 15000 },
+    { timeout: remainingTime(deadline) },
   );
+  if (!response) {
+    throw new Error('Liepin initial-data response did not arrive before deadline.');
+  }
 }
 
 type LiepinSearchResumesApiCandidate = {
@@ -573,7 +610,7 @@ function attachLiepinSearchResumesApiObserver(page: Page): void {
   });
 }
 
-async function waitForLiepinSearchResumesApi(page: Page): Promise<CandidateListItem[]> {
+async function waitForLiepinSearchResumesApi(page: Page, timeoutMs?: number): Promise<CandidateListItem[]> {
   if (observedLiepinSearchApiSeenPages.has(page)) {
     return observedLiepinSearchApiCandidates.get(page) ?? [];
   }
@@ -584,10 +621,12 @@ async function waitForLiepinSearchResumesApi(page: Page): Promise<CandidateListI
     return observedLiepinSearchApiCandidates.get(page) ?? [];
   }
 
-  const response = await waitForResponse(
+  const effectiveTimeoutMs = Math.max(timeoutMs ?? config.playwright.searchPageTimeoutMs, 1);
+  const responsePromise = waitForResponse(
     (candidateResponse) => isLiepinSearchResumesApiResponse(candidateResponse),
-    { timeout: 15000 },
+    { timeout: effectiveTimeoutMs },
   ).catch(() => undefined);
+  const response = await withTimeout(responsePromise, effectiveTimeoutMs, undefined);
 
   if (response) {
     await cacheLiepinSearchResumesApiResponse(page, response);
@@ -596,7 +635,7 @@ async function waitForLiepinSearchResumesApi(page: Page): Promise<CandidateListI
   return observedLiepinSearchApiCandidates.get(page) ?? [];
 }
 
-async function waitForLiepinSearchShell(page: Page): Promise<void> {
+async function waitForLiepinSearchShell(page: Page, deadline: number): Promise<void> {
   const waitForFunction = (page as Partial<Pick<Page, 'waitForFunction'>>).waitForFunction?.bind(page);
   if (!waitForFunction) {
     return;
@@ -609,19 +648,26 @@ async function waitForLiepinSearchShell(page: Page): Promise<void> {
       return hasSearchText && bodyText.trim().length > 0;
     },
     undefined,
-    { timeout: 15000, polling: 250 },
+    { timeout: remainingTime(deadline), polling: 250 },
   );
 }
 
-async function clickLiepinQuickSearchTag(page: Page, keyword: string): Promise<void> {
+async function clickLiepinQuickSearchTag(page: Page, keyword: string, deadline: number): Promise<void> {
   const getByText = (page as Partial<Pick<Page, 'getByText'>>).getByText?.bind(page);
   if (!getByText) {
     return;
   }
 
   const tag = getByText(keyword, { exact: true }).first();
-  await tag.waitFor({ state: 'visible', timeout: 5000 });
-  await tag.click();
+  await tag.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+  await tag.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/unexpected argument|too many arguments/i.test(message)) {
+      throw error;
+    }
+
+    await tag.click();
+  });
 }
 
 async function waitForLiepinResumeDetailReady(page: Page, deadline = createDeadline()): Promise<void> {
@@ -650,7 +696,10 @@ async function waitForLiepinResumeDetailReady(page: Page, deadline = createDeadl
 }
 
 async function waitForLiepinPageReady(page: Page, options: { deadline?: number; timeoutMs?: number } = {}): Promise<void> {
-  const deadline = options.deadline ?? createDeadline(options.timeoutMs);
+  const defaultTimeoutMs = isLiepinResumeDetailUrl(page.url())
+    ? config.playwright.resumeDetailTimeoutMs
+    : config.playwright.searchPageTimeoutMs;
+  const deadline = options.deadline ?? createDeadline(options.timeoutMs ?? defaultTimeoutMs);
   await page.waitForLoadState('domcontentloaded');
 
   if (isLiepinResumeDetailUrl(page.url())) {
@@ -661,21 +710,47 @@ async function waitForLiepinPageReady(page: Page, options: { deadline?: number; 
   await assertLiepinAuthenticated(page);
 
   if (isLiepinSearchUrl(page.url())) {
-    try {
-      await waitForLiepinInitialData(page);
-    } catch (error) {
+    const canWaitForShell = typeof (page as Partial<Pick<Page, 'waitForFunction'>>).waitForFunction === 'function';
+    const canWaitForInitialData = typeof (page as Partial<Pick<Page, 'waitForResponse'>>).waitForResponse === 'function';
+
+    if (canWaitForShell && canWaitForInitialData) {
+      await Promise.any([
+        waitForLiepinInitialData(page, deadline).catch(async (error) => {
+          await assertLiepinAuthenticated(page);
+          throw error;
+        }),
+        waitForLiepinSearchShell(page, deadline),
+      ]).catch(async (error) => {
+        await assertLiepinAuthenticated(page);
+        throwLastAggregateError(error);
+      });
       await assertLiepinAuthenticated(page);
-      await waitForLiepinSearchShell(page);
+      return;
     }
-    await waitForLiepinSearchShell(page);
+
+    if (canWaitForShell) {
+      await waitForLiepinSearchShell(page, deadline);
+      await assertLiepinAuthenticated(page);
+      return;
+    }
+
+    if (canWaitForInitialData) {
+      try {
+        await waitForLiepinInitialData(page, deadline);
+        await assertLiepinAuthenticated(page);
+      } catch (error) {
+        await assertLiepinAuthenticated(page);
+        throw error;
+      }
+    }
   }
 }
 
-async function waitForLiepinExtractionReady(page: Page): Promise<void> {
+async function waitForLiepinExtractionReady(page: Page, deadline: number): Promise<void> {
   await page.waitForLoadState('domcontentloaded');
 
   if (isLiepinSearchUrl(page.url())) {
-    await waitForLiepinSearchShell(page);
+    await waitForLiepinSearchShell(page, deadline);
   }
 
   await assertLiepinAuthenticated(page);
@@ -894,6 +969,48 @@ async function collectLiepinCards(page: Page): Promise<Array<{
   return page.locator(candidateLinkSelector).evaluateAll(extractLiepinCardsInPage);
 }
 
+function isLiepinExplicitEmptyText(text: string): boolean {
+  return /暂无(?:符合条件的)?人才|暂无.*人选|暂无.*简历|暂无.*结果|没有找到.*(?:人才|人选|简历|结果)|未找到.*(?:人才|人选|简历|结果)|共0位人选/.test(normalizeText(text));
+}
+
+async function hasLiepinExplicitEmptyResults(page: Page): Promise<boolean> {
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  return isLiepinExplicitEmptyText(bodyText);
+}
+
+function mergeLiepinCardCandidatesWithApi(
+  cardCandidates: CandidateListItem[],
+  apiCandidates: CandidateListItem[],
+): CandidateListItem[] {
+  const apiCandidatesById = new Map(apiCandidates.map((candidate) => [candidate.candidateId, candidate]));
+  return cardCandidates.map((candidate) => mergeLiepinApiCandidateIntoCardCandidate(candidate, apiCandidatesById.get(candidate.candidateId)));
+}
+
+async function readLiepinDomCandidates(page: Page): Promise<CandidateListItem[]> {
+  return (await collectLiepinCards(page))
+    .map((candidate) => mergeLiepinApiCandidateIntoCardCandidate(candidate, undefined));
+}
+
+async function resolveLiepinCardCandidates(
+  page: Page,
+  cardCandidates: CandidateListItem[],
+  isSearchPage: boolean,
+  deadline: number,
+): Promise<{ candidates: CandidateListItem[] }> {
+  if (!isSearchPage || !cardCandidates.some(candidateNeedsSafeLiepinResumeUrl)) {
+    return { candidates: cardCandidates };
+  }
+
+  const apiCandidates = await waitForLiepinSearchResumesApi(
+    page,
+    boundedTimeout(deadline, config.playwright.apiFallbackTimeoutMs),
+  ).catch(() => []);
+
+  return {
+    candidates: mergeLiepinCardCandidatesWithApi(cardCandidates, apiCandidates),
+  };
+}
+
 async function requireLiepinReadyPage(pagePromise: Promise<Page | null>): Promise<Page> {
   const page = await pagePromise;
   if (!page) {
@@ -1013,13 +1130,14 @@ export const liepinAdapter: PlatformAdapter = {
     return page;
   },
   assertAuthenticated: assertLiepinAuthenticated,
-  openSubscribeSearch: async (page, keyword) => {
+  openSubscribeSearch: async (page, keyword, options) => {
+    const deadline = createSearchDeadline(options);
     clearObservedLiepinSearchResumesApi(page);
     attachLiepinSearchResumesApiObserver(page);
 
     if (!isLiepinSearchUrl(page.url())) {
       try {
-        await page.goto(liepinAuthenticatedUrl, { waitUntil: 'domcontentloaded' });
+        await page.goto(liepinAuthenticatedUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
       } catch (error) {
         if (!isAbortNavigationError(error) || !isLiepinSearchUrl(page.url())) {
           throw error;
@@ -1027,56 +1145,66 @@ export const liepinAdapter: PlatformAdapter = {
       }
     }
 
-    await waitForLiepinPageReady(page);
-    await clickLiepinQuickSearchTag(page, keyword);
-    await waitForLiepinPageReady(page);
+    await waitForLiepinPageReady(page, { deadline });
+    await clickLiepinQuickSearchTag(page, keyword, deadline);
+    await waitForLiepinPageReady(page, { deadline });
     return page;
   },
-  extractCandidateList: async (page) => {
+  extractCandidateList: async (page, options) => {
+    const deadline = createSearchDeadline(options);
     const isSearchPage = isLiepinSearchUrl(page.url());
     attachLiepinSearchResumesApiObserver(page);
-    const apiCandidatesPromise = isSearchPage
-      ? waitForLiepinSearchResumesApi(page).catch(() => [])
-      : Promise.resolve([] as CandidateListItem[]);
 
-    await waitForLiepinExtractionReady(page);
-    let candidates = (await collectLiepinCards(page))
-      .map((candidate) => mergeLiepinApiCandidateIntoCardCandidate(candidate, undefined));
+    await waitForLiepinExtractionReady(page, deadline);
+    let candidates = await readLiepinDomCandidates(page);
     if (candidates.length > 0) {
-      if (!isSearchPage || !candidates.some(candidateNeedsSafeLiepinResumeUrl)) {
+      return resolveLiepinCardCandidates(page, candidates, isSearchPage, deadline);
+    }
+
+    while (Date.now() <= deadline) {
+      if (isSearchPage) {
+        const apiCandidates = await waitForLiepinSearchResumesApi(
+          page,
+          Math.min(100, remainingTime(deadline)),
+        ).catch(() => []);
+        if (apiCandidates.length > 0) {
+          return { candidates: apiCandidates };
+        }
+      }
+
+      candidates = await readLiepinDomCandidates(page);
+      if (candidates.length > 0) {
+        return resolveLiepinCardCandidates(page, candidates, isSearchPage, deadline);
+      }
+
+      if (await hasLiepinExplicitEmptyResults(page)) {
+        return { candidates: [] };
+      }
+
+      if (!isSearchPage || observedLiepinSearchApiSeenPages.has(page)) {
         return { candidates };
       }
 
-      const apiCandidates = await apiCandidatesPromise;
-      const apiCandidatesById = new Map(apiCandidates.map((candidate) => [candidate.candidateId, candidate]));
-      return {
-        candidates: candidates.map((candidate) => mergeLiepinApiCandidateIntoCardCandidate(candidate, apiCandidatesById.get(candidate.candidateId))),
-      };
+      await new Promise((resolve) => setTimeout(resolve, Math.min(100, remainingTime(deadline))));
     }
 
-    if (isSearchPage) {
-      await waitForLiepinExtractionReady(page);
-      candidates = (await collectLiepinCards(page))
-        .map((candidate) => mergeLiepinApiCandidateIntoCardCandidate(candidate, undefined));
-      if (candidates.length > 0) {
-        if (!candidates.some(candidateNeedsSafeLiepinResumeUrl)) {
-          return { candidates };
-        }
-
-        const apiCandidates = await apiCandidatesPromise;
-        const apiCandidatesById = new Map(apiCandidates.map((candidate) => [candidate.candidateId, candidate]));
-        return {
-          candidates: candidates.map((candidate) => mergeLiepinApiCandidateIntoCardCandidate(candidate, apiCandidatesById.get(candidate.candidateId))),
-        };
-      }
+    const finalApiCandidates = isSearchPage
+      ? await waitForLiepinSearchResumesApi(page, 1).catch(() => [])
+      : [];
+    if (finalApiCandidates.length > 0) {
+      return { candidates: finalApiCandidates };
     }
 
-    const apiCandidates = await apiCandidatesPromise;
-    if (apiCandidates.length > 0) {
-      return { candidates: apiCandidates };
+    candidates = await readLiepinDomCandidates(page);
+    if (candidates.length > 0) {
+      return resolveLiepinCardCandidates(page, candidates, isSearchPage, deadline);
     }
 
-    return { candidates };
+    if (await hasLiepinExplicitEmptyResults(page)) {
+      return { candidates: [] };
+    }
+
+    return { candidates: [] };
   },
   openResumeDetail: async (context, searchPage, candidate) => openResumePage(context, searchPage, candidate),
   parseResumeDetail: async (page, candidate) => {

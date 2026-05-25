@@ -131,20 +131,25 @@ function createCandidateListPage(options: {
   bodyText?: string;
   resultListVisible?: boolean;
   candidateCardsVisible?: boolean;
+  candidateCardCountSequence?: number[];
   cardPayloads?: Array<{ id: string; text: string; html?: string; resumeUrl?: string; name?: string }>;
   url?: string;
   loadingVisible?: boolean;
   rootVisible?: boolean;
+  onWaitForTimeout?: (timeout: number) => void;
 }) {
   const {
     bodyText = '结果页已加载',
     resultListVisible = true,
     candidateCardsVisible = false,
+    candidateCardCountSequence,
     cardPayloads = [],
     url = 'https://example.com/search',
     loadingVisible = false,
     rootVisible = false,
+    onWaitForTimeout,
   } = options;
+  const countSequence = [...(candidateCardCountSequence ?? [])];
 
   const candidateCardsLocator = {
     first: () => ({
@@ -154,7 +159,7 @@ function createCandidateListPage(options: {
         }
       },
     }),
-    count: async () => cardPayloads.length,
+    count: async () => countSequence.shift() ?? cardPayloads.length,
     evaluateAll: async () => cardPayloads.map((card) => ({
       elementId: card.id,
       html: card.html ?? `<div id="${card.id}">${card.text}</div>`,
@@ -185,6 +190,9 @@ function createCandidateListPage(options: {
 
   return {
     waitForLoadState: async (_state: string) => undefined,
+    waitForTimeout: async (timeout: number) => {
+      onWaitForTimeout?.(timeout);
+    },
     url: () => url,
     locator: (selector?: string) => {
       if (selector === 'div[id^="no_interested_"]') {
@@ -819,18 +827,70 @@ after(async () => {
 });
 
 describe('candidate list readiness', () => {
-  it('treats an empty visible result list as ready', async () => {
+  it('treats a stable empty visible result list as ready', async () => {
+    let now = 0;
     const page = createCandidateListPage({
       bodyText: '已筛选为零条结果',
       resultListVisible: true,
       candidateCardsVisible: false,
       cardPayloads: [],
+      onWaitForTimeout: (timeout) => {
+        now += timeout;
+      },
     });
 
-    await assert.doesNotReject(() => waitForCandidateResultsReady(page));
-    const candidates = await collectCandidateList(page);
+    await captureDateNow(async () => {
+      Date.now = () => now;
+      await assert.doesNotReject(() => waitForCandidateResultsReady(page, { deadline: config.playwright.emptyResultsStableMs + 500 }));
+      const candidates = await collectCandidateList(page, { deadline: now + config.playwright.emptyResultsStableMs + 500 });
 
-    assert.deepStrictEqual(candidates, []);
+      assert.deepStrictEqual(candidates, []);
+    });
+  });
+
+  it('returns candidates when the result list appears before delayed candidate cards', async () => {
+    let now = 0;
+    const page = createCandidateListPage({
+      bodyText: '结果页已加载',
+      resultListVisible: true,
+      candidateCardsVisible: true,
+      candidateCardCountSequence: [0, 0, 1],
+      cardPayloads: [
+        {
+          id: 'no_interested_100228050',
+          text: '张三\n上海测试科技有限公司\n销售经理',
+          resumeUrl: 'https://example.com/resume/100228050',
+          name: '张三',
+        },
+      ],
+      onWaitForTimeout: (timeout) => {
+        now += timeout;
+      },
+    });
+
+    await captureDateNow(async () => {
+      Date.now = () => now;
+      const candidates = await collectCandidateList(page, { deadline: config.playwright.emptyResultsStableMs + 500 });
+
+      assert.deepStrictEqual(candidates.map((candidate) => candidate.candidateId), ['100228050']);
+    });
+  });
+
+  it('treats explicit empty-result text as ready without waiting for the stable empty-list window', async () => {
+    const waitCalls: number[] = [];
+    const page = createCandidateListPage({
+      bodyText: '暂无符合条件的人才',
+      resultListVisible: true,
+      candidateCardsVisible: false,
+      cardPayloads: [],
+      onWaitForTimeout: (timeout) => {
+        waitCalls.push(timeout);
+      },
+    });
+
+    await waitForCandidateResultsReady(page, { deadline: Date.now() + 1000 });
+
+    assert.deepStrictEqual(waitCalls, []);
   });
 
   it('allows extraction validation to accept an empty candidate list', () => {
@@ -858,9 +918,85 @@ describe('candidate list readiness', () => {
     });
 
     await assert.rejects(
-      () => waitForCandidateResultsReady(page),
-      /loadingVisible=true.*resultListVisible=false.*candidateCardCount=0/,
+      () => waitForCandidateResultsReady(page, { deadline: Date.now() - 1 }),
+      /emptyTextMatched=false.*loadingVisible=true.*resultListVisible=false.*candidateCardCount=0.*stableEmptyListObservedMs=0.*deadlineRemainingMs=0/,
     );
+  });
+
+  it('rejects when an empty visible result list has not met the stable window before the deadline', async () => {
+    let now = 0;
+    const page = createCandidateListPage({
+      bodyText: '结果页已加载',
+      resultListVisible: true,
+      candidateCardsVisible: false,
+      cardPayloads: [],
+      onWaitForTimeout: (timeout) => {
+        now += timeout;
+      },
+    });
+
+    await captureDateNow(async () => {
+      Date.now = () => now;
+      await assert.rejects(
+        () => waitForCandidateResultsReady(page, { deadline: config.playwright.emptyResultsStableMs - 100 }),
+        /resultListVisible=true.*candidateCardCount=0.*stableEmptyListObservedMs=/,
+      );
+    });
+  });
+
+  it('passes the same search deadline from orchestration to open and extract', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-search-deadline-contract';
+    const fetchedAt = '2026-05-25T00:00:00.000Z';
+    const observed: Array<{ phase: string; deadline?: number }> = [];
+    let now = 1000;
+
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('liepin'),
+      openSubscribeSearch: async (_page, _keyword, options) => {
+        observed.push({ phase: 'open', deadline: options?.deadline });
+        now += 25;
+        return { id: 'search-page' } as never;
+      },
+      extractCandidateList: async (_page, options) => {
+        observed.push({ phase: 'extract', deadline: options?.deadline });
+        return { candidates: [] };
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    const session = {
+      page: { id: 'root-page' },
+      context: { id: 'browser-context' },
+    } as never;
+
+    await captureDateNow(async () => {
+      Date.now = () => now;
+      await indexModule.runResumeCaptureFlow(
+        'liepin',
+        jobKey,
+        {
+          title: 'Test Job',
+          majors: [],
+          languageRequirements: [],
+          responsibilities: [],
+          hardRequirements: [],
+          preferredRequirements: [],
+          regionPreferences: [],
+          industryTags: [],
+        },
+        'search keyword',
+        store,
+        session,
+        fetchedAt,
+        adapter,
+      );
+    });
+
+    assert.deepStrictEqual(observed, [
+      { phase: 'open', deadline: 1000 + config.playwright.searchPageTimeoutMs },
+      { phase: 'extract', deadline: 1000 + config.playwright.searchPageTimeoutMs },
+    ]);
   });
 });
 
@@ -1090,7 +1226,7 @@ describe('scoring run semantics', () => {
       ],
     );
     for (const call of searchOpen.getCardWaitForCalls()) {
-      assert.ok(call.timeout !== undefined && call.timeout > 0 && call.timeout <= config.playwright.authCheckTimeoutMs);
+      assert.ok(call.timeout !== undefined && call.timeout > 0 && call.timeout <= config.playwright.searchPageTimeoutMs);
     }
   });
 

@@ -76,7 +76,11 @@ export const extractCandidateListRef = {
   fn: extractionBoundary.extractCandidateListFromPage,
 };
 export const extractCandidateListWithAdapterRef = {
-  fn: async (adapter: PlatformAdapter, page: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>) => adapter.extractCandidateList(page),
+  fn: async (
+    adapter: PlatformAdapter,
+    page: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>,
+    options?: Parameters<PlatformAdapter['extractCandidateList']>[1],
+  ) => adapter.extractCandidateList(page, options),
 };
 export const extractResumeFromPageRef = {
   fn: extractionBoundary.extractResumeFromPage,
@@ -95,7 +99,7 @@ export function resolvePlatformAdapter(platform: SupportedPlatform): PlatformAda
     return {
       ...adapter,
       openSubscribeSearch: openSubscribeSearchRef.fn,
-      extractCandidateList: async (page) => extractCandidateListRef.fn(page),
+      extractCandidateList: async (page, options) => extractCandidateListRef.fn(page, options),
       openResumeDetail: openResumeDetailRef.fn,
     };
   }
@@ -273,10 +277,11 @@ async function scoreCapturedResumes(
 }
 
 export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
-  const searchPage = await platformAdapter.openSubscribeSearch(session.page, searchKeyword);
+  const searchDeadline = Date.now() + config.playwright.searchPageTimeoutMs;
+  const searchPage = await platformAdapter.openSubscribeSearch(session.page, searchKeyword, { deadline: searchDeadline });
   const { candidates } = platformAdapter.platform === '51job'
-    ? await extractCandidateListRef.fn(searchPage)
-    : await extractCandidateListWithAdapterRef.fn(platformAdapter, searchPage);
+    ? await extractCandidateListRef.fn(searchPage, { deadline: searchDeadline })
+    : await extractCandidateListWithAdapterRef.fn(platformAdapter, searchPage, { deadline: searchDeadline });
   const seenCandidateIdsBeforeRun = await store.readSeenIds(platform, jobKey);
   const seenCandidateIdsSet = new Set(seenCandidateIdsBeforeRun);
   const newCandidates = candidates.filter((candidate) => !seenCandidateIdsSet.has(candidate.candidateId));

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { config } from '../config.js';
 import { zhilianAdapter, zhilianTestExports } from '../platforms/zhilian-adapter.js';
 
 test('zhilian adapter exposes the expected platform metadata', () => {
@@ -324,6 +325,50 @@ test('zhilian adapter extracts candidate cards from DOM fallback', async () => {
   ]);
 });
 
+test('zhilian adapter returns DOM candidates without waiting for the candidate API', async () => {
+  let waitForResponseCalls = 0;
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async () => {
+      waitForResponseCalls += 1;
+      throw new Error('candidate API should not block DOM results');
+    },
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 招聘管理 职位管理 简历管理 候选人 搜索',
+        };
+      }
+
+      return {
+        evaluateAll: async (fn: (elements: Element[]) => unknown) => {
+          const container = {
+            textContent: '李四\n上海测试科技有限公司\n海外销售经理',
+            outerHTML: '<div>李四 上海测试科技有限公司 海外销售经理</div>',
+            getAttribute: () => null,
+          };
+          const anchor = {
+            href: 'https://rd6.zhaopin.com/resume/detail?resumeId=R654321',
+            outerHTML: '<a data-resume-id="R654321" href="https://rd6.zhaopin.com/resume/detail?resumeId=R654321">李四</a>',
+            textContent: '李四',
+            getAttribute: (name: string) => (name === 'data-resume-id' ? 'R654321' : null),
+            closest: () => container,
+          };
+          return fn([anchor as unknown as Element]);
+        },
+      };
+    },
+  } as never;
+
+  const result = await zhilianAdapter.extractCandidateList(page, { deadline: Date.now() + 1000 });
+
+  assert.deepEqual(result.candidates.map((candidate) => candidate.candidateId), ['R654321']);
+  assert.equal(waitForResponseCalls, 0);
+});
+
 test('zhilian adapter treats an empty visible list as a successful zero-candidate extraction', async () => {
   const page = {
     url: () => 'https://rd6.zhaopin.com/app/search',
@@ -387,7 +432,9 @@ test('zhilian adapter waits for the real talent search list response instead of 
     waitForFunction: async () => undefined,
     waitForResponse: async (
       predicate: (response: { url(): string; status(): number }) => boolean,
+      options?: { timeout?: number },
     ) => {
+      assert.ok(options?.timeout !== undefined && options.timeout > 0 && options.timeout <= config.playwright.searchPageTimeoutMs);
       const responses = [unrelatedResponse, listResponse];
       const match = responses.find((response) => predicate(response));
       if (!match) {
@@ -434,6 +481,43 @@ test('zhilian adapter waits for the real talent search list response instead of 
       }),
     },
   ]);
+});
+
+test('zhilian adapter uses the shared deadline for shell and quick-search tag waits', async () => {
+  const observedShellTimeouts: number[] = [];
+  const observedTagTimeouts: number[] = [];
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async (_predicate: () => boolean, _arg: unknown, options?: { timeout?: number }) => {
+      observedShellTimeouts.push(options?.timeout ?? 0);
+    },
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库',
+        };
+      }
+
+      return {
+        evaluateAll: async () => [],
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async (options?: { timeout?: number }) => {
+          observedTagTimeouts.push(options?.timeout ?? 0);
+        },
+        click: async () => undefined,
+      }),
+    }),
+  } as never;
+
+  await zhilianAdapter.openSubscribeSearch(page, '优衣库', { deadline: Date.now() + 1000 });
+
+  assert.ok(observedShellTimeouts.every((timeout) => timeout > 0 && timeout <= 1000));
+  assert.ok(observedTagTimeouts.every((timeout) => timeout > 0 && timeout <= 1000));
 });
 
 test('zhilian adapter opens resume detail by clicking the matching result card when no resume link is exposed', async () => {

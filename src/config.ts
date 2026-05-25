@@ -70,6 +70,9 @@ export const config = {
     authCheckTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_AUTH_CHECK_TIMEOUT_MS', 15000),
     loginTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_LOGIN_TIMEOUT_MS', 300000),
     loginPollIntervalMs: getOptionalNumberEnv('PLAYWRIGHT_LOGIN_POLL_INTERVAL_MS', 2000),
+    searchPageTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_SEARCH_PAGE_TIMEOUT_MS', 20000),
+    emptyResultsStableMs: getOptionalNumberEnv('PLAYWRIGHT_EMPTY_RESULTS_STABLE_MS', 2000),
+    apiFallbackTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_API_FALLBACK_TIMEOUT_MS', 3000),
     resumeDetailTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS', 20000),
   },
   openai: {

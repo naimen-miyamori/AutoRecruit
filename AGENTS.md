@@ -77,6 +77,9 @@ The repository currently implements resume scoring, markdown export, and SMTP em
 - Key supported env vars:
   - `DATA_DIR` to relocate persisted job data.
   - `PLAYWRIGHT_HEADLESS=true` to run headless; default is headed.
+  - `PLAYWRIGHT_SEARCH_PAGE_TIMEOUT_MS` to control the total search-entry plus candidate-list readiness budget; default is `20000`.
+  - `PLAYWRIGHT_EMPTY_RESULTS_STABLE_MS` to require a stable empty 51job result container before treating it as zero candidates; default is `2000`.
+  - `PLAYWRIGHT_API_FALLBACK_TIMEOUT_MS` to cap short API fallback waits when DOM candidates need URL enrichment or DOM has no candidates; default is `3000`.
   - `PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS` to control the total resume-detail open/readiness budget; default is `20000`.
   - `STORAGE_STATE_PATH` to override the storage state file path for the current invocation. Leave it unset for normal multi-platform use so each platform keeps its own default file. If you set it, point it at a platform-specific filename for that invocation only; shared paths like `storage-state.json` are intentionally rejected for non-51job platforms.
   - `OPENAI_BASE_URL` to point JD parsing and scoring at a compatible third-party model endpoint.
@@ -112,10 +115,12 @@ On reruns where the keyword-derived `jobKey` already exists, `src/index.ts` skip
 The browser layer lives under `src/browser/` and is intentionally split by page responsibility:
 
 - `session.ts` creates a Chromium context from the saved storage state when present, and `npm run login:session -- --platform <platform>` uses a fresh context for manual login before re-verifying the persisted state in a separate fresh browser session.
-- `subscribe-search.ts` opens `https://ehire.51job.com/Revision/talent/subscribe`, checks for an obvious login page, hovers the requested keyword entry, resolves the talent-search trigger through several selector/text fallbacks, and lets the click helper own readiness checks before opening the search page.
-- `candidate-list.ts` scrapes result cards by anchoring on `div[id^="no_interested_"]`, then extracts `candidateId` from IDs/HTML/text using several fallback regexes. It also derives lightweight card metadata like name, current company, and current title heuristically. Its readiness checks now treat a visible but empty result list as a valid zero-candidate state and include page diagnostics when the list never renders.
+- `subscribe-search.ts` opens `https://ehire.51job.com/Revision/talent/subscribe`, checks for an obvious login page, hovers the requested keyword entry, resolves the talent-search trigger through several selector/text fallbacks, and lets the click helper own readiness checks before opening the search page. It uses the shared search deadline created by the main workflow.
+- `candidate-list.ts` scrapes result cards by anchoring on `div[id^="no_interested_"]`, then extracts `candidateId` from IDs/HTML/text using several fallback regexes. It also derives lightweight card metadata like name, current company, and current title heuristically. Its readiness checks now require candidate cards, explicit empty-result text, or a stable empty `.virtual_list` window before treating zero candidates as ready, and include deadline diagnostics when the list never renders.
 - `resume-detail.ts` opens an individual 51job resume from the list card and parses the resume page. Detail opening uses one total deadline and races popup, current-page navigation, and current-page content readiness.
 - `src/platforms/*.ts` holds the platform adapter contract plus concrete supported 51job, Liepin, and Zhilian implementations; auth/session entrypoints, search opening, list extraction, and resume-detail parsing now flow through these adapters.
+
+All supported platform adapters accept the same search wait contract: the main workflow creates one deadline before opening the platform search entry and passes it to both `openSubscribeSearch()` and `extractCandidateList()`. DOM candidates are returned as soon as they are complete. 51job has no API fallback and uses DOM cards, explicit empty text, or the stable empty-list window. Liepin and Zhilian are DOM-first; their API fallbacks are used only when DOM has no candidates or, for Liepin, when DOM candidates need safe detail URLs.
 
 Zhilian-specific behavior lives in `src/platforms/zhilian-adapter.ts`:
 
@@ -130,7 +135,7 @@ Liepin manual-login polling is intentionally constrained:
 - before authenticated recruiter cookies exist, it must not probe unrelated pages or other login pages in the same context
 - once authenticated cookies exist, it may probe non-login recruiter pages and a dedicated fresh probe page to confirm recruiter-search readiness
 
-Liepin detail opening uses the same total detail deadline style as 51job. Its search-page readiness is still more API/shell-heavy than Zhilian and can spend separate 15s windows on initial-data, search shell, and `search-resumes` API fallback waits, so live Liepin search entry can still feel slower than Zhilian.
+Liepin detail opening uses the same total detail deadline style as 51job. Its search-page readiness now shares the main search deadline across initial-data, shell, quick-search tag, DOM extraction, and `search-resumes` API fallback waits; it should not add multiple fixed 15s waits in series.
 
 When changing selectors, preserve the current strategy of using several DOM fallbacks rather than assuming one stable 51job structure.
 

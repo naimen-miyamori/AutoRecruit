@@ -5,9 +5,10 @@ import { parseResumeDetail, parseResumeFromSource } from '../browser/resume-deta
 import { CandidateListItem, ResumeDomSnapshot } from '../types/job.js';
 import { CandidateListExtractionResult, ExtractionBoundary, ResumeExtractionResult, validateCandidateListExtraction, validateResumeExtraction } from './extractor.js';
 import { RawPageSource } from './page-source.js';
+import type { SearchWaitOptions } from '../platforms/types.js';
 
-export async function extractCandidateListFromPage(page: Page): Promise<CandidateListExtractionResult> {
-  const candidates = await collectCandidateList(page);
+export async function extractCandidateListFromPage(page: Page, options?: SearchWaitOptions): Promise<CandidateListExtractionResult> {
+  const candidates = await collectCandidateList(page, options);
   return validateCandidateListExtraction({ candidates });
 }
 
