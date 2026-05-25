@@ -8,10 +8,11 @@ import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
 import type { PlatformAdapter, SupportedPlatform } from './platforms/types.js';
+import { loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
 import { scoreResumeAgainstJob } from './scoring/score-resume.js';
 import { exportJobResults, type ExportJobResultsSummary } from './scripts/export-job-results.js';
 import { sendJobReport, type SendJobReportSummary } from './scripts/send-job-report-email.js';
-import { CandidateListItem, JobRecord, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult } from './types/job.js';
+import { CandidateListItem, JobRecord, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult, SearchSubscriptionSummary } from './types/job.js';
 
 interface CandidateProcessResult {
   candidateId: string;
@@ -47,11 +48,20 @@ interface BatchCliInput extends ReportDeliveryOptions {
   jobsFilePath: string;
 }
 
+interface SearchSubscriptionCliInput {
+  mode: 'search-subscription';
+  platform: CliPlatformSelection;
+  keyword?: string;
+  filePath: string;
+  save: boolean;
+  savedSearchName?: string;
+}
+
 interface BatchRunnableJobInput extends RunnableJobInput {
   sourceIndex: number;
 }
 
-type CliInput = SingleJobCliInput | BatchCliInput;
+type CliInput = SingleJobCliInput | BatchCliInput | SearchSubscriptionCliInput;
 
 interface SinglePlatformCliInput extends ReportDeliveryOptions {
   platform: SupportedPlatform;
@@ -88,7 +98,7 @@ export interface BatchJobRunSummary {
   summary: MainRunSummary;
 }
 
-export type MainResult = MainRunSummary | AllPlatformsRunSummary[] | BatchJobRunSummary[];
+export type MainResult = MainRunSummary | AllPlatformsRunSummary[] | BatchJobRunSummary[] | SearchSubscriptionSummary | SearchSubscriptionSummary[];
 
 export const parseJobDescriptionRef = { fn: parseJobDescription };
 export const extractionBoundary = createProductionExtractionBoundary();
@@ -112,6 +122,7 @@ export const exportJobResultsRef = { fn: exportJobResults };
 export const sendJobReportRef = { fn: sendJobReport };
 export const ensureAuthenticatedBrowserSessionRef = { fn: ensureAuthenticatedBrowserSession };
 export const closeBrowserSessionRef = { fn: closeBrowserSession };
+export const runSearchSubscriptionWorkflowRef = { fn: runSearchSubscriptionWorkflow };
 export { JobStore };
 
 export function resolvePlatformAdapter(platform: SupportedPlatform): PlatformAdapter {
@@ -135,6 +146,22 @@ function parsePlatformSelection(platform?: string): CliPlatformSelection {
   }
 
   return parsePlatformArg(platform);
+}
+
+function parseOptionalBoolean(value: string | undefined, argumentName: string): boolean {
+  if (value === undefined) {
+    return true;
+  }
+
+  if (value === 'true') {
+    return true;
+  }
+
+  if (value === 'false') {
+    return false;
+  }
+
+  throw new Error(`${argumentName} must be true or false`);
 }
 
 function parseBatchCcEmails(value: unknown, itemIndex: number): string[] | undefined {
@@ -247,6 +274,30 @@ function parseArgs(argv: readonly string[]): CliInput {
   const jobDescriptionFilePath = values.get('jd-file');
   const recipientEmail = values.get('email');
   const ccEmails = flagPresence.has('cc') ? parseEmailList(values.get('cc')) : undefined;
+  const searchSubscriptionFilePath = values.get('search-subscription-file');
+  const saveSearchSubscription = flagPresence.has('save-search-subscription')
+    ? parseOptionalBoolean(values.get('save-search-subscription'), '--save-search-subscription')
+    : false;
+  const searchSubscriptionName = values.get('search-subscription-name');
+
+  if (searchSubscriptionFilePath) {
+    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc')) {
+      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, or --cc');
+    }
+
+    return {
+      mode: 'search-subscription',
+      platform,
+      keyword: searchKeyword,
+      filePath: searchSubscriptionFilePath,
+      save: saveSearchSubscription,
+      savedSearchName: searchSubscriptionName,
+    };
+  }
+
+  if (saveSearchSubscription || searchSubscriptionName) {
+    throw new Error('--save-search-subscription and --search-subscription-name require --search-subscription-file');
+  }
 
   if (jobsFilePath) {
     if (flagPresence.has('keyword') || flagPresence.has('jd') || flagPresence.has('jd-file')) {
@@ -593,8 +644,38 @@ async function runBatchJobs(input: BatchCliInput): Promise<BatchJobRunSummary[]>
   return summaries;
 }
 
+async function runSearchSubscription(input: SearchSubscriptionCliInput): Promise<SearchSubscriptionSummary | SearchSubscriptionSummary[]> {
+  const summaries: SearchSubscriptionSummary[] = [];
+
+  for (const platform of listSelectedPlatforms(input.platform)) {
+    const adapter = resolvePlatformAdapter(platform);
+    const plan = await loadSearchConditionPlanFile(input.filePath, {
+      keywordOverride: input.keyword,
+      savedSearchNameOverride: input.savedSearchName,
+    });
+    const session = await ensureAuthenticatedBrowserSessionRef.fn(adapter.platform);
+
+    try {
+      summaries.push(await runSearchSubscriptionWorkflowRef.fn(adapter, session.page, plan, {
+        save: input.save,
+        savedSearchName: input.savedSearchName,
+      }));
+    } finally {
+      await closeBrowserSessionRef.fn(session);
+    }
+  }
+
+  const result = input.platform === 'all' ? summaries : summaries[0];
+  console.log(JSON.stringify(result, null, 2));
+  return result;
+}
+
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<MainResult> {
   const input = parseArgs(argv);
+
+  if (input.mode === 'search-subscription') {
+    return runSearchSubscription(input);
+  }
 
   if (input.mode === 'batch') {
     return runBatchJobs(input);

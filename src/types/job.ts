@@ -36,6 +36,41 @@ export interface ReportDeliveryOptions {
   ccEmails?: string[];
 }
 
+export type SearchCondition =
+  | { kind: 'keyword'; value: string }
+  | { kind: 'resumeFreshness'; value: string }
+  | { kind: 'location'; field?: string; values: string[] }
+  | { kind: 'industry'; field?: string; values: string[] }
+  | { kind: 'function'; field?: string; values: string[] }
+  | { kind: 'education'; value: string }
+  | { kind: 'experience'; minYears?: number; maxYears?: number }
+  | { kind: 'age'; min?: number; max?: number }
+  | { kind: string; [key: string]: unknown };
+
+export interface SearchConditionPlan {
+  keyword: string;
+  savedSearchName?: string;
+  conditions: SearchCondition[];
+}
+
+export interface SearchConditionApplyResult {
+  platform: SupportedPlatform;
+  condition: SearchCondition;
+  status: 'applied' | 'skipped' | 'failed';
+  message?: string;
+}
+
+export interface SearchSubscriptionSummary {
+  platform: SupportedPlatform;
+  keyword: string;
+  savedSearchName?: string;
+  resultTotal: number;
+  resultTotalSource: 'page' | 'api';
+  saveRequested: boolean;
+  saved: boolean;
+  conditionResults: SearchConditionApplyResult[];
+}
+
 export function parseEmailList(value?: string): string[] | undefined {
   if (value === undefined) {
     return undefined;

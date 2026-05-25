@@ -1,5 +1,5 @@
 import type { BrowserContext, Page } from 'playwright';
-import type { CandidateListItem, CandidateResume } from '../types/job.js';
+import type { CandidateListItem, CandidateResume, SearchCondition, SearchConditionApplyResult } from '../types/job.js';
 
 export const SUPPORTED_PLATFORMS = ['51job', 'liepin', 'zhilian'] as const;
 
@@ -19,6 +19,13 @@ export interface PlatformAdapter {
   openAuthenticatedHome(page: Page): Promise<Page>;
   assertAuthenticated(page: Page): Promise<void>;
   openSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
+  prepareSearchConditionPage?(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
+  applySearchCondition?(page: Page, condition: SearchCondition): Promise<SearchConditionApplyResult>;
+  readSearchConditionResultTotal?(page: Page, options?: SearchWaitOptions): Promise<{
+    resultTotal: number;
+    resultTotalSource: 'page' | 'api';
+  }>;
+  saveSearchCondition?(page: Page, savedSearchName: string, options?: SearchWaitOptions): Promise<void>;
   extractCandidateList(page: Page, options?: SearchWaitOptions): Promise<{ candidates: CandidateListItem[] }>;
   openResumeDetail(context: BrowserContext, searchPage: Page, candidate: CandidateListItem): Promise<Page>;
   parseResumeDetail(page: Page, candidate: CandidateListItem): Promise<CandidateResume>;

@@ -1,5 +1,13 @@
 import type { BrowserContext, Page, Response } from 'playwright';
 import { config } from '../config.js';
+import {
+  clickFirstVisibleText,
+  clickPrimarySearchButton,
+  fillFirstVisibleInput,
+  fillInputNearText,
+  parseSearchResultTotalFromText,
+  saveSearchConditionByCommonDialog,
+} from '../search/page-actions.js';
 import type { CandidateListItem, CandidateResume, EducationExperience, ProjectExperience, WorkExperience } from '../types/job.js';
 import type { PlatformAdapter, SearchWaitOptions } from './types.js';
 
@@ -444,6 +452,72 @@ export function isSafeLiepinResumeUrl(url: string | null | undefined): boolean {
 
 function isLiepinSearchUrl(url: string): boolean {
   return /^https:\/\/h\.liepin\.com\/search\/getconditionitem(?:[/?#].*)?$/i.test(url);
+}
+
+async function fillLiepinKeywordSearchInput(page: Page, value: string): Promise<boolean> {
+  return fillInputNearText(
+    page,
+    value,
+    ['职位名称', '包含任意关键词', '包含全部关键词'],
+    ['.search-item', '.filter-item', '.form-item', '[class*="search"]', '[class*="filter"]'],
+    [
+      'input.ant-select-selection-search-input[type="search"]',
+      'input.search-component-input',
+      'input.ant-input',
+      'input[type="search"]',
+      'input[type="text"]',
+    ],
+  ) || fillFirstVisibleInput(page, value, [
+    'input.ant-select-selection-search-input[type="search"]',
+    'input.search-component-input',
+    'input.ant-input',
+    'input[type="search"]',
+    'input[type="text"]',
+  ]);
+}
+
+async function prepareLiepinSearchConditionPage(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page> {
+  const deadline = createSearchDeadline(options);
+  resetObservedLiepinSearchResumesApi(page);
+  attachLiepinSearchResumesApiObserver(page);
+
+  if (!isLiepinSearchUrl(page.url())) {
+    try {
+      await page.goto(liepinAuthenticatedUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
+    } catch (error) {
+      if (!isAbortNavigationError(error) || !isLiepinSearchUrl(page.url())) {
+        throw error;
+      }
+    }
+  }
+
+  await waitForLiepinPageReady(page, { deadline });
+  const didFillKeyword = await fillLiepinKeywordSearchInput(page, keyword);
+  if (!didFillKeyword) {
+    throw new Error('Search subscription on liepin could not fill the keyword input on the recruiter search page.');
+  }
+
+  const didTriggerSearch = await clickPrimarySearchButton(page)
+    || await clickFirstVisibleText(page, ['搜索', '搜 索']);
+  if (!didTriggerSearch) {
+    throw new Error('Search subscription on liepin could not trigger the keyword search on the recruiter search page.');
+  }
+
+  await waitForLiepinPageReady(page, { deadline });
+  await clickFirstVisibleText(page, ['更多', '展开', '高级搜索', '更多筛选']).catch(() => false);
+  return page;
+}
+
+async function readLiepinSearchConditionResultTotal(page: Page): Promise<{ resultTotal: number; resultTotalSource: 'page' }> {
+  const resultTotal = parseSearchResultTotalFromText(await page.locator('body').innerText());
+  if (resultTotal === undefined) {
+    throw new Error('Search subscription on liepin could not read the page result total.');
+  }
+
+  return {
+    resultTotal,
+    resultTotalSource: 'page',
+  };
 }
 
 async function waitForLiepinInitialData(page: Page, deadline: number): Promise<void> {
@@ -1438,6 +1512,12 @@ export const liepinAdapter: PlatformAdapter = {
     }
     await waitForLiepinPageReady(page, { deadline });
     return page;
+  },
+  prepareSearchConditionPage: prepareLiepinSearchConditionPage,
+  readSearchConditionResultTotal: readLiepinSearchConditionResultTotal,
+  saveSearchCondition: async (page, savedSearchName) => {
+    await saveSearchConditionByCommonDialog(page, savedSearchName, { platformLabel: 'liepin' });
+    await waitForLiepinPageReady(page);
   },
   extractCandidateList: async (page, options) => {
     const deadline = createSearchDeadline(options);
