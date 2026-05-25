@@ -1,0 +1,45 @@
+{
+  "name": "auto-recruit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <27"
+  },
+  "scripts": {
+    "dev": "node --import ./scripts/node-ts-hooks.mjs src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:scoring && npm run test:export && npm run test:maintenance",
+    "test:scoring": "node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-jd-parser.ts src/scripts/test-score-schema.ts src/scripts/test-score-prompt.ts src/scripts/test-scoring-run-semantics.ts src/scripts/test-score-stored-resumes.ts src/scripts/test-platform-registry.ts src/scripts/test-node-ts-hooks.ts",
+    "test:export": "node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-aggregate-results.ts src/scripts/test-export-job-results.ts",
+    "test:maintenance": "node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-migrate-platform-storage.ts src/scripts/test-send-job-report-email.ts",
+    "test:experimental:liepin": "node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-liepin-adapter.ts",
+    "test:experimental:zhilian": "node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-zhilian-adapter.ts",
+    "score:stored": "node --import ./scripts/node-ts-hooks.mjs src/scripts/score-stored-resumes.ts",
+    "export:results": "node --import ./scripts/node-ts-hooks.mjs src/scripts/export-job-results.ts",
+    "migrate:platform-storage": "node --import ./scripts/node-ts-hooks.mjs src/scripts/migrate-platform-storage.ts",
+    "start": "node dist/index.js",
+    "reparse:resumes": "node --import ./scripts/node-ts-hooks.mjs src/scripts/reparse-resumes.ts",
+    "validate:resumes": "node --import ./scripts/node-ts-hooks.mjs src/scripts/validate-resume-extraction.ts",
+    "capture:resume-dom": "node --import ./scripts/node-ts-hooks.mjs src/scripts/capture-resume-dom-snapshot.ts",
+    "login:session": "node --import ./scripts/node-ts-hooks.mjs src/scripts/login-and-save-session.ts",
+    "debug:zhilian": "node --import ./scripts/node-ts-hooks.mjs src/scripts/debug-zhilian-search-state.ts",
+    "smoke:liepin": "node --import ./scripts/node-ts-hooks.mjs src/scripts/smoke-liepin-flow.ts",
+    "smoke:zhilian": "node --import ./scripts/node-ts-hooks.mjs src/scripts/smoke-zhilian-flow.ts"
+  },
+  "dependencies": {
+    "cheerio": "1.0.0-rc.12",
+    "dotenv": "^16.4.5",
+    "nodemailer": "^6.10.0",
+    "openai": "^6.37.0",
+    "playwright": "^1.59.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/nodemailer": "^8.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.2"
+  }
+}

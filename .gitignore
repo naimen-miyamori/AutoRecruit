@@ -1,0 +1,11 @@
+.env
+.env.local
+.venv/
+node_modules/
+dist/
+data/
+storage-state*.json
+.DS_Store
+*.log
+playwright-report/
+test-results/
