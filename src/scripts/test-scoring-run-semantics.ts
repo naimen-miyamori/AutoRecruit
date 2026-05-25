@@ -893,6 +893,23 @@ describe('candidate list readiness', () => {
     assert.deepStrictEqual(waitCalls, []);
   });
 
+  it('treats 51job filtered empty-result text as ready without waiting for the stable empty-list window', async () => {
+    const waitCalls: number[] = [];
+    const page = createCandidateListPage({
+      bodyText: '过滤：\n我已看\n\n没有搜索到相关的人才\n\n更换搜索条件再试试',
+      resultListVisible: true,
+      candidateCardsVisible: false,
+      cardPayloads: [],
+      onWaitForTimeout: (timeout) => {
+        waitCalls.push(timeout);
+      },
+    });
+
+    await waitForCandidateResultsReady(page, { deadline: Date.now() + 1000 });
+
+    assert.deepStrictEqual(waitCalls, []);
+  });
+
   it('allows extraction validation to accept an empty candidate list', () => {
     assert.deepStrictEqual(validateCandidateListExtraction({ candidates: [] }), { candidates: [] });
   });

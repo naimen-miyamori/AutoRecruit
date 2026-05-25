@@ -7,7 +7,7 @@ export const candidateCardSelector = 'div[id^="no_interested_"]';
 const recommendationBoundaryText = '未找到更多，为你推荐人才';
 const resultListSelector = '.virtual_list';
 const candidateContainerSelector = '.talent-card, .resume-card, .candidate-card, li, .item, .result-item, [class*="card"]';
-const emptyResultsPattern = /暂无(?:符合条件的)?人才|暂无.*人才|暂无搜索结果|暂无.*结果|没有找到.*人才|没有.*结果|未找到.*人才|无结果/;
+const emptyResultsPattern = /暂无(?:符合条件的)?人才|暂无.*人才|暂无搜索结果|暂无.*结果|没有搜索到.*人才|没有找到.*人才|没有.*结果|未找到.*人才|无结果/;
 const candidateListPollIntervalMs = 100;
 
 export type CandidateListSourceCard = {
