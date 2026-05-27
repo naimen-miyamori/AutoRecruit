@@ -238,6 +238,7 @@ function createCandidateListPage(options: {
 }
 
 function createSubscribeSearchOpenStub() {
+  const viewedFilterSelector = 'label.el-checkbox:has-text("我已看"), label:has-text("我已看")';
   const popupWaitForLoadStateCalls: string[] = [];
   const popupWaitForTimeoutCalls: number[] = [];
   const targetWaitForLoadStateCalls: string[] = [];
@@ -255,6 +256,23 @@ function createSubscribeSearchOpenStub() {
   let availablePageSelectors = new Set<string>();
   let cardTextTriggerReady = false;
   let pageTextTriggerReady = false;
+  let viewedFilterChecked = false;
+  let viewedFilterClicks = 0;
+
+  const viewedFilterLocator = {
+    first: () => ({
+      waitFor: async () => {
+        if (!viewedFilterChecked) {
+          throw new Error('viewed filter not visible');
+        }
+      },
+      evaluate: async () => viewedFilterChecked,
+      click: async () => {
+        viewedFilterClicks += 1;
+        viewedFilterChecked = false;
+      },
+    }),
+  };
 
   const targetPage = {
     waitForLoadState: async (state: string) => {
@@ -339,6 +357,9 @@ function createSubscribeSearchOpenStub() {
       pageWaitForTimeoutCalls.push(timeout);
     },
     locator: (selector?: string) => {
+      if (selector === viewedFilterSelector) {
+        return viewedFilterLocator;
+      }
       if (selector === '.talent-subscribe-card-main-wrapper') {
         return cardLocator;
       }
@@ -389,6 +410,7 @@ function createSubscribeSearchOpenStub() {
         waitForTimeout: async (timeout: number) => {
           popupWaitForTimeoutCalls.push(timeout);
         },
+        locator: page.locator,
       };
     },
     setSearchTriggerHref(href: string | null) {
@@ -396,6 +418,9 @@ function createSubscribeSearchOpenStub() {
     },
     setBodyText(text: string) {
       bodyText = text;
+    },
+    setViewedFilterChecked(checked: boolean) {
+      viewedFilterChecked = checked;
     },
     getCardWaitForCalls: () => cardWaitForCalls,
     getPageWaitForLoadStateCalls: () => pageWaitForLoadStateCalls,
@@ -406,6 +431,8 @@ function createSubscribeSearchOpenStub() {
     getTargetWaitForTimeoutCalls: () => targetWaitForTimeoutCalls,
     getCardSelectorWaits: () => new Map(cardSelectorWaits),
     getPageSelectorWaits: () => new Map(pageSelectorWaits),
+    getViewedFilterClicks: () => viewedFilterClicks,
+    isViewedFilterChecked: () => viewedFilterChecked,
     getCurrentUrl: () => currentUrl,
   };
 }
@@ -1129,6 +1156,62 @@ describe('scoring run semantics', () => {
       waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
       clickSearchTriggerRef.fn = originalClickSearchTrigger;
     }
+  });
+
+  it('keeps the 51job viewed filter by default after opening subscription search results', async () => {
+    const searchOpen = createSubscribeSearchOpenStub();
+    searchOpen.showPopup();
+    searchOpen.showCardTextTrigger();
+    searchOpen.setViewedFilterChecked(true);
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
+    const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
+    const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
+    const originalClickSearchTrigger = clickSearchTriggerRef.fn;
+
+    openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
+    waitForSearchTriggerReadyRef.fn = async () => undefined;
+    clickSearchTriggerRef.fn = async () => undefined;
+
+    try {
+      await openSubscribeSearch(searchOpen.page, '泰国 英语');
+    } finally {
+      openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      findSubscriptionCardRef.fn = originalFindSubscriptionCard;
+      waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
+      clickSearchTriggerRef.fn = originalClickSearchTrigger;
+    }
+
+    assert.equal(searchOpen.getViewedFilterClicks(), 0);
+    assert.equal(searchOpen.isViewedFilterChecked(), true);
+  });
+
+  it('clears the 51job viewed filter when viewed candidates are explicitly included', async () => {
+    const searchOpen = createSubscribeSearchOpenStub();
+    searchOpen.showPopup();
+    searchOpen.showCardTextTrigger();
+    searchOpen.setViewedFilterChecked(true);
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
+    const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
+    const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
+    const originalClickSearchTrigger = clickSearchTriggerRef.fn;
+
+    openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
+    waitForSearchTriggerReadyRef.fn = async () => undefined;
+    clickSearchTriggerRef.fn = async () => undefined;
+
+    try {
+      await openSubscribeSearch(searchOpen.page, '泰国 英语', { includeViewedCandidates: true });
+    } finally {
+      openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      findSubscriptionCardRef.fn = originalFindSubscriptionCard;
+      waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
+      clickSearchTriggerRef.fn = originalClickSearchTrigger;
+    }
+
+    assert.equal(searchOpen.getViewedFilterClicks(), 1);
+    assert.equal(searchOpen.isViewedFilterChecked(), false);
   });
 
   it('does not perform duplicate readiness waits before clicking the subscription search trigger', async () => {
@@ -4159,6 +4242,58 @@ describe('scoring run semantics', () => {
     });
 
     assert.equal(parsedText, '职位名称：测试注入解析器');
+  });
+
+  it('keeps viewed candidates excluded by default when opening 51job search from the CLI', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const observedIncludeViewedValues: Array<boolean | undefined> = [];
+
+    stubSuccessfulRun(indexModule);
+    indexModule.openSubscribeSearchRef.fn = (async (_page, _keyword, options) => {
+      observedIncludeViewedValues.push(options?.includeViewedCandidates);
+      return createSearchPage();
+    }) as typeof indexModule.openSubscribeSearchRef.fn;
+
+    await captureConsole(async () => {
+      await indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        `默认不含已看-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：默认不含已看',
+      ]);
+    });
+
+    assert.deepStrictEqual(observedIncludeViewedValues, [false]);
+  });
+
+  it('passes --include-viewed true through to 51job search opening', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const observedIncludeViewedValues: Array<boolean | undefined> = [];
+
+    stubSuccessfulRun(indexModule);
+    indexModule.openSubscribeSearchRef.fn = (async (_page, _keyword, options) => {
+      observedIncludeViewedValues.push(options?.includeViewedCandidates);
+      return createSearchPage();
+    }) as typeof indexModule.openSubscribeSearchRef.fn;
+
+    await captureConsole(async () => {
+      await indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        `包含已看-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：包含已看',
+        '--include-viewed',
+        'true',
+      ]);
+    });
+
+    assert.deepStrictEqual(observedIncludeViewedValues, [true]);
   });
 
   it('persists JD file contents as rawText for a first-time job record', async () => {

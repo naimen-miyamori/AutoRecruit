@@ -952,7 +952,11 @@ async function waitForLiepinHideViewedState(page: Page, deadline: number): Promi
   return readLiepinHideViewedState(page);
 }
 
-async function clickLiepinSearchButtonIfHideViewedMissing(page: Page, deadline: number): Promise<boolean> {
+async function clickLiepinSearchButtonIfHideViewedMissing(
+  page: Page,
+  deadline: number,
+  options: { beforeClick?: () => void } = {},
+): Promise<boolean> {
   const state = await readLiepinHideViewedState(page);
   if (state.found || !state.searchButtonSelector) {
     return false;
@@ -960,6 +964,7 @@ async function clickLiepinSearchButtonIfHideViewedMissing(page: Page, deadline: 
 
   const searchButton = page.locator(state.searchButtonSelector).first();
   await searchButton.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+  options.beforeClick?.();
   await searchButton.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
     const message = error instanceof Error ? error.message : String(error);
     if (!/unexpected argument|too many arguments/i.test(message)) {
@@ -1020,6 +1025,54 @@ async function ensureLiepinHideViewedChecked(
     await filterText.click();
   });
   await verifyChecked();
+  return true;
+}
+
+async function ensureLiepinHideViewedUnchecked(
+  page: Page,
+  deadline: number,
+  options: { beforeClick?: () => void } = {},
+): Promise<boolean> {
+  const state = await waitForLiepinHideViewedState(page, deadline);
+  if (!state.found || !state.checked) {
+    return false;
+  }
+
+  const verifyUnchecked = async () => {
+    const nextState = await waitForLiepinHideViewedState(page, deadline);
+    if (nextState.checked) {
+      throw new Error(`Liepin "隐藏已查看" filter was clicked but did not become unchecked. Page text: ${(nextState.bodyText ?? '').slice(0, 500)}`);
+    }
+  };
+
+  if (state.clickSelector) {
+    const control = page.locator(state.clickSelector).first();
+    await control.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+    options.beforeClick?.();
+    await control.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/unexpected argument|too many arguments/i.test(message)) {
+        throw error;
+      }
+
+      await control.click();
+    });
+    await verifyUnchecked();
+    return true;
+  }
+
+  const filterText = page.getByText('隐藏已查看', { exact: false }).first();
+  await filterText.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+  options.beforeClick?.();
+  await filterText.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/unexpected argument|too many arguments/i.test(message)) {
+      throw error;
+    }
+
+    await filterText.click();
+  });
+  await verifyUnchecked();
   return true;
 }
 
@@ -1501,6 +1554,25 @@ export const liepinAdapter: PlatformAdapter = {
     await waitForLiepinPageReady(page, { deadline });
     await clickLiepinQuickSearchTag(page, keyword, deadline);
     await waitForLiepinPageReady(page, { deadline });
+
+    if (options?.includeViewedCandidates) {
+      const clickedSearchButton = await clickLiepinSearchButtonIfHideViewedMissing(page, deadline, {
+        beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+      });
+      if (clickedSearchButton) {
+        await waitForLiepinPageReady(page, { deadline });
+      }
+
+      const clickedHideViewed = await ensureLiepinHideViewedUnchecked(page, deadline, {
+        beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+      });
+      if (clickedSearchButton || clickedHideViewed) {
+        await waitForLiepinSearchResumesApi(page, boundedTimeout(deadline, config.playwright.apiFallbackTimeoutMs)).catch(() => []);
+      }
+      await waitForLiepinPageReady(page, { deadline });
+      return page;
+    }
+
     if (await clickLiepinSearchButtonIfHideViewedMissing(page, deadline)) {
       await waitForLiepinPageReady(page, { deadline });
     }

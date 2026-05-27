@@ -7,6 +7,7 @@ export type SupportedPlatform = (typeof SUPPORTED_PLATFORMS)[number];
 
 export interface SearchWaitOptions {
   deadline?: number;
+  includeViewedCandidates?: boolean;
 }
 
 export interface PlatformAdapter {

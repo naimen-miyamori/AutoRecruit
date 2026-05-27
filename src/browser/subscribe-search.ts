@@ -29,6 +29,10 @@ const titleSelector = '.card-title';
 const pageReadySelector = `${cardSelector}, .el-empty`;
 const loadingMaskSelector = '.el-loading-mask';
 const subscriptionCardsSettleDelayMs = 3000;
+const viewedFilterSelector = 'label.el-checkbox:has-text("我已看"), label:has-text("我已看")';
+const viewedFilterSettleMs = 1000;
+const viewedFilterPollMs = 100;
+const viewedFilterMaxWaitMs = 8000;
 
 export const waitForAuthenticatedSubscribeReadyRef = {
   fn: waitForAuthenticatedSubscribeReady,
@@ -212,6 +216,45 @@ async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: 
     : new Error('Talent search button did not become clickable before timing out.');
 }
 
+async function is51jobViewedFilterChecked(viewedFilter: Locator): Promise<boolean> {
+  return viewedFilter.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+
+    const checkbox = element.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+    return checkbox?.checked === true || element.classList.contains('is-checked');
+  }).catch(() => false);
+}
+
+export async function clear51jobViewedFilter(page: Page, options?: SearchWaitOptions): Promise<void> {
+  const deadline = resolveSearchDeadline(options);
+  const waitUntil = Math.min(deadline, Date.now() + viewedFilterMaxWaitMs);
+  const viewedFilter = page.locator(viewedFilterSelector).first();
+  try {
+    await viewedFilter.waitFor({ state: 'visible', timeout: Math.max(1, waitUntil - Date.now()) });
+  } catch {
+    return;
+  }
+
+  let uncheckedSince: number | undefined;
+
+  while (Date.now() < waitUntil) {
+    if (await is51jobViewedFilterChecked(viewedFilter)) {
+      uncheckedSince = undefined;
+      await viewedFilter.click({ timeout: Math.min(1000, Math.max(1, waitUntil - Date.now())) }).catch(() => undefined);
+    } else {
+      const now = Date.now();
+      uncheckedSince ??= now;
+      if (now - uncheckedSince >= viewedFilterSettleMs) {
+        return;
+      }
+    }
+
+    await page.waitForTimeout(Math.min(viewedFilterPollMs, Math.max(1, waitUntil - Date.now()))).catch(() => undefined);
+  }
+}
+
 async function findSubscriptionCard(page: Page, searchKeyword: string, options?: SearchWaitOptions): Promise<Locator> {
   const deadline = resolveSearchDeadline(options);
   await waitForAuthenticatedSubscribeReadyRef.fn(page, { deadline });
@@ -303,12 +346,18 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
 
   if (openOutcome) {
     await openOutcome.page.waitForLoadState('domcontentloaded', { timeout: getRemainingTimeout(deadline) });
+    if (options?.includeViewedCandidates) {
+      await clear51jobViewedFilter(openOutcome.page, { deadline });
+    }
     return openOutcome.page;
   }
 
   const searchLinkHref = await searchTrigger.getAttribute('href').catch(() => null);
   if (searchLinkHref) {
     await page.goto(searchLinkHref, { waitUntil: 'domcontentloaded', timeout: getRemainingTimeout(deadline) });
+    if (options?.includeViewedCandidates) {
+      await clear51jobViewedFilter(page, { deadline });
+    }
     return page;
   }
 

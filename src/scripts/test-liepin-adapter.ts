@@ -243,6 +243,112 @@ test('liepin adapter does not click hide-viewed again when it is already checked
   assert.deepStrictEqual(calls, ['ready', 'quick-search', 'ready', 'ready']);
 });
 
+test('liepin adapter clears hide-viewed when viewed candidates are explicitly included', async () => {
+  const calls: string[] = [];
+  let hideViewedChecked = true;
+  const page = {
+    goto: async () => undefined,
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
+    waitForLoadState: async () => undefined,
+    waitForResponse: async () => undefined,
+    waitForFunction: async () => {
+      calls.push('ready');
+    },
+    evaluate: async () => liepinHideViewedState(hideViewedChecked),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => {
+          calls.push('quick-search');
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => liepinSearchReadyText,
+        };
+      }
+
+      if (selector === '#hide-viewed') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              hideViewedChecked = false;
+              calls.push('hide-viewed');
+            },
+          }),
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+      };
+    },
+  } as never;
+
+  await assert.doesNotReject(() => liepinAdapter.openSubscribeSearch(page, '优衣库', { includeViewedCandidates: true }));
+  assert.deepStrictEqual(calls, ['ready', 'quick-search', 'ready', 'hide-viewed', 'ready']);
+  assert.equal(hideViewedChecked, false);
+});
+
+test('liepin adapter keeps hide-viewed unchecked when viewed candidates are explicitly included', async () => {
+  const calls: string[] = [];
+  let hideViewedChecked = false;
+  const page = {
+    goto: async () => undefined,
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
+    waitForLoadState: async () => undefined,
+    waitForResponse: async () => undefined,
+    waitForFunction: async () => {
+      calls.push('ready');
+    },
+    evaluate: async () => liepinHideViewedState(hideViewedChecked),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => {
+          calls.push('quick-search');
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => liepinSearchReadyText,
+        };
+      }
+
+      if (selector === '#hide-viewed') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              hideViewedChecked = true;
+              calls.push('hide-viewed');
+            },
+          }),
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+      };
+    },
+  } as never;
+
+  await assert.doesNotReject(() => liepinAdapter.openSubscribeSearch(page, '优衣库', { includeViewedCandidates: true }));
+  assert.deepStrictEqual(calls, ['ready', 'quick-search', 'ready', 'ready']);
+  assert.equal(hideViewedChecked, false);
+});
+
 test('liepin adapter discards quick-search search-resumes responses before hide-viewed is applied', async () => {
   let responseListener: ((response: { url(): string; status(): number; text(): string }) => void) | undefined;
   let resultListVisible = false;

@@ -71,6 +71,15 @@ const zhilianResumeDetailSelectors = [
   '.resume-detail.km-scrollbar.new-resume-detail',
   '.new-shortcut-resume__inner',
 ];
+const zhilianUnviewedFilterSelector = [
+  '.km-checkbox:has-text("未看过")',
+  '[class*="checkbox"]:has-text("未看过")',
+  '[role="checkbox"]:has-text("未看过")',
+  'label:has-text("未看过")',
+].join(', ');
+const zhilianViewedFilterSettleMs = 1000;
+const zhilianViewedFilterPollMs = 100;
+const zhilianViewedFilterMaxWaitMs = 8000;
 
 function createDeadline(timeoutMs = config.playwright.resumeDetailTimeoutMs): number {
   return Date.now() + Math.max(timeoutMs, 1);
@@ -308,6 +317,61 @@ async function clickSavedZhilianQuickSearchTag(page: Page, keyword: string, dead
   }
 
   await waitForZhilianRecruiterShell(page, { deadline });
+}
+
+async function isZhilianUnviewedFilterChecked(page: Page): Promise<boolean> {
+  const unviewedFilter = page.locator(zhilianUnviewedFilterSelector).filter({ visible: true }).first();
+
+  return unviewedFilter.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+
+    const control = element.closest('[class*="checkbox"], label, [role="checkbox"]') ?? element;
+    const checkbox = control.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+    const ariaChecked = control.getAttribute('aria-checked');
+    return checkbox?.checked === true
+      || ariaChecked === 'true'
+      || /\b(km-checkbox--checked|ant-checkbox-checked|is-checked|checked)\b/.test(String(control.className ?? ''));
+  }).catch(() => false);
+}
+
+async function clearZhilianUnviewedFilter(page: Page, options?: SearchWaitOptions): Promise<boolean> {
+  const deadline = createSearchDeadline(options);
+  const waitUntil = Math.min(deadline, Date.now() + zhilianViewedFilterMaxWaitMs);
+  const unviewedFilter = page.locator(zhilianUnviewedFilterSelector).filter({ visible: true }).first();
+
+  try {
+    await unviewedFilter.waitFor({ state: 'visible', timeout: Math.max(1, waitUntil - Date.now()) });
+  } catch {
+    return false;
+  }
+
+  let clicked = false;
+  let uncheckedSince: number | undefined;
+
+  while (Date.now() < waitUntil) {
+    if (await isZhilianUnviewedFilterChecked(page)) {
+      uncheckedSince = undefined;
+      clearObservedZhilianCandidateApi(page);
+      try {
+        await unviewedFilter.click({ timeout: Math.min(1000, Math.max(1, waitUntil - Date.now())) });
+        clicked = true;
+      } catch {
+        // The search page renders hidden duplicates; retry until a visible control is stable.
+      }
+    } else {
+      const now = Date.now();
+      uncheckedSince ??= now;
+      if (now - uncheckedSince >= zhilianViewedFilterSettleMs) {
+        return clicked;
+      }
+    }
+
+    await page.waitForTimeout(Math.min(zhilianViewedFilterPollMs, Math.max(1, waitUntil - Date.now()))).catch(() => undefined);
+  }
+
+  return clicked;
 }
 
 async function fillZhilianKeywordSearchInput(page: Page, value: string): Promise<boolean> {
@@ -1180,6 +1244,9 @@ export const zhilianAdapter: PlatformAdapter = {
     attachZhilianCandidateApiObserver(page);
     await openZhilianRecruiterHome(page, { deadline });
     await clickSavedZhilianQuickSearchTag(page, keyword, deadline);
+    if (options?.includeViewedCandidates && await clearZhilianUnviewedFilter(page, { deadline })) {
+      await waitForZhilianRecruiterShell(page, { deadline });
+    }
     return page;
   },
   prepareSearchConditionPage: prepareZhilianSearchConditionPage,
@@ -1278,5 +1345,6 @@ export const zhilianTestExports = {
   extractZhilianCandidateIdFromText,
   extractZhilianCardsInPage,
   parseZhilianDomCandidateSnapshots,
+  clearZhilianUnviewedFilter,
   listVisibleZhilianQuickSearchTags,
 };

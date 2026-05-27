@@ -35,6 +35,15 @@ function defineGlobalProperty(propertyName: 'window' | 'navigator' | 'document',
   return () => restoreGlobalProperty(propertyName, originalDescriptor);
 }
 
+async function captureDateNow(fn: () => Promise<void>): Promise<void> {
+  const originalDateNow = Date.now;
+  try {
+    await fn();
+  } finally {
+    Date.now = originalDateNow;
+  }
+}
+
 function createZhilianShareLinkPageStubs(
   clickCalls: string[] = [],
   shareUrl = 'https://m.zhaopin.com/b/resume-package?zhaopinToken=share-token-from-copy',
@@ -260,6 +269,163 @@ test('zhilian adapter clicks a saved quick-search tag whose text contains the ra
 
   await assert.doesNotReject(() => zhilianAdapter.openSubscribeSearch(page, '优衣库'));
   assert.deepEqual(clickCalls, ['优衣库']);
+});
+
+function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean }) {
+  const clickCalls: string[] = [];
+  const waitForTimeoutCalls: number[] = [];
+  let unviewedChecked = options.unviewedChecked;
+  let now = 1000;
+
+  const unviewedFilterLocator = {
+    waitFor: async () => undefined,
+    evaluate: async (callback: (element: HTMLElement) => boolean) => {
+      const restoreHTMLElement = defineGlobalProperty('window', {});
+      const originalHTMLElement = (globalThis as { HTMLElement?: unknown }).HTMLElement;
+      const originalHTMLInputElement = (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement;
+      class HTMLElementStub {
+        className: string;
+        constructor(className: string) {
+          this.className = className;
+        }
+
+        closest() {
+          return this;
+        }
+
+        querySelector() {
+          return null;
+        }
+
+        getAttribute() {
+          return null;
+        }
+      }
+
+      Object.defineProperty(globalThis, 'HTMLElement', {
+        configurable: true,
+        writable: true,
+        value: HTMLElementStub,
+      });
+      Object.defineProperty(globalThis, 'HTMLInputElement', {
+        configurable: true,
+        writable: true,
+        value: class HTMLInputElementStub {},
+      });
+
+      try {
+        return callback(new HTMLElementStub(unviewedChecked ? 'km-checkbox km-checkbox--checked' : 'km-checkbox') as unknown as HTMLElement);
+      } finally {
+        if (originalHTMLElement === undefined) {
+          delete (globalThis as { HTMLElement?: unknown }).HTMLElement;
+        } else {
+          Object.defineProperty(globalThis, 'HTMLElement', {
+            configurable: true,
+            writable: true,
+            value: originalHTMLElement,
+          });
+        }
+
+        if (originalHTMLInputElement === undefined) {
+          delete (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement;
+        } else {
+          Object.defineProperty(globalThis, 'HTMLInputElement', {
+            configurable: true,
+            writable: true,
+            value: originalHTMLInputElement,
+          });
+        }
+
+        restoreHTMLElement();
+      }
+    },
+    click: async () => {
+      clickCalls.push('未看过');
+      unviewedChecked = false;
+    },
+  };
+  const unviewedFilterListLocator = {
+    filter: () => unviewedFilterListLocator,
+    first: () => unviewedFilterLocator,
+  };
+
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForTimeout: async (timeout: number) => {
+      waitForTimeoutCalls.push(timeout);
+      now += timeout;
+    },
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 未看过 未聊过',
+        };
+      }
+
+      if (selector.includes('未看过')) {
+        return unviewedFilterListLocator;
+      }
+
+      if (selector.includes('未聊过')) {
+        throw new Error('未聊过 should not be targeted when clearing viewed candidates');
+      }
+
+      return {
+        evaluateAll: async () => [],
+      };
+    },
+    getByText: (matcher: RegExp) => {
+      if (matcher.source.includes('优衣库')) {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              clickCalls.push('优衣库');
+            },
+          }),
+        };
+      }
+      throw new Error(`unexpected matcher: ${matcher.source}`);
+    },
+  } as never;
+
+  return {
+    page,
+    getClickCalls: () => clickCalls,
+    getWaitForTimeoutCalls: () => waitForTimeoutCalls,
+    isUnviewedChecked: () => unviewedChecked,
+    setDateNow: () => {
+      Date.now = () => now;
+    },
+  };
+}
+
+test('zhilian adapter keeps the unviewed filter by default after opening saved search results', async () => {
+  const stub = createZhilianUnviewedFilterPageStub({ unviewedChecked: true });
+
+  await assert.doesNotReject(() => zhilianAdapter.openSubscribeSearch(stub.page, '优衣库'));
+
+  assert.deepEqual(stub.getClickCalls(), ['优衣库']);
+  assert.equal(stub.isUnviewedChecked(), true);
+});
+
+test('zhilian adapter clears only 未看过 when viewed candidates are explicitly included', async () => {
+  const stub = createZhilianUnviewedFilterPageStub({ unviewedChecked: true });
+
+  await captureDateNow(async () => {
+    stub.setDateNow();
+    await zhilianAdapter.openSubscribeSearch(stub.page, '优衣库', {
+      deadline: Date.now() + 5000,
+      includeViewedCandidates: true,
+    });
+  });
+
+  assert.deepEqual(stub.getClickCalls(), ['优衣库', '未看过']);
+  assert.equal(stub.isUnviewedChecked(), false);
+  assert.ok(stub.getWaitForTimeoutCalls().length > 0);
 });
 
 test('zhilian adapter fails when no saved quick-search tag contains the raw keyword', async () => {

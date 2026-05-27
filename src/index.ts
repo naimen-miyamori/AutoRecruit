@@ -35,6 +35,7 @@ interface RunnableJobInput extends ReportDeliveryOptions {
   searchKeyword: string;
   jobDescriptionText?: string;
   jobDescriptionFilePath?: string;
+  includeViewedCandidates: boolean;
 }
 
 interface SingleJobCliInput extends RunnableJobInput {
@@ -46,6 +47,7 @@ interface BatchCliInput extends ReportDeliveryOptions {
   mode: 'batch';
   platform: CliPlatformSelection;
   jobsFilePath: string;
+  includeViewedCandidates: boolean;
 }
 
 interface SearchSubscriptionCliInput {
@@ -68,6 +70,7 @@ interface SinglePlatformCliInput extends ReportDeliveryOptions {
   searchKeyword: string;
   jobDescriptionText?: string;
   jobDescriptionFilePath?: string;
+  includeViewedCandidates: boolean;
 }
 
 export interface MainRunSummary {
@@ -219,6 +222,7 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     ccEmails: item.cc === undefined ? input.ccEmails : itemCcEmails,
     jobDescriptionText: jd,
     jobDescriptionFilePath: jdFile,
+    includeViewedCandidates: input.includeViewedCandidates,
   };
 }
 
@@ -279,10 +283,13 @@ function parseArgs(argv: readonly string[]): CliInput {
     ? parseOptionalBoolean(values.get('save-search-subscription'), '--save-search-subscription')
     : false;
   const searchSubscriptionName = values.get('search-subscription-name');
+  const includeViewedCandidates = flagPresence.has('include-viewed')
+    ? parseOptionalBoolean(values.get('include-viewed'), '--include-viewed')
+    : false;
 
   if (searchSubscriptionFilePath) {
-    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc')) {
-      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, or --cc');
+    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed')) {
+      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, or --include-viewed');
     }
 
     return {
@@ -310,6 +317,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       jobsFilePath,
       recipientEmail,
       ccEmails,
+      includeViewedCandidates,
     };
   }
 
@@ -329,6 +337,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     ccEmails,
     jobDescriptionText,
     jobDescriptionFilePath,
+    includeViewedCandidates,
   };
 }
 
@@ -340,6 +349,7 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
     ccEmails: input.ccEmails,
     jobDescriptionText: input.jobDescriptionText,
     jobDescriptionFilePath: input.jobDescriptionFilePath,
+    includeViewedCandidates: input.includeViewedCandidates,
   };
 }
 
@@ -448,9 +458,12 @@ async function scoreCapturedResumes(
   };
 }
 
-export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
+export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
   const searchDeadline = Date.now() + config.playwright.searchPageTimeoutMs;
-  const searchPage = await platformAdapter.openSubscribeSearch(session.page, searchKeyword, { deadline: searchDeadline });
+  const searchPage = await platformAdapter.openSubscribeSearch(session.page, searchKeyword, {
+    deadline: searchDeadline,
+    includeViewedCandidates: options.includeViewedCandidates,
+  });
   const { candidates } = platformAdapter.platform === '51job'
     ? await extractCandidateListRef.fn(searchPage, { deadline: searchDeadline })
     : await extractCandidateListWithAdapterRef.fn(platformAdapter, searchPage, { deadline: searchDeadline });
@@ -568,6 +581,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       session,
       fetchedAt,
       platformAdapter,
+      { includeViewedCandidates: input.includeViewedCandidates },
     );
 
     let exportSummary: ExportJobResultsSummary | undefined;

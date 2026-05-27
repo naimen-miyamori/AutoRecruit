@@ -22,6 +22,7 @@ If one platform fails during an all-platform run, stop immediately and propagate
 - Batch mode uses `--jobs-file` only. Do not allow it to combine with single-job `--keyword`, `--jd`, or `--jd-file`.
 - With `--platform all --jobs-file`, the outer loop is jobs-file order and the inner loop is `51job`, `liepin`, `zhilian`.
 - Search-subscription mode (`--search-subscription-file`) is standalone. It must not parse JD text, create job records, capture resumes, score candidates, export reports, or send email.
+- `--include-viewed` defaults to `false`. It is only for normal resume-capture runs and must remain rejected in search-subscription mode.
 - Explicit empty-result states are successful zero-candidate runs, not extraction failures. This includes 51job text such as `没有搜索到相关的人才` and stable empty result lists.
 - Only successfully captured resumes are marked seen. Detail-open or extraction failures stay retryable.
 - Mark successful captures as seen before scoring.
@@ -29,15 +30,15 @@ If one platform fails during an all-platform run, stop immediately and propagate
 - Latest run-result files stay lightweight: store platform, counts, and candidate ID lists rather than full candidate card payloads.
 - Exported markdown reports and email bodies must preserve a visible platform-source label.
 - Zhilian scored-candidate emails must use copied colleague-forward resume share links. Missing or duplicated current-run Zhilian share links are delivery errors.
-- Liepin candidate extraction must happen after `隐藏已查看` is checked. Stale `search-resumes` API responses from before that filter is applied must be discarded.
+- Liepin candidate extraction defaults to running after `隐藏已查看` is checked. When `--include-viewed true` is provided, extraction must run after that filter is explicitly unchecked. Stale `search-resumes` API responses from before the final viewed-filter state is applied must be discarded.
 
 ## Platform Rules
 
 | Platform | Storage State | Search Entry | Candidate Extraction | Special Rules |
 | --- | --- | --- | --- | --- |
-| `51job` | `storage-state.json` | Subscription page at `https://ehire.51job.com/Revision/talent/subscribe` | DOM cards anchored around `div[id^="no_interested_"]` | Hover saved keyword card, click talent-search trigger, preserve selector fallbacks, treat filtered-empty text as success. |
-| `liepin` | `storage-state.liepin.json` | Recruiter quick-search tag | DOM-first; API fallback only when DOM has no candidates or needs safe detail URLs | Manual-login polling must avoid unrelated probes before recruiter cookies exist. Click requested quick-search tag, ensure `隐藏已查看`, then reset/request-start barrier before extraction. |
-| `zhilian` | `storage-state.zhilian.json` | `https://rd6.zhaopin.com/app/search` saved quick-search tag | DOM-first; API fallback only when DOM yields no candidates | Login starts at `https://passport.zhaopin.com/org/login`. Saved tag text must contain raw `--keyword`. Resume detail is a modal on `/app/search`; parse the modal subtree, copy `转给同事` -> `链接转发` share link, and persist it as `candidateShareUrl`. |
+| `51job` | `storage-state.json` | Subscription page at `https://ehire.51job.com/Revision/talent/subscribe` | DOM cards anchored around `div[id^="no_interested_"]` | Hover saved keyword card, click talent-search trigger, preserve selector fallbacks, treat filtered-empty text as success. `--include-viewed true` clears `我已看`. |
+| `liepin` | `storage-state.liepin.json` | Recruiter quick-search tag | DOM-first; API fallback only when DOM has no candidates or needs safe detail URLs | Manual-login polling must avoid unrelated probes before recruiter cookies exist. Click requested quick-search tag, ensure `隐藏已查看` by default, or uncheck it for `--include-viewed true`, then reset/request-start barrier before extraction. |
+| `zhilian` | `storage-state.zhilian.json` | `https://rd6.zhaopin.com/app/search` saved quick-search tag | DOM-first; API fallback only when DOM yields no candidates | Login starts at `https://passport.zhaopin.com/org/login`. Saved tag text must contain raw `--keyword`. `--include-viewed true` clears visible `未看过` only. Resume detail is a modal on `/app/search`; parse the modal subtree, copy `转给同事` -> `链接转发` share link, and persist it as `candidateShareUrl`. |
 
 All adapters share one search wait contract: the main workflow creates a single search deadline before opening platform search entry and passes it through search opening and candidate extraction. Avoid adding fixed waits in series that exceed the shared deadline.
 
@@ -78,6 +79,7 @@ Run from source:
 - First run with inline JD: `rtk npm run dev -- --platform <51job|liepin|zhilian|all> --keyword "<keyword>" --jd "<JD text>" [--email user@example.com] [--cc a@example.com,b@example.com]`
 - First run with JD file: `rtk npm run dev -- --platform <platform> --keyword "<keyword>" --jd-file ./fixtures/jd.txt`
 - Rerun existing job key: `rtk npm run dev -- --platform <platform> --keyword "<keyword>"`
+- Include already-viewed candidates: `rtk npm run dev -- --platform <platform> --keyword "<keyword>" --include-viewed true`
 - Batch mode: `rtk npm run dev -- --platform <platform|all> --jobs-file ./jobs.json`
 - Search-subscription mode: `rtk npm run dev -- --platform <platform|all> --search-subscription-file ./search-subscription.json [--keyword "<keyword>"] [--search-subscription-name "<name>"] [--save-search-subscription true]`
 
