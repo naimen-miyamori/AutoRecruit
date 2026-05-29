@@ -8,6 +8,7 @@ import {
   parseSearchResultTotalFromText,
   saveSearchConditionByCommonDialog,
 } from '../search/page-actions.js';
+import { discoverSearchFiltersOnPage } from '../search/filter-discovery.js';
 import type { CandidateListItem, CandidateResume, EducationExperience, WorkExperience } from '../types/job.js';
 import type { PlatformAdapter, SearchWaitOptions } from './types.js';
 
@@ -1250,6 +1251,23 @@ export const zhilianAdapter: PlatformAdapter = {
     return page;
   },
   prepareSearchConditionPage: prepareZhilianSearchConditionPage,
+  discoverSearchFilters: async (page, options) => discoverSearchFiltersOnPage('zhilian', page, options, {
+    ignoreTextPatterns: [
+      /转给同事/,
+      /链接转发/,
+      /下载简历/,
+      /沟通/,
+      /面试/,
+      /搜索结果/,
+      /第\d+页/,
+    ],
+    filterContainerTextPatterns: [
+      /筛选|条件|城市|地区|行业|职能|学历|经验|薪资|学校|专业|语言|技能|更新时间|发布时间/,
+    ],
+    beforeScan: async (scanPage) => {
+      await clickFirstVisibleText(scanPage, ['使用高级搜索', '高级搜索', '筛选', '更多筛选']).catch(() => false);
+    },
+  }),
   readSearchConditionResultTotal: readZhilianSearchConditionResultTotal,
   saveSearchCondition: async (page, savedSearchName) => {
     await saveSearchConditionByCommonDialog(page, savedSearchName, { platformLabel: 'zhilian' });

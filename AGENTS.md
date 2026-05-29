@@ -82,6 +82,7 @@ Run from source:
 - Include already-viewed candidates: `rtk npm run dev -- --platform <platform> --keyword "<keyword>" --include-viewed true`
 - Batch mode: `rtk npm run dev -- --platform <platform|all> --jobs-file ./jobs.json`
 - Search-subscription mode: `rtk npm run dev -- --platform <platform|all> --search-subscription-file ./search-subscription.json [--keyword "<keyword>"] [--search-subscription-name "<name>"] [--save-search-subscription true]`
+- Search-filter discovery: `rtk npm run discover:filters -- --platform <51job|liepin|zhilian|all> --keyword "<keyword>" [--max-depth 3] [--max-options-per-level 50] [--include-remote-probes true]`
 
 Run compiled CLI:
 
@@ -125,6 +126,9 @@ Platform-specific regression command names keep `experimental` for compatibility
 - `src/browser/resume-detail.ts` - 51job resume opening and heuristic resume parsing.
 - `src/platforms/*.ts` - adapter contract and concrete 51job, Liepin, and Zhilian implementations.
 - `src/search/search-subscription.ts` - standalone search-subscription orchestration.
+- `src/search/filter-catalog.ts` - shared search-filter catalog types and discovery result schema.
+- `src/search/filter-dom.ts` - pure DOM scanning helpers for search-filter discovery.
+- `src/search/filter-discovery.ts` - standalone Playwright-based search-filter discovery runner.
 - `src/storage/job-store.ts` - JSON-backed persistence.
 - `src/scripts/*.ts` - offline debug, export, email, reparse, login, migration, and smoke utilities.
 - `项目说明文档.md` - higher-level usage, architecture, and operational notes.
@@ -143,6 +147,11 @@ Each job lives under `data/<platform>/jobs/<jobKey>/`:
 - `exports/latest.md` - latest markdown report.
 
 Legacy top-level `data/jobs/` content may exist. `rtk npm run migrate:platform-storage` moves legacy jobs into `data/51job/jobs/`, backfills missing platform fields, and must not overwrite existing target job directories.
+
+Search-filter discovery outputs live outside job directories:
+
+- `data/<platform>/filter-catalog/latest.json`
+- `data/<platform>/filter-catalog/<timestamp>.json`
 
 ## Resume Parsing Guidance
 

@@ -470,7 +470,7 @@ function createResumeDetailPageStub() {
         }
       },
       first: () => createClickableLocator(label),
-      locator: () => createClickableLocator(label),
+      locator: (nestedSelector?: string) => createClickableLocator(nestedSelector ? `${label}:${nestedSelector}` : label),
     };
   }
 
@@ -1497,7 +1497,7 @@ describe('scoring run semantics', () => {
     const result = await openResumeDetail(detailPage.context, detailPage.page, candidate);
 
     assert.equal(result, detailPage.page);
-    assert.deepStrictEqual(detailPage.getClickCalls(), ['card']);
+    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.user']);
     assert.deepStrictEqual(detailPage.getGotoCalls(), []);
     assert.equal(candidate.resumeUrl, 'https://example.com/resume/100228050');
     assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
@@ -1514,7 +1514,7 @@ describe('scoring run semantics', () => {
     const result = await openResumeDetail(detailPage.context, detailPage.page, candidate);
 
     assert.equal(result, detailPage.page);
-    assert.deepStrictEqual(detailPage.getClickCalls(), ['card']);
+    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.user']);
     assert.deepStrictEqual(detailPage.getGotoCalls(), []);
     assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
   });
@@ -1531,7 +1531,7 @@ describe('scoring run semantics', () => {
     const result = await openResumeDetail(detailPage.context, detailPage.page, candidate);
 
     assert.equal(result, detailPage.page);
-    assert.deepStrictEqual(detailPage.getClickCalls(), ['card']);
+    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.user']);
     assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
   });
 

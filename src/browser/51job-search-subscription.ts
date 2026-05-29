@@ -8,6 +8,7 @@ import {
   parseSearchResultTotalFromText,
   saveSearchConditionByCommonDialog,
 } from '../search/page-actions.js';
+import type { SearchWaitOptions } from '../platforms/types.js';
 
 const talentSearchPageUrl = 'https://ehire.51job.com/Revision/talent/search';
 const subscribePageUrl = 'https://ehire.51job.com/Revision/talent/subscribe';
@@ -40,13 +41,13 @@ export async function fill51jobSearchKeyword(page: Page, keyword: string): Promi
     'input[placeholder*="关键词"]',
     'input[type="search"]',
     'input[type="text"]',
-  ]);
+  ], 5000);
 
   if (!didFillKeyword) {
     throw new Error('Search subscription on 51job could not find the keyword input on the talent search page.');
   }
 
-  const didTriggerSearch = await clickPrimarySearchButton(page);
+  const didTriggerSearch = await clickPrimarySearchButton(page, 3000);
   if (!didTriggerSearch) {
     throw new Error('Search subscription on 51job could not trigger the keyword search on the talent search page.');
   }
@@ -72,8 +73,24 @@ export async function prepare51jobSearchConditionPage(page: Page, keyword: strin
   return searchPage;
 }
 
+export async function prepare51jobSearchConditionPageWithOptions(
+  page: Page,
+  keyword: string,
+  _options?: SearchWaitOptions,
+): Promise<Page> {
+  return prepare51jobSearchConditionPage(page, keyword);
+}
+
 export async function read51jobSearchResultTotal(page: Page): Promise<{ resultTotal: number; resultTotalSource: 'page' }> {
-  const resultTotal = parseSearchResultTotalFromText(await page.locator('body').innerText());
+  const bodyText = await page.locator('body').innerText();
+  const resultTotal = parseSearchResultTotalFromText(bodyText);
+  if (bodyText.includes('没有搜索到相关的人才')) {
+    return {
+      resultTotal: 0,
+      resultTotalSource: 'page',
+    };
+  }
+
   if (resultTotal === undefined) {
     throw new Error('Search subscription on 51job could not read the page result total.');
   }

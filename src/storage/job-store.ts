@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import type { SupportedPlatform } from '../platforms/types.js';
+import type { SearchFilterCatalog } from '../search/filter-catalog.js';
 import {
   CandidateListItem,
   CandidateResume,
@@ -21,6 +22,11 @@ interface JobPaths {
   domSnapshotsDir: string;
   jdPath: string;
   seenIdsPath: string;
+}
+
+interface FilterCatalogPaths {
+  dir: string;
+  latestPath: string;
 }
 
 interface LegacyResumeSnapshotSource {
@@ -96,6 +102,14 @@ function normalizeRunResult(runResult: LegacyRunResult): RunResult {
 }
 
 export class JobStore {
+  private getFilterCatalogPaths(platform: SupportedPlatform): FilterCatalogPaths {
+    const dir = path.join(config.dataDir, platform, 'filter-catalog');
+    return {
+      dir,
+      latestPath: path.join(dir, 'latest.json'),
+    };
+  }
+
   private getJobPaths(platform: SupportedPlatform, jobKey: string): JobPaths {
     const jobDir = path.join(config.dataDir, platform, 'jobs', jobKey);
     return {
@@ -279,5 +293,33 @@ export class JobStore {
       platform,
     });
     return filePath;
+  }
+
+  async saveSearchFilterCatalog(
+    platform: SupportedPlatform,
+    catalog: SearchFilterCatalog,
+    outputPath?: string,
+  ): Promise<{ latestPath: string; timestampedPath: string; outputPath?: string }> {
+    const paths = this.getFilterCatalogPaths(platform);
+    await ensureDir(paths.dir);
+    const timestamp = catalog.capturedAt.replace(/[:.]/g, '-');
+    const timestampedPath = path.join(paths.dir, `${timestamp}.json`);
+
+    await Promise.all([
+      writeJson(paths.latestPath, catalog),
+      writeJson(timestampedPath, catalog),
+      outputPath ? writeJson(path.resolve(outputPath), catalog) : Promise.resolve(),
+    ]);
+
+    return {
+      latestPath: paths.latestPath,
+      timestampedPath,
+      outputPath: outputPath ? path.resolve(outputPath) : undefined,
+    };
+  }
+
+  async readLatestSearchFilterCatalog(platform: SupportedPlatform): Promise<SearchFilterCatalog | undefined> {
+    const { latestPath } = this.getFilterCatalogPaths(platform);
+    return readJsonFile<SearchFilterCatalog | undefined>(latestPath, undefined);
   }
 }

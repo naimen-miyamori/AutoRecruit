@@ -1843,6 +1843,11 @@ export async function openResumeDetail(context: BrowserContext, page: Page, cand
 
   const card = trigger.locator('xpath=ancestor::*[contains(@class, "card") or self::li][1]');
   const clickableLocators = [
+    card.locator('.user').first(),
+    card.locator('.userinfo').first(),
+    card.locator('.info_content').first(),
+    card.locator('.info').first(),
+    card.locator('.detail').first(),
     card.locator('[class*="name"]').first(),
     card.locator('[class*="job"]').first(),
     card.locator('[class*="company"]').first(),

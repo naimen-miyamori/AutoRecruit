@@ -38,6 +38,18 @@ export interface ReportDeliveryOptions {
 
 export type SearchCondition =
   | { kind: 'keyword'; value: string }
+  | {
+    kind: 'applicationFilter';
+    fieldId: string;
+    label: string;
+    fieldKind: 'singleSelect' | 'textInput' | 'salaryRange';
+    value: unknown;
+    values?: Array<{
+      value: string;
+      pathLabels?: string[];
+      ambiguous?: boolean;
+    }>;
+  }
   | { kind: 'resumeFreshness'; value: string }
   | { kind: 'location'; field?: string; values: string[] }
   | { kind: 'industry'; field?: string; values: string[] }
@@ -68,6 +80,8 @@ export interface SearchSubscriptionSummary {
   resultTotalSource: 'page' | 'api';
   saveRequested: boolean;
   saved: boolean;
+  allConditionsApplied: boolean;
+  conditionStatusCounts: Record<SearchConditionApplyResult['status'], number>;
   conditionResults: SearchConditionApplyResult[];
 }
 

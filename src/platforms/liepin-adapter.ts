@@ -8,6 +8,8 @@ import {
   parseSearchResultTotalFromText,
   saveSearchConditionByCommonDialog,
 } from '../search/page-actions.js';
+import { buildSearchFilterDiscoveryStats, createEmptySearchFilterCatalog } from '../search/filter-catalog.js';
+import { discoverLiepinStaticSearchFilters } from './liepin-filter-normalization.js';
 import type { CandidateListItem, CandidateResume, EducationExperience, ProjectExperience, WorkExperience } from '../types/job.js';
 import type { PlatformAdapter, SearchWaitOptions } from './types.js';
 
@@ -1586,6 +1588,17 @@ export const liepinAdapter: PlatformAdapter = {
     return page;
   },
   prepareSearchConditionPage: prepareLiepinSearchConditionPage,
+  discoverSearchFilters: async (page, options) => {
+    const staticResult = await discoverLiepinStaticSearchFilters(page, options);
+    const catalog = createEmptySearchFilterCatalog('liepin', options.keyword, page.url());
+    const filters = staticResult.filters;
+    return {
+      ...catalog,
+      filters,
+      failures: staticResult.failures,
+      stats: buildSearchFilterDiscoveryStats(filters),
+    };
+  },
   readSearchConditionResultTotal: readLiepinSearchConditionResultTotal,
   saveSearchCondition: async (page, savedSearchName) => {
     await saveSearchConditionByCommonDialog(page, savedSearchName, { platformLabel: 'liepin' });

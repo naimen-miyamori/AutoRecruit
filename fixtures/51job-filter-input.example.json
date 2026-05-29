@@ -1,0 +1,25 @@
+{
+  "work_years": "1-3年",
+  "age": "25-30岁",
+  "gender": "女",
+  "education": "本科及以上",
+  "school_nature": "全日制",
+  "job_status": "离职-周内到岗",
+  "recent_activity_time": "近1周",
+  "graduation_year": "2026年",
+  "language": "大学英语四级及以上",
+  "work_type": "全职",
+  "company_nature": "民营公司",
+  "job_hopping_count": "5年内跳槽次数<3次",
+  "expected_location": "深圳",
+  "living_location": "全部 深圳",
+  "expected_industry": "电子商务",
+  "expected_function": "销售专员",
+  "engaged_industry": "电子商务",
+  "engaged_function": "销售专员",
+  "major": "金融科技应用",
+  "expected_salary": {
+    "min": "2千",
+    "max": "3千"
+  }
+}

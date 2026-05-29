@@ -1,4 +1,5 @@
 import type { BrowserContext, Page } from 'playwright';
+import type { SearchFilterCatalog, SearchFilterDiscoveryRunOptions } from '../search/filter-catalog.js';
 import type { CandidateListItem, CandidateResume, SearchCondition, SearchConditionApplyResult } from '../types/job.js';
 
 export const SUPPORTED_PLATFORMS = ['51job', 'liepin', 'zhilian'] as const;
@@ -21,6 +22,7 @@ export interface PlatformAdapter {
   assertAuthenticated(page: Page): Promise<void>;
   openSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
   prepareSearchConditionPage?(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
+  discoverSearchFilters?(page: Page, options: SearchFilterDiscoveryRunOptions): Promise<SearchFilterCatalog>;
   applySearchCondition?(page: Page, condition: SearchCondition): Promise<SearchConditionApplyResult>;
   readSearchConditionResultTotal?(page: Page, options?: SearchWaitOptions): Promise<{
     resultTotal: number;

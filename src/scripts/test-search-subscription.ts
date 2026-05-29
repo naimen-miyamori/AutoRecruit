@@ -103,6 +103,12 @@ describe('search subscription workflow', () => {
     assert.equal(summary.resultTotalSource, 'page');
     assert.equal(summary.saveRequested, false);
     assert.equal(summary.saved, false);
+    assert.equal(summary.allConditionsApplied, false);
+    assert.deepEqual(summary.conditionStatusCounts, {
+      applied: 0,
+      skipped: 1,
+      failed: 0,
+    });
     assert.equal(summary.conditionResults.length, 1);
     assert.equal(summary.conditionResults[0].status, 'skipped');
     assert.match(summary.conditionResults[0].message ?? '', /not implemented/i);
@@ -139,6 +145,37 @@ describe('search subscription workflow', () => {
     assert.equal(summary.savedSearchName, '优衣库订阅');
   });
 
+  it('refuses to save when any search condition was not applied', async () => {
+    const calls: string[] = [];
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const searchPage = { id: 'search-page' } as unknown as Page;
+    const adapter = buildAdapter({
+      prepareSearchConditionPage: async () => {
+        calls.push('prepare');
+        return searchPage;
+      },
+      readSearchConditionResultTotal: async () => {
+        calls.push('read-total');
+        return { resultTotal: 8, resultTotalSource: 'page' };
+      },
+      saveSearchCondition: async () => {
+        calls.push('save');
+      },
+    });
+
+    await assert.rejects(
+      () => runSearchSubscriptionWorkflow(adapter, rootPage, {
+        keyword: '优衣库',
+        savedSearchName: '优衣库订阅',
+        conditions: [{ kind: 'education', value: '本科' }],
+      }, {
+        save: true,
+      }),
+      /not all search conditions were applied/i,
+    );
+    assert.deepEqual(calls, ['prepare', 'read-total']);
+  });
+
   it('loads a condition plan from a JSON file and lets CLI keyword override the file keyword', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-search-subscription-'));
     const planPath = path.join(tempDir, 'conditions.json');
@@ -162,6 +199,340 @@ describe('search subscription workflow', () => {
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it('loads application filter input file and expands it into applicationFilter conditions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-search-subscription-filters-'));
+    const planPath = path.join(tempDir, 'conditions.json');
+    const inputPath = path.join(tempDir, 'filter-input.json');
+    const optionsPath = path.join(tempDir, 'application-filter-options.json');
+
+    try {
+      await fs.writeFile(optionsPath, JSON.stringify({
+        platform: '51job',
+        capturedAt: '2026-05-26T13:23:24.638Z',
+        keyword: '优衣库',
+        fieldCount: 3,
+        fieldIds: ['language', 'expected_location', 'expected_salary'],
+        fieldIdByLabel: {
+          语言要求: 'language',
+          期望工作地: 'expected_location',
+          期望月薪: 'expected_salary',
+        },
+        groups: {
+          singleSelect: ['language'],
+          textInput: ['expected_location'],
+          salaryRange: ['expected_salary'],
+        },
+        fieldsById: {
+          language: {
+            fieldId: 'language',
+            filterKey: 'language-filter',
+            label: '语言要求',
+            kind: 'singleSelect',
+            restrictInput: true,
+            valueShape: 'string',
+            acceptedInputShapes: ['string'],
+            allowedValues: ['大学英语四级及以上'],
+            options: [{
+              label: '大学英语四级及以上',
+              value: '大学英语四级及以上',
+              depth: 1,
+              disabled: false,
+              selected: false,
+              parentPathLabels: ['英语'],
+              pathLabels: ['英语', '大学英语四级及以上'],
+            }],
+          },
+          expected_location: {
+            fieldId: 'expected_location',
+            filterKey: 'expected-location-filter',
+            label: '期望工作地',
+            kind: 'textInput',
+            semanticKind: 'location',
+            scope: 'expected',
+            restrictInput: true,
+            valueShape: 'string|string[]',
+            acceptedInputShapes: ['string', 'string[]', '{ value: string; pathLabels: string[] }', '{ value: string; pathLabels: string[] }[]'],
+            allowedValues: ['热门城市', '广东省', '深圳'],
+            rootValues: ['热门城市', '广东省'],
+            valuesByDepth: [
+              { depth: 0, values: ['热门城市', '广东省'] },
+              { depth: 1, values: ['深圳'] },
+            ],
+            tree: [
+              {
+                key: '热门城市',
+                label: '热门城市',
+                depth: 0,
+                pathLabels: ['热门城市'],
+                children: [{
+                  key: '热门城市\u0000深圳',
+                  label: '深圳',
+                  depth: 1,
+                  pathLabels: ['热门城市', '深圳'],
+                  children: [],
+                }],
+              },
+              {
+                key: '广东省',
+                label: '广东省',
+                depth: 0,
+                pathLabels: ['广东省'],
+                children: [{
+                  key: '广东省\u0000深圳',
+                  label: '深圳',
+                  depth: 1,
+                  pathLabels: ['广东省', '深圳'],
+                  children: [],
+                }],
+              },
+            ],
+          },
+          expected_salary: {
+            fieldId: 'expected_salary',
+            filterKey: 'expected-salary-filter',
+            label: '期望月薪',
+            kind: 'salaryRange',
+            restrictInput: true,
+            valueShape: 'object',
+            acceptedInputShapes: ['{ min: string; max: string }'],
+            minKey: 'min',
+            maxKey: 'max',
+            minLabel: '薪资下限',
+            maxLabel: '薪资上限',
+            orderedValues: ['2千', '3千'],
+            minOptions: ['2千', '3千'],
+            maxOptions: ['2千', '3千'],
+            rule: {
+              kind: 'orderedRange',
+              comparison: 'maxSalaryValue >= minSalaryValue',
+              message: '右侧薪资上限不能低于左侧薪资下限。',
+            },
+          },
+        },
+      }), 'utf8');
+      await fs.writeFile(inputPath, JSON.stringify({
+        language: '大学英语四级及以上',
+        expected_location: {
+          value: '深圳',
+          pathLabels: ['广东省', '深圳'],
+        },
+        expected_salary: {
+          min: '2千',
+          max: '3千',
+        },
+      }), 'utf8');
+      await fs.writeFile(planPath, JSON.stringify({
+        keyword: '文件关键词',
+        applicationFilterInputFile: './filter-input.json',
+      }), 'utf8');
+
+      const plan = await loadSearchConditionPlanFile(planPath, {
+        platform: '51job',
+        applicationFilterOptionsPath: optionsPath,
+      });
+
+      assert.equal(plan.keyword, '文件关键词');
+      assert.deepEqual(plan.conditions, [
+        {
+          kind: 'applicationFilter',
+          fieldId: 'language',
+          label: '语言要求',
+          fieldKind: 'singleSelect',
+          value: '大学英语四级及以上',
+          values: [{
+            value: '大学英语四级及以上',
+            pathLabels: ['英语', '大学英语四级及以上'],
+          }],
+        },
+        {
+          kind: 'applicationFilter',
+          fieldId: 'expected_location',
+          label: '期望工作地',
+          fieldKind: 'textInput',
+          value: {
+            value: '深圳',
+            pathLabels: ['广东省', '深圳'],
+          },
+          values: [{
+            value: '深圳',
+            pathLabels: ['广东省', '深圳'],
+            ambiguous: false,
+          }],
+        },
+        {
+          kind: 'applicationFilter',
+          fieldId: 'expected_salary',
+          label: '期望月薪',
+          fieldKind: 'salaryRange',
+          value: {
+            min: '2千',
+            max: '3千',
+          },
+          values: [
+            { value: '2千' },
+            { value: '3千' },
+          ],
+        },
+      ]);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('marks text input conditions ambiguous when duplicate labels need a path', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-search-subscription-ambiguous-filters-'));
+    const optionsPath = path.join(tempDir, 'application-filter-options.json');
+
+    try {
+      await fs.writeFile(optionsPath, JSON.stringify({
+        platform: '51job',
+        capturedAt: '2026-05-26T13:23:24.638Z',
+        keyword: '优衣库',
+        fieldCount: 1,
+        fieldIds: ['expected_location'],
+        fieldIdByLabel: {
+          期望工作地: 'expected_location',
+        },
+        groups: {
+          singleSelect: [],
+          textInput: ['expected_location'],
+          salaryRange: [],
+        },
+        fieldsById: {
+          expected_location: {
+            fieldId: 'expected_location',
+            filterKey: 'expected-location-filter',
+            label: '期望工作地',
+            kind: 'textInput',
+            semanticKind: 'location',
+            scope: 'expected',
+            restrictInput: true,
+            valueShape: 'string|string[]',
+            acceptedInputShapes: ['string', 'string[]', '{ value: string; pathLabels: string[] }', '{ value: string; pathLabels: string[] }[]'],
+            allowedValues: ['热门城市', '广东省', '深圳'],
+            rootValues: ['热门城市', '广东省'],
+            valuesByDepth: [
+              { depth: 0, values: ['热门城市', '广东省'] },
+              { depth: 1, values: ['深圳'] },
+            ],
+            tree: [
+              {
+                key: '热门城市',
+                label: '热门城市',
+                depth: 0,
+                pathLabels: ['热门城市'],
+                children: [{
+                  key: '热门城市\u0000深圳',
+                  label: '深圳',
+                  depth: 1,
+                  pathLabels: ['热门城市', '深圳'],
+                  children: [],
+                }],
+              },
+              {
+                key: '广东省',
+                label: '广东省',
+                depth: 0,
+                pathLabels: ['广东省'],
+                children: [{
+                  key: '广东省\u0000深圳',
+                  label: '深圳',
+                  depth: 1,
+                  pathLabels: ['广东省', '深圳'],
+                  children: [],
+                }],
+              },
+            ],
+          },
+        },
+      }), 'utf8');
+
+      const planPath = path.join(tempDir, 'conditions.json');
+      await fs.writeFile(planPath, JSON.stringify({
+        keyword: '文件关键词',
+        applicationFilterInput: {
+          expected_location: '深圳',
+        },
+      }), 'utf8');
+
+      const plan = await loadSearchConditionPlanFile(planPath, {
+        platform: '51job',
+        applicationFilterOptionsPath: optionsPath,
+      });
+
+      assert.deepEqual(plan.conditions, [{
+        kind: 'applicationFilter',
+        fieldId: 'expected_location',
+        label: '期望工作地',
+        fieldKind: 'textInput',
+        value: '深圳',
+        values: [{
+          value: '深圳',
+          pathLabels: ['热门城市', '深圳'],
+          ambiguous: true,
+        }],
+      }]);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('applies search conditions through adapter before reading result total', async () => {
+    const calls: string[] = [];
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const searchPage = { id: 'search-page' } as unknown as Page;
+    const condition = {
+      kind: 'applicationFilter',
+      fieldId: 'expected_location',
+      label: '期望工作地',
+      fieldKind: 'textInput',
+      value: '深圳',
+      values: [{ value: '深圳', pathLabels: ['广东省', '深圳'] }],
+    } as const;
+    const adapter = buildAdapter({
+      prepareSearchConditionPage: async () => {
+        calls.push('prepare');
+        return searchPage;
+      },
+      applySearchCondition: async (page, appliedCondition) => {
+        assert.equal(page, searchPage);
+        assert.deepEqual(appliedCondition, condition);
+        calls.push(`apply:${appliedCondition.kind}`);
+        return {
+          platform: '51job',
+          condition: appliedCondition,
+          status: 'applied',
+        };
+      },
+      readSearchConditionResultTotal: async (page) => {
+        assert.equal(page, searchPage);
+        calls.push('read-total');
+        return { resultTotal: 21, resultTotalSource: 'page' };
+      },
+    });
+
+    const summary = await runSearchSubscriptionWorkflow(adapter, rootPage, {
+      keyword: '优衣库',
+      conditions: [condition],
+    }, {
+      save: false,
+    });
+
+    assert.deepEqual(calls, ['prepare', 'apply:applicationFilter', 'read-total']);
+    assert.equal(summary.resultTotal, 21);
+    assert.equal(summary.allConditionsApplied, true);
+    assert.deepEqual(summary.conditionStatusCounts, {
+      applied: 1,
+      skipped: 0,
+      failed: 0,
+    });
+    assert.deepEqual(summary.conditionResults, [{
+      platform: '51job',
+      condition,
+      status: 'applied',
+    }]);
   });
 
   it('runs the standalone CLI mode without JD parsing or resume capture', async () => {
@@ -207,6 +578,12 @@ describe('search subscription workflow', () => {
           resultTotalSource: 'page',
           saveRequested: options.save,
           saved: options.save,
+          allConditionsApplied: true,
+          conditionStatusCounts: {
+            applied: 0,
+            skipped: 0,
+            failed: 0,
+          },
           conditionResults: [],
         };
       };

@@ -664,6 +664,7 @@ async function runSearchSubscription(input: SearchSubscriptionCliInput): Promise
   for (const platform of listSelectedPlatforms(input.platform)) {
     const adapter = resolvePlatformAdapter(platform);
     const plan = await loadSearchConditionPlanFile(input.filePath, {
+      platform,
       keywordOverride: input.keyword,
       savedSearchNameOverride: input.savedSearchName,
     });
