@@ -9,3 +9,4 @@ storage-state*.json
 *.log
 playwright-report/
 test-results/
+.assistant/
