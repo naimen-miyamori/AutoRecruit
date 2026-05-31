@@ -11,6 +11,7 @@ import {
 
 const talentSearchPageUrl = 'https://ehire.51job.com/Revision/talent/search';
 const subscribePageUrl = 'https://ehire.51job.com/Revision/talent/subscribe';
+const platform = '51job';
 
 export const openPageLevelSearchRef = {
   fn: openPageLevelSearch,
@@ -40,13 +41,13 @@ export async function fill51jobSearchKeyword(page: Page, keyword: string): Promi
     'input[placeholder*="关键词"]',
     'input[type="search"]',
     'input[type="text"]',
-  ]);
+  ], 1000, platform);
 
   if (!didFillKeyword) {
     throw new Error('Search subscription on 51job could not find the keyword input on the talent search page.');
   }
 
-  const didTriggerSearch = await clickPrimarySearchButton(page);
+  const didTriggerSearch = await clickPrimarySearchButton(page, 1000, platform);
   if (!didTriggerSearch) {
     throw new Error('Search subscription on 51job could not trigger the keyword search on the talent search page.');
   }
@@ -61,8 +62,8 @@ export async function expand51jobAdvancedFilters(page: Page): Promise<void> {
     '[class*="more"]',
     '[class*="expand"]',
     '[class*="advanced"]',
-  ]).catch(() => false);
-  await clickFirstVisibleText(page, ['更多', '展开', '高级搜索', '更多筛选']).catch(() => false);
+  ], 1000, platform).catch(() => false);
+  await clickFirstVisibleText(page, ['更多', '展开', '高级搜索', '更多筛选'], 1000, platform).catch(() => false);
 }
 
 export async function prepare51jobSearchConditionPage(page: Page, keyword: string): Promise<Page> {
@@ -85,5 +86,5 @@ export async function read51jobSearchResultTotal(page: Page): Promise<{ resultTo
 }
 
 export async function save51jobSearchCondition(page: Page, savedSearchName: string): Promise<void> {
-  await saveSearchConditionByCommonDialog(page, savedSearchName, { platformLabel: '51job' });
+  await saveSearchConditionByCommonDialog(page, savedSearchName, { platformLabel: '51job', platform });
 }

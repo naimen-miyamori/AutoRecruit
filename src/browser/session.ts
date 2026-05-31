@@ -23,6 +23,7 @@ export interface BrowserSession {
   keepOpenOnExit?: boolean;
   reusableExternalBrowser?: boolean;
   reusedExistingBrowser?: boolean;
+  platform?: SupportedPlatform;
 }
 
 export const createBrowserSessionRef = { fn: createBrowserSession };
@@ -43,22 +44,32 @@ type SessionDiagnostics = {
 
 type BrowserStorageState = Parameters<BrowserContext['setStorageState']>[0];
 
-const liepinSearchUrlPattern = /^https:\/\/h\.liepin\.com\/search\/getconditionitem(?:[/?#].*)?$/i;
+const platformPreferredUrlPatterns: Record<SupportedPlatform, RegExp[]> = {
+  '51job': [
+    /^https:\/\/ehire\.51job\.com\/Revision\/talent\/search(?:[/?#].*)?$/i,
+    /^https:\/\/ehire\.51job\.com\/Revision\/talent\/subscribe(?:[/?#].*)?$/i,
+    /^https:\/\/ehire\.51job\.com\//i,
+  ],
+  liepin: [
+    /^https:\/\/h\.liepin\.com\/search\/getconditionitem(?:[/?#].*)?$/i,
+    /^https:\/\/h\.liepin\.com\//i,
+  ],
+  zhilian: [
+    /^https:\/\/rd6\.zhaopin\.com\/app\/search(?:[/?#].*)?$/i,
+    /^https:\/\/(?:rd6|rd5|rd)\.zhaopin\.com\//i,
+  ],
+};
 
-function isLiepinSearchUrl(url: string): boolean {
-  return liepinSearchUrlPattern.test(url);
+function resolveReusableBrowserUserDataDir(platform: SupportedPlatform): string {
+  return path.join(config.dataDir, platform, 'browser-profile');
 }
 
-function resolveLiepinReusableBrowserUserDataDir(): string {
-  return path.join(config.dataDir, 'liepin', 'browser-profile');
+function resolveReusableBrowserCdpEndpoint(platform: SupportedPlatform): string {
+  return `http://127.0.0.1:${config.playwright.reuseCdpPortByPlatform[platform]}`;
 }
 
-function resolveLiepinReusableBrowserCdpEndpoint(): string {
-  return `http://127.0.0.1:${config.playwright.liepinReuseCdpPort}`;
-}
-
-async function waitForLiepinReusableBrowserCdpEndpoint(timeoutMs = 30000): Promise<void> {
-  const endpoint = `${resolveLiepinReusableBrowserCdpEndpoint()}/json/version`;
+async function waitForReusableBrowserCdpEndpoint(platform: SupportedPlatform, timeoutMs = 30000): Promise<void> {
+  const endpoint = `${resolveReusableBrowserCdpEndpoint(platform)}/json/version`;
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
@@ -74,12 +85,12 @@ async function waitForLiepinReusableBrowserCdpEndpoint(timeoutMs = 30000): Promi
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
 
-  throw new Error(`Timed out waiting for Liepin reusable browser CDP endpoint: ${endpoint}`);
+  throw new Error(`Timed out waiting for ${getPlatformAdapter(platform).displayName} reusable browser CDP endpoint: ${endpoint}`);
 }
 
-async function connectLiepinReusableBrowser(): Promise<Browser | undefined> {
+async function connectReusableBrowser(platform: SupportedPlatform): Promise<Browser | undefined> {
   try {
-    return await chromium.connectOverCDP(resolveLiepinReusableBrowserCdpEndpoint(), { timeout: 2000 });
+    return await chromium.connectOverCDP(resolveReusableBrowserCdpEndpoint(platform), { timeout: 2000 });
   } catch {
     return undefined;
   }
@@ -89,11 +100,17 @@ function firstUsablePage(context: BrowserContext): Page | undefined {
   return context.pages().find((page) => !page.isClosed()) ?? undefined;
 }
 
-function preferredLiepinSessionPage(context: BrowserContext): Page | undefined {
+function preferredSessionPage(platform: SupportedPlatform, context: BrowserContext): Page | undefined {
   const pages = context.pages().filter((page) => !page.isClosed());
-  return pages.find((page) => isLiepinSearchUrl(page.url()))
-    ?? pages.find((page) => /^https:\/\/h\.liepin\.com\//i.test(page.url()))
-    ?? pages[0];
+  const preferredPatterns = platformPreferredUrlPatterns[platform];
+  for (const pattern of preferredPatterns) {
+    const matchedPage = pages.find((page) => pattern.test(page.url()));
+    if (matchedPage) {
+      return matchedPage;
+    }
+  }
+
+  return pages[0];
 }
 
 async function readStorageStateIfExists(platform: SupportedPlatform): Promise<BrowserStorageState | undefined> {
@@ -135,7 +152,7 @@ async function buildReusableBrowserLaunchOptions(headless: boolean): Promise<{
     ? launchOptions.executablePath
     : undefined;
   if (!executablePath) {
-    throw new Error('CloakBrowser did not resolve a Chromium executable path for the reusable Liepin browser.');
+    throw new Error('CloakBrowser did not resolve a Chromium executable path for the reusable browser.');
   }
 
   const cloakArgs = Array.isArray(launchOptions.args) ? launchOptions.args : [];
@@ -153,12 +170,12 @@ async function buildReusableBrowserLaunchOptions(headless: boolean): Promise<{
   };
 }
 
-async function createReusableLiepinBrowserSession(headless: boolean): Promise<BrowserSession> {
-  const existingBrowser = await connectLiepinReusableBrowser();
+async function createReusableBrowserSession(platform: SupportedPlatform, headless: boolean): Promise<BrowserSession> {
+  const existingBrowser = await connectReusableBrowser(platform);
   if (existingBrowser) {
     const existingContext = existingBrowser.contexts()[0];
     if (existingContext) {
-      const existingPage = preferredLiepinSessionPage(existingContext) ?? await existingContext.newPage();
+      const existingPage = preferredSessionPage(platform, existingContext) ?? await existingContext.newPage();
       return {
         browser: existingBrowser,
         context: existingContext,
@@ -167,18 +184,19 @@ async function createReusableLiepinBrowserSession(headless: boolean): Promise<Br
         keepOpenOnExit: true,
         reusableExternalBrowser: true,
         reusedExistingBrowser: true,
+        platform,
       };
     }
 
     await existingBrowser.close().catch(() => undefined);
   }
 
-  const userDataDir = resolveLiepinReusableBrowserUserDataDir();
+  const userDataDir = resolveReusableBrowserUserDataDir(platform);
   await fs.mkdir(userDataDir, { recursive: true });
   const launchOptions = await buildReusableBrowserLaunchOptions(headless);
   const browserArgs = [
     `--user-data-dir=${userDataDir}`,
-    `--remote-debugging-port=${config.playwright.liepinReuseCdpPort}`,
+    `--remote-debugging-port=${config.playwright.reuseCdpPortByPlatform[platform]}`,
     '--remote-debugging-address=127.0.0.1',
     ...launchOptions.args,
     'about:blank',
@@ -190,12 +208,12 @@ async function createReusableLiepinBrowserSession(headless: boolean): Promise<Br
   });
   child.unref();
 
-  await waitForLiepinReusableBrowserCdpEndpoint();
-  const browser = await chromium.connectOverCDP(resolveLiepinReusableBrowserCdpEndpoint());
+  await waitForReusableBrowserCdpEndpoint(platform);
+  const browser = await chromium.connectOverCDP(resolveReusableBrowserCdpEndpoint(platform));
   const context = browser.contexts()[0];
   if (!context) {
     await browser.close().catch(() => undefined);
-    throw new Error('Liepin reusable browser started without a default context.');
+    throw new Error(`${getPlatformAdapter(platform).displayName} reusable browser started without a default context.`);
   }
 
   if (config.browser.engine === 'cloakbrowser') {
@@ -208,8 +226,8 @@ async function createReusableLiepinBrowserSession(headless: boolean): Promise<Br
     }
   }
 
-  await applyPersistedStorageState(context, 'liepin');
-  const page = firstUsablePage(context) ?? await context.newPage();
+  await applyPersistedStorageState(context, platform);
+  const page = preferredSessionPage(platform, context) ?? firstUsablePage(context) ?? await context.newPage();
 
   return {
     browser,
@@ -219,6 +237,7 @@ async function createReusableLiepinBrowserSession(headless: boolean): Promise<Br
     keepOpenOnExit: true,
     reusableExternalBrowser: true,
     reusedExistingBrowser: false,
+    platform,
   };
 }
 
@@ -240,15 +259,19 @@ function shouldAppendExperimentalPlatformDiagnostics(platform: SupportedPlatform
 }
 
 export function shouldKeepBrowserOpenOnExit(platform: SupportedPlatform, headless = config.playwright.headless): boolean {
-  return platform === 'liepin' && !headless;
+  return isReusableBrowserEnabled(platform, headless);
 }
 
 export function resolveBrowserHeadless(platform: SupportedPlatform, requestedHeadless = config.playwright.headless): boolean {
   return platform === 'liepin' ? false : requestedHeadless;
 }
 
+export function isReusableBrowserEnabled(platform: SupportedPlatform, headless = config.playwright.headless): boolean {
+  return config.playwright.reuseBrowserByPlatform[platform] && !resolveBrowserHeadless(platform, headless);
+}
+
 export function isLiepinReusableBrowserEnabled(headless = config.playwright.headless): boolean {
-  return config.playwright.liepinReuseBrowser && !resolveBrowserHeadless('liepin', headless);
+  return isReusableBrowserEnabled('liepin', headless);
 }
 
 function classifyLiepinManualLoginLanding(url: string, bodyText: string): 'login' | 'redirect' | 'unexpected' {
@@ -333,12 +356,11 @@ async function createBrowserSessionWithHeadless(
 ): Promise<BrowserSession> {
   const effectiveHeadless = resolveBrowserHeadless(platform, headless);
   if (
-    platform === 'liepin'
-    && config.playwright.liepinReuseBrowser
+    isReusableBrowserEnabled(platform, effectiveHeadless)
     && !effectiveHeadless
     && options.keepOpenOnExit !== false
   ) {
-    return createReusableLiepinBrowserSession(effectiveHeadless);
+    return createReusableBrowserSession(platform, effectiveHeadless);
   }
 
   const browser = await launchBrowser(effectiveHeadless);
@@ -349,6 +371,7 @@ async function createBrowserSessionWithHeadless(
     browser,
     context,
     page,
+    platform,
     keepOpenOnExit: options.keepOpenOnExit ?? shouldKeepBrowserOpenOnExit(platform, effectiveHeadless),
   };
 }
@@ -378,6 +401,7 @@ export async function createPersistentBrowserSession(platform: SupportedPlatform
     temporaryUserDataDir,
     closeBrowser: false,
     keepOpenOnExit: shouldKeepBrowserOpenOnExit(platform, headless),
+    platform,
   };
 }
 
@@ -489,7 +513,9 @@ export async function closeBrowserSession(session: BrowserSession): Promise<void
     }
 
     if (session.reusableExternalBrowser) {
-      await session.context.storageState({ path: resolveStorageStatePath('liepin') }).catch(() => undefined);
+      if (session.platform) {
+        await session.context.storageState({ path: resolveStorageStatePath(session.platform) }).catch(() => undefined);
+      }
       await session.browser.close().catch(() => undefined);
       cleanupTemporaryUserDataDir();
       return;

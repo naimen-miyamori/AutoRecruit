@@ -1,6 +1,17 @@
 import type { BrowserContext, Locator, Page, Response } from 'playwright';
 import { config } from '../config.js';
 import {
+  clickLocatorWithMouse,
+  clickPlatformLocator,
+  fillPlatformLocator,
+  getPlatformCandidatePaceDelayMs,
+  randomIntBetween,
+  waitOnPageOrTimer,
+  waitPlatformActionPace,
+  waitPlatformActionPaceWithoutPage,
+  waitPlatformCandidatePace,
+} from '../browser/pacing.js';
+import {
   parseSearchResultTotalFromText,
 } from '../search/page-actions.js';
 import type { CandidateListItem, CandidateResume, EducationExperience, ProjectExperience, WorkExperience } from '../types/job.js';
@@ -46,6 +57,7 @@ const observedLiepinSearchApiGenerations = new WeakMap<Page, number>();
 const observedLiepinSearchApiMinRequestStartTimes = new WeakMap<Page, number>();
 const observedLiepinSearchApiEmptyResultPages = new WeakSet<Page>();
 const liepinDetailPollIntervalMs = 250;
+const liepinPlatform = 'liepin';
 
 function createDeadline(timeoutMs = config.playwright.resumeDetailTimeoutMs): number {
   return Date.now() + Math.max(timeoutMs, 1);
@@ -63,89 +75,31 @@ function boundedTimeout(deadline: number, maxTimeoutMs = Number.POSITIVE_INFINIT
   return Math.max(1, Math.min(remainingTime(deadline), maxTimeoutMs));
 }
 
-function randomIntBetween(min: number, max: number): number {
-  const lower = Math.max(0, Math.floor(Math.min(min, max)));
-  const upper = Math.max(lower, Math.floor(Math.max(min, max)));
-  return lower + Math.floor(Math.random() * (upper - lower + 1));
-}
-
 function liepinActionTimeoutMs(): number {
-  return randomIntBetween(config.playwright.liepinActionDelayMinMs, config.playwright.liepinActionDelayMaxMs);
-}
-
-async function waitOnPageOrTimer(page: Page, timeoutMs: number): Promise<void> {
-  if (timeoutMs <= 0) {
-    return;
-  }
-
-  const waitForTimeout = (page as Partial<Pick<Page, 'waitForTimeout'>>).waitForTimeout?.bind(page);
-  if (!waitForTimeout) {
-    return;
-  }
-
-  await waitForTimeout(timeoutMs).catch(async () => {
-    await new Promise((resolve) => setTimeout(resolve, timeoutMs));
-  });
-}
-
-async function waitLiepinActionPace(page: Page): Promise<void> {
-  await waitOnPageOrTimer(
-    page,
-    randomIntBetween(config.playwright.liepinActionDelayMinMs, config.playwright.liepinActionDelayMaxMs),
+  return randomIntBetween(
+    config.playwright.actionDelayMinMsByPlatform.liepin,
+    config.playwright.actionDelayMaxMsByPlatform.liepin,
   );
 }
 
+async function waitLiepinActionPace(page: Page): Promise<void> {
+  await waitPlatformActionPace(page, liepinPlatform);
+}
+
 async function waitLiepinActionPaceWithoutPage(): Promise<void> {
-  await new Promise((resolve) => setTimeout(
-    resolve,
-    randomIntBetween(config.playwright.liepinActionDelayMinMs, config.playwright.liepinActionDelayMaxMs),
-  ));
+  await waitPlatformActionPaceWithoutPage(liepinPlatform);
 }
 
 async function clickLiepinLocatorWithMouse(locator: Locator, page: Page, timeoutMs: number): Promise<boolean> {
-  const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
-  const boundingBox = (locator as Partial<Pick<Locator, 'boundingBox'>>).boundingBox?.bind(locator);
-  const scrollIntoViewIfNeeded = (locator as Partial<Pick<Locator, 'scrollIntoViewIfNeeded'>>).scrollIntoViewIfNeeded?.bind(locator);
-
-  if (!mouse || !boundingBox) {
-    return false;
-  }
-
-  await scrollIntoViewIfNeeded?.({ timeout: timeoutMs }).catch(() => undefined);
-  const box = await boundingBox({ timeout: timeoutMs }).catch(() => null);
-  if (!box || box.width <= 0 || box.height <= 0) {
-    return false;
-  }
-
-  const targetX = box.x + box.width / 2;
-  const targetY = box.y + box.height / 2;
-  const currentX = targetX + randomIntBetween(-80, 80);
-  const currentY = targetY + randomIntBetween(-40, 40);
-  await mouse.move(currentX, currentY, { steps: randomIntBetween(3, 6) }).catch(() => undefined);
-  await mouse.move(targetX, targetY, { steps: randomIntBetween(8, 16) });
-  await mouse.click(targetX, targetY);
-  return true;
+  return clickLocatorWithMouse(locator, page, timeoutMs);
 }
 
 async function clickLiepinLocator(locator: Locator, page: Page, timeoutMs: number): Promise<void> {
-  await waitLiepinActionPace(page);
-  if (await clickLiepinLocatorWithMouse(locator, page, timeoutMs)) {
-    return;
-  }
-
-  await locator.click({ timeout: timeoutMs }).catch(async (error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/unexpected argument|too many arguments/i.test(message)) {
-      throw error;
-    }
-
-    await locator.click();
-  });
+  await clickPlatformLocator(locator, page, liepinPlatform, timeoutMs);
 }
 
 async function fillLiepinLocator(locator: Locator, page: Page, value: string, timeoutMs: number): Promise<void> {
-  await waitLiepinActionPace(page);
-  await locator.fill(value, { timeout: timeoutMs });
+  await fillPlatformLocator(locator, page, liepinPlatform, value, timeoutMs);
 }
 
 async function fillFirstVisibleLiepinInput(
@@ -274,14 +228,11 @@ async function saveLiepinSearchCondition(page: Page, savedSearchName: string): P
 }
 
 export function getLiepinCandidatePaceDelayMs(): number {
-  return randomIntBetween(
-    config.playwright.liepinCandidateDelayMinMs,
-    config.playwright.liepinCandidateDelayMaxMs,
-  );
+  return getPlatformCandidatePaceDelayMs(liepinPlatform);
 }
 
 export async function waitLiepinCandidatePace(page: Page): Promise<void> {
-  await waitOnPageOrTimer(page, getLiepinCandidatePaceDelayMs());
+  await waitPlatformCandidatePace(page, liepinPlatform);
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
@@ -767,7 +718,7 @@ async function openLiepinRecruiterSearchPage(page: Page, deadline: number): Prom
 }
 
 async function fillLiepinKeywordSearchInput(page: Page, value: string): Promise<boolean> {
-  return fillLiepinInputNearText(
+  if (await fillLiepinInputNearText(
     page,
     value,
     ['职位名称', '包含任意关键词', '包含全部关键词'],
@@ -779,7 +730,11 @@ async function fillLiepinKeywordSearchInput(page: Page, value: string): Promise<
       'input[type="search"]',
       'input[type="text"]',
     ],
-  ) || fillFirstVisibleLiepinInput(page, value, [
+  )) {
+    return true;
+  }
+
+  return fillFirstVisibleLiepinInput(page, value, [
     'input.ant-select-selection-search-input[type="search"]',
     'input.search-component-input',
     'input.ant-input',

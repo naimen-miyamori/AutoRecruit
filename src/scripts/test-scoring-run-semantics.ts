@@ -11,7 +11,7 @@ import { buildJobKey } from '../parsers/jd-parser.js';
 import { getResumeDomSnapshot, collectResumePageEvidence, openResumeDetail } from '../browser/resume-detail.js';
 import { collectCandidateList, waitForCandidateResultsReady } from '../browser/candidate-list.js';
 import { clickSearchTriggerRef, findSubscriptionCardRef, openAuthenticatedSubscribePageRef, openSubscribeSearch, waitForAuthenticatedSubscribeReadyRef, waitForSearchTriggerReadyRef } from '../browser/subscribe-search.js';
-import { BrowserSession, closeBrowserSessionRef, createFreshBrowserSessionRef, createPersistentBrowserSessionRef, isLiepinReusableBrowserEnabled, openLoginSessionRef, persistBrowserSessionRef, openAuthenticatedSubscribePageRef as openAuthenticatedSubscribePageSessionRef, resolveBrowserHeadless, verifyPersistedBrowserSessionRef } from '../browser/session.js';
+import { BrowserSession, closeBrowserSessionRef, createFreshBrowserSessionRef, createPersistentBrowserSessionRef, isLiepinReusableBrowserEnabled, isReusableBrowserEnabled, openLoginSessionRef, persistBrowserSessionRef, openAuthenticatedSubscribePageRef as openAuthenticatedSubscribePageSessionRef, resolveBrowserHeadless, verifyPersistedBrowserSessionRef } from '../browser/session.js';
 import { validateCandidateListExtraction } from '../extraction/extractor.js';
 import { resolveOpenAISettings } from '../llm/openai-client.js';
 import { liepinAdapter } from '../platforms/liepin-adapter.js';
@@ -1811,17 +1811,39 @@ describe('scoring run semantics', () => {
   });
 
   it('enables reusable Liepin browser sessions only for headed Liepin runs unless explicitly disabled', () => {
-    const originalReuseBrowser = config.playwright.liepinReuseBrowser;
+    const originalReuseBrowser = config.playwright.reuseBrowserByPlatform.liepin;
 
     try {
-      (config.playwright as { liepinReuseBrowser: boolean }).liepinReuseBrowser = true;
+      (config.playwright.reuseBrowserByPlatform as { liepin: boolean }).liepin = true;
       assert.equal(isLiepinReusableBrowserEnabled(true), true);
       assert.equal(isLiepinReusableBrowserEnabled(false), true);
 
-      (config.playwright as { liepinReuseBrowser: boolean }).liepinReuseBrowser = false;
+      (config.playwright.reuseBrowserByPlatform as { liepin: boolean }).liepin = false;
       assert.equal(isLiepinReusableBrowserEnabled(false), false);
     } finally {
-      (config.playwright as { liepinReuseBrowser: boolean }).liepinReuseBrowser = originalReuseBrowser;
+      (config.playwright.reuseBrowserByPlatform as { liepin: boolean }).liepin = originalReuseBrowser;
+    }
+  });
+
+  it('supports reusable browser sessions per platform without changing 51job and Zhilian defaults', () => {
+    const originalReuseBrowser = { ...config.playwright.reuseBrowserByPlatform };
+    const originalHeadless = config.playwright.headless;
+
+    try {
+      (config.playwright as { headless: boolean }).headless = false;
+      assert.equal(isReusableBrowserEnabled('liepin'), true);
+      assert.equal(isReusableBrowserEnabled('51job'), false);
+      assert.equal(isReusableBrowserEnabled('zhilian'), false);
+
+      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean })['51job'] = true;
+      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean }).zhilian = true;
+      assert.equal(isReusableBrowserEnabled('51job', false), true);
+      assert.equal(isReusableBrowserEnabled('zhilian', false), true);
+      assert.equal(isReusableBrowserEnabled('51job', true), false);
+      assert.equal(isReusableBrowserEnabled('zhilian', true), false);
+    } finally {
+      (config.playwright as { headless: boolean }).headless = originalHeadless;
+      Object.assign(config.playwright.reuseBrowserByPlatform, originalReuseBrowser);
     }
   });
 
@@ -4356,6 +4378,55 @@ describe('scoring run semantics', () => {
     ]);
     assert.deepStrictEqual(result.newCandidates.map((candidate) => candidate.candidateId), ['cand-new']);
     assert.deepStrictEqual(await store.readSeenIds('liepin', jobKey), ['cand-seen', 'cand-new']);
+  });
+
+  it('uses platform candidate pacing between every pair of new candidates', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-platform-candidate-pace';
+    const fetchedAt = '2026-04-20T12:34:56.000Z';
+    const paceCalls: string[] = [];
+    const originalWaitPlatformCandidatePace = indexModule.waitPlatformCandidatePaceRef.fn;
+
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('zhilian'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({
+        candidates: [
+          { candidateId: 'cand-1' },
+          { candidateId: 'cand-2' },
+          { candidateId: 'cand-3' },
+        ],
+      }),
+      openResumeDetail: async () => createDetailPage(),
+      parseResumeDetail: async (_page, candidate) => buildResume(candidate.candidateId),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    indexModule.waitPlatformCandidatePaceRef.fn = async (_page, platform) => {
+      paceCalls.push(platform);
+    };
+    indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
+
+    try {
+      await indexModule.runResumeCaptureFlow(
+        'zhilian',
+        jobKey,
+        buildNormalizedJob(),
+        'search keyword',
+        store,
+        {
+          page: { id: 'root-page' },
+          context: { id: 'browser-context' },
+        } as never,
+        fetchedAt,
+        adapter,
+      );
+    } finally {
+      indexModule.waitPlatformCandidatePaceRef.fn = originalWaitPlatformCandidatePace;
+    }
+
+    assert.deepStrictEqual(paceCalls, ['zhilian', 'zhilian']);
   });
 
   it('stops Liepin flow on candidate failure and leaves the failed detail page open', async () => {

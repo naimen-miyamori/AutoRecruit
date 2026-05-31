@@ -13,7 +13,7 @@ Liepin 当前是正式支持的平台实现，CLI 名称为 `liepin`。平台专
 
 手动登录轮询有一个重要约束：在检测到已鉴权 recruiter cookies 之前，不应在同一上下文里额外探测其他登录页、`about:blank` 或任意无关页面，避免刚打开登录窗口就被脚本误关。登录阶段只检查当前上下文已有页面，不额外打开 probe 标签页；保存登录态后也不再启动 fresh-session 复验。
 
-Liepin 始终使用有头浏览器，`PLAYWRIGHT_HEADLESS=true` 对 Liepin 不生效。浏览器启动引擎默认是 CloakBrowser；如需回退到 Playwright 自带 Chromium，可设置 `BROWSER_ENGINE=playwright`。默认开启可复用浏览器：流程结束会关闭最后的详情页、停留并置前招聘端人才搜索页，同时保留浏览器；下次 Liepin 运行会优先通过本地 CDP 端口连接这个窗口并从当前搜索页继续。可设置 `PLAYWRIGHT_LIEPIN_REUSE_BROWSER=false` 关闭复用，或用 `PLAYWRIGHT_LIEPIN_REUSE_CDP_PORT` 改默认端口 `19327`。
+Liepin 始终使用有头浏览器，`PLAYWRIGHT_HEADLESS=true` 对 Liepin 不生效。浏览器启动引擎默认是 CloakBrowser；如需回退到 Playwright 自带 Chromium，可设置 `BROWSER_ENGINE=playwright`。可复用浏览器能力是全平台共享实现，但 Liepin 默认开启：流程结束会关闭最后的详情页、停留并置前招聘端人才搜索页，同时保留浏览器；下次 Liepin 运行会优先通过本地 CDP 端口连接这个窗口并从当前搜索页继续。可设置 `PLAYWRIGHT_LIEPIN_REUSE_BROWSER=false` 关闭复用，或用 `PLAYWRIGHT_LIEPIN_REUSE_CDP_PORT` 改默认端口 `19327`。
 
 ## 搜索与候选人提取
 
@@ -37,7 +37,7 @@ Liepin 搜索页打开、搜索壳页、快捷搜索标签、DOM 候选和 `sear
 
 ## 操作节奏
 
-Liepin 站内点击和输入默认都会先等待随机 `2000-3000ms`，包括快捷搜索、搜索按钮、`隐藏已查看`、打开详情、`转发`、选择联系人和确认转发。候选人之间的默认间隔也是随机 `2000-3000ms`。点击会先移动鼠标到目标元素再点击；如需临时调整，可设置 `PLAYWRIGHT_LIEPIN_ACTION_DELAY_MIN_MS`、`PLAYWRIGHT_LIEPIN_ACTION_DELAY_MAX_MS`、`PLAYWRIGHT_LIEPIN_CANDIDATE_DELAY_MIN_MS`、`PLAYWRIGHT_LIEPIN_CANDIDATE_DELAY_MAX_MS`。
+Liepin 站内点击和输入默认都会先等待随机 `2000-3000ms`，包括快捷搜索、搜索按钮、`隐藏已查看`、打开详情、`转发`、选择联系人和确认转发。候选人之间的默认间隔也是随机 `2000-3000ms`。点击会先移动鼠标到目标元素再点击；如需临时调整，可设置 `PLAYWRIGHT_LIEPIN_ACTION_DELAY_MIN_MS`、`PLAYWRIGHT_LIEPIN_ACTION_DELAY_MAX_MS`、`PLAYWRIGHT_LIEPIN_CANDIDATE_DELAY_MIN_MS`、`PLAYWRIGHT_LIEPIN_CANDIDATE_DELAY_MAX_MS`。这些配置走全平台共享 pacing 实现；也可以使用全局 `PLAYWRIGHT_ACTION_DELAY_*` 和 `PLAYWRIGHT_CANDIDATE_DELAY_*` 默认值，再用 Liepin 平台变量覆盖。
 
 ## 推荐验证
 

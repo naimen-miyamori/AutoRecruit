@@ -3,11 +3,11 @@ import { buildJobKey, parseJobDescription } from './parsers/jd-parser.js';
 import { config } from './config.js';
 import { JobStore } from './storage/job-store.js';
 import { BrowserSession, closeBrowserSession, ensureAuthenticatedBrowserSession } from './browser/session.js';
+import { waitPlatformCandidatePace } from './browser/pacing.js';
 import { createProductionExtractionBoundary } from './extraction/production-extractor.js';
 import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
-import { waitLiepinCandidatePace } from './platforms/liepin-adapter.js';
 import type { CandidatePostOpenActions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
 import { loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
 import { scoreResumeAgainstJob } from './scoring/score-resume.js';
@@ -130,7 +130,7 @@ export const sendJobReportRef = { fn: sendJobReport };
 export const ensureAuthenticatedBrowserSessionRef = { fn: ensureAuthenticatedBrowserSession };
 export const closeBrowserSessionRef = { fn: closeBrowserSession };
 export const runSearchSubscriptionWorkflowRef = { fn: runSearchSubscriptionWorkflow };
-export const waitLiepinCandidatePaceRef = { fn: waitLiepinCandidatePace };
+export const waitPlatformCandidatePaceRef = { fn: waitPlatformCandidatePace };
 export { JobStore };
 
 export function resolvePlatformAdapter(platform: SupportedPlatform): PlatformAdapter {
@@ -503,8 +503,8 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   const candidateResults: CandidateProcessResult[] = [];
 
   for (const candidate of newCandidates) {
-    if (platform === 'liepin' && candidateResults.length > 0) {
-      await waitLiepinCandidatePaceRef.fn(searchPage);
+    if (candidateResults.length > 0) {
+      await waitPlatformCandidatePaceRef.fn(searchPage, platform);
     }
 
     candidateResults.push(await captureCandidateResume(platform, jobKey, candidate, store, session, searchPage, platformAdapter, {
