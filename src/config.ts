@@ -4,6 +4,8 @@ import type { SupportedPlatform } from './platforms/types.js';
 
 dotenv.config();
 
+export type BrowserEngine = 'cloakbrowser' | 'playwright';
+
 function getRequiredEnv(name: string): string {
   const value = process.env[name];
 
@@ -27,6 +29,16 @@ function getOptionalNumberEnv(name: string, fallback: number): number {
   }
 
   return parsed;
+}
+
+function getBrowserEngineEnv(): BrowserEngine {
+  const value = (process.env.BROWSER_ENGINE ?? 'cloakbrowser').trim().toLowerCase();
+
+  if (value === 'cloakbrowser' || value === 'playwright') {
+    return value;
+  }
+
+  throw new Error('Environment variable BROWSER_ENGINE must be either "cloakbrowser" or "playwright"');
 }
 
 function getDefaultStorageStatePath(platform: SupportedPlatform): string {
@@ -63,6 +75,9 @@ export function resolveStorageStatePath(platform: SupportedPlatform): string {
 
 export const config = {
   dataDir: path.resolve(process.env.DATA_DIR ?? './data'),
+  browser: {
+    engine: getBrowserEngineEnv(),
+  },
   playwright: {
     headless: process.env.PLAYWRIGHT_HEADLESS === 'true',
     storageStatePath: path.resolve(process.env.STORAGE_STATE_PATH ?? './storage-state.json'),
@@ -74,6 +89,12 @@ export const config = {
     emptyResultsStableMs: getOptionalNumberEnv('PLAYWRIGHT_EMPTY_RESULTS_STABLE_MS', 2000),
     apiFallbackTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_API_FALLBACK_TIMEOUT_MS', 3000),
     resumeDetailTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS', 20000),
+    liepinActionDelayMinMs: getOptionalNumberEnv('PLAYWRIGHT_LIEPIN_ACTION_DELAY_MIN_MS', 2000),
+    liepinActionDelayMaxMs: getOptionalNumberEnv('PLAYWRIGHT_LIEPIN_ACTION_DELAY_MAX_MS', 3000),
+    liepinCandidateDelayMinMs: getOptionalNumberEnv('PLAYWRIGHT_LIEPIN_CANDIDATE_DELAY_MIN_MS', 2000),
+    liepinCandidateDelayMaxMs: getOptionalNumberEnv('PLAYWRIGHT_LIEPIN_CANDIDATE_DELAY_MAX_MS', 3000),
+    liepinReuseBrowser: process.env.PLAYWRIGHT_LIEPIN_REUSE_BROWSER !== 'false',
+    liepinReuseCdpPort: getOptionalNumberEnv('PLAYWRIGHT_LIEPIN_REUSE_CDP_PORT', 19327),
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY ?? '',

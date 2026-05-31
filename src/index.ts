@@ -7,7 +7,8 @@ import { createProductionExtractionBoundary } from './extraction/production-extr
 import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
-import type { PlatformAdapter, SupportedPlatform } from './platforms/types.js';
+import { waitLiepinCandidatePace } from './platforms/liepin-adapter.js';
+import type { CandidatePostOpenActions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
 import { loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
 import { scoreResumeAgainstJob } from './scoring/score-resume.js';
 import { exportJobResults, type ExportJobResultsSummary } from './scripts/export-job-results.js';
@@ -36,6 +37,7 @@ interface RunnableJobInput extends ReportDeliveryOptions {
   jobDescriptionText?: string;
   jobDescriptionFilePath?: string;
   includeViewedCandidates: boolean;
+  liepinForwardContact?: string;
 }
 
 interface SingleJobCliInput extends RunnableJobInput {
@@ -48,6 +50,7 @@ interface BatchCliInput extends ReportDeliveryOptions {
   platform: CliPlatformSelection;
   jobsFilePath: string;
   includeViewedCandidates: boolean;
+  liepinForwardContact?: string;
 }
 
 interface SearchSubscriptionCliInput {
@@ -71,6 +74,7 @@ interface SinglePlatformCliInput extends ReportDeliveryOptions {
   jobDescriptionText?: string;
   jobDescriptionFilePath?: string;
   includeViewedCandidates: boolean;
+  liepinForwardContact?: string;
 }
 
 export interface MainRunSummary {
@@ -126,6 +130,7 @@ export const sendJobReportRef = { fn: sendJobReport };
 export const ensureAuthenticatedBrowserSessionRef = { fn: ensureAuthenticatedBrowserSession };
 export const closeBrowserSessionRef = { fn: closeBrowserSession };
 export const runSearchSubscriptionWorkflowRef = { fn: runSearchSubscriptionWorkflow };
+export const waitLiepinCandidatePaceRef = { fn: waitLiepinCandidatePace };
 export { JobStore };
 
 export function resolvePlatformAdapter(platform: SupportedPlatform): PlatformAdapter {
@@ -223,6 +228,7 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     jobDescriptionText: jd,
     jobDescriptionFilePath: jdFile,
     includeViewedCandidates: input.includeViewedCandidates,
+    liepinForwardContact: input.liepinForwardContact,
   };
 }
 
@@ -286,10 +292,21 @@ function parseArgs(argv: readonly string[]): CliInput {
   const includeViewedCandidates = flagPresence.has('include-viewed')
     ? parseOptionalBoolean(values.get('include-viewed'), '--include-viewed')
     : false;
+  const liepinForwardContact = values.get('liepin-forward-contact')?.trim();
+
+  if (flagPresence.has('liepin-forward-contact')) {
+    if (!liepinForwardContact) {
+      throw new Error('--liepin-forward-contact must be a non-empty string');
+    }
+
+    if (platform !== 'liepin' && platform !== 'all') {
+      throw new Error('--liepin-forward-contact can only be used with --platform liepin or --platform all');
+    }
+  }
 
   if (searchSubscriptionFilePath) {
-    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed')) {
-      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, or --include-viewed');
+    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact')) {
+      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, or --liepin-forward-contact');
     }
 
     return {
@@ -318,6 +335,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       recipientEmail,
       ccEmails,
       includeViewedCandidates,
+      liepinForwardContact,
     };
   }
 
@@ -338,6 +356,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     jobDescriptionText,
     jobDescriptionFilePath,
     includeViewedCandidates,
+    liepinForwardContact,
   };
 }
 
@@ -350,6 +369,7 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
     jobDescriptionText: input.jobDescriptionText,
     jobDescriptionFilePath: input.jobDescriptionFilePath,
     includeViewedCandidates: input.includeViewedCandidates,
+    liepinForwardContact: input.liepinForwardContact,
   };
 }
 
@@ -361,11 +381,14 @@ async function captureCandidateResume(
   session: BrowserSession,
   searchPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>,
   platformAdapter: PlatformAdapter,
+  postOpenActions: CandidatePostOpenActions = {},
 ): Promise<CandidateProcessResult> {
   let detailPage = session.page;
+  let preserveDetailPageForInspection = false;
 
   try {
     detailPage = await platformAdapter.openResumeDetail(session.context, searchPage, candidate);
+    await platformAdapter.afterResumeDetailOpened?.(detailPage, candidate, postOpenActions);
     const extraction = platformAdapter.platform === '51job'
       ? await extractResumeFromPageRef.fn(detailPage, candidate)
       : {
@@ -381,6 +404,11 @@ async function captureCandidateResume(
       captured: true,
     };
   } catch (error) {
+    if (platform === 'liepin') {
+      preserveDetailPageForInspection = true;
+      throw new Error(`Liepin candidate ${candidate.candidateId} failed; stopping flow and leaving the browser open for inspection. Original error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
     return {
       candidateId: candidate.candidateId,
       markAsSeen: false,
@@ -388,8 +416,10 @@ async function captureCandidateResume(
       failureReason: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    if (detailPage !== session.page && detailPage !== searchPage) {
+    if (!preserveDetailPageForInspection && detailPage !== session.page && detailPage !== searchPage) {
       await detailPage.close().catch(() => undefined);
+      await (searchPage as Partial<Pick<typeof searchPage, 'bringToFront'>>).bringToFront?.call(searchPage).catch(() => undefined);
+      session.page = searchPage;
     }
   }
 }
@@ -458,7 +488,7 @@ async function scoreCapturedResumes(
   };
 }
 
-export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
+export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean; liepinForwardContact?: string } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
   const searchDeadline = Date.now() + config.playwright.searchPageTimeoutMs;
   const searchPage = await platformAdapter.openSubscribeSearch(session.page, searchKeyword, {
     deadline: searchDeadline,
@@ -473,7 +503,13 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   const candidateResults: CandidateProcessResult[] = [];
 
   for (const candidate of newCandidates) {
-    candidateResults.push(await captureCandidateResume(platform, jobKey, candidate, store, session, searchPage, platformAdapter));
+    if (platform === 'liepin' && candidateResults.length > 0) {
+      await waitLiepinCandidatePaceRef.fn(searchPage);
+    }
+
+    candidateResults.push(await captureCandidateResume(platform, jobKey, candidate, store, session, searchPage, platformAdapter, {
+      liepinForwardContact: platform === 'liepin' ? options.liepinForwardContact : undefined,
+    }));
   }
 
   const seenCandidateIds = candidateResults
@@ -581,7 +617,10 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       session,
       fetchedAt,
       platformAdapter,
-      { includeViewedCandidates: input.includeViewedCandidates },
+      {
+        includeViewedCandidates: input.includeViewedCandidates,
+        liepinForwardContact: input.liepinForwardContact,
+      },
     );
 
     let exportSummary: ExportJobResultsSummary | undefined;

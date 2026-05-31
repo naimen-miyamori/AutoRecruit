@@ -1,15 +1,10 @@
-import type { BrowserContext, Page, Response } from 'playwright';
+import type { BrowserContext, Locator, Page, Response } from 'playwright';
 import { config } from '../config.js';
 import {
-  clickFirstVisibleText,
-  clickPrimarySearchButton,
-  fillFirstVisibleInput,
-  fillInputNearText,
   parseSearchResultTotalFromText,
-  saveSearchConditionByCommonDialog,
 } from '../search/page-actions.js';
 import type { CandidateListItem, CandidateResume, EducationExperience, ProjectExperience, WorkExperience } from '../types/job.js';
-import type { PlatformAdapter, SearchWaitOptions } from './types.js';
+import type { CandidatePostOpenActions, PlatformAdapter, SearchWaitOptions } from './types.js';
 
 const candidateLinkSelector = [
   'a[href*="/resume/"]',
@@ -33,11 +28,23 @@ const detailReadySelectors = [
 const sectionTitles = ['工作经历', '项目经历', '项目经验', '教育经历', '教育背景', '技能', '技能标签', '语言能力', '证书', '个人优势'];
 const liepinLoginUrl = 'https://h.liepin.com/account/login';
 const liepinAuthenticatedUrl = 'https://h.liepin.com/search/getConditionItem';
+const liepinForwardDialogSelector = [
+  '[role="dialog"]',
+  '.ant-modal',
+  '.semi-modal',
+  '.modal',
+  '[class*="modal"]',
+  '[class*="dialog"]',
+  '[class*="popover"]',
+].join(', ');
+const liepinForwardActionTargetAttribute = 'data-autorecruit-liepin-forward-target';
+const liepinForwardContactTargetAttribute = 'data-autorecruit-liepin-forward-contact-target';
 const observedLiepinSearchApiCandidates = new WeakMap<Page, CandidateListItem[]>();
 const observedLiepinSearchApiSeenPages = new WeakSet<Page>();
 const observedLiepinSearchApiListenerPages = new WeakSet<Page>();
 const observedLiepinSearchApiGenerations = new WeakMap<Page, number>();
 const observedLiepinSearchApiMinRequestStartTimes = new WeakMap<Page, number>();
+const observedLiepinSearchApiEmptyResultPages = new WeakSet<Page>();
 const liepinDetailPollIntervalMs = 250;
 
 function createDeadline(timeoutMs = config.playwright.resumeDetailTimeoutMs): number {
@@ -56,6 +63,227 @@ function boundedTimeout(deadline: number, maxTimeoutMs = Number.POSITIVE_INFINIT
   return Math.max(1, Math.min(remainingTime(deadline), maxTimeoutMs));
 }
 
+function randomIntBetween(min: number, max: number): number {
+  const lower = Math.max(0, Math.floor(Math.min(min, max)));
+  const upper = Math.max(lower, Math.floor(Math.max(min, max)));
+  return lower + Math.floor(Math.random() * (upper - lower + 1));
+}
+
+function liepinActionTimeoutMs(): number {
+  return randomIntBetween(config.playwright.liepinActionDelayMinMs, config.playwright.liepinActionDelayMaxMs);
+}
+
+async function waitOnPageOrTimer(page: Page, timeoutMs: number): Promise<void> {
+  if (timeoutMs <= 0) {
+    return;
+  }
+
+  const waitForTimeout = (page as Partial<Pick<Page, 'waitForTimeout'>>).waitForTimeout?.bind(page);
+  if (!waitForTimeout) {
+    return;
+  }
+
+  await waitForTimeout(timeoutMs).catch(async () => {
+    await new Promise((resolve) => setTimeout(resolve, timeoutMs));
+  });
+}
+
+async function waitLiepinActionPace(page: Page): Promise<void> {
+  await waitOnPageOrTimer(
+    page,
+    randomIntBetween(config.playwright.liepinActionDelayMinMs, config.playwright.liepinActionDelayMaxMs),
+  );
+}
+
+async function waitLiepinActionPaceWithoutPage(): Promise<void> {
+  await new Promise((resolve) => setTimeout(
+    resolve,
+    randomIntBetween(config.playwright.liepinActionDelayMinMs, config.playwright.liepinActionDelayMaxMs),
+  ));
+}
+
+async function clickLiepinLocatorWithMouse(locator: Locator, page: Page, timeoutMs: number): Promise<boolean> {
+  const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
+  const boundingBox = (locator as Partial<Pick<Locator, 'boundingBox'>>).boundingBox?.bind(locator);
+  const scrollIntoViewIfNeeded = (locator as Partial<Pick<Locator, 'scrollIntoViewIfNeeded'>>).scrollIntoViewIfNeeded?.bind(locator);
+
+  if (!mouse || !boundingBox) {
+    return false;
+  }
+
+  await scrollIntoViewIfNeeded?.({ timeout: timeoutMs }).catch(() => undefined);
+  const box = await boundingBox({ timeout: timeoutMs }).catch(() => null);
+  if (!box || box.width <= 0 || box.height <= 0) {
+    return false;
+  }
+
+  const targetX = box.x + box.width / 2;
+  const targetY = box.y + box.height / 2;
+  const currentX = targetX + randomIntBetween(-80, 80);
+  const currentY = targetY + randomIntBetween(-40, 40);
+  await mouse.move(currentX, currentY, { steps: randomIntBetween(3, 6) }).catch(() => undefined);
+  await mouse.move(targetX, targetY, { steps: randomIntBetween(8, 16) });
+  await mouse.click(targetX, targetY);
+  return true;
+}
+
+async function clickLiepinLocator(locator: Locator, page: Page, timeoutMs: number): Promise<void> {
+  await waitLiepinActionPace(page);
+  if (await clickLiepinLocatorWithMouse(locator, page, timeoutMs)) {
+    return;
+  }
+
+  await locator.click({ timeout: timeoutMs }).catch(async (error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/unexpected argument|too many arguments/i.test(message)) {
+      throw error;
+    }
+
+    await locator.click();
+  });
+}
+
+async function fillLiepinLocator(locator: Locator, page: Page, value: string, timeoutMs: number): Promise<void> {
+  await waitLiepinActionPace(page);
+  await locator.fill(value, { timeout: timeoutMs });
+}
+
+async function fillFirstVisibleLiepinInput(
+  page: Page,
+  value: string,
+  selectors: string[],
+  timeoutMs = 1000,
+): Promise<boolean> {
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    try {
+      await locator.waitFor({ state: 'visible', timeout: timeoutMs });
+      await fillLiepinLocator(locator, page, value, timeoutMs);
+      return true;
+    } catch {
+      continue;
+    }
+  }
+
+  return false;
+}
+
+async function fillLiepinInputNearText(
+  page: Page,
+  value: string,
+  rowHints: Array<string | RegExp>,
+  rowSelectors: string[],
+  inputSelectors: string[],
+  timeoutMs = 1000,
+): Promise<boolean> {
+  for (const rowHint of rowHints) {
+    for (const rowSelector of rowSelectors) {
+      const row = page.locator(rowSelector, { hasText: rowHint }).first();
+      if (typeof (row as Partial<Locator>).locator !== 'function') {
+        continue;
+      }
+
+      for (const inputSelector of inputSelectors) {
+        const locator = row.locator(inputSelector).first();
+        try {
+          await locator.waitFor({ state: 'visible', timeout: timeoutMs });
+          await fillLiepinLocator(locator, page, value, timeoutMs);
+          return true;
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+async function clickFirstVisibleLiepinText(
+  page: Page,
+  labels: Array<string | RegExp>,
+  timeoutMs = 1000,
+): Promise<boolean> {
+  for (const label of labels) {
+    const locator = page.getByText(label, { exact: false }).first();
+    try {
+      await locator.waitFor({ state: 'visible', timeout: timeoutMs });
+      await clickLiepinLocator(locator, page, timeoutMs);
+      return true;
+    } catch {
+      continue;
+    }
+  }
+
+  return false;
+}
+
+async function clickLiepinPrimarySearchButton(page: Page, timeoutMs = 1000): Promise<boolean> {
+  const candidates: Locator[] = [];
+  const roleLookup = (page as Partial<Pick<Page, 'getByRole'>>).getByRole?.bind(page);
+
+  if (roleLookup) {
+    candidates.push(roleLookup('button', { name: /^搜索$/ }).first());
+    candidates.push(roleLookup('button', { name: /搜\s*索/ }).first());
+  }
+
+  const buttonLocator = page.locator('button');
+  if (typeof (buttonLocator as Partial<Locator>).filter === 'function') {
+    candidates.push(buttonLocator.filter({ hasText: /^搜索$/ }).first());
+    candidates.push(buttonLocator.filter({ hasText: /搜\s*索/ }).first());
+  }
+
+  candidates.push(page.locator('.search-btn, .btn-search, .search_button, button.search_button, [class*="search-btn"], [class*="btn-search"]').first());
+
+  for (const locator of candidates) {
+    try {
+      await locator.waitFor({ state: 'visible', timeout: timeoutMs });
+      await clickLiepinLocator(locator, page, timeoutMs);
+      return true;
+    } catch {
+      continue;
+    }
+  }
+
+  return false;
+}
+
+async function saveLiepinSearchCondition(page: Page, savedSearchName: string): Promise<void> {
+  const timeoutMs = 1000;
+  const didOpenSaveDialog = await clickFirstVisibleLiepinText(page, ['订阅', '保存搜索条件', '保存条件', '保存搜索', '保存'], timeoutMs);
+  if (!didOpenSaveDialog) {
+    throw new Error('Search subscription on liepin could not find the save search condition action.');
+  }
+
+  const didFillSaveName = await fillFirstVisibleLiepinInput(page, savedSearchName, [
+    'input[placeholder*="订阅名称"]',
+    'input[placeholder*="名称"]',
+    'input[placeholder*="搜索"]',
+    'input[placeholder*="条件"]',
+    'input[type="text"]',
+  ], timeoutMs);
+
+  if (!didFillSaveName) {
+    throw new Error('Search subscription on liepin could not fill the saved search name.');
+  }
+
+  const didConfirm = await clickFirstVisibleLiepinText(page, ['确定', '保存', '确认'], timeoutMs);
+  if (!didConfirm) {
+    throw new Error('Search subscription on liepin could not confirm saving the search condition.');
+  }
+}
+
+export function getLiepinCandidatePaceDelayMs(): number {
+  return randomIntBetween(
+    config.playwright.liepinCandidateDelayMinMs,
+    config.playwright.liepinCandidateDelayMaxMs,
+  );
+}
+
+export async function waitLiepinCandidatePace(page: Page): Promise<void> {
+  await waitOnPageOrTimer(page, getLiepinCandidatePaceDelayMs());
+}
+
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
 
@@ -71,6 +299,11 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: 
       clearTimeout(timeout);
     }
   }
+}
+
+function buildExactTextPattern(value: string): RegExp {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^\\s*${escaped}\\s*$`);
 }
 
 function throwLastAggregateError(error: unknown): never {
@@ -395,8 +628,22 @@ function isLiepinLoginPageUrl(url: string): boolean {
     || /^https:\/\/h\.liepin\.com\/(?:\?.*)?#login$/.test(normalizedUrl);
 }
 
+function isLiepinHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url);
+}
+
 function hasLiepinAuthenticatedCookie(cookieNames: string[]): boolean {
   return cookieNames.some((name) => /^(uniquekey|liepin_login_valid|lt_auth|_h_ld_auth_)$/i.test(name));
+}
+
+async function readLiepinCookieNames(page: Page): Promise<string[]> {
+  const context = (page as Partial<Pick<Page, 'context'>>).context?.();
+  if (!context) {
+    return [];
+  }
+
+  const cookies = await context.cookies().catch(() => []);
+  return cookies.map((cookie) => cookie.name);
 }
 
 function isLiepinResumeDetailUrl(url: string): boolean {
@@ -412,12 +659,16 @@ async function assertLiepinAuthenticated(page: Page): Promise<void> {
   const bodyText = await body.innerText();
   const currentUrl = page.url();
   if (isLiepinUnauthenticatedText(bodyText) || isLiepinLoginPageUrl(currentUrl)) {
+    const cookieNames = await readLiepinCookieNames(page);
+    if (isLiepinLoginPageUrl(currentUrl) && hasLiepinAuthenticatedCookie(cookieNames)) {
+      return;
+    }
+
     throw new Error('Liepin authenticated page is not available because the session has fallen back to the login screen.');
   }
 
   if (bodyText.trim().length === 0 && /^https:\/\/h\.liepin\.com\/search\/getconditionitem(?:\?.*)?(?:#.*)?$/i.test(currentUrl)) {
-    const cookies = await page.context().cookies().catch(() => []);
-    const cookieNames = cookies.map((cookie) => cookie.name);
+    const cookieNames = await readLiepinCookieNames(page);
     if (hasLiepinAuthenticatedCookie(cookieNames)) {
       return;
     }
@@ -450,12 +701,73 @@ export function isSafeLiepinResumeUrl(url: string | null | undefined): boolean {
     || /^https:\/\/www\.liepin\.com\/resume-detail(?:\/|[-?])/i.test(normalizedUrl);
 }
 
-function isLiepinSearchUrl(url: string): boolean {
+export function isLiepinSearchUrl(url: string): boolean {
   return /^https:\/\/h\.liepin\.com\/search\/getconditionitem(?:[/?#].*)?$/i.test(url);
 }
 
+async function clickLiepinFindTalentEntry(page: Page, deadline: number): Promise<boolean> {
+  const getByText = (page as Partial<Pick<Page, 'getByText'>>).getByText?.bind(page);
+  if (!getByText) {
+    return false;
+  }
+
+  const findTalent = getByText(/^\s*找人\s*$/).first();
+  const isVisible = (findTalent as Partial<Pick<Locator, 'isVisible'>>).isVisible?.bind(findTalent);
+  const visible = isVisible
+    ? await isVisible({ timeout: Math.min(remainingTime(deadline), 1000) }).catch(() => false)
+    : await findTalent.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 1000) })
+      .then(() => true)
+      .catch(() => false);
+  if (!visible) {
+    return false;
+  }
+
+  await clickLiepinLocator(findTalent, page, boundedTimeout(deadline, 5000));
+  return true;
+}
+
+async function openLiepinSearchFromAuthenticatedHome(page: Page, deadline: number): Promise<boolean> {
+  if (isLiepinSearchUrl(page.url())) {
+    return true;
+  }
+
+  const clicked = await clickLiepinFindTalentEntry(page, deadline);
+  if (!clicked) {
+    return false;
+  }
+
+  const waitForUrl = (page as Partial<Pick<Page, 'waitForURL'>>).waitForURL?.bind(page);
+  await waitForUrl?.(
+    (url) => isLiepinSearchUrl(url.toString()),
+    { timeout: remainingTime(deadline) },
+  ).catch(() => undefined);
+  return isLiepinSearchUrl(page.url());
+}
+
+async function openLiepinRecruiterSearchPage(page: Page, deadline: number): Promise<void> {
+  if (isLiepinSearchUrl(page.url())) {
+    return;
+  }
+
+  if (isLiepinHttpUrl(page.url())) {
+    await assertLiepinAuthenticated(page);
+    if (await openLiepinSearchFromAuthenticatedHome(page, deadline)) {
+      return;
+    }
+  }
+
+  try {
+    await waitLiepinActionPace(page);
+    await page.goto(liepinAuthenticatedUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
+  } catch (error) {
+    if (!isAbortNavigationError(error) || !isLiepinSearchUrl(page.url())) {
+      throw error;
+    }
+  }
+}
+
 async function fillLiepinKeywordSearchInput(page: Page, value: string): Promise<boolean> {
-  return fillInputNearText(
+  return fillLiepinInputNearText(
     page,
     value,
     ['职位名称', '包含任意关键词', '包含全部关键词'],
@@ -467,7 +779,7 @@ async function fillLiepinKeywordSearchInput(page: Page, value: string): Promise<
       'input[type="search"]',
       'input[type="text"]',
     ],
-  ) || fillFirstVisibleInput(page, value, [
+  ) || fillFirstVisibleLiepinInput(page, value, [
     'input.ant-select-selection-search-input[type="search"]',
     'input.search-component-input',
     'input.ant-input',
@@ -481,30 +793,22 @@ async function prepareLiepinSearchConditionPage(page: Page, keyword: string, opt
   resetObservedLiepinSearchResumesApi(page);
   attachLiepinSearchResumesApiObserver(page);
 
-  if (!isLiepinSearchUrl(page.url())) {
-    try {
-      await page.goto(liepinAuthenticatedUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
-    } catch (error) {
-      if (!isAbortNavigationError(error) || !isLiepinSearchUrl(page.url())) {
-        throw error;
-      }
-    }
-  }
+  await openLiepinRecruiterSearchPage(page, deadline);
 
-  await waitForLiepinPageReady(page, { deadline });
+  await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
   const didFillKeyword = await fillLiepinKeywordSearchInput(page, keyword);
   if (!didFillKeyword) {
     throw new Error('Search subscription on liepin could not fill the keyword input on the recruiter search page.');
   }
 
-  const didTriggerSearch = await clickPrimarySearchButton(page)
-    || await clickFirstVisibleText(page, ['搜索', '搜 索']);
+  const didTriggerSearch = await clickLiepinPrimarySearchButton(page)
+    || await clickFirstVisibleLiepinText(page, ['搜索', '搜 索']);
   if (!didTriggerSearch) {
     throw new Error('Search subscription on liepin could not trigger the keyword search on the recruiter search page.');
   }
 
-  await waitForLiepinPageReady(page, { deadline });
-  await clickFirstVisibleText(page, ['更多', '展开', '高级搜索', '更多筛选']).catch(() => false);
+  await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+  await clickFirstVisibleLiepinText(page, ['更多', '展开', '高级搜索', '更多筛选']).catch(() => false);
   return page;
 }
 
@@ -715,11 +1019,17 @@ async function cacheLiepinSearchResumesApiResponse(
 
   observedLiepinSearchApiCandidates.set(page, candidates);
   observedLiepinSearchApiSeenPages.add(page);
+  if (candidates.length === 0) {
+    observedLiepinSearchApiEmptyResultPages.add(page);
+  } else {
+    observedLiepinSearchApiEmptyResultPages.delete(page);
+  }
 }
 
 function clearObservedLiepinSearchResumesApi(page: Page): void {
   observedLiepinSearchApiCandidates.delete(page);
   observedLiepinSearchApiSeenPages.delete(page);
+  observedLiepinSearchApiEmptyResultPages.delete(page);
   bumpObservedLiepinSearchApiGeneration(page);
 }
 
@@ -731,6 +1041,24 @@ function resetObservedLiepinSearchResumesApi(page: Page): void {
 function clearObservedLiepinSearchResumesApiBeforeNextAction(page: Page): void {
   observedLiepinSearchApiMinRequestStartTimes.set(page, Date.now());
   clearObservedLiepinSearchResumesApi(page);
+}
+
+async function waitForLiepinFinalSearchResumesOrEmptyResults(page: Page, deadline: number): Promise<void> {
+  await waitForLiepinSearchResumesApi(
+    page,
+    boundedTimeout(deadline, config.playwright.apiFallbackTimeoutMs),
+  ).catch(() => []);
+
+  if (!observedLiepinSearchApiSeenPages.has(page)) {
+    await hasLiepinExplicitEmptyResults(page).catch(() => false);
+  }
+}
+
+async function waitForLiepinQuickSearchResults(page: Page, deadline: number): Promise<void> {
+  await waitForLiepinSearchResumesApi(
+    page,
+    boundedTimeout(deadline, config.playwright.apiFallbackTimeoutMs),
+  ).catch(() => []);
 }
 
 function attachLiepinSearchResumesApiObserver(page: Page): void {
@@ -797,14 +1125,7 @@ async function clickLiepinQuickSearchTag(page: Page, keyword: string, deadline: 
 
   const tag = getByText(keyword, { exact: true }).first();
   await tag.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
-  await tag.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/unexpected argument|too many arguments/i.test(message)) {
-      throw error;
-    }
-
-    await tag.click();
-  });
+  await clickLiepinLocator(tag, page, remainingTime(deadline));
 }
 
 type LiepinHideViewedState = {
@@ -965,14 +1286,7 @@ async function clickLiepinSearchButtonIfHideViewedMissing(
   const searchButton = page.locator(state.searchButtonSelector).first();
   await searchButton.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
   options.beforeClick?.();
-  await searchButton.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/unexpected argument|too many arguments/i.test(message)) {
-      throw error;
-    }
-
-    await searchButton.click();
-  });
+  await clickLiepinLocator(searchButton, page, remainingTime(deadline));
   return true;
 }
 
@@ -1001,14 +1315,7 @@ async function ensureLiepinHideViewedChecked(
     const control = page.locator(state.clickSelector).first();
     await control.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
     options.beforeClick?.();
-    await control.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/unexpected argument|too many arguments/i.test(message)) {
-        throw error;
-      }
-
-      await control.click();
-    });
+    await clickLiepinLocator(control, page, remainingTime(deadline));
     await verifyChecked();
     return true;
   }
@@ -1016,14 +1323,7 @@ async function ensureLiepinHideViewedChecked(
   const filterText = page.getByText('隐藏已查看', { exact: false }).first();
   await filterText.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
   options.beforeClick?.();
-  await filterText.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/unexpected argument|too many arguments/i.test(message)) {
-      throw error;
-    }
-
-    await filterText.click();
-  });
+  await clickLiepinLocator(filterText, page, remainingTime(deadline));
   await verifyChecked();
   return true;
 }
@@ -1049,14 +1349,7 @@ async function ensureLiepinHideViewedUnchecked(
     const control = page.locator(state.clickSelector).first();
     await control.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
     options.beforeClick?.();
-    await control.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/unexpected argument|too many arguments/i.test(message)) {
-        throw error;
-      }
-
-      await control.click();
-    });
+    await clickLiepinLocator(control, page, remainingTime(deadline));
     await verifyUnchecked();
     return true;
   }
@@ -1064,14 +1357,7 @@ async function ensureLiepinHideViewedUnchecked(
   const filterText = page.getByText('隐藏已查看', { exact: false }).first();
   await filterText.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
   options.beforeClick?.();
-  await filterText.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!/unexpected argument|too many arguments/i.test(message)) {
-      throw error;
-    }
-
-    await filterText.click();
-  });
+  await clickLiepinLocator(filterText, page, remainingTime(deadline));
   await verifyUnchecked();
   return true;
 }
@@ -1101,7 +1387,10 @@ async function waitForLiepinResumeDetailReady(page: Page, deadline = createDeadl
   throw lastError;
 }
 
-async function waitForLiepinPageReady(page: Page, options: { deadline?: number; timeoutMs?: number } = {}): Promise<void> {
+async function waitForLiepinPageReady(
+  page: Page,
+  options: { deadline?: number; timeoutMs?: number; requireSearchPage?: boolean } = {},
+): Promise<void> {
   const defaultTimeoutMs = isLiepinResumeDetailUrl(page.url())
     ? config.playwright.resumeDetailTimeoutMs
     : config.playwright.searchPageTimeoutMs;
@@ -1114,6 +1403,9 @@ async function waitForLiepinPageReady(page: Page, options: { deadline?: number; 
   }
 
   await assertLiepinAuthenticated(page);
+  if (options.requireSearchPage && !(await openLiepinSearchFromAuthenticatedHome(page, deadline))) {
+    throw new Error('Liepin authenticated page is available, but recruiter-search was not reached from the current page.');
+  }
 
   if (isLiepinSearchUrl(page.url())) {
     const canWaitForShell = typeof (page as Partial<Pick<Page, 'waitForFunction'>>).waitForFunction === 'function';
@@ -1491,6 +1783,7 @@ async function openResumePage(context: BrowserContext, searchPage: Page, candida
 
   if (candidate.resumeUrl && isSafeLiepinResumeUrl(candidate.resumeUrl)) {
     const page = await context.newPage();
+    await waitLiepinActionPace(page);
     await page.goto(candidate.resumeUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
     await waitForLiepinPageReady(page, { deadline });
     return page;
@@ -1505,7 +1798,7 @@ async function openResumePage(context: BrowserContext, searchPage: Page, candida
       searchPage,
       previousUrl,
       deadline,
-      () => candidateLink.click({ timeout: remainingTime(deadline) }),
+      () => clickLiepinLocator(candidateLink, searchPage, remainingTime(deadline)),
     );
     if (detailPage) {
       return detailPage;
@@ -1521,6 +1814,878 @@ async function openResumePage(context: BrowserContext, searchPage: Page, candida
   throw new Error(`Could not open Liepin resume detail for candidate ${candidate.candidateId} without using a public zhaopin URL.`);
 }
 
+async function clickFirstVisibleLiepinLocator(locators: Locator[], timeoutMs: number): Promise<boolean> {
+  for (const locator of locators) {
+    const count = await locator.count().catch(() => 0);
+    const candidates = count > 0
+      ? Array.from({ length: count }, (_, index) => locator.nth(index))
+      : [locator.first()];
+
+    for (const candidate of candidates) {
+      if (!(await candidate.isVisible({ timeout: timeoutMs }).catch(() => false))) {
+        continue;
+      }
+
+      const page = candidate.page?.();
+      if (page) {
+        await clickLiepinLocator(candidate, page, timeoutMs);
+      } else {
+        await waitLiepinActionPaceWithoutPage();
+        await candidate.click({ timeout: timeoutMs });
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function findLiepinForwardDialog(page: Page, timeoutMs: number): Promise<Locator | undefined> {
+  const deadline = createDeadline(timeoutMs);
+
+  while (remainingTime(deadline) > 1) {
+    const dialogs = page.locator(liepinForwardDialogSelector, { hasText: /常联系的顾问|常用联系人|联系人|顾问|确认|确定|转发|发送/ });
+    const count = await dialogs.count().catch(() => 0);
+
+    for (let index = Math.max(count - 1, 0); index >= 0; index -= 1) {
+      const dialog = dialogs.nth(index);
+      try {
+        const waitTimeoutMs = Math.max(1, Math.min(remainingTime(deadline), 1000));
+        await dialog.waitFor({ state: 'visible', timeout: waitTimeoutMs });
+        const text = normalizeText(await dialog.innerText({ timeout: waitTimeoutMs }).catch(() => ''));
+        if (text && text !== '转发简历') {
+          return dialog;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    await waitOnPageOrTimer(page, Math.min(remainingTime(deadline), liepinDetailPollIntervalMs));
+  }
+
+  return undefined;
+}
+
+async function clickLiepinLocatorAndWaitForForwardDialog(locator: Locator, timeoutMs: number): Promise<boolean> {
+  const count = await locator.count().catch(() => 0);
+  const candidates = count > 0
+    ? Array.from({ length: count }, (_, index) => locator.nth(index))
+    : [locator.first()];
+
+  for (const candidate of candidates) {
+    if (!(await candidate.isVisible({ timeout: timeoutMs }).catch(() => false))) {
+      continue;
+    }
+
+    const page = candidate.page();
+    await clickLiepinLocator(candidate, page, timeoutMs);
+
+    if (await findLiepinForwardDialog(page, timeoutMs)) {
+      return true;
+    }
+
+    throw new Error('Clicked the visible Liepin resume forward action, but the forward dialog did not open. Stopping without trying alternate matches.');
+  }
+
+  return false;
+}
+
+type LiepinForwardActionClickPoint = {
+  x: number;
+  y: number;
+  description: string;
+};
+
+function isLiepinForwardActionClickPoint(value: unknown): value is LiepinForwardActionClickPoint {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<LiepinForwardActionClickPoint>;
+  return typeof candidate.x === 'number'
+    && Number.isFinite(candidate.x)
+    && typeof candidate.y === 'number'
+    && Number.isFinite(candidate.y);
+}
+
+async function clickLiepinDomForwardActionAndWait(page: Page, timeoutMs: number): Promise<boolean> {
+  const evaluate = (page as Partial<Pick<Page, 'evaluate'>>).evaluate?.bind(page);
+  const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
+  if (!evaluate || !mouse) {
+    return false;
+  }
+
+  const clickPoint = await evaluate((targetAttribute) => {
+    const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+    const isHTMLElement = (element: Element | null): element is HTMLElement => element instanceof HTMLElement;
+    const isVisibleRect = (rect: DOMRect | ClientRect) => rect.width > 0
+      && rect.height > 0
+      && rect.bottom >= 0
+      && rect.right >= 0
+      && rect.top <= window.innerHeight
+      && rect.left <= window.innerWidth;
+    const isVisible = (element: Element | null) => {
+      if (!isHTMLElement(element)) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return isVisibleRect(rect)
+        && style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && style.opacity !== '0';
+    };
+    const directText = (element: Element) => Array.from(element.childNodes)
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent ?? '')
+      .join('');
+    const isClickLike = (element: HTMLElement) => {
+      const tagName = element.tagName.toLowerCase();
+      const role = element.getAttribute('role') ?? '';
+      const className = typeof element.className === 'string' ? element.className : '';
+      const style = window.getComputedStyle(element);
+      return tagName === 'button'
+        || tagName === 'a'
+        || role === 'button'
+        || style.cursor === 'pointer'
+        || Boolean(element.getAttribute('onclick'))
+        || /button|btn|action|operate|forward|share|item|tool|icon/i.test(className);
+    };
+    const chooseClickElement = (element: HTMLElement) => {
+      let best = element;
+      let current: HTMLElement | null = element;
+      let depth = 0;
+
+      while (current && current !== document.body && depth < 6) {
+        if (!isVisible(current)) {
+          current = current.parentElement;
+          depth += 1;
+          continue;
+        }
+
+        const rect = current.getBoundingClientRect();
+        const text = normalize(current.textContent);
+        const compact = rect.width <= 260 && rect.height <= 120 && text.length <= 24;
+        if (compact) {
+          best = current;
+        }
+        if (compact && isClickLike(current)) {
+          return current;
+        }
+
+        current = current.parentElement;
+        depth += 1;
+      }
+
+      return best;
+    };
+    const scoreCandidate = (element: HTMLElement, pointRect: DOMRect | ClientRect, source: string) => {
+      const clickElement = chooseClickElement(element);
+      const rect = clickElement.getBoundingClientRect();
+      const text = normalize(clickElement.textContent);
+      const className = typeof clickElement.className === 'string' ? clickElement.className : '';
+      const tagName = clickElement.tagName.toLowerCase();
+      const style = window.getComputedStyle(clickElement);
+      let score = 0;
+
+      if (source === 'text-node') {
+        score += 70;
+      } else if (source === 'own-text') {
+        score += 60;
+      } else if (source === 'accessible-label') {
+        score += 45;
+      } else {
+        score += 25;
+      }
+      if (text === '转发') {
+        score += 30;
+      } else if (/转发/.test(text) && text.length <= 12) {
+        score += 12;
+      } else if (text.length > 30) {
+        score -= 70;
+      }
+      if (tagName === 'button' || tagName === 'a') {
+        score += 20;
+      }
+      if (clickElement.getAttribute('role') === 'button') {
+        score += 16;
+      }
+      if (style.cursor === 'pointer') {
+        score += 16;
+      }
+      if (/button|btn|action|operate|forward|share|item|tool|icon/i.test(className)) {
+        score += 12;
+      }
+      if (rect.width <= 180 && rect.height <= 80) {
+        score += 12;
+      }
+      if (rect.width > 360 || rect.height > 180) {
+        score -= 45;
+      }
+      if (clickElement === document.body || clickElement === document.documentElement) {
+        score -= 1000;
+      }
+
+      return {
+        clickElement,
+        pointRect,
+        score,
+        source,
+      };
+    };
+    const candidates: Array<ReturnType<typeof scoreCandidate>> = [];
+    const pushCandidate = (element: Element | null, rect: DOMRect | ClientRect, source: string) => {
+      if (!isHTMLElement(element) || !isVisible(element) || !isVisibleRect(rect)) {
+        return;
+      }
+
+      candidates.push(scoreCandidate(element, rect, source));
+    };
+
+    document.querySelectorAll(`[${targetAttribute}]`).forEach((element) => {
+      element.removeAttribute(targetAttribute);
+    });
+
+    const allElements = Array.from(document.querySelectorAll('button, a, [role="button"], span, div, p, i, svg'));
+    for (const element of allElements) {
+      if (!isHTMLElement(element) || !isVisible(element)) {
+        continue;
+      }
+
+      const ownText = normalize(directText(element));
+      const accessibleLabel = normalize(`${element.getAttribute('aria-label') ?? ''} ${element.getAttribute('title') ?? ''}`);
+      const className = typeof element.className === 'string' ? element.className : '';
+      if (ownText === '转发') {
+        pushCandidate(element, element.getBoundingClientRect(), 'own-text');
+      } else if (accessibleLabel === '转发' || accessibleLabel === '转给同事' || accessibleLabel === '分享') {
+        pushCandidate(element, element.getBoundingClientRect(), 'accessible-label');
+      } else if (/forward|share/i.test(className) && /转发|转给同事|分享/.test(normalize(element.textContent))) {
+        pushCandidate(element, element.getBoundingClientRect(), 'semantic-class');
+      }
+    }
+
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let currentNode = walker.nextNode();
+    while (currentNode) {
+      if (normalize(currentNode.textContent) === '转发') {
+        const parent = currentNode.parentElement;
+        const range = document.createRange();
+        range.selectNodeContents(currentNode);
+        const rects = Array.from(range.getClientRects()).filter(isVisibleRect);
+        const fallbackRect = parent?.getBoundingClientRect();
+
+        for (const rect of rects) {
+          pushCandidate(parent, rect, 'text-node');
+        }
+        if (rects.length === 0 && fallbackRect) {
+          pushCandidate(parent, fallbackRect, 'text-node');
+        }
+        range.detach();
+      }
+
+      currentNode = walker.nextNode();
+    }
+
+    candidates.sort((left, right) => right.score - left.score);
+    const selected = candidates[0];
+    if (!selected) {
+      return null;
+    }
+
+    selected.clickElement.setAttribute(targetAttribute, 'true');
+    return {
+      x: Math.round((selected.pointRect.left + selected.pointRect.width / 2) * 100) / 100,
+      y: Math.round((selected.pointRect.top + selected.pointRect.height / 2) * 100) / 100,
+      description: `${selected.source}:${selected.clickElement.tagName.toLowerCase()}.${typeof selected.clickElement.className === 'string' ? selected.clickElement.className : ''}`.slice(0, 160),
+    };
+  }, liepinForwardActionTargetAttribute).catch(() => undefined);
+
+  if (!isLiepinForwardActionClickPoint(clickPoint)) {
+    return false;
+  }
+
+  try {
+    await waitLiepinActionPace(page);
+    await mouse.move(clickPoint.x + randomIntBetween(-80, 80), clickPoint.y + randomIntBetween(-40, 40), { steps: randomIntBetween(3, 6) }).catch(() => undefined);
+    await mouse.move(clickPoint.x, clickPoint.y, { steps: randomIntBetween(8, 16) });
+    await mouse.click(clickPoint.x, clickPoint.y);
+  } catch (error) {
+    throw new Error(`Failed to click the selected Liepin resume forward action. Stopping without trying alternate matches. Cause: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  if (await findLiepinForwardDialog(page, timeoutMs)) {
+    return true;
+  }
+
+  throw new Error('Clicked the selected Liepin resume forward action, but the forward dialog did not open. Stopping without trying alternate matches.');
+}
+
+async function clickLiepinForwardAction(page: Page, timeoutMs: number): Promise<void> {
+  if (await clickLiepinDomForwardActionAndWait(page, timeoutMs)) {
+    return;
+  }
+
+  const roleLookup = (page as Partial<Pick<Page, 'getByRole'>>).getByRole?.bind(page);
+  const locators: Locator[] = [];
+
+  if (roleLookup) {
+    locators.push(roleLookup('button', { name: /^转发$/ }));
+    locators.push(roleLookup('button', { name: /转发|转给同事|分享/ }));
+  }
+
+  locators.push(page.locator('button, a, [role="button"], [class*="button"], [class*="btn"], [class*="action"], [class*="operate"], [class*="forward"], [class*="share"]', { hasText: /^\s*转发\s*$/ }));
+  locators.push(page.locator('button, a, [role="button"]', { hasText: /转发|转给同事|分享/ }));
+  locators.push(page.locator('span, div, p', { hasText: /^\s*转发\s*$/ }));
+  locators.push(page.getByText(/^\s*转发\s*$/, { exact: false }));
+
+  for (const locator of locators) {
+    if (await clickLiepinLocatorAndWaitForForwardDialog(locator, timeoutMs)) {
+      return;
+    }
+  }
+
+  throw new Error('Could not find or click the visible Liepin resume forward action, or the forward dialog did not open after clicking.');
+}
+
+async function getLiepinForwardDialog(page: Page, timeoutMs: number): Promise<Locator> {
+  const dialog = await findLiepinForwardDialog(page, timeoutMs);
+  if (dialog) {
+    return dialog;
+  }
+
+  const body = page.locator('body');
+  await body.waitFor({ state: 'visible', timeout: timeoutMs });
+  return body;
+}
+
+type LiepinForwardContactClickPoint = {
+  x: number;
+  y: number;
+  description: string;
+};
+
+type LiepinForwardContactClickResult = {
+  points: LiepinForwardContactClickPoint[];
+  diagnostic: string;
+};
+
+function isLiepinForwardContactClickPoint(value: unknown): value is LiepinForwardContactClickPoint {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<LiepinForwardContactClickPoint>;
+  return typeof candidate.x === 'number'
+    && Number.isFinite(candidate.x)
+    && typeof candidate.y === 'number'
+    && Number.isFinite(candidate.y);
+}
+
+function isLiepinForwardContactClickResult(value: unknown): value is LiepinForwardContactClickResult {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const candidate = value as Partial<LiepinForwardContactClickResult>;
+  return Array.isArray(candidate.points)
+    && candidate.points.every(isLiepinForwardContactClickPoint)
+    && typeof candidate.diagnostic === 'string';
+}
+
+async function clickLiepinDomFrequentContact(page: Page, contactName: string, timeoutMs: number): Promise<boolean> {
+  const evaluate = (page as Partial<Pick<Page, 'evaluate'>>).evaluate?.bind(page);
+  const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
+  if (!evaluate) {
+    return false;
+  }
+
+  const result = await evaluate(({ name, targetAttribute, dialogSelector }) => {
+    const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+    const isHTMLElement = (element: Element | null): element is HTMLElement => element instanceof HTMLElement;
+    const isVisibleRect = (rect: DOMRect | ClientRect) => rect.width > 0
+      && rect.height > 0
+      && rect.bottom >= 0
+      && rect.right >= 0
+      && rect.top <= window.innerHeight
+      && rect.left <= window.innerWidth;
+    const isVisible = (element: Element | null) => {
+      if (!isHTMLElement(element)) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return isVisibleRect(rect)
+        && style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && style.opacity !== '0';
+    };
+    const directText = (element: Element) => Array.from(element.childNodes)
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent ?? '')
+      .join('');
+    const visibleDialogs = Array.from(document.querySelectorAll(dialogSelector))
+      .filter(isVisible);
+    const roots = visibleDialogs.length > 0 ? visibleDialogs : [document.body].filter(isVisible);
+
+    document.querySelectorAll(`[${targetAttribute}]`).forEach((element) => {
+      element.removeAttribute(targetAttribute);
+    });
+
+    const isClickLike = (element: HTMLElement) => {
+      const tagName = element.tagName.toLowerCase();
+      const role = element.getAttribute('role') ?? '';
+      const className = typeof element.className === 'string' ? element.className : '';
+      const style = window.getComputedStyle(element);
+      return tagName === 'button'
+        || tagName === 'a'
+        || tagName === 'label'
+        || role === 'button'
+        || role === 'checkbox'
+        || role === 'option'
+        || style.cursor === 'pointer'
+        || Boolean(element.getAttribute('onclick'))
+        || /checkbox|contact|user|item|option|select|row|list/i.test(className);
+    };
+    const nearestContactCard = (element: HTMLElement) => {
+      let best: HTMLElement = element;
+      let current: HTMLElement | null = element;
+      let depth = 0;
+
+      while (current && current !== document.body && depth < 8) {
+        if (!isVisible(current)) {
+          current = current.parentElement;
+          depth += 1;
+          continue;
+        }
+
+        const rect = current.getBoundingClientRect();
+        const text = normalize(current.textContent);
+        const compact = rect.width <= 520 && rect.height <= 220 && text.includes(name) && text.length <= 140;
+        const hasAboveNameMedia = Array.from(current.querySelectorAll('img, picture, canvas, svg, [class*="avatar"], [class*="Avatar"], [class*="photo"], [class*="Photo"], [class*="head"], [class*="Head"], [class*="portrait"], [class*="Portrait"], [style*="background-image"]'))
+          .filter((candidate): candidate is HTMLElement => isHTMLElement(candidate) && isVisible(candidate))
+          .some((candidate) => {
+            const mediaRect = candidate.getBoundingClientRect();
+            return isVisibleRect(mediaRect)
+              && mediaRect.width <= 140
+              && mediaRect.height <= 140
+              && mediaRect.top >= rect.top - 4
+              && mediaRect.bottom <= rect.bottom + 4
+              && mediaRect.top < element.getBoundingClientRect().top;
+          });
+        if (compact) {
+          best = current;
+        }
+        if (compact && hasAboveNameMedia) {
+          return current;
+        }
+        if (compact && isClickLike(current) && current !== element) {
+          return current;
+        }
+
+        current = current.parentElement;
+        depth += 1;
+      }
+
+      return best;
+    };
+    const pushPoint = (
+      points: LiepinForwardContactClickPoint[],
+      seen: Set<string>,
+      x: number,
+      y: number,
+      description: string,
+    ) => {
+      const roundedX = Math.round(x * 100) / 100;
+      const roundedY = Math.round(y * 100) / 100;
+      const key = `${Math.round(roundedX)}:${Math.round(roundedY)}`;
+      if (
+        seen.has(key)
+        || roundedX < 0
+        || roundedY < 0
+        || roundedX > window.innerWidth
+        || roundedY > window.innerHeight
+      ) {
+        return;
+      }
+
+      const elementAtPoint = document.elementFromPoint(roundedX, roundedY);
+      if (!elementAtPoint || !isVisible(elementAtPoint)) {
+        return;
+      }
+
+      seen.add(key);
+      points.push({
+        x: roundedX,
+        y: roundedY,
+        description: description.slice(0, 160),
+      });
+    };
+    const buildClickPoints = (card: HTMLElement, textRect: DOMRect | ClientRect, source: string) => {
+      const points: LiepinForwardContactClickPoint[] = [];
+      const seen = new Set<string>();
+      const cardRect = card.getBoundingClientRect();
+      let hasNameAboveImagePoint = false;
+      const aboveNameMedia = Array.from(card.querySelectorAll('img, picture, canvas, svg, [class*="avatar"], [class*="Avatar"], [class*="photo"], [class*="Photo"], [class*="head"], [class*="Head"], [class*="portrait"], [class*="Portrait"], [style*="background-image"]'))
+        .filter((element): element is HTMLElement => isHTMLElement(element) && isVisible(element))
+        .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+        .filter(({ rect }) => {
+          if (!isVisibleRect(rect) || rect.width > 140 || rect.height > 140) {
+            return false;
+          }
+
+          const mediaCenterX = rect.left + rect.width / 2;
+          const textCenterX = textRect.left + textRect.width / 2;
+          const horizontalDistance = Math.abs(mediaCenterX - textCenterX);
+          const isAboveName = rect.top < textRect.top && rect.bottom <= textRect.top + 18;
+          const isInsideCard = rect.left >= cardRect.left - 4
+            && rect.right <= cardRect.right + 4
+            && rect.top >= cardRect.top - 4
+            && rect.bottom <= cardRect.bottom + 4;
+          return isAboveName && isInsideCard && horizontalDistance <= Math.max(80, cardRect.width * 0.45);
+        })
+        .sort((left, right) => {
+          const leftCenterX = left.rect.left + left.rect.width / 2;
+          const rightCenterX = right.rect.left + right.rect.width / 2;
+          const textCenterX = textRect.left + textRect.width / 2;
+          const leftDistance = Math.abs(leftCenterX - textCenterX) + Math.abs(left.rect.bottom - textRect.top);
+          const rightDistance = Math.abs(rightCenterX - textCenterX) + Math.abs(right.rect.bottom - textRect.top);
+          return leftDistance - rightDistance;
+        })[0];
+
+      if (aboveNameMedia) {
+        hasNameAboveImagePoint = true;
+        pushPoint(
+          points,
+          seen,
+          aboveNameMedia.rect.left + aboveNameMedia.rect.width / 2,
+          aboveNameMedia.rect.top + aboveNameMedia.rect.height / 2,
+          `${source}:name-above-image:${aboveNameMedia.element.tagName.toLowerCase()}`,
+        );
+      } else if (isVisibleRect(cardRect) && textRect.top - cardRect.top > 24) {
+        hasNameAboveImagePoint = true;
+        pushPoint(
+          points,
+          seen,
+          textRect.left + textRect.width / 2,
+          cardRect.top + Math.max(16, (textRect.top - cardRect.top) / 2),
+          `${source}:name-above-image-fallback:${card.tagName.toLowerCase()}`,
+        );
+      }
+
+      if (hasNameAboveImagePoint) {
+        return points;
+      }
+
+      const controls = Array.from(card.querySelectorAll('input[type="checkbox"], [role="checkbox"], label, button, a, .ant-checkbox, .semi-checkbox, [class*="checkbox"], [class*="radio"], [class*="select"], [class*="avatar"], [class*="photo"], [class*="head"], [class*="item"]'))
+        .filter((element): element is HTMLElement => isHTMLElement(element) && isVisible(element));
+      const control = controls
+        .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+        .filter(({ rect }) => isVisibleRect(rect) && rect.width <= 120 && rect.height <= 120)
+        .sort((left, right) => {
+          const leftDistance = Math.abs(left.rect.left - cardRect.left) + Math.abs(left.rect.top - cardRect.top);
+          const rightDistance = Math.abs(right.rect.left - cardRect.left) + Math.abs(right.rect.top - cardRect.top);
+          return leftDistance - rightDistance;
+        })[0];
+
+      if (control) {
+        pushPoint(points, seen, control.rect.left + control.rect.width / 2, control.rect.top + control.rect.height / 2, `${source}:control:${control.element.tagName.toLowerCase()}`);
+      }
+
+      if (isVisibleRect(cardRect) && cardRect.width <= 520 && cardRect.height <= 220) {
+        pushPoint(points, seen, cardRect.left + cardRect.width / 2, cardRect.top + cardRect.height / 2, `${source}:card-center:${card.tagName.toLowerCase()}`);
+        pushPoint(points, seen, cardRect.left + Math.min(44, Math.max(12, cardRect.width * 0.25)), cardRect.top + cardRect.height / 2, `${source}:card-left:${card.tagName.toLowerCase()}`);
+        pushPoint(points, seen, cardRect.left + cardRect.width / 2, cardRect.top + Math.min(44, Math.max(12, cardRect.height * 0.35)), `${source}:card-upper:${card.tagName.toLowerCase()}`);
+      }
+
+      pushPoint(points, seen, textRect.left + textRect.width / 2, textRect.top + textRect.height / 2, `${source}:text:${card.tagName.toLowerCase()}`);
+      return points;
+    };
+    const scoreCandidate = (element: HTMLElement, rect: DOMRect | ClientRect, source: string) => {
+      const card = nearestContactCard(element);
+      const clickPoints = buildClickPoints(card, rect, source);
+      const cardRect = card.getBoundingClientRect();
+      const text = normalize(card.textContent);
+      const className = typeof card.className === 'string' ? card.className : '';
+      let score = 0;
+
+      if (normalize(directText(element)) === name) {
+        score += 50;
+      }
+      if (normalize(element.textContent) === name) {
+        score += 35;
+      }
+      if (source === 'text-node') {
+        score += 40;
+      }
+      if (isClickLike(card)) {
+        score += 20;
+      }
+      if (/checkbox|contact|user|item|option|select|row|list/i.test(className)) {
+        score += 15;
+      }
+      if (clickPoints.some((point) => point.description.includes(':control:'))) {
+        score += 35;
+      }
+      if (text === name || text.length <= 40) {
+        score += 10;
+      }
+      if (cardRect.width > 640 || cardRect.height > 260 || text.length > 180) {
+        score -= 45;
+      }
+      if (card === document.body || card === document.documentElement) {
+        score -= 1000;
+      }
+
+      return {
+        card,
+        clickPoints,
+        score,
+        source,
+      };
+    };
+    const candidates: Array<ReturnType<typeof scoreCandidate>> = [];
+    const pushCandidate = (element: Element | null, rect: DOMRect | ClientRect, source: string) => {
+      if (!isHTMLElement(element) || !isVisible(element) || !isVisibleRect(rect)) {
+        return;
+      }
+
+      candidates.push(scoreCandidate(element, rect, source));
+    };
+
+    document.querySelectorAll(`[${targetAttribute}]`).forEach((element) => {
+      element.removeAttribute(targetAttribute);
+    });
+
+    for (const root of roots) {
+      root.querySelectorAll('li, [role="option"], [role="checkbox"], label, span, div, p').forEach((element) => {
+        if (!isHTMLElement(element) || !isVisible(element)) {
+          return;
+        }
+
+        const ownText = normalize(directText(element));
+        const text = normalize(element.textContent);
+        if (ownText === name || text === name) {
+          pushCandidate(element, element.getBoundingClientRect(), 'element');
+        }
+      });
+
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let currentNode = walker.nextNode();
+      while (currentNode) {
+        if (normalize(currentNode.textContent) === name) {
+          const parent = currentNode.parentElement;
+          const range = document.createRange();
+          range.selectNodeContents(currentNode);
+          const rects = Array.from(range.getClientRects()).filter(isVisibleRect);
+          const fallbackRect = parent?.getBoundingClientRect();
+
+          for (const rect of rects) {
+            pushCandidate(parent, rect, 'text-node');
+          }
+          if (rects.length === 0 && fallbackRect) {
+            pushCandidate(parent, fallbackRect, 'text-node');
+          }
+          range.detach();
+        }
+
+        currentNode = walker.nextNode();
+      }
+    }
+
+    candidates.sort((left, right) => right.score - left.score);
+    const selected = candidates[0];
+    if (!selected || selected.clickPoints.length === 0) {
+      return {
+        points: [],
+        diagnostic: candidates.length === 0
+          ? `No visible contact candidate for ${name}`
+          : `No visible click point for ${name}`,
+      };
+    }
+
+    selected.card.setAttribute(targetAttribute, 'true');
+    return {
+      points: selected.clickPoints,
+      diagnostic: `score=${selected.score};source=${selected.source};card=${selected.card.tagName.toLowerCase()}.${typeof selected.card.className === 'string' ? selected.card.className : ''};text=${normalize(selected.card.textContent).slice(0, 120)}`,
+    };
+  }, {
+    name: contactName,
+    targetAttribute: liepinForwardContactTargetAttribute,
+    dialogSelector: liepinForwardDialogSelector,
+  }).catch(() => undefined);
+
+  if (!mouse || !isLiepinForwardContactClickResult(result) || result.points.length === 0) {
+    return false;
+  }
+
+  try {
+    for (const point of result.points.slice(0, 1)) {
+      console.log(`Clicking Liepin frequent forward contact "${contactName}" at ${point.x},${point.y} (${point.description}; ${result.diagnostic})`);
+      await waitLiepinActionPace(page);
+      await mouse.move(point.x + randomIntBetween(-40, 40), point.y + randomIntBetween(-20, 20), { steps: randomIntBetween(3, 6) }).catch(() => undefined);
+      await mouse.move(point.x, point.y, { steps: randomIntBetween(8, 16) });
+      await mouse.click(point.x, point.y);
+      await waitLiepinActionPace(page);
+    }
+
+    return true;
+  } catch (error) {
+    throw new Error(`Failed to click the selected Liepin frequent forward contact "${contactName}". Stopping without trying alternate matches. Cause: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function clickLiepinDomConfirmForward(page: Page): Promise<boolean> {
+  const evaluate = (page as Partial<Pick<Page, 'evaluate'>>).evaluate?.bind(page);
+  const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
+  if (!evaluate || !mouse) {
+    return false;
+  }
+
+  const clickPoint = await evaluate((dialogSelector) => {
+    const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+    const isHTMLElement = (element: Element | null): element is HTMLElement => element instanceof HTMLElement;
+    const isVisible = (element: Element | null) => {
+      if (!isHTMLElement(element)) {
+        return false;
+      }
+
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0
+        && rect.height > 0
+        && style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && style.opacity !== '0';
+    };
+
+    const dialogs = Array.from(document.querySelectorAll(dialogSelector)).filter(isVisible);
+    const roots = dialogs.length > 0 ? dialogs : [document.body].filter(isVisible);
+    for (const root of roots) {
+      const candidates = Array.from(root.querySelectorAll('button, [role="button"], a, [class*="button"], [class*="btn"], span, div'))
+        .filter(isHTMLElement)
+        .filter(isVisible)
+        .filter((element) => /^(确认转发|确定转发|转发|确认|确定|发送)$/.test(normalize(element.textContent)))
+        .sort((left, right) => {
+          const leftButton = left.tagName.toLowerCase() === 'button' || left.getAttribute('role') === 'button' ? 0 : 1;
+          const rightButton = right.tagName.toLowerCase() === 'button' || right.getAttribute('role') === 'button' ? 0 : 1;
+          return leftButton - rightButton;
+      });
+      const selected = candidates[0];
+      if (selected) {
+        const rect = selected.getBoundingClientRect();
+        return {
+          x: Math.round((rect.left + rect.width / 2) * 100) / 100,
+          y: Math.round((rect.top + rect.height / 2) * 100) / 100,
+          description: `confirm:${selected.tagName.toLowerCase()}.${typeof selected.className === 'string' ? selected.className : ''}`.slice(0, 160),
+        };
+      }
+    }
+
+    return null;
+  }, liepinForwardDialogSelector).catch(() => undefined);
+
+  if (!isLiepinForwardContactClickPoint(clickPoint)) {
+    return false;
+  }
+
+  await waitLiepinActionPace(page);
+  await mouse.move(clickPoint.x + randomIntBetween(-40, 40), clickPoint.y + randomIntBetween(-20, 20), { steps: randomIntBetween(3, 6) }).catch(() => undefined);
+  await mouse.move(clickPoint.x, clickPoint.y, { steps: randomIntBetween(6, 12) });
+  await mouse.click(clickPoint.x, clickPoint.y);
+  return true;
+}
+
+async function selectLiepinFrequentForwardContact(page: Page, contactName: string, timeoutMs: number): Promise<void> {
+  const dialog = await getLiepinForwardDialog(page, timeoutMs);
+  const exactContact = buildExactTextPattern(contactName);
+  if (await clickLiepinDomFrequentContact(page, contactName, timeoutMs)) {
+    return;
+  }
+
+  const preciseLocators: Locator[] = [
+    dialog.getByText(exactContact, { exact: false }).first(),
+    page.getByText(exactContact, { exact: false }).first(),
+  ];
+
+  if (await clickFirstVisibleLiepinLocator(preciseLocators, Math.min(timeoutMs, 2000))) {
+    await waitLiepinActionPace(page);
+    return;
+  }
+
+  const containers = ['li', '[role="option"]', '[role="checkbox"]', 'label', '.ant-checkbox-wrapper', '.semi-checkbox', '[class*="contact"]', '[class*="user"]', '[class*="item"]', 'div', 'span'];
+  const locators: Locator[] = [
+    dialog.getByText(exactContact, { exact: false }).first(),
+    dialog.locator(containers.join(', '), { hasText: exactContact }).first(),
+    page.locator(containers.join(', '), { hasText: exactContact }).first(),
+    page.getByText(exactContact, { exact: false }).first(),
+  ];
+
+  const selected = await clickFirstVisibleLiepinLocator(locators, timeoutMs);
+  if (!selected) {
+    const dialogText = await dialog.innerText({ timeout: timeoutMs }).catch(() => '');
+    throw new Error(`Could not select Liepin frequent forward contact "${contactName}". Dialog text: ${normalizeText(dialogText).slice(0, 500)}`);
+  }
+}
+
+async function confirmLiepinForward(page: Page, contactName: string, timeoutMs: number): Promise<void> {
+  if (await clickLiepinDomConfirmForward(page)) {
+    await waitLiepinActionPace(page);
+    return;
+  }
+
+  const dialog = await getLiepinForwardDialog(page, timeoutMs);
+  const roleLookup = (page as Partial<Pick<Page, 'getByRole'>>).getByRole?.bind(page);
+  const locators: Locator[] = [];
+  const clickableSelector = 'button, [role="button"], a, [class*="button"], [class*="btn"]';
+  const exactConfirmPattern = /^\s*(确认转发|确定转发|转\s*发|确\s*认|确\s*定|发\s*送)\s*$/;
+  const looseConfirmPattern = /确认转发|确定转发|确\s*认|确\s*定|发\s*送/;
+
+  locators.push(dialog.locator(clickableSelector, { hasText: exactConfirmPattern }).first());
+  if (roleLookup) {
+    locators.push(roleLookup('button', { name: exactConfirmPattern }).first());
+  }
+  locators.push(page.locator(clickableSelector, { hasText: exactConfirmPattern }).first());
+  locators.push(dialog.locator(clickableSelector, { hasText: looseConfirmPattern }).first());
+  locators.push(dialog.getByText(looseConfirmPattern, { exact: false }).first());
+
+  const confirmed = await clickFirstVisibleLiepinLocator(locators, timeoutMs);
+  if (!confirmed) {
+    const dialogText = await dialog.innerText({ timeout: timeoutMs }).catch(() => '');
+    throw new Error(`Could not confirm Liepin resume forward to "${contactName}". Dialog text: ${normalizeText(dialogText).slice(0, 500)}`);
+  }
+
+  await waitLiepinActionPace(page);
+}
+
+async function forwardLiepinResumeToFrequentContact(
+  page: Page,
+  contactName: string,
+  mode: NonNullable<CandidatePostOpenActions['liepinForwardContactMode']> = 'confirm',
+): Promise<void> {
+  const normalizedContactName = normalizeText(contactName);
+  if (!normalizedContactName) {
+    return;
+  }
+
+  const deadline = createDeadline();
+  await waitForLiepinPageReady(page, { deadline });
+  await clickLiepinForwardAction(page, liepinActionTimeoutMs());
+  await selectLiepinFrequentForwardContact(page, normalizedContactName, liepinActionTimeoutMs());
+  if (mode === 'select-only') {
+    return;
+  }
+  await confirmLiepinForward(page, normalizedContactName, liepinActionTimeoutMs());
+}
+
+async function runLiepinPostOpenActions(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions): Promise<void> {
+  if (actions.liepinForwardContact) {
+    await forwardLiepinResumeToFrequentContact(page, actions.liepinForwardContact, actions.liepinForwardContactMode);
+  }
+}
+
 export const liepinAdapter: PlatformAdapter = {
   platform: 'liepin',
   displayName: 'Liepin',
@@ -1528,11 +2693,13 @@ export const liepinAdapter: PlatformAdapter = {
   loginUrl: liepinLoginUrl,
   storageStateFileName: 'storage-state.liepin.json',
   openLoginPage: async (page) => {
+    await waitLiepinActionPace(page);
     await page.goto(liepinLoginUrl, { waitUntil: 'domcontentloaded' });
   },
   openAuthenticatedHome: async (page) => {
-    await page.goto(liepinAuthenticatedUrl, { waitUntil: 'domcontentloaded' });
-    await waitForLiepinPageReady(page);
+    const deadline = createSearchDeadline();
+    await openLiepinRecruiterSearchPage(page, deadline);
+    await waitForLiepinPageReady(page, { requireSearchPage: true });
     return page;
   },
   assertAuthenticated: assertLiepinAuthenticated,
@@ -1541,55 +2708,57 @@ export const liepinAdapter: PlatformAdapter = {
     resetObservedLiepinSearchResumesApi(page);
     attachLiepinSearchResumesApiObserver(page);
 
-    if (!isLiepinSearchUrl(page.url())) {
-      try {
-        await page.goto(liepinAuthenticatedUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
-      } catch (error) {
-        if (!isAbortNavigationError(error) || !isLiepinSearchUrl(page.url())) {
-          throw error;
-        }
-      }
-    }
+    await openLiepinRecruiterSearchPage(page, deadline);
 
-    await waitForLiepinPageReady(page, { deadline });
+    await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+    clearObservedLiepinSearchResumesApiBeforeNextAction(page);
     await clickLiepinQuickSearchTag(page, keyword, deadline);
-    await waitForLiepinPageReady(page, { deadline });
+    await waitForLiepinQuickSearchResults(page, deadline);
+    await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
 
     if (options?.includeViewedCandidates) {
       const clickedSearchButton = await clickLiepinSearchButtonIfHideViewedMissing(page, deadline, {
         beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
       });
       if (clickedSearchButton) {
-        await waitForLiepinPageReady(page, { deadline });
+        await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
       }
 
       const clickedHideViewed = await ensureLiepinHideViewedUnchecked(page, deadline, {
         beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
       });
-      if (clickedSearchButton || clickedHideViewed) {
-        await waitForLiepinSearchResumesApi(page, boundedTimeout(deadline, config.playwright.apiFallbackTimeoutMs)).catch(() => []);
+      await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
+      if ((await waitForLiepinHideViewedState(page, deadline)).checked) {
+        await ensureLiepinHideViewedUnchecked(page, deadline, {
+          beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+        });
+        await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
       }
-      await waitForLiepinPageReady(page, { deadline });
+      await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
       return page;
     }
 
     if (await clickLiepinSearchButtonIfHideViewedMissing(page, deadline)) {
-      await waitForLiepinPageReady(page, { deadline });
+      await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
     }
     const clickedHideViewed = await ensureLiepinHideViewedChecked(page, deadline, {
       beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
     });
-    if (clickedHideViewed) {
-      await waitForLiepinSearchResumesApi(page, boundedTimeout(deadline, config.playwright.apiFallbackTimeoutMs)).catch(() => []);
+    await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
+    if (!(await waitForLiepinHideViewedState(page, deadline)).checked) {
+      await ensureLiepinHideViewedChecked(page, deadline, {
+        beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+      });
+      await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
     }
-    await waitForLiepinPageReady(page, { deadline });
+    await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
     return page;
   },
   prepareSearchConditionPage: prepareLiepinSearchConditionPage,
   readSearchConditionResultTotal: readLiepinSearchConditionResultTotal,
   saveSearchCondition: async (page, savedSearchName) => {
-    await saveSearchConditionByCommonDialog(page, savedSearchName, { platformLabel: 'liepin' });
-    await waitForLiepinPageReady(page);
+    await saveLiepinSearchCondition(page, savedSearchName);
+    await waitForLiepinPageReady(page, { requireSearchPage: true });
   },
   extractCandidateList: async (page, options) => {
     const deadline = createSearchDeadline(options);
@@ -1597,6 +2766,13 @@ export const liepinAdapter: PlatformAdapter = {
     attachLiepinSearchResumesApiObserver(page);
 
     await waitForLiepinExtractionReady(page, deadline);
+    if (observedLiepinSearchApiEmptyResultPages.has(page)) {
+      return { candidates: [] };
+    }
+    if (await hasLiepinExplicitEmptyResults(page)) {
+      return { candidates: [] };
+    }
+
     let candidates = await readLiepinDomCandidates(page);
     if (candidates.length > 0) {
       return resolveLiepinCardCandidates(page, candidates, isSearchPage, deadline);
@@ -1648,6 +2824,7 @@ export const liepinAdapter: PlatformAdapter = {
     return { candidates: [] };
   },
   openResumeDetail: async (context, searchPage, candidate) => openResumePage(context, searchPage, candidate),
+  afterResumeDetailOpened: runLiepinPostOpenActions,
   parseResumeDetail: async (page, candidate) => {
     await waitForLiepinPageReady(page);
     const bodyRawText = await page.locator('body').innerText();

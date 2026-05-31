@@ -1,15 +1,39 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 
 import { config } from '../config.js';
-import { liepinAdapter } from '../platforms/liepin-adapter.js';
+import { getLiepinCandidatePaceDelayMs, liepinAdapter } from '../platforms/liepin-adapter.js';
+
+const originalDataDir = config.dataDir;
+const testTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-liepin-adapter-'));
+(config as { dataDir: string }).dataDir = testTempDir;
+
+test.after(async () => {
+  (config as { dataDir: string }).dataDir = originalDataDir;
+  await fs.rm(testTempDir, { recursive: true, force: true });
+});
 
 function runInIsolatedPageContext<TArg, TResult>(fn: (arg: TArg) => TResult, arg: TArg): TResult {
   return vm.runInNewContext(`(${fn.toString()})(arg)`, { arg }) as TResult;
 }
 
 const liepinSearchReadyText = '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 隐藏已查看';
+
+test('liepin adapter defaults every action and candidate pace delay to 2-3 seconds', () => {
+  assert.equal(config.playwright.liepinActionDelayMinMs, 2000);
+  assert.equal(config.playwright.liepinActionDelayMaxMs, 3000);
+  assert.equal(config.playwright.liepinCandidateDelayMinMs, 2000);
+  assert.equal(config.playwright.liepinCandidateDelayMaxMs, 3000);
+
+  for (let index = 0; index < 20; index += 1) {
+    const delayMs = getLiepinCandidatePaceDelayMs();
+    assert.ok(delayMs >= 2000 && delayMs <= 3000);
+  }
+});
 
 function liepinHideViewedState(checked = true, bodyText = liepinSearchReadyText) {
   return {
@@ -349,6 +373,76 @@ test('liepin adapter keeps hide-viewed unchecked when viewed candidates are expl
   assert.equal(hideViewedChecked, false);
 });
 
+test('liepin adapter treats an empty final search response as zero candidates even when stale cards remain in the DOM', async () => {
+  let responseListener: ((response: { url(): string; status(): number; text(): string; request(): { timing(): { startTime: number } } }) => void) | undefined;
+  const makeSearchResponse = (candidateIds: string[]) => ({
+    url: () => 'https://api-h.liepin.com/api/com.liepin.searchfront4r.h.search-resumes',
+    status: () => 200,
+    request: () => ({
+      timing: () => ({ startTime: Date.now() + 1 }),
+    }),
+    text: () => JSON.stringify({
+      data: {
+        resList: candidateIds.map((candidateId) => ({
+          resIdEncode: candidateId,
+          resName: candidateId,
+          detailUrl: `/resume/showresumedetail/?res_id_encode=${candidateId}`,
+        })),
+      },
+    }),
+  });
+  const page = {
+    goto: async () => undefined,
+    url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async (
+      predicate: (response: { url(): string; status(): number; text(): string; request(): { timing(): { startTime: number } } }) => boolean,
+    ) => {
+      const response = makeSearchResponse([]);
+      responseListener?.(response);
+      return predicate(response) ? response : Promise.reject(new Error('empty final response was rejected'));
+    },
+    on: (event: string, listener: (response: { url(): string; status(): number; text(): string; request(): { timing(): { startTime: number } } }) => void) => {
+      assert.equal(event, 'response');
+      responseListener = listener;
+    },
+    evaluate: async () => liepinHideViewedState(true, '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 隐藏已查看 共0位人选'),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+        click: async () => undefined,
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 隐藏已查看 共0位人选',
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+        evaluateAll: async () => [
+          {
+            candidateId: 'stale-candidate',
+            resumeUrl: 'https://h.liepin.com/resume/showresumedetail/?res_id_encode=stale-candidate',
+            name: 'stale-candidate',
+          },
+        ],
+      };
+    },
+  } as never;
+
+  const searchPage = await liepinAdapter.openSubscribeSearch(page, '优衣库');
+  const result = await liepinAdapter.extractCandidateList(searchPage);
+
+  assert.deepStrictEqual(result.candidates, []);
+});
+
 test('liepin adapter discards quick-search search-resumes responses before hide-viewed is applied', async () => {
   let responseListener: ((response: { url(): string; status(): number; text(): string }) => void) | undefined;
   let resultListVisible = false;
@@ -630,11 +724,13 @@ test('liepin adapter rejects when quick-search click does not lead to refreshed 
 test('liepin adapter opens the recruiter authenticated search home instead of the public jobs page when not already on a recruiter search page', async () => {
   const gotoCalls: Array<{ url: string; waitUntil?: string }> = [];
   const clickCalls: string[] = [];
+  let currentUrl = 'about:blank';
   const page = {
     goto: async (url: string, options?: { waitUntil?: string }) => {
       gotoCalls.push({ url, waitUntil: options?.waitUntil });
+      currentUrl = url;
     },
-    url: () => 'about:blank',
+    url: () => currentUrl,
     waitForLoadState: async () => undefined,
     waitForResponse: async () => undefined,
     waitForFunction: async () => undefined,
@@ -672,6 +768,58 @@ test('liepin adapter opens the recruiter authenticated search home instead of th
   assert.deepStrictEqual(clickCalls, ['优衣库']);
 });
 
+test('liepin adapter enters recruiter search from the authenticated home by clicking find-talent', async () => {
+  let currentUrl = 'https://h.liepin.com/dashboard';
+  const gotoCalls: Array<{ url: string; waitUntil?: string }> = [];
+  const clickCalls: string[] = [];
+  const page = {
+    goto: async (url: string, options?: { waitUntil?: string }) => {
+      gotoCalls.push({ url, waitUntil: options?.waitUntil });
+    },
+    url: () => currentUrl,
+    waitForLoadState: async () => undefined,
+    waitForResponse: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForTimeout: async () => undefined,
+    waitForURL: async () => undefined,
+    mouse: {
+      move: async () => undefined,
+      click: async () => undefined,
+    },
+    getByText: (text: string | RegExp) => ({
+      first: () => ({
+        isVisible: async () => text instanceof RegExp && text.test('找人'),
+        scrollIntoViewIfNeeded: async () => undefined,
+        boundingBox: async () => null,
+        click: async () => {
+          clickCalls.push(String(text));
+          currentUrl = 'https://h.liepin.com/search/getConditionItem';
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => currentUrl.includes('/search/')
+            ? '搜简历 搜索条件 人才搜索 快捷搜索'
+            : '猎聘 招聘管理 找人 职位管理',
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+      };
+    },
+  } as never;
+
+  await assert.doesNotReject(() => liepinAdapter.openAuthenticatedHome(page));
+  assert.deepStrictEqual(gotoCalls, []);
+  assert.deepStrictEqual(clickCalls, ['/^\\s*找人\\s*$/']);
+});
+
 test('liepin adapter waits for the initial-data API before treating search as ready', async () => {
   const responseUrls: string[] = [];
   const page = {
@@ -707,6 +855,8 @@ test('liepin adapter waits for the initial-data API before treating search as re
 
   await assert.doesNotReject(() => liepinAdapter.openSubscribeSearch(page, '优衣库'));
   assert.deepStrictEqual(responseUrls, [
+    'https://api-h.liepin.com/api/com.liepin.recruitbff.clt.search.get-initial-data',
+    'https://api-h.liepin.com/api/com.liepin.recruitbff.clt.search.get-initial-data',
     'https://api-h.liepin.com/api/com.liepin.recruitbff.clt.search.get-initial-data',
     'https://api-h.liepin.com/api/com.liepin.recruitbff.clt.search.get-initial-data',
     'https://api-h.liepin.com/api/com.liepin.recruitbff.clt.search.get-initial-data',
@@ -1022,7 +1172,7 @@ test('liepin adapter accepts the real post-login recruiter shell when main-conta
   } as never;
 
   await assert.doesNotReject(() => liepinAdapter.openAuthenticatedHome(page));
-  assert.deepStrictEqual(urls, [{ url: 'https://h.liepin.com/search/getConditionItem', waitUntil: 'domcontentloaded' }]);
+  assert.deepStrictEqual(urls, []);
 });
 
 test('liepin adapter rejects when the Liepin SPA shell readiness wait fails on a page that supports waitForFunction', async () => {
@@ -1176,6 +1326,7 @@ test('liepin adapter reuses the current recruiter search URL and authenticates a
 test('liepin adapter opens the Liepin login page', async () => {
   const urls: Array<{ url: string; waitUntil: string }> = [];
   const page = {
+    waitForTimeout: async () => undefined,
     goto: async (url: string, options: { waitUntil?: string }) => {
       urls.push({ url, waitUntil: options.waitUntil ?? '' });
     },
@@ -1247,6 +1398,7 @@ test('liepin adapter accepts an authenticated recruiter resume detail page', asy
 test('liepin adapter opens the real authenticated verification entry before asserting auth', async () => {
   const urls: Array<{ url: string; waitUntil: string }> = [];
   const page = {
+    waitForTimeout: async () => undefined,
     goto: async (url: string, options: { waitUntil?: string }) => {
       urls.push({ url, waitUntil: options.waitUntil ?? '' });
     },
@@ -1269,7 +1421,7 @@ test('liepin adapter opens the real authenticated verification entry before asse
   } as never;
 
   await assert.doesNotReject(() => liepinAdapter.openAuthenticatedHome(page));
-  assert.deepStrictEqual(urls, [{ url: 'https://h.liepin.com/search/getConditionItem', waitUntil: 'domcontentloaded' }]);
+  assert.deepStrictEqual(urls, []);
 });
 
 test('liepin adapter accepts an authenticated recruiter search page', async () => {
@@ -1303,6 +1455,7 @@ test('liepin adapter accepts an authenticated recruiter search page', async () =
 test('liepin adapter does not directly navigate to public zhaopin resume urls when opening resume detail', async () => {
   let newPageCalls = 0;
   const clickCalls: string[] = [];
+  const mouseCalls: string[] = [];
   const popupPage = {
     url: () => 'https://h.liepin.com/search/getConditionItem?resumeId=87654321#detail',
     waitForLoadState: async () => undefined,
@@ -1335,6 +1488,14 @@ test('liepin adapter does not directly navigate to public zhaopin resume urls wh
   } as never;
   const searchPage = {
     url: () => 'https://h.liepin.com/search/getConditionItem?key=%E4%BC%98%E8%A1%A3%E5%BA%93#session',
+    mouse: {
+      move: async (x: number, y: number, options?: { steps?: number }) => {
+        mouseCalls.push(`move:${Math.round(x)}:${Math.round(y)}:${options?.steps ?? 0}`);
+      },
+      click: async (x: number, y: number) => {
+        mouseCalls.push(`click:${Math.round(x)}:${Math.round(y)}`);
+      },
+    },
     locator: (selector: string) => {
       assert.match(selector, /87654321/);
       return {
@@ -1344,6 +1505,8 @@ test('liepin adapter does not directly navigate to public zhaopin resume urls wh
             assert.ok((options?.timeout ?? 0) > 0);
             assert.ok((options?.timeout ?? 0) <= 20000);
           },
+          scrollIntoViewIfNeeded: async () => undefined,
+          boundingBox: async () => ({ x: 100, y: 200, width: 80, height: 20 }),
           click: async () => {
             clickCalls.push('candidate-link');
           },
@@ -1359,7 +1522,11 @@ test('liepin adapter does not directly navigate to public zhaopin resume urls wh
 
   assert.equal(result, popupPage);
   assert.equal(newPageCalls, 0);
-  assert.deepStrictEqual(clickCalls, ['candidate-link']);
+  assert.deepStrictEqual(clickCalls, []);
+  assert.equal(mouseCalls.length, 3);
+  assert.match(mouseCalls[0], /^move:/);
+  assert.match(mouseCalls[1], /^move:140:210:/);
+  assert.equal(mouseCalls[2], 'click:140:210');
 });
 
 test('liepin adapter waits for recruiter resume detail content to hydrate before treating a safe detail url as authenticated', async () => {
@@ -2846,4 +3013,202 @@ test('liepin adapter keeps sections separated across multiple experience blocks'
     skill: [],
     certificates: ['英语八级'],
   });
+});
+
+test('liepin adapter forwards an opened resume detail to a frequent contact when requested', async () => {
+  const clickCalls: string[] = [];
+  const mouseCalls: string[] = [];
+  const bodyText = [
+    '猎聘',
+    '中文简历',
+    '简历编号：LP123456',
+    '工作经历',
+    '教育经历',
+    '转发',
+    '常用联系人',
+    '王经理',
+    '确 认',
+  ].join('\n');
+
+  const makeLocator = (name: string, options: { text?: string; count?: number } = {}) => ({
+    count: async () => options.count ?? 1,
+    nth: (index: number) => makeLocator(`${name}:${index}`, { ...options, count: 1 }),
+    first: () => makeLocator(`${name}:first`, { ...options, count: 1 }),
+    last: () => makeLocator(`${name}:last`, { ...options, count: 1 }),
+    waitFor: async () => undefined,
+    isVisible: async () => true,
+    page: () => page,
+    scrollIntoViewIfNeeded: async () => undefined,
+    boundingBox: async () => ({ x: 40, y: 80, width: 120, height: 40 }),
+    click: async () => {
+      clickCalls.push(name);
+    },
+    innerText: async () => options.text ?? bodyText,
+    getByText: (label: string | RegExp) => makeLocator(`dialog-text:${String(label)}`),
+    locator: (selector: string) => makeLocator(`dialog-locator:${selector}`),
+  });
+
+  const page = {
+    url: () => 'https://h.liepin.com/resume/showresumedetail/?res_id_encode=LP123456',
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+    mouse: {
+      move: async (x: number, y: number, options?: { steps?: number }) => {
+        mouseCalls.push(`move:${Math.round(x)}:${Math.round(y)}:${options?.steps ?? 0}`);
+      },
+      click: async (x: number, y: number) => {
+        mouseCalls.push(`click:${Math.round(x)}:${Math.round(y)}`);
+      },
+    },
+    locator: (selector: string, options?: { hasText?: string | RegExp }) => {
+      if (selector === 'body') {
+        return makeLocator('body', { text: bodyText });
+      }
+
+      if (/role="dialog"|modal|dialog|popover/.test(selector)) {
+        return makeLocator('dialog', { text: bodyText });
+      }
+
+      return makeLocator(`locator:${selector}:${String(options?.hasText ?? '')}`);
+    },
+    getByText: (label: string | RegExp) => makeLocator(`text:${String(label)}`),
+  } as never;
+
+  await liepinAdapter.afterResumeDetailOpened?.(page, { candidateId: 'LP123456' }, {
+    liepinForwardContact: '王经理',
+  });
+
+  assert.deepStrictEqual(clickCalls, []);
+  assert.deepStrictEqual(mouseCalls.filter((call) => call === 'click:100:100'), [
+    'click:100:100',
+    'click:100:100',
+    'click:100:100',
+  ]);
+});
+
+test('liepin adapter ignores the forward dialog title when looking for the confirm button', async () => {
+  const clickCalls: string[] = [];
+  const mouseCalls: string[] = [];
+  const bodyText = '猎聘\n中文简历\n简历编号：LP123456\n工作经历\n教育经历\n转发\n常用联系人\n王经理\n转发简历\n确 认';
+
+  const makeLocator = (name: string, options: { text?: string; visible?: boolean; count?: number } = {}) => ({
+    count: async () => options.count ?? 1,
+    nth: (index: number) => {
+      if (name === 'dialogs') {
+        return makeLocator(`dialog-${index}`, {
+          text: index === 1 ? '转发简历' : bodyText,
+          visible: true,
+          count: 1,
+        });
+      }
+      return makeLocator(`${name}:${index}`, { ...options, count: 1 });
+    },
+    first: () => makeLocator(`${name}:first`, { ...options, count: 1 }),
+    last: () => makeLocator(`${name}:last`, { ...options, count: 1 }),
+    waitFor: async () => undefined,
+    isVisible: async () => options.visible ?? true,
+    page: () => page,
+    scrollIntoViewIfNeeded: async () => undefined,
+    boundingBox: async () => ({ x: 40, y: 80, width: 120, height: 40 }),
+    click: async () => {
+      clickCalls.push(name);
+    },
+    innerText: async () => options.text ?? bodyText,
+    getByText: (label: string | RegExp) => makeLocator(`${name}-text:${String(label)}`),
+    locator: (selector: string) => makeLocator(`${name}-locator:${selector}`),
+  });
+
+  const page = {
+    url: () => 'https://h.liepin.com/resume/showresumedetail/?res_id_encode=LP123456',
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+    mouse: {
+      move: async (x: number, y: number, options?: { steps?: number }) => {
+        mouseCalls.push(`move:${Math.round(x)}:${Math.round(y)}:${options?.steps ?? 0}`);
+      },
+      click: async (x: number, y: number) => {
+        mouseCalls.push(`click:${Math.round(x)}:${Math.round(y)}`);
+      },
+    },
+    locator: (selector: string, options?: { hasText?: string | RegExp }) => {
+      if (selector === 'body') {
+        return makeLocator('body', { text: bodyText });
+      }
+
+      if (/role="dialog"|modal|dialog|popover/.test(selector)) {
+        return makeLocator('dialogs', { count: 2 });
+      }
+
+      return makeLocator(`locator:${selector}:${String(options?.hasText ?? '')}`);
+    },
+    getByText: (label: string | RegExp) => makeLocator(`text:${String(label)}`),
+  } as never;
+
+  await liepinAdapter.afterResumeDetailOpened?.(page, { candidateId: 'LP123456' }, {
+    liepinForwardContact: '王经理',
+  });
+
+  assert.deepStrictEqual(clickCalls, []);
+  assert.deepStrictEqual(mouseCalls.filter((call) => call === 'click:100:100'), [
+    'click:100:100',
+    'click:100:100',
+    'click:100:100',
+  ]);
+});
+
+test('liepin adapter stops after the first visible forward action fails to open a dialog', async () => {
+  const mouseClicks: string[] = [];
+  const bodyText = '猎聘\n中文简历\n简历编号：LP123456\n工作经历\n教育经历\n转发';
+
+  const makeLocator = (name: string, options: { text?: string; visible?: boolean; count?: number } = {}) => ({
+    count: async () => options.count ?? 1,
+    nth: (index: number) => makeLocator(`${name}:${index}`, { ...options, count: 1 }),
+    first: () => makeLocator(`${name}:first`, { ...options, count: 1 }),
+    waitFor: async () => undefined,
+    isVisible: async () => options.visible ?? true,
+    page: () => page,
+    scrollIntoViewIfNeeded: async () => undefined,
+    boundingBox: async () => ({ x: 40, y: 80, width: 120, height: 40 }),
+    click: async () => {
+      throw new Error(`locator click should not be used for ${name}`);
+    },
+    innerText: async () => options.text ?? bodyText,
+    getByText: (label: string | RegExp) => makeLocator(`${name}-text:${String(label)}`),
+    locator: (selector: string) => makeLocator(`${name}-locator:${selector}`),
+  });
+
+  const page = {
+    url: () => 'https://h.liepin.com/resume/showresumedetail/?res_id_encode=LP123456',
+    waitForLoadState: async () => undefined,
+    waitForTimeout: async () => undefined,
+    mouse: {
+      move: async () => undefined,
+      click: async (x: number, y: number) => {
+        mouseClicks.push(`${Math.round(x)}:${Math.round(y)}`);
+      },
+    },
+    locator: (selector: string, options?: { hasText?: string | RegExp }) => {
+      if (selector === 'body') {
+        return makeLocator('body', { text: bodyText });
+      }
+
+      if (/role="dialog"|modal|dialog|popover/.test(selector)) {
+        return makeLocator('dialog', { text: '', count: 0, visible: false });
+      }
+
+      return makeLocator(`locator:${selector}:${String(options?.hasText ?? '')}`, { count: 2 });
+    },
+    getByText: (label: string | RegExp) => makeLocator(`text:${String(label)}`),
+  } as never;
+
+  const afterResumeDetailOpened = liepinAdapter.afterResumeDetailOpened;
+  assert.ok(afterResumeDetailOpened);
+  await assert.rejects(
+    () => afterResumeDetailOpened(page, { candidateId: 'LP123456' }, {
+      liepinForwardContact: '王经理',
+    }),
+    /forward dialog did not open.*Stopping without trying alternate matches/,
+  );
+
+  assert.deepStrictEqual(mouseClicks, ['100:100']);
 });
