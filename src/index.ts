@@ -494,6 +494,7 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
     deadline: searchDeadline,
     includeViewedCandidates: options.includeViewedCandidates,
   });
+  session.page = searchPage;
   const { candidates } = platformAdapter.platform === '51job'
     ? await extractCandidateListRef.fn(searchPage, { deadline: searchDeadline })
     : await extractCandidateListWithAdapterRef.fn(platformAdapter, searchPage, { deadline: searchDeadline });

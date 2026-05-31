@@ -246,6 +246,7 @@ function createSubscribeSearchOpenStub() {
   const targetWaitForTimeoutCalls: number[] = [];
   const pageWaitForTimeoutCalls: number[] = [];
   const pageWaitForLoadStateCalls: string[] = [];
+  const closedPageLabels: string[] = [];
   const cardWaitForCalls: Array<{ state?: string; timeout?: number }> = [];
   const cardSelectorWaits = new Map<string, number>();
   const pageSelectorWaits = new Map<string, number>();
@@ -259,6 +260,12 @@ function createSubscribeSearchOpenStub() {
   let pageTextTriggerReady = false;
   let viewedFilterChecked = false;
   let viewedFilterClicks = 0;
+  const extraPages: Array<{
+    label: string;
+    url: () => string;
+    isClosed: () => boolean;
+    close: () => Promise<void>;
+  }> = [];
 
   const viewedFilterLocator = {
     first: () => ({
@@ -346,10 +353,23 @@ function createSubscribeSearchOpenStub() {
     getByRole: (role?: string, options?: { name?: RegExp }) => makeWaitable('card', `role:${role ?? ''}:${options?.name?.toString() ?? ''}`, () => cardTextTriggerReady),
   };
 
+  const context = {
+    waitForEvent: async () => popupPage,
+    pages: () => [
+      page,
+      ...extraPages,
+      ...(popupPage ? [popupPage] : []),
+    ],
+  };
+
   const page = {
     url: () => currentUrl,
     goto: async (url: string) => {
       currentUrl = url;
+    },
+    isClosed: () => false,
+    close: async () => {
+      closedPageLabels.push('main');
     },
     waitForLoadState: async (state: string) => {
       pageWaitForLoadStateCalls.push(state);
@@ -376,10 +396,11 @@ function createSubscribeSearchOpenStub() {
     },
     getByText: (text?: string) => makeWaitable('page', `text:${text ?? ''}`, () => pageTextTriggerReady),
     getByRole: (role?: string, options?: { name?: RegExp }) => makeWaitable('page', `role:${role ?? ''}:${options?.name?.toString() ?? ''}`, () => pageTextTriggerReady),
-    context: () => ({
-      waitForEvent: async () => popupPage,
-    }),
+    context: () => context,
     waitForURL: async () => {
+      if (popupPage) {
+        throw new Error('no current-page navigation when popup opens');
+      }
       currentUrl = 'https://example.com/search';
       return targetPage;
     },
@@ -405,6 +426,11 @@ function createSubscribeSearchOpenStub() {
     },
     showPopup() {
       popupPage = {
+        url: () => 'https://ehire.51job.com/Revision/talent/search?rt=popup',
+        isClosed: () => false,
+        close: async () => {
+          closedPageLabels.push('popup');
+        },
         waitForLoadState: async (state: string) => {
           popupWaitForLoadStateCalls.push(state);
         },
@@ -412,7 +438,23 @@ function createSubscribeSearchOpenStub() {
           popupWaitForTimeoutCalls.push(timeout);
         },
         locator: page.locator,
+        context: () => context,
       };
+    },
+    addExtraPage(label: string, url: string) {
+      let closed = false;
+      extraPages.push({
+        label,
+        url: () => url,
+        isClosed: () => closed,
+        close: async () => {
+          closed = true;
+          closedPageLabels.push(label);
+        },
+      });
+    },
+    setCurrentUrl(url: string) {
+      currentUrl = url;
     },
     setSearchTriggerHref(href: string | null) {
       searchTriggerHref = href;
@@ -435,6 +477,7 @@ function createSubscribeSearchOpenStub() {
     getViewedFilterClicks: () => viewedFilterClicks,
     isViewedFilterChecked: () => viewedFilterChecked,
     getCurrentUrl: () => currentUrl,
+    getClosedPageLabels: () => closedPageLabels,
   };
 }
 
@@ -1187,6 +1230,35 @@ describe('scoring run semantics', () => {
 
     assert.equal(searchOpen.getViewedFilterClicks(), 0);
     assert.equal(searchOpen.isViewedFilterChecked(), true);
+  });
+
+  it('closes 51job subscribe tabs after a popup search page opens', async () => {
+    const searchOpen = createSubscribeSearchOpenStub();
+    searchOpen.showPopup();
+    searchOpen.showCardTextTrigger();
+    searchOpen.setCurrentUrl('https://ehire.51job.com/Revision/talent/subscribe?rt=current');
+    searchOpen.addExtraPage('stale-subscribe', 'https://ehire.51job.com/Revision/talent/subscribe?rt=stale');
+    searchOpen.addExtraPage('unrelated-search', 'https://ehire.51job.com/Revision/talent/search?rt=old');
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
+    const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
+    const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
+    const originalClickSearchTrigger = clickSearchTriggerRef.fn;
+
+    openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
+    waitForSearchTriggerReadyRef.fn = async () => undefined;
+    clickSearchTriggerRef.fn = async () => undefined;
+
+    try {
+      await openSubscribeSearch(searchOpen.page, '泰国 英语');
+    } finally {
+      openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      findSubscriptionCardRef.fn = originalFindSubscriptionCard;
+      waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
+      clickSearchTriggerRef.fn = originalClickSearchTrigger;
+    }
+
+    assert.deepStrictEqual(searchOpen.getClosedPageLabels(), ['main', 'stale-subscribe']);
   });
 
   it('clears the 51job viewed filter when viewed candidates are explicitly included', async () => {
