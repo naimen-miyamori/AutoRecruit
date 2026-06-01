@@ -9,7 +9,11 @@ Liepin 当前是正式支持的平台实现，CLI 名称为 `liepin`。平台专
 - live smoke：`npm run smoke:liepin -- --keyword "<关键词>" [--parse-first]`
 - 专项回归：`npm run test:experimental:liepin`
 
-手动登录轮询有一个重要约束：在检测到已鉴权 recruiter cookies 之前，不应在同一上下文里额外探测其他登录页、`about:blank` 或任意无关页面，避免刚打开登录窗口就被脚本误关。只有 cookies 已就绪后，才允许探测非登录 recruiter 页和专用 probe page 来确认搜索壳页可用。
+每次运行 `smoke:liepin` 复验时，会先读取该关键词当天的 `results/*.json`，把当天出现过的候选人 ID 从本地 `seen-ids.json` 移除，再进入页面复验。这个清理只作用于 smoke 复验，不改变正式 `npm run dev` 流程的历史去重语义。
+
+手动登录轮询有一个重要约束：在检测到已鉴权 recruiter cookies 之前，不应在同一上下文里额外探测其他登录页、`about:blank` 或任意无关页面，避免刚打开登录窗口就被脚本误关。登录阶段只检查当前上下文已有页面，不额外打开 probe 标签页；保存登录态后也不再启动 fresh-session 复验。
+
+Liepin 始终使用有头浏览器，`PLAYWRIGHT_HEADLESS=true` 对 Liepin 不生效。浏览器启动引擎默认是 CloakBrowser；如需回退到 Playwright 自带 Chromium，可设置 `BROWSER_ENGINE=playwright`。可复用浏览器能力是全平台共享实现，但 Liepin 默认开启：流程结束会关闭最后的详情页、停留并置前招聘端人才搜索页，同时保留浏览器；下次 Liepin 运行会优先通过本地 CDP 端口连接这个窗口并从当前搜索页继续。可设置 `PLAYWRIGHT_LIEPIN_REUSE_BROWSER=false` 关闭复用，或用 `PLAYWRIGHT_LIEPIN_REUSE_CDP_PORT` 改默认端口 `19327`。
 
 ## 搜索与候选人提取
 
@@ -25,15 +29,26 @@ Liepin 搜索页打开、搜索壳页、快捷搜索标签、DOM 候选和 `sear
 
 勾选 `隐藏已查看` 前捕获到的 `search-resumes` 响应不能复用。旧响应延迟返回时也不能污染后续候选人 ID 列表。本地 `seen-ids.json` 仍然是最终去重兜底，平台侧“隐藏已查看”不能替代本地去重。
 
+## 详情页转发
+
+主流程支持 `--liepin-forward-contact "<常用联系人姓名>"`。该开关只对 Liepin 生效，且只处理本地 `seen-ids.json` 过滤后的新增候选人。
+
+每个新增候选人打开详情页后，适配器会点击详情页上的 `转发` 动作，在转发弹窗的常用联系人里选择指定联系人，然后点击确认转发。转发完成后才继续解析简历、保存快照并标记 seen；如果转发动作失败，该候选人按捕获失败处理，不写入 seen，后续运行仍可重试。
+
+## 操作节奏
+
+Liepin 站内点击和输入默认都会先等待随机 `2000-3000ms`，包括快捷搜索、搜索按钮、`隐藏已查看`、打开详情、`转发`、选择联系人和确认转发。候选人之间的默认间隔也是随机 `2000-3000ms`。点击会先移动鼠标到目标元素再点击；如需临时调整，可设置 `PLAYWRIGHT_LIEPIN_ACTION_DELAY_MIN_MS`、`PLAYWRIGHT_LIEPIN_ACTION_DELAY_MAX_MS`、`PLAYWRIGHT_LIEPIN_CANDIDATE_DELAY_MIN_MS`、`PLAYWRIGHT_LIEPIN_CANDIDATE_DELAY_MAX_MS`。这些配置走全平台共享 pacing 实现；也可以使用全局 `PLAYWRIGHT_ACTION_DELAY_*` 和 `PLAYWRIGHT_CANDIDATE_DELAY_*` 默认值，再用 Liepin 平台变量覆盖。
+
 ## 推荐验证
 
 真实账号验证顺序：
 
 ```bash
-PLAYWRIGHT_HEADLESS=false npm run login:session -- --platform liepin
-PLAYWRIGHT_HEADLESS=false npm run smoke:liepin -- --keyword "优衣库"
-PLAYWRIGHT_HEADLESS=false npm run smoke:liepin -- --keyword "优衣库" --parse-first
-PLAYWRIGHT_HEADLESS=false npm run dev -- --platform liepin --keyword "优衣库" --jd "<JD 文本>"
+npm run login:session -- --platform liepin
+npm run smoke:liepin -- --keyword "优衣库"
+npm run smoke:liepin -- --keyword "优衣库" --parse-first
+npm run smoke:liepin -- --keyword "优衣库" --parse-first --forward-contact "<常用联系人姓名>"
+npm run dev -- --platform liepin --keyword "优衣库" --jd "<JD 文本>"
 ```
 
 只验证本地命令接线和回归时：
@@ -55,4 +70,4 @@ npm run test:experimental:liepin
 ## 验证记录
 
 - 2026-05-15：Liepin 正式支持状态已确认。`npm run typecheck`、`npm run test`、`npm run test:experimental:liepin` 全部通过；`npm run smoke:liepin -- --keyword "优衣库"`、`npm run smoke:liepin -- --keyword "优衣库" --parse-first`、`npm run smoke:liepin -- --keyword "阀门"`、`npm run smoke:liepin -- --keyword "阀门" --parse-first` 已在真实账号下跑通。完整 `npm run dev -- --platform liepin --keyword "优衣库" --jd "<JD 文本>"` 与 `npm run dev -- --platform liepin --keyword "阀门" --jd "<JD 文本>"` 也已在隔离 `DATA_DIR` 下验证成功，并写出 `jd.json`、`seen-ids.json`、`results/*.json`、`exports/latest.md`、`resumes/*.json`、`snapshots/*.txt`、`scores/*.json`。
-- 2026-05-25：Liepin `隐藏已查看` 筛选已接入正式搜索入口。`npm run typecheck`、`npm run test:experimental:liepin` 已通过；`PLAYWRIGHT_HEADLESS=true npm run smoke:liepin -- --keyword "优衣库"` 在真实登录态下通过，并在勾选 `隐藏已查看` 后返回 0 候选人。完整 `PLAYWRIGHT_HEADLESS=true npm run dev -- --platform liepin --keyword "优衣库" --email "wd-cmgmt@hotmail.com"` 已成功写出结果、导出最新报告并发送“本次无新增候选人”邮件。
+- 2026-05-25：Liepin `隐藏已查看` 筛选已接入正式搜索入口。`npm run typecheck`、`npm run test:experimental:liepin` 已通过；`npm run smoke:liepin -- --keyword "优衣库"` 在真实登录态下通过，并在勾选 `隐藏已查看` 后返回 0 候选人。完整 `npm run dev -- --platform liepin --keyword "优衣库" --email "wd-cmgmt@hotmail.com"` 已成功写出结果、导出最新报告并发送“本次无新增候选人”邮件。

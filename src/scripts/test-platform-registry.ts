@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveStorageStatePath } from '../config.js';
+import { config, resolveStorageStatePath } from '../config.js';
 import { normalize51jobFilterDefinition } from '../platforms/51job-filter-normalization.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from '../platforms/registry.js';
 
@@ -82,6 +82,39 @@ test('resolveStorageStatePath rejects cross-platform or shared STORAGE_STATE_PAT
       process.env.STORAGE_STATE_PATH = originalStorageStatePath;
     }
   }
+});
+
+test('browser pacing and reuse defaults are platform-specific', () => {
+  assert.deepEqual(config.playwright.actionDelayMinMsByPlatform, {
+    '51job': 0,
+    liepin: 2000,
+    zhilian: 0,
+  });
+  assert.deepEqual(config.playwright.actionDelayMaxMsByPlatform, {
+    '51job': 0,
+    liepin: 3000,
+    zhilian: 0,
+  });
+  assert.deepEqual(config.playwright.candidateDelayMinMsByPlatform, {
+    '51job': 0,
+    liepin: 2000,
+    zhilian: 0,
+  });
+  assert.deepEqual(config.playwright.candidateDelayMaxMsByPlatform, {
+    '51job': 0,
+    liepin: 3000,
+    zhilian: 0,
+  });
+  assert.deepEqual(config.playwright.reuseBrowserByPlatform, {
+    '51job': false,
+    liepin: true,
+    zhilian: false,
+  });
+  assert.deepEqual(config.playwright.reuseCdpPortByPlatform, {
+    '51job': 19325,
+    liepin: 19327,
+    zhilian: 19329,
+  });
 });
 
 test('51job adapter exposes the shared auth contract', () => {

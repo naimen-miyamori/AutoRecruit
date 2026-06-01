@@ -11,6 +11,11 @@ export interface SearchWaitOptions {
   includeViewedCandidates?: boolean;
 }
 
+export interface CandidatePostOpenActions {
+  liepinForwardContact?: string;
+  liepinForwardContactMode?: 'confirm' | 'select-only';
+}
+
 export interface PlatformAdapter {
   platform: SupportedPlatform;
   displayName: string;
@@ -31,5 +36,6 @@ export interface PlatformAdapter {
   saveSearchCondition?(page: Page, savedSearchName: string, options?: SearchWaitOptions): Promise<void>;
   extractCandidateList(page: Page, options?: SearchWaitOptions): Promise<{ candidates: CandidateListItem[] }>;
   openResumeDetail(context: BrowserContext, searchPage: Page, candidate: CandidateListItem): Promise<Page>;
+  afterResumeDetailOpened?(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions): Promise<void>;
   parseResumeDetail(page: Page, candidate: CandidateListItem): Promise<CandidateResume>;
 }

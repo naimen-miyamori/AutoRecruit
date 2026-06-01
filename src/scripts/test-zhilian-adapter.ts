@@ -225,19 +225,32 @@ test('zhilian adapter accepts blank rd6 shell when authenticated cookies exist',
 
 test('zhilian adapter clicks a saved quick-search tag whose text contains the raw keyword', async () => {
   const clickCalls: string[] = [];
+  let quickSearchApplied = false;
   const page = {
     url: () => 'https://rd6.zhaopin.com/app/search',
     waitForLoadState: async () => undefined,
     waitForFunction: async () => undefined,
+    waitForTimeout: async () => undefined,
     locator: (selector: string) => {
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 李宁 无印良品',
+          innerText: async () => quickSearchApplied
+            ? '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 李宁 无印良品 关键词：优衣库'
+            : '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 李宁 无印良品',
         };
       }
 
       return {
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              quickSearchApplied = true;
+              clickCalls.push(selector);
+            },
+          }),
+        }),
         first: () => ({
           waitFor: async () => {
             if (selector.includes('快捷搜索') || selector.includes('猜你想搜') || selector.includes('tag')) {
@@ -252,29 +265,34 @@ test('zhilian adapter clicks a saved quick-search tag whose text contains the ra
         }),
       };
     },
-    getByText: (matcher: RegExp) => {
-      if (matcher.source.includes('优衣库')) {
-        return {
-          first: () => ({
-            waitFor: async () => undefined,
-            click: async () => {
-              clickCalls.push('优衣库');
-            },
-          }),
-        };
-      }
-      throw new Error(`unexpected matcher: ${matcher.source}`);
-    },
   } as never;
 
   await assert.doesNotReject(() => zhilianAdapter.openSubscribeSearch(page, '优衣库'));
-  assert.deepEqual(clickCalls, ['优衣库']);
+  assert.deepEqual(clickCalls, ['.search-quick-search-new__content-item']);
+});
+
+test('zhilian adapter detects whether saved quick-search conditions are active', () => {
+  assert.equal(
+    zhilianTestExports.hasAppliedZhilianQuickSearchKeyword(
+      '快捷搜索 上海 | 优衣库 李宁 关键词：优衣库 李宁 学历要求：大专及以上 未看过',
+      '优衣库',
+    ),
+    true,
+  );
+  assert.equal(
+    zhilianTestExports.hasAppliedZhilianQuickSearchKeyword(
+      '快捷搜索 上海 | 优衣库 李宁 学历要求：大专及以上 未看过',
+      '优衣库',
+    ),
+    false,
+  );
 });
 
 function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean }) {
   const clickCalls: string[] = [];
   const waitForTimeoutCalls: number[] = [];
   let unviewedChecked = options.unviewedChecked;
+  let quickSearchApplied = false;
   let now = 1000;
 
   const unviewedFilterLocator = {
@@ -361,7 +379,9 @@ function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 未看过 未聊过',
+          innerText: async () => quickSearchApplied
+            ? '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 未看过 未聊过 关键词：优衣库'
+            : '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 未看过 未聊过',
         };
       }
 
@@ -374,21 +394,18 @@ function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean
       }
 
       return {
-        evaluateAll: async () => [],
-      };
-    },
-    getByText: (matcher: RegExp) => {
-      if (matcher.source.includes('优衣库')) {
-        return {
+        filter: () => ({
           first: () => ({
             waitFor: async () => undefined,
             click: async () => {
               clickCalls.push('优衣库');
+              quickSearchApplied = true;
+              unviewedChecked = true;
             },
           }),
-        };
-      }
-      throw new Error(`unexpected matcher: ${matcher.source}`);
+        }),
+        evaluateAll: async () => [],
+      };
     },
   } as never;
 
@@ -433,6 +450,7 @@ test('zhilian adapter fails when no saved quick-search tag contains the raw keyw
     url: () => 'https://rd6.zhaopin.com/app/search',
     waitForLoadState: async () => undefined,
     waitForFunction: async () => undefined,
+    waitForTimeout: async () => undefined,
     locator: (selector: string) => {
       if (selector === 'body') {
         return {
@@ -442,6 +460,13 @@ test('zhilian adapter fails when no saved quick-search tag contains the raw keyw
       }
 
       return {
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => {
+              throw new Error(`tag selector did not match: ${selector}`);
+            },
+          }),
+        }),
         first: () => ({
           waitFor: async () => {
             throw new Error(`tag selector did not match: ${selector}`);
@@ -449,13 +474,6 @@ test('zhilian adapter fails when no saved quick-search tag contains the raw keyw
         }),
       };
     },
-    getByText: () => ({
-      first: () => ({
-        waitFor: async () => {
-          throw new Error('raw keyword tag not found');
-        },
-      }),
-    }),
   } as never;
 
   await assert.rejects(
@@ -591,6 +609,53 @@ test('zhilian adapter extracts candidate cards from DOM fallback', async () => {
       currentTitle: '海外销售经理',
       cardText: '李四 上海测试科技有限公司 海外销售经理',
       sourceText: 'https://rd6.zhaopin.com/resume/detail?resumeId=R654321 <a data-resume-id="R654321" href="https://rd6.zhaopin.com/resume/detail?resumeId=R654321">李四</a> <div>李四 上海测试科技有限公司 海外销售经理</div> 李四 上海测试科技有限公司 海外销售经理',
+    },
+  ]);
+});
+
+test('zhilian adapter extracts candidate cards from Vue props when no resume links are exposed', () => {
+  const candidates = zhilianTestExports.parseZhilianVueCandidateSnapshots([
+    {
+      rawText: '石女士\n23岁\n1年\n本科\n斐乐\n店长',
+      containerOuterHtml: '<div class="search-resume-item-wrap">石女士 斐乐 店长</div>',
+      candidate: {
+        userMasterId: 1257585175,
+        userName: '石女士',
+        resumeNumber: 'yISBw6q(6hVzPPyKfEn(LTkV6flsN2rQ',
+        resumeK: '2EE082F722425F6EF874282781E179D6',
+        resumeT: '1780239013348',
+        workExperiences: [
+          {
+            companyName: '斐乐',
+            jobTitle: '店长',
+          },
+        ],
+      },
+    },
+  ]);
+
+  assert.deepEqual(candidates, [
+    {
+      candidateId: '1257585175',
+      resumeUrl: 'https://rd6.zhaopin.com/app/search?resumeNumber=yISBw6q(6hVzPPyKfEn(LTkV6flsN2rQ',
+      name: '石女士',
+      currentCompany: '斐乐',
+      currentTitle: '店长',
+      cardText: '石女士 23岁 1年 本科 斐乐 店长',
+      searchResultIndex: 0,
+      sourceText: JSON.stringify({
+        userMasterId: 1257585175,
+        userName: '石女士',
+        resumeNumber: 'yISBw6q(6hVzPPyKfEn(LTkV6flsN2rQ',
+        resumeK: '2EE082F722425F6EF874282781E179D6',
+        resumeT: '1780239013348',
+        workExperiences: [
+          {
+            companyName: '斐乐',
+            jobTitle: '店长',
+          },
+        ],
+      }),
     },
   ]);
 });
@@ -756,32 +821,38 @@ test('zhilian adapter waits for the real talent search list response instead of 
 test('zhilian adapter uses the shared deadline for shell and quick-search tag waits', async () => {
   const observedShellTimeouts: number[] = [];
   const observedTagTimeouts: number[] = [];
+  let quickSearchApplied = false;
   const page = {
     url: () => 'https://rd6.zhaopin.com/app/search',
     waitForLoadState: async () => undefined,
     waitForFunction: async (_predicate: () => boolean, _arg: unknown, options?: { timeout?: number }) => {
       observedShellTimeouts.push(options?.timeout ?? 0);
     },
+    waitForTimeout: async () => undefined,
     locator: (selector: string) => {
       if (selector === 'body') {
         return {
           waitFor: async () => undefined,
-          innerText: async () => '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库',
+          innerText: async () => quickSearchApplied
+            ? '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 关键词：优衣库'
+            : '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库',
         };
       }
 
       return {
+        filter: () => ({
+          first: () => ({
+            waitFor: async (options?: { timeout?: number }) => {
+              observedTagTimeouts.push(options?.timeout ?? 0);
+            },
+            click: async () => {
+              quickSearchApplied = true;
+            },
+          }),
+        }),
         evaluateAll: async () => [],
       };
     },
-    getByText: () => ({
-      first: () => ({
-        waitFor: async (options?: { timeout?: number }) => {
-          observedTagTimeouts.push(options?.timeout ?? 0);
-        },
-        click: async () => undefined,
-      }),
-    }),
   } as never;
 
   await zhilianAdapter.openSubscribeSearch(page, '优衣库', { deadline: Date.now() + 1000 });

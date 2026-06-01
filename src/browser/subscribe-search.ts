@@ -1,5 +1,6 @@
 import { Locator, Page } from 'playwright';
 import { config } from '../config.js';
+import { clickPlatformLocator, waitPlatformActionPace } from './pacing.js';
 import { openAuthenticatedHome as openAuthenticatedSubscribePage } from './session.js';
 import type { SearchWaitOptions, SupportedPlatform } from '../platforms/types.js';
 
@@ -33,6 +34,8 @@ const viewedFilterSelector = 'label.el-checkbox:has-text("我已看"), label:has
 const viewedFilterSettleMs = 1000;
 const viewedFilterPollMs = 100;
 const viewedFilterMaxWaitMs = 8000;
+const platform = '51job';
+const subscribePageUrlPattern = /^https:\/\/ehire\.51job\.com\/Revision\/talent\/subscribe(?:[/?#].*)?$/i;
 
 export const waitForAuthenticatedSubscribeReadyRef = {
   fn: waitForAuthenticatedSubscribeReady,
@@ -60,6 +63,21 @@ function getRemainingTimeout(deadline: number): number {
 
 function resolveSearchDeadline(options?: SearchWaitOptions): number {
   return options?.deadline ?? Date.now() + config.playwright.searchPageTimeoutMs;
+}
+
+function is51jobSubscribePage(page: Page): boolean {
+  return subscribePageUrlPattern.test(page.url());
+}
+
+async function closeExtra51jobSubscribePages(searchPage: Page): Promise<void> {
+  const pages = searchPage.context().pages();
+  await Promise.all(pages.map(async (candidatePage) => {
+    if (candidatePage === searchPage || candidatePage.isClosed() || !is51jobSubscribePage(candidatePage)) {
+      return;
+    }
+
+    await candidatePage.close().catch(() => undefined);
+  }));
 }
 
 async function openAuthenticatedSubscribePageWithDeadline(
@@ -204,7 +222,7 @@ async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: 
     await waitForSearchTriggerReadyRef.fn(page, searchTrigger, { deadline });
 
     try {
-      await searchTrigger.click({ timeout: getRemainingTimeout(deadline) });
+      await clickPlatformLocator(searchTrigger, page, platform, getRemainingTimeout(deadline));
       return;
     } catch (error) {
       lastError = error;
@@ -242,7 +260,12 @@ export async function clear51jobViewedFilter(page: Page, options?: SearchWaitOpt
   while (Date.now() < waitUntil) {
     if (await is51jobViewedFilterChecked(viewedFilter)) {
       uncheckedSince = undefined;
-      await viewedFilter.click({ timeout: Math.min(1000, Math.max(1, waitUntil - Date.now())) }).catch(() => undefined);
+      await clickPlatformLocator(
+        viewedFilter,
+        page,
+        platform,
+        Math.min(1000, Math.max(1, waitUntil - Date.now())),
+      ).catch(() => undefined);
     } else {
       const now = Date.now();
       uncheckedSince ??= now;
@@ -329,6 +352,7 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
 
   const card = await findSubscriptionCardRef.fn(page, searchKeyword, { deadline });
   await card.scrollIntoViewIfNeeded();
+  await waitPlatformActionPace(page, platform);
   await card.hover();
 
   const searchTrigger = await resolveSearchTrigger(page, card, deadline);
@@ -349,6 +373,7 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
     if (options?.includeViewedCandidates) {
       await clear51jobViewedFilter(openOutcome.page, { deadline });
     }
+    await closeExtra51jobSubscribePages(openOutcome.page);
     return openOutcome.page;
   }
 
@@ -358,6 +383,7 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
     if (options?.includeViewedCandidates) {
       await clear51jobViewedFilter(page, { deadline });
     }
+    await closeExtra51jobSubscribePages(page);
     return page;
   }
 

@@ -3,6 +3,7 @@ import { CandidateListItem, CandidateResume, EducationExperience, LanguageSkill,
 import { buildRawPageSource } from '../extraction/page-source.js';
 import { extractResumeFromSource as extractResumeFromCrawl4AiSource } from '../extraction/crawl4ai-extractor.js';
 import { config } from '../config.js';
+import { clickPlatformLocator } from './pacing.js';
 
 const EDUCATION_KEYWORDS = ['博士', '硕士', '本科', '大专', '中技/中专', '中专', '高中'];
 const LANGUAGE_KEYWORDS = ['英语', '日语', '韩语', '粤语', '法语', '德语', '西班牙语'];
@@ -1843,6 +1844,7 @@ export async function openResumeDetail(context: BrowserContext, page: Page, cand
 
   const card = trigger.locator('xpath=ancestor::*[contains(@class, "card") or self::li][1]');
   const clickableLocators = [
+    card.locator('.img img, img[alt*="头像"], img[src*="avatar"]').first(),
     card.locator('.user').first(),
     card.locator('.userinfo').first(),
     card.locator('.info_content').first(),
@@ -1868,7 +1870,7 @@ export async function openResumeDetail(context: BrowserContext, page: Page, cand
         candidate.candidateId,
         previousUrl,
         deadline,
-        () => locator.click({ timeout: remainingTime(deadline), force: true }),
+        () => clickPlatformLocator(locator, page, '51job', remainingTime(deadline), { force: true }),
       );
       if (detailPage) {
         return detailPage;

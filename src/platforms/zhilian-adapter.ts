@@ -1,5 +1,6 @@
 import type { BrowserContext, Page } from 'playwright';
 import { config } from '../config.js';
+import { clickPlatformLocator } from '../browser/pacing.js';
 import {
   clickFirstVisibleText,
   clickPrimarySearchButton,
@@ -63,6 +64,12 @@ type ZhilianDomCandidateSnapshot = {
   anchorText: string;
 };
 
+type ZhilianVueCandidateSnapshot = {
+  candidate?: ZhilianApiCandidate;
+  rawText: string;
+  containerOuterHtml: string;
+};
+
 const observedZhilianSearchApiCandidates = new WeakMap<Page, CandidateListItem[]>();
 const observedZhilianSearchApiSeenPages = new WeakSet<Page>();
 const observedZhilianSearchApiListenerPages = new WeakSet<Page>();
@@ -81,6 +88,8 @@ const zhilianUnviewedFilterSelector = [
 const zhilianViewedFilterSettleMs = 1000;
 const zhilianViewedFilterPollMs = 100;
 const zhilianViewedFilterMaxWaitMs = 8000;
+const zhilianSearchStatePollMs = 100;
+const zhilianPlatform = 'zhilian';
 
 function createDeadline(timeoutMs = config.playwright.resumeDetailTimeoutMs): number {
   return Date.now() + Math.max(timeoutMs, 1);
@@ -212,7 +221,12 @@ async function closeExistingZhilianResumeModal(page: Page): Promise<void> {
   ].join(', ');
 
   try {
-    await page.locator(closeSelector).first().click({ timeout: Math.min(config.playwright.resumeDetailTimeoutMs, 1000) });
+    await clickPlatformLocator(
+      page.locator(closeSelector).first(),
+      page,
+      zhilianPlatform,
+      Math.min(config.playwright.resumeDetailTimeoutMs, 1000),
+    );
   } catch {
     if (/resumeNumber=/i.test(page.url())) {
       const keyboard = (page as Partial<Pick<Page, 'keyboard'>>).keyboard;
@@ -298,26 +312,87 @@ function keywordToLoosePattern(keyword: string): RegExp {
   return new RegExp(pattern, 'i');
 }
 
-async function clickSavedZhilianQuickSearchTag(page: Page, keyword: string, deadline: number): Promise<void> {
+function hasAppliedZhilianQuickSearchKeyword(bodyText: string, keyword: string): boolean {
+  const normalizedText = normalizeText(bodyText);
   const keywordPattern = keywordToLoosePattern(keyword);
-  const quickSearchTag = page.getByText(keywordPattern, { exact: false }).first();
+  const appliedKeywordMatch = normalizedText.match(/关键词[:：]\s*([^:：]*?)(?:\s+(?:学历要求|年龄要求|期望月薪|活跃日期|期望职位|从事职业|现居住地|保存为快捷搜索|今日搜索聊剩|综合排序|未看过|未聊过|近一段工作相关|其他过滤条件)|$)/);
+  return keywordPattern.test(appliedKeywordMatch?.[1] ?? '');
+}
 
-  try {
-    await quickSearchTag.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
-    await quickSearchTag.click({ timeout: remainingTime(deadline) }).catch(async (error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/unexpected argument|too many arguments/i.test(message)) {
-        throw error;
-      }
+async function isZhilianQuickSearchApplied(page: Page, keyword: string): Promise<boolean> {
+  const bodyText = await page.locator('body').innerText().catch(() => '');
+  return hasAppliedZhilianQuickSearchKeyword(bodyText, keyword);
+}
 
-      await quickSearchTag.click();
-    });
-  } catch {
+async function waitForZhilianQuickSearchApplied(page: Page, keyword: string, deadline: number): Promise<boolean> {
+  while (Date.now() <= deadline) {
+    if (await isZhilianQuickSearchApplied(page, keyword)) {
+      return true;
+    }
+
+    await page.waitForTimeout(Math.min(zhilianSearchStatePollMs, remainingTime(deadline))).catch(() => undefined);
+  }
+
+  return false;
+}
+
+async function clickSavedZhilianQuickSearchTag(page: Page, keyword: string, deadline: number): Promise<void> {
+  if (await isZhilianQuickSearchApplied(page, keyword)) {
+    return;
+  }
+
+  const keywordPattern = keywordToLoosePattern(keyword);
+  const quickSearchTagSelectors = [
+    '.search-quick-search-new__content-item',
+    '.search-quick-search__content-item',
+    '[class*="quick-search"][class*="content-item"]',
+    '[class*="quick-search"][class*="item"]',
+  ];
+  let quickSearchTag: ReturnType<Page['locator']> | undefined;
+
+  for (const selector of quickSearchTagSelectors) {
+    const candidate = page.locator(selector).filter({ hasText: keywordPattern }).first();
+    try {
+      await candidate.waitFor({ state: 'visible', timeout: Math.min(2000, remainingTime(deadline)) });
+      quickSearchTag = candidate;
+      break;
+    } catch {
+      continue;
+    }
+  }
+
+  if (!quickSearchTag) {
     const visibleTags = await listVisibleZhilianQuickSearchTags(page);
     throw new Error(`Could not find a saved Zhilian quick-search tag containing keyword "${keyword}". Visible tags: ${visibleTags.join(', ') || '(none)'}.`);
   }
 
+  clearObservedZhilianCandidateApi(page);
+  await clickPlatformLocator(quickSearchTag, page, zhilianPlatform, remainingTime(deadline));
   await waitForZhilianRecruiterShell(page, { deadline });
+  if (!await waitForZhilianQuickSearchApplied(page, keyword, deadline)) {
+    throw new Error(`Saved Zhilian quick-search tag containing keyword "${keyword}" was clicked, but its search conditions did not become active before timeout.`);
+  }
+}
+
+async function ensureZhilianViewedFilterClearedForQuickSearch(page: Page, keyword: string, deadline: number): Promise<void> {
+  if (await clearZhilianUnviewedFilter(page, { deadline })) {
+    await waitForZhilianRecruiterShell(page, { deadline });
+  }
+
+  if (!await isZhilianQuickSearchApplied(page, keyword)) {
+    await clickSavedZhilianQuickSearchTag(page, keyword, deadline);
+    if (await clearZhilianUnviewedFilter(page, { deadline })) {
+      await waitForZhilianRecruiterShell(page, { deadline });
+    }
+  }
+
+  if (!await waitForZhilianQuickSearchApplied(page, keyword, deadline)) {
+    throw new Error(`Saved Zhilian quick-search conditions for keyword "${keyword}" were not active after clearing 未看过.`);
+  }
+
+  if (await isZhilianUnviewedFilterChecked(page)) {
+    throw new Error('Zhilian 未看过 filter remained checked after --include-viewed true.');
+  }
 }
 
 async function isZhilianUnviewedFilterChecked(page: Page): Promise<boolean> {
@@ -356,7 +431,12 @@ async function clearZhilianUnviewedFilter(page: Page, options?: SearchWaitOption
       uncheckedSince = undefined;
       clearObservedZhilianCandidateApi(page);
       try {
-        await unviewedFilter.click({ timeout: Math.min(1000, Math.max(1, waitUntil - Date.now())) });
+        await clickPlatformLocator(
+          unviewedFilter,
+          page,
+          zhilianPlatform,
+          Math.min(1000, Math.max(1, waitUntil - Date.now())),
+        );
         clicked = true;
       } catch {
         // The search page renders hidden duplicates; retry until a visible control is stable.
@@ -389,13 +469,19 @@ async function fillZhilianKeywordSearchInput(page: Page, value: string): Promise
     'input[type="text"]',
   ];
 
-  return fillInputNearText(
+  if (await fillInputNearText(
     page,
     value,
     ['搜公司、职位、专业、学校、行业、技能等', '搜索关键词', '关键词', '职位', '专业', '学校', '行业', '技能'],
     ['.search-item', '.filter-item', '.form-item', '[class*="search"]', '[class*="filter"]'],
     inputSelectors,
-  ) || fillFirstVisibleInput(page, value, inputSelectors);
+    1000,
+    zhilianPlatform,
+  )) {
+    return true;
+  }
+
+  return fillFirstVisibleInput(page, value, inputSelectors, 1000, zhilianPlatform);
 }
 
 async function prepareZhilianSearchConditionPage(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page> {
@@ -409,14 +495,14 @@ async function prepareZhilianSearchConditionPage(page: Page, keyword: string, op
     throw new Error('Search subscription on zhilian could not fill the keyword input on the recruiter search page.');
   }
 
-  const didTriggerSearch = await clickPrimarySearchButton(page)
-    || await clickFirstVisibleText(page, ['搜索', '搜 索']);
+  const didTriggerSearch = await clickPrimarySearchButton(page, 1000, zhilianPlatform)
+    || await clickFirstVisibleText(page, ['搜索', '搜 索'], 1000, zhilianPlatform);
   if (!didTriggerSearch) {
     throw new Error('Search subscription on zhilian could not trigger the keyword search on the recruiter search page.');
   }
 
   await waitForZhilianRecruiterShell(page, { deadline });
-  await clickFirstVisibleText(page, ['使用高级搜索', '高级搜索', '筛选', '更多筛选']).catch(() => false);
+  await clickFirstVisibleText(page, ['使用高级搜索', '高级搜索', '筛选', '更多筛选'], 1000, zhilianPlatform).catch(() => false);
   return page;
 }
 
@@ -499,7 +585,7 @@ async function clickFirstVisibleZhilianText(page: Page, pattern: RegExp, timeout
         continue;
       }
 
-      await candidate.click({ timeout });
+      await clickPlatformLocator(candidate, page, zhilianPlatform, timeout);
       return true;
     } catch {
       continue;
@@ -509,7 +595,7 @@ async function clickFirstVisibleZhilianText(page: Page, pattern: RegExp, timeout
   try {
     const firstLocator = locator.first();
     await firstLocator.waitFor({ state: 'visible', timeout });
-    await firstLocator.click({ timeout });
+    await clickPlatformLocator(firstLocator, page, zhilianPlatform, timeout);
     return true;
   } catch {
     return false;
@@ -1056,7 +1142,54 @@ function parseZhilianDomCandidateSnapshots(snapshots: ZhilianDomCandidateSnapsho
   return Array.from(resultById.values());
 }
 
+function parseZhilianVueCandidateSnapshots(snapshots: ZhilianVueCandidateSnapshot[]): CandidateListItem[] {
+  const candidatesById = new Map<string, CandidateListItem>();
+
+  for (const [index, snapshot] of snapshots.entries()) {
+    if (!snapshot.candidate) {
+      continue;
+    }
+
+    const parsedCandidates = parseZhilianApiCandidates(JSON.stringify([snapshot.candidate]));
+    const candidate = parsedCandidates[0];
+    if (!candidate) {
+      continue;
+    }
+
+    const rawText = snapshot.rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const cardText = normalizeText(rawText) || candidate.cardText;
+    candidatesById.set(candidate.candidateId, {
+      ...candidate,
+      cardText,
+      sourceText: JSON.stringify(snapshot.candidate),
+      searchResultIndex: index,
+    });
+  }
+
+  return Array.from(candidatesById.values());
+}
+
 async function collectZhilianCards(page: Page): Promise<CandidateListItem[]> {
+  const vueSnapshots = await page.locator('.search-resume-item-wrap').evaluateAll((elements) => elements.map((element) => {
+    const maybeVueElement = element as Element & {
+      __vue__?: {
+        _props?: {
+          candidate?: ZhilianApiCandidate;
+        };
+      };
+    };
+
+    return {
+      candidate: maybeVueElement.__vue__?._props?.candidate,
+      containerOuterHtml: (element as HTMLElement).outerHTML,
+      rawText: element.textContent ?? '',
+    };
+  })).catch(() => []);
+  const vueCandidates = parseZhilianVueCandidateSnapshots(vueSnapshots);
+  if (vueCandidates.length > 0) {
+    return vueCandidates;
+  }
+
   const snapshots = await page.locator(zhilianCandidateLinkSelector).evaluateAll((elements) => elements.map((element) => {
     const anchor = element as HTMLAnchorElement;
     const container = anchor.closest('li, [class*="card"], [class*="item"], [class*="resume"], [class*="candidate"], [class*="talent"], article, section, div') ?? anchor;
@@ -1114,11 +1247,11 @@ async function clickZhilianSearchResultCard(searchPage: Page, candidate: Candida
   }
 
   if (contentEvaluateAll) {
-    await contentLocator.nth(targetIndex).click({ timeout: remainingTime(deadline) });
+    await clickPlatformLocator(contentLocator.nth(targetIndex), searchPage, zhilianPlatform, remainingTime(deadline));
     return true;
   }
 
-  await cardLocator.nth(targetIndex).click({ timeout: remainingTime(deadline) });
+  await clickPlatformLocator(cardLocator.nth(targetIndex), searchPage, zhilianPlatform, remainingTime(deadline));
   return true;
 }
 
@@ -1245,8 +1378,8 @@ export const zhilianAdapter: PlatformAdapter = {
     attachZhilianCandidateApiObserver(page);
     await openZhilianRecruiterHome(page, { deadline });
     await clickSavedZhilianQuickSearchTag(page, keyword, deadline);
-    if (options?.includeViewedCandidates && await clearZhilianUnviewedFilter(page, { deadline })) {
-      await waitForZhilianRecruiterShell(page, { deadline });
+    if (options?.includeViewedCandidates) {
+      await ensureZhilianViewedFilterClearedForQuickSearch(page, keyword, deadline);
     }
     return page;
   },
@@ -1270,7 +1403,10 @@ export const zhilianAdapter: PlatformAdapter = {
   }),
   readSearchConditionResultTotal: readZhilianSearchConditionResultTotal,
   saveSearchCondition: async (page, savedSearchName) => {
-    await saveSearchConditionByCommonDialog(page, savedSearchName, { platformLabel: 'zhilian' });
+    await saveSearchConditionByCommonDialog(page, savedSearchName, {
+      platformLabel: 'zhilian',
+      platform: zhilianPlatform,
+    });
     await waitForZhilianRecruiterShell(page);
   },
   extractCandidateList: async (page, options) => {
@@ -1317,7 +1453,7 @@ export const zhilianAdapter: PlatformAdapter = {
       try {
         const candidateLink = searchPage.locator(`${zhilianCandidateLinkSelector}[href*="${candidate.candidateId}"]`).first();
         await candidateLink.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
-        await candidateLink.click({ timeout: remainingTime(deadline) });
+        await clickPlatformLocator(candidateLink, searchPage, zhilianPlatform, remainingTime(deadline));
         clicked = true;
       } catch {
         clicked = false;
@@ -1363,6 +1499,9 @@ export const zhilianTestExports = {
   extractZhilianCandidateIdFromText,
   extractZhilianCardsInPage,
   parseZhilianDomCandidateSnapshots,
+  parseZhilianVueCandidateSnapshots,
   clearZhilianUnviewedFilter,
+  hasAppliedZhilianQuickSearchKeyword,
+  isZhilianQuickSearchApplied,
   listVisibleZhilianQuickSearchTags,
 };

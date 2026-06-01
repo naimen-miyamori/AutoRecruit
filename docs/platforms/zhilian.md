@@ -21,8 +21,12 @@ Zhilian 搜索进入方式与 51job、Liepin 不同：
 1. 打开 `https://rd6.zhaopin.com/app/search`。
 2. 点击一个已保存的快捷搜索标签。
 3. 标签文本必须包含本次运行传入的原始 `--keyword`。
-4. 列表提取 DOM-first；如果 DOM 已经提取到候选人，不继续等待候选人 API。
-5. DOM 无候选时，才在剩余 deadline 内等待 API fallback 或明确空结果。
+4. 点击后必须确认当前条件中出现 `关键词：<keyword>`，避免页面刷新或筛选切换后快捷搜索条件丢失。
+5. 默认运行保留 `未看过` 筛选；`--include-viewed true` 只取消可见的 `未看过`，不改动 `未聊过`。
+6. 如果取消 `未看过` 后快捷搜索条件消失，必须重新选择本次关键词的快捷搜索标签，再次取消 `未看过`，并重新确认 `关键词：<keyword>`。
+7. 列表提取 DOM-first；如果 DOM 已经提取到候选人，不继续等待候选人 API。
+8. 当前搜索卡片可能没有可用的详情链接或显式 ID，DOM 提取应优先读取 `.search-resume-item-wrap` Vue props 中的候选人字段，例如 `userMasterId`、`resumeNumber`、`resumeK` 和 `resumeT`。
+9. DOM 无候选时，才在剩余 deadline 内等待 API fallback 或明确空结果。
 
 ## 简历详情与分享链接
 

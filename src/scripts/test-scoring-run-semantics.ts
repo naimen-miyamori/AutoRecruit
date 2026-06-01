@@ -11,7 +11,7 @@ import { buildJobKey } from '../parsers/jd-parser.js';
 import { getResumeDomSnapshot, collectResumePageEvidence, openResumeDetail } from '../browser/resume-detail.js';
 import { collectCandidateList, waitForCandidateResultsReady } from '../browser/candidate-list.js';
 import { clickSearchTriggerRef, findSubscriptionCardRef, openAuthenticatedSubscribePageRef, openSubscribeSearch, waitForAuthenticatedSubscribeReadyRef, waitForSearchTriggerReadyRef } from '../browser/subscribe-search.js';
-import { BrowserSession, closeBrowserSessionRef, createFreshBrowserSessionRef, createPersistentBrowserSessionRef, openLoginSessionRef, persistBrowserSessionRef, openAuthenticatedSubscribePageRef as openAuthenticatedSubscribePageSessionRef, verifyPersistedBrowserSessionRef } from '../browser/session.js';
+import { BrowserSession, closeBrowserSessionRef, createFreshBrowserSessionRef, createPersistentBrowserSessionRef, isLiepinReusableBrowserEnabled, isReusableBrowserEnabled, openLoginSessionRef, persistBrowserSessionRef, openAuthenticatedSubscribePageRef as openAuthenticatedSubscribePageSessionRef, resolveBrowserHeadless, verifyPersistedBrowserSessionRef } from '../browser/session.js';
 import { validateCandidateListExtraction } from '../extraction/extractor.js';
 import { resolveOpenAISettings } from '../llm/openai-client.js';
 import { liepinAdapter } from '../platforms/liepin-adapter.js';
@@ -122,6 +122,7 @@ function createSearchPage() {
   return {
     id: 'search-page',
     close: async () => undefined,
+    bringToFront: async () => undefined,
   } as never;
 }
 
@@ -245,6 +246,7 @@ function createSubscribeSearchOpenStub() {
   const targetWaitForTimeoutCalls: number[] = [];
   const pageWaitForTimeoutCalls: number[] = [];
   const pageWaitForLoadStateCalls: string[] = [];
+  const closedPageLabels: string[] = [];
   const cardWaitForCalls: Array<{ state?: string; timeout?: number }> = [];
   const cardSelectorWaits = new Map<string, number>();
   const pageSelectorWaits = new Map<string, number>();
@@ -258,6 +260,12 @@ function createSubscribeSearchOpenStub() {
   let pageTextTriggerReady = false;
   let viewedFilterChecked = false;
   let viewedFilterClicks = 0;
+  const extraPages: Array<{
+    label: string;
+    url: () => string;
+    isClosed: () => boolean;
+    close: () => Promise<void>;
+  }> = [];
 
   const viewedFilterLocator = {
     first: () => ({
@@ -345,10 +353,23 @@ function createSubscribeSearchOpenStub() {
     getByRole: (role?: string, options?: { name?: RegExp }) => makeWaitable('card', `role:${role ?? ''}:${options?.name?.toString() ?? ''}`, () => cardTextTriggerReady),
   };
 
+  const context = {
+    waitForEvent: async () => popupPage,
+    pages: () => [
+      page,
+      ...extraPages,
+      ...(popupPage ? [popupPage] : []),
+    ],
+  };
+
   const page = {
     url: () => currentUrl,
     goto: async (url: string) => {
       currentUrl = url;
+    },
+    isClosed: () => false,
+    close: async () => {
+      closedPageLabels.push('main');
     },
     waitForLoadState: async (state: string) => {
       pageWaitForLoadStateCalls.push(state);
@@ -375,10 +396,11 @@ function createSubscribeSearchOpenStub() {
     },
     getByText: (text?: string) => makeWaitable('page', `text:${text ?? ''}`, () => pageTextTriggerReady),
     getByRole: (role?: string, options?: { name?: RegExp }) => makeWaitable('page', `role:${role ?? ''}:${options?.name?.toString() ?? ''}`, () => pageTextTriggerReady),
-    context: () => ({
-      waitForEvent: async () => popupPage,
-    }),
+    context: () => context,
     waitForURL: async () => {
+      if (popupPage) {
+        throw new Error('no current-page navigation when popup opens');
+      }
       currentUrl = 'https://example.com/search';
       return targetPage;
     },
@@ -404,6 +426,11 @@ function createSubscribeSearchOpenStub() {
     },
     showPopup() {
       popupPage = {
+        url: () => 'https://ehire.51job.com/Revision/talent/search?rt=popup',
+        isClosed: () => false,
+        close: async () => {
+          closedPageLabels.push('popup');
+        },
         waitForLoadState: async (state: string) => {
           popupWaitForLoadStateCalls.push(state);
         },
@@ -411,7 +438,23 @@ function createSubscribeSearchOpenStub() {
           popupWaitForTimeoutCalls.push(timeout);
         },
         locator: page.locator,
+        context: () => context,
       };
+    },
+    addExtraPage(label: string, url: string) {
+      let closed = false;
+      extraPages.push({
+        label,
+        url: () => url,
+        isClosed: () => closed,
+        close: async () => {
+          closed = true;
+          closedPageLabels.push(label);
+        },
+      });
+    },
+    setCurrentUrl(url: string) {
+      currentUrl = url;
     },
     setSearchTriggerHref(href: string | null) {
       searchTriggerHref = href;
@@ -434,6 +477,7 @@ function createSubscribeSearchOpenStub() {
     getViewedFilterClicks: () => viewedFilterClicks,
     isViewedFilterChecked: () => viewedFilterChecked,
     getCurrentUrl: () => currentUrl,
+    getClosedPageLabels: () => closedPageLabels,
   };
 }
 
@@ -562,6 +606,7 @@ function createManualLoginSessionStub() {
     waitForTimeout: async (timeout: number) => {
       pageWaitForTimeoutCalls.push(timeout);
     },
+    bringToFront: async () => undefined,
     goto: async () => undefined,
     waitForLoadState: async () => undefined,
     title: async () => '',
@@ -639,7 +684,7 @@ function createManualLoginSessionStub() {
   };
 }
 
-function createClosableBrowserSessionStub(options: { temporaryUserDataDir?: string; closeBrowser?: boolean } = {}) {
+function createClosableBrowserSessionStub(options: { temporaryUserDataDir?: string; closeBrowser?: boolean; keepOpenOnExit?: boolean } = {}) {
   const closeOrder: string[] = [];
   const session = {
     context: {
@@ -655,6 +700,7 @@ function createClosableBrowserSessionStub(options: { temporaryUserDataDir?: stri
     page: {} as never,
     temporaryUserDataDir: options.temporaryUserDataDir,
     closeBrowser: options.closeBrowser,
+    keepOpenOnExit: options.keepOpenOnExit,
   } as unknown as BrowserSession;
 
   return {
@@ -843,7 +889,7 @@ function buildManualLoginReadyLog(
 }
 
 function buildLiepinManualLoginWaitDiagnosticLog(options: {
-  pageRole: 'probe' | 'context';
+  pageRole: 'context';
   finalUrl: string;
   title: string;
   bodyPreview: string;
@@ -1186,6 +1232,35 @@ describe('scoring run semantics', () => {
     assert.equal(searchOpen.isViewedFilterChecked(), true);
   });
 
+  it('closes 51job subscribe tabs after a popup search page opens', async () => {
+    const searchOpen = createSubscribeSearchOpenStub();
+    searchOpen.showPopup();
+    searchOpen.showCardTextTrigger();
+    searchOpen.setCurrentUrl('https://ehire.51job.com/Revision/talent/subscribe?rt=current');
+    searchOpen.addExtraPage('stale-subscribe', 'https://ehire.51job.com/Revision/talent/subscribe?rt=stale');
+    searchOpen.addExtraPage('unrelated-search', 'https://ehire.51job.com/Revision/talent/search?rt=old');
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
+    const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
+    const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
+    const originalClickSearchTrigger = clickSearchTriggerRef.fn;
+
+    openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
+    waitForSearchTriggerReadyRef.fn = async () => undefined;
+    clickSearchTriggerRef.fn = async () => undefined;
+
+    try {
+      await openSubscribeSearch(searchOpen.page, '泰国 英语');
+    } finally {
+      openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      findSubscriptionCardRef.fn = originalFindSubscriptionCard;
+      waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
+      clickSearchTriggerRef.fn = originalClickSearchTrigger;
+    }
+
+    assert.deepStrictEqual(searchOpen.getClosedPageLabels(), ['main', 'stale-subscribe']);
+  });
+
   it('clears the 51job viewed filter when viewed candidates are explicitly included', async () => {
     const searchOpen = createSubscribeSearchOpenStub();
     searchOpen.showPopup();
@@ -1497,7 +1572,7 @@ describe('scoring run semantics', () => {
     const result = await openResumeDetail(detailPage.context, detailPage.page, candidate);
 
     assert.equal(result, detailPage.page);
-    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.user']);
+    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.img img, img[alt*="头像"], img[src*="avatar"]']);
     assert.deepStrictEqual(detailPage.getGotoCalls(), []);
     assert.equal(candidate.resumeUrl, 'https://example.com/resume/100228050');
     assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
@@ -1514,7 +1589,7 @@ describe('scoring run semantics', () => {
     const result = await openResumeDetail(detailPage.context, detailPage.page, candidate);
 
     assert.equal(result, detailPage.page);
-    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.user']);
+    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.img img, img[alt*="头像"], img[src*="avatar"]']);
     assert.deepStrictEqual(detailPage.getGotoCalls(), []);
     assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
   });
@@ -1531,7 +1606,7 @@ describe('scoring run semantics', () => {
     const result = await openResumeDetail(detailPage.context, detailPage.page, candidate);
 
     assert.equal(result, detailPage.page);
-    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.user']);
+    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.img img, img[alt*="头像"], img[src*="avatar"]']);
     assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
   });
 
@@ -1792,6 +1867,58 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(closableSession.getCloseOrder(), ['context', 'browser']);
   });
 
+  it('keeps a Liepin headed browser session open until manual close is requested', async () => {
+    const closableSession = createClosableBrowserSessionStub({ keepOpenOnExit: true });
+
+    await closeBrowserSessionRef.fn(closableSession.session);
+
+    assert.deepStrictEqual(closableSession.getCloseOrder(), []);
+  });
+
+  it('forces Liepin browser sessions to headed mode even when headless is requested', () => {
+    assert.equal(resolveBrowserHeadless('liepin', true), false);
+    assert.equal(resolveBrowserHeadless('liepin', false), false);
+    assert.equal(resolveBrowserHeadless('51job', true), true);
+    assert.equal(resolveBrowserHeadless('zhilian', true), true);
+  });
+
+  it('enables reusable Liepin browser sessions only for headed Liepin runs unless explicitly disabled', () => {
+    const originalReuseBrowser = config.playwright.reuseBrowserByPlatform.liepin;
+
+    try {
+      (config.playwright.reuseBrowserByPlatform as { liepin: boolean }).liepin = true;
+      assert.equal(isLiepinReusableBrowserEnabled(true), true);
+      assert.equal(isLiepinReusableBrowserEnabled(false), true);
+
+      (config.playwright.reuseBrowserByPlatform as { liepin: boolean }).liepin = false;
+      assert.equal(isLiepinReusableBrowserEnabled(false), false);
+    } finally {
+      (config.playwright.reuseBrowserByPlatform as { liepin: boolean }).liepin = originalReuseBrowser;
+    }
+  });
+
+  it('supports reusable browser sessions per platform without changing 51job and Zhilian defaults', () => {
+    const originalReuseBrowser = { ...config.playwright.reuseBrowserByPlatform };
+    const originalHeadless = config.playwright.headless;
+
+    try {
+      (config.playwright as { headless: boolean }).headless = false;
+      assert.equal(isReusableBrowserEnabled('liepin'), true);
+      assert.equal(isReusableBrowserEnabled('51job'), false);
+      assert.equal(isReusableBrowserEnabled('zhilian'), false);
+
+      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean })['51job'] = true;
+      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean }).zhilian = true;
+      assert.equal(isReusableBrowserEnabled('51job', false), true);
+      assert.equal(isReusableBrowserEnabled('zhilian', false), true);
+      assert.equal(isReusableBrowserEnabled('51job', true), false);
+      assert.equal(isReusableBrowserEnabled('zhilian', true), false);
+    } finally {
+      (config.playwright as { headless: boolean }).headless = originalHeadless;
+      Object.assign(config.playwright.reuseBrowserByPlatform, originalReuseBrowser);
+    }
+  });
+
   it('diagnoses manual login session module identity', async () => {
     const token = `${Date.now()}-${Math.random()}`;
     const sessionModule = await import(`../browser/session.js?test=${token}`);
@@ -1884,14 +2011,14 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(output.stdout, [
       'Waiting for login to complete.',
       buildManualLoginReadyLog('liepin', 'https://h.liepin.com/search/getConditionItem', '猎聘人才搜索'),
-      'Authenticated page confirmed, storage state saved, and fresh-session reuse verified.',
+      'Authenticated page confirmed and storage state saved.',
     ]);
     assert.equal(caughtError, undefined);
     assert.deepStrictEqual(loginSession.getOpenLoginCalls(), ['liepin']);
-    assert.deepStrictEqual(loginSession.getOpenAuthenticatedCalls(), ['liepin']);
+    assert.deepStrictEqual(loginSession.getOpenAuthenticatedCalls(), []);
     assert.deepStrictEqual(loginSession.getPageWaitForTimeoutCalls(), []);
     assert.deepStrictEqual(loginSession.getPersistCalls(), ['liepin']);
-    assert.deepStrictEqual(loginSession.getVerifyCalls(), ['liepin']);
+    assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     assert.equal(storageStateCalls, 0);
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
@@ -1979,14 +2106,14 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(output.stdout, [
       'Waiting for login to complete.',
       buildManualLoginReadyLog('liepin', 'https://h.liepin.com/search/getConditionItem', '猎聘人才搜索'),
-      'Authenticated page confirmed, storage state saved, and fresh-session reuse verified.',
+      'Authenticated page confirmed and storage state saved.',
     ]);
     assert.equal(caughtError, undefined);
     assert.deepStrictEqual(loginSession.getOpenLoginCalls(), ['liepin']);
-    assert.deepStrictEqual(loginSession.getOpenAuthenticatedCalls(), ['liepin']);
+    assert.deepStrictEqual(loginSession.getOpenAuthenticatedCalls(), []);
     assert.deepStrictEqual(loginSession.getPageWaitForTimeoutCalls(), []);
     assert.deepStrictEqual(loginSession.getPersistCalls(), ['liepin']);
-    assert.deepStrictEqual(loginSession.getVerifyCalls(), ['liepin']);
+    assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     assert.equal(storageStateCalls, 0);
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
@@ -2536,7 +2663,7 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
-  it('reopens a Liepin login page when the active manual-login page has been closed before auth cookies exist', async () => {
+  it('does not reopen a Liepin login page when the active manual-login page has been closed before auth cookies exist', async () => {
     const loginSession = createManualLoginSessionStub();
     const originalArgv = process.argv;
     const originalOpenLoginSession = openLoginSessionRef.fn;
@@ -2632,10 +2759,8 @@ describe('scoring run semantics', () => {
       caughtError instanceof Error ? caughtError.message : String(caughtError),
       /Login confirmation timed out before the authenticated page became ready\./,
     );
-    assert.equal(newPageCalls, 1);
-    assert.deepStrictEqual(replacementGotoCalls, [
-      { url: 'https://h.liepin.com/account/login', waitUntil: 'domcontentloaded' },
-    ]);
+    assert.equal(newPageCalls, 0);
+    assert.deepStrictEqual(replacementGotoCalls, []);
     assert.deepStrictEqual(checkedPages, []);
     assert.deepStrictEqual(loginSession.getOpenLoginCalls(), ['liepin']);
     assert.deepStrictEqual(loginSession.getPersistCalls(), []);
@@ -2643,7 +2768,7 @@ describe('scoring run semantics', () => {
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
 
-  it('reopens a Liepin login page when the active manual-login page disappears from the context before auth cookies exist', async () => {
+  it('does not reopen a Liepin login page when the active manual-login page disappears from the context before auth cookies exist', async () => {
     const loginSession = createManualLoginSessionStub();
     const originalArgv = process.argv;
     const originalOpenLoginSession = openLoginSessionRef.fn;
@@ -2737,12 +2862,99 @@ describe('scoring run semantics', () => {
       caughtError instanceof Error ? caughtError.message : String(caughtError),
       /Login confirmation timed out before the authenticated page became ready\./,
     );
-    assert.equal(newPageCalls, 1);
-    assert.deepStrictEqual(replacementGotoCalls, [
-      { url: 'https://h.liepin.com/account/login', waitUntil: 'domcontentloaded' },
-    ]);
+    assert.equal(newPageCalls, 0);
+    assert.deepStrictEqual(replacementGotoCalls, []);
     assert.deepStrictEqual(checkedPages, []);
     assert.deepStrictEqual(loginSession.getOpenLoginCalls(), ['liepin']);
+    assert.deepStrictEqual(loginSession.getPersistCalls(), []);
+    assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
+    assert.equal(loginSession.getCloseCalls().length, 1);
+  });
+
+  it('does not reopen Liepin login pages when the manual-login page stays missing before auth cookies exist', async () => {
+    const loginSession = createManualLoginSessionStub();
+    const originalArgv = process.argv;
+    const originalOpenLoginSession = openLoginSessionRef.fn;
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
+    const originalPersistBrowserSession = persistBrowserSessionRef.fn;
+    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalCloseBrowserSession = closeBrowserSessionRef.fn;
+    const originalUrl = loginSession.page.url;
+    let now = 0;
+    let newPageCalls = 0;
+    const replacementGotoCalls: Array<{ url: string; waitUntil?: string }> = [];
+    const replacementLoginPage = {
+      goto: async (url: string, options?: { waitUntil?: string }) => {
+        replacementGotoCalls.push({ url, waitUntil: options?.waitUntil });
+      },
+      waitForLoadState: async () => undefined,
+      waitForTimeout: async () => undefined,
+      url: () => 'https://h.liepin.com/account/login',
+      locator: (selector?: string) => {
+        assert.equal(selector, 'body');
+        return {
+          innerText: async () => '立即登录/注册 密码登录',
+        };
+      },
+      close: async () => undefined,
+      isClosed: () => false,
+    } as never;
+
+    process.argv = ['node', 'test-login-save-session', '--platform', 'liepin'];
+    openLoginSessionRef.fn = async (platform) => loginSession.openLoginSession(platform);
+    openAuthenticatedSubscribePageSessionRef.fn = (async (_page, platform) => {
+      if (platform !== 'liepin') {
+        throw new Error(`Unexpected platform: ${platform}`);
+      }
+      throw new Error('login not ready');
+    }) as typeof openAuthenticatedSubscribePageSessionRef.fn;
+    persistBrowserSessionRef.fn = (async (_session, platform) => {
+      await loginSession.persistBrowserSession(platform);
+    }) as typeof persistBrowserSessionRef.fn;
+    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
+      await loginSession.verifyPersistedBrowserSession(platform);
+    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    closeBrowserSessionRef.fn = (async () => {
+      await loginSession.closeBrowserSession();
+    }) as typeof closeBrowserSessionRef.fn;
+    loginSession.page.waitForTimeout = async (timeout: number) => {
+      loginSession.getPageWaitForTimeoutCalls().push(timeout);
+      now += timeout;
+    };
+    loginSession.page.url = (() => 'https://h.liepin.com/account/login') as typeof loginSession.page.url;
+    Object.assign(loginSession.page as object, {
+      isClosed: () => true,
+    });
+    Object.assign(loginSession.session.context as object, {
+      pages: () => [],
+      cookies: async () => [],
+      newPage: async () => {
+        newPageCalls += 1;
+        return replacementLoginPage;
+      },
+    });
+
+    try {
+      await assert.rejects(
+        captureDateNow(async () => {
+          Date.now = () => now;
+          await runManualLoginSessionSave();
+        }),
+        /Login confirmation timed out/,
+      );
+    } finally {
+      process.argv = originalArgv;
+      openLoginSessionRef.fn = originalOpenLoginSession;
+      openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
+      persistBrowserSessionRef.fn = originalPersistBrowserSession;
+      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      closeBrowserSessionRef.fn = originalCloseBrowserSession;
+      loginSession.page.url = originalUrl;
+    }
+
+    assert.equal(newPageCalls, 0);
+    assert.deepStrictEqual(replacementGotoCalls, []);
+    assert.ok(loginSession.getPageWaitForTimeoutCalls().length > 1);
     assert.deepStrictEqual(loginSession.getPersistCalls(), []);
     assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     assert.equal(loginSession.getCloseCalls().length, 1);
@@ -2765,6 +2977,12 @@ describe('scoring run semantics', () => {
       waitForTimeout: async () => undefined,
       url: () => 'https://h.liepin.com/search/getConditionItem',
       title: async () => '猎聘人才搜索',
+      locator: (selector?: string) => {
+        assert.equal(selector, 'body');
+        return {
+          innerText: async () => '搜简历 招聘管理 候选人',
+        };
+      },
       close: async () => undefined,
     } as never;
 
@@ -2830,20 +3048,20 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(output.stdout, [
       'Waiting for login to complete.',
       buildManualLoginReadyLog('liepin', 'https://h.liepin.com/search/getConditionItem', '猎聘人才搜索'),
-      'Authenticated page confirmed, storage state saved, and fresh-session reuse verified.',
+      'Authenticated page confirmed and storage state saved.',
     ]);
     assert.equal(caughtError, undefined);
-    assert.deepStrictEqual(checkedPages, [loginSession.page, authenticatedPage]);
+    assert.deepStrictEqual(checkedPages, []);
     assert.equal(newPageCalls, 0);
     assert.deepStrictEqual(loginSession.getOpenLoginCalls(), ['liepin']);
     assert.deepStrictEqual(loginSession.getOpenAuthenticatedCalls(), []);
     assert.deepStrictEqual(loginSession.getPageWaitForTimeoutCalls(), []);
     assert.deepStrictEqual(loginSession.getPersistCalls(), ['liepin']);
-    assert.deepStrictEqual(loginSession.getVerifyCalls(), ['liepin']);
+    assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
 
-  it('saves and verifies a Liepin session by probing one reusable page in the same context when the original page is not ready', async () => {
+  it('does not open a Liepin probe page when authenticated cookies exist but the current page is not ready', async () => {
     const loginSession = createManualLoginSessionStub();
     const loginPage = loginSession.page as unknown as Page;
     const originalArgv = process.argv;
@@ -2854,18 +3072,9 @@ describe('scoring run semantics', () => {
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     const checkedPages: unknown[] = [];
-    const probeGotoCalls: string[] = [];
     let newPageCalls = 0;
-    const probePage = {
-      goto: async (url: string) => {
-        probeGotoCalls.push(url);
-      },
-      waitForLoadState: async () => undefined,
-      waitForTimeout: async () => undefined,
-      url: () => 'https://h.liepin.com/search/getConditionItem',
-      title: async () => '猎聘人才搜索',
-      close: async () => undefined,
-    } as never;
+    const currentUrl = 'about:blank';
+    const currentBodyText = '';
 
     process.argv = ['node', 'test-login-save-session', '--platform', 'liepin'];
     openLoginSessionRef.fn = async (platform) => loginSession.openLoginSession(platform);
@@ -2876,9 +3085,6 @@ describe('scoring run semantics', () => {
       }
       if (page === loginPage) {
         throw new Error('login not ready');
-      }
-      if (page === probePage) {
-        return probePage;
       }
       throw new Error('login not ready');
     }) as typeof openAuthenticatedSubscribePageSessionRef.fn;
@@ -2895,6 +3101,15 @@ describe('scoring run semantics', () => {
       loginSession.getPageWaitForTimeoutCalls().push(timeout);
       now += timeout;
     };
+    loginSession.page.url = (() => currentUrl) as typeof loginSession.page.url;
+    loginSession.page.locator = ((selector: string) => {
+      if (selector === 'body') {
+        return {
+          innerText: async () => currentBodyText,
+        };
+      }
+      throw new Error(`Unexpected selector: ${selector}`);
+    }) as unknown as typeof loginSession.page.locator;
     Object.assign(loginSession.session.context as object, {
       pages: () => [loginSession.page],
       cookies: async () => [
@@ -2903,12 +3118,11 @@ describe('scoring run semantics', () => {
       ],
       newPage: async () => {
         newPageCalls += 1;
-        return probePage;
+        throw new Error('probe page should not be opened after authenticated cookies exist');
       },
     });
 
     let caughtError: unknown;
-    let loginSucceeded = false;
     let output: Awaited<ReturnType<typeof captureConsole>>;
 
     try {
@@ -2917,7 +3131,6 @@ describe('scoring run semantics', () => {
           Date.now = () => now;
           try {
             await runManualLoginSessionSave();
-            loginSucceeded = true;
           } catch (error) {
             caughtError = error;
           }
@@ -2932,25 +3145,22 @@ describe('scoring run semantics', () => {
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
     }
 
-    assert.equal(loginSucceeded, true);
-    assert.deepStrictEqual(output.stdout, [
-      'Waiting for login to complete.',
-      buildManualLoginReadyLog('liepin', 'https://h.liepin.com/search/getConditionItem', '猎聘人才搜索'),
-      'Authenticated page confirmed, storage state saved, and fresh-session reuse verified.',
-    ]);
-    assert.equal(caughtError, undefined);
-    assert.deepStrictEqual(checkedPages, [loginPage, probePage]);
-    assert.equal(newPageCalls, 1);
-    assert.deepStrictEqual(probeGotoCalls, []);
+    assert.match(
+      caughtError instanceof Error ? caughtError.message : String(caughtError),
+      /Login confirmation timed out before the authenticated page became ready\./,
+    );
+    assert.deepStrictEqual(output.stdout, ['Waiting for login to complete.']);
+    assert.deepStrictEqual(checkedPages, []);
+    assert.equal(newPageCalls, 0);
     assert.deepStrictEqual(loginSession.getOpenLoginCalls(), ['liepin']);
     assert.deepStrictEqual(loginSession.getOpenAuthenticatedCalls(), []);
-    assert.deepStrictEqual(loginSession.getPageWaitForTimeoutCalls(), []);
-    assert.deepStrictEqual(loginSession.getPersistCalls(), ['liepin']);
-    assert.deepStrictEqual(loginSession.getVerifyCalls(), ['liepin']);
+    assert.ok(loginSession.getPageWaitForTimeoutCalls().length > 0);
+    assert.deepStrictEqual(loginSession.getPersistCalls(), []);
+    assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
 
-  it('reuses the same Liepin probe page across login polls instead of opening a new tab each time', async () => {
+  it('polls the same Liepin page across login checks instead of opening a probe tab', async () => {
     const loginSession = createManualLoginSessionStub();
     const loginPage = loginSession.page as unknown as Page;
     const originalArgv = process.argv;
@@ -2963,12 +3173,8 @@ describe('scoring run semantics', () => {
     let readyAttempts = 0;
     const checkedPages: unknown[] = [];
     let newPageCalls = 0;
-    const probePage = {
-      goto: async () => undefined,
-      waitForLoadState: async () => undefined,
-      waitForTimeout: async () => undefined,
-      close: async () => undefined,
-    } as never;
+    let currentUrl = 'https://h.liepin.com/account/login';
+    let currentBodyText = '立即登录/注册 密码登录';
 
     process.argv = ['node', 'test-login-save-session', '--platform', 'liepin'];
     openLoginSessionRef.fn = async (platform) => loginSession.openLoginSession(platform);
@@ -2977,17 +3183,7 @@ describe('scoring run semantics', () => {
       if (platform !== 'liepin') {
         throw new Error(`Unexpected platform: ${platform}`);
       }
-      if (page === loginPage) {
-        throw new Error('login not ready');
-      }
-      if (page !== probePage) {
-        throw new Error('unexpected page');
-      }
-      readyAttempts += 1;
-      if (readyAttempts < 3) {
-        throw new Error('login not ready');
-      }
-      return probePage;
+      throw new Error('manual login polling must not call openAuthenticatedHome');
     }) as typeof openAuthenticatedSubscribePageSessionRef.fn;
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
@@ -3000,8 +3196,23 @@ describe('scoring run semantics', () => {
     }) as typeof closeBrowserSessionRef.fn;
     loginSession.page.waitForTimeout = async (timeout: number) => {
       loginSession.getPageWaitForTimeoutCalls().push(timeout);
+      readyAttempts += 1;
+      if (readyAttempts >= 2) {
+        currentUrl = 'https://h.liepin.com/search/getConditionItem';
+        currentBodyText = '搜简历 招聘管理 候选人';
+      }
       now += timeout;
     };
+    loginSession.page.url = (() => currentUrl) as typeof loginSession.page.url;
+    loginSession.page.title = (async () => '猎聘人才搜索') as typeof loginSession.page.title;
+    loginSession.page.locator = ((selector: string) => {
+      if (selector === 'body') {
+        return {
+          innerText: async () => currentBodyText,
+        };
+      }
+      throw new Error(`Unexpected selector: ${selector}`);
+    }) as unknown as typeof loginSession.page.locator;
     Object.assign(loginSession.session.context as object, {
       pages: () => [loginSession.page],
       cookies: async () => [
@@ -3010,7 +3221,7 @@ describe('scoring run semantics', () => {
       ],
       newPage: async () => {
         newPageCalls += 1;
-        return probePage;
+        throw new Error('probe page should not be opened after authenticated cookies exist');
       },
     });
 
@@ -3038,21 +3249,14 @@ describe('scoring run semantics', () => {
 
     assert.equal(loginSucceeded, true);
     assert.equal(caughtError, undefined);
-    assert.equal(newPageCalls, 1);
-    assert.deepStrictEqual(checkedPages, [
-      loginPage,
-      probePage,
-      loginPage,
-      probePage,
-      loginPage,
-      probePage,
-    ]);
+    assert.equal(newPageCalls, 0);
+    assert.deepStrictEqual(checkedPages, []);
     assert.deepStrictEqual(loginSession.getPageWaitForTimeoutCalls(), [
       config.playwright.loginPollIntervalMs,
       config.playwright.loginPollIntervalMs,
     ]);
     assert.deepStrictEqual(loginSession.getPersistCalls(), ['liepin']);
-    assert.deepStrictEqual(loginSession.getVerifyCalls(), ['liepin']);
+    assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
 
@@ -3138,22 +3342,10 @@ describe('scoring run semantics', () => {
     const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
+    const originalTitle = loginSession.page.title;
+    const originalLocator = loginSession.page.locator;
     let now = 0;
     let newPageCalls = 0;
-    const probePage = {
-      goto: async () => undefined,
-      waitForLoadState: async () => undefined,
-      waitForTimeout: async () => undefined,
-      close: async () => undefined,
-      url: () => 'https://h.liepin.com/search/getConditionItem',
-      title: async () => '猎聘人才搜索',
-      locator: (selector?: string) => {
-        assert.equal(selector, 'body');
-        return {
-          innerText: async () => '搜索条件正在加载',
-        };
-      },
-    } as never;
 
     process.argv = ['node', 'test-login-save-session', '--platform', 'liepin'];
     openLoginSessionRef.fn = async (platform) => loginSession.openLoginSession(platform);
@@ -3162,9 +3354,6 @@ describe('scoring run semantics', () => {
         throw new Error(`Unexpected platform: ${platform}`);
       }
       if (page === loginPage) {
-        throw new Error('login not ready');
-      }
-      if (page === probePage) {
         throw new Error('search shell still loading');
       }
       throw new Error('unexpected page');
@@ -3182,7 +3371,14 @@ describe('scoring run semantics', () => {
       loginSession.getPageWaitForTimeoutCalls().push(timeout);
       now += config.playwright.loginTimeoutMs;
     };
-    loginSession.page.url = (() => 'https://h.liepin.com/account/login') as typeof loginSession.page.url;
+    loginSession.page.url = (() => 'https://h.liepin.com/search/getConditionItem') as typeof loginSession.page.url;
+    loginSession.page.title = (async () => '猎聘人才搜索') as typeof loginSession.page.title;
+    loginSession.page.locator = ((selector: string) => {
+      assert.equal(selector, 'body');
+      return {
+        innerText: async () => '搜索条件正在加载',
+      };
+    }) as unknown as typeof loginSession.page.locator;
     Object.assign(loginSession.session.context as object, {
       pages: () => [loginPage],
       cookies: async () => [
@@ -3191,7 +3387,7 @@ describe('scoring run semantics', () => {
       ],
       newPage: async () => {
         newPageCalls += 1;
-        return probePage;
+        throw new Error('probe page should not be opened after authenticated cookies exist');
       },
     });
 
@@ -3217,6 +3413,8 @@ describe('scoring run semantics', () => {
       verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
+      loginSession.page.title = originalTitle;
+      loginSession.page.locator = originalLocator;
     }
 
     assert.match(
@@ -3226,14 +3424,14 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(output.stdout, ['Waiting for login to complete.']);
     assert.deepStrictEqual(output.stderr, [
       buildLiepinManualLoginWaitDiagnosticLog({
-        pageRole: 'probe',
+        pageRole: 'context',
         finalUrl: 'https://h.liepin.com/search/getConditionItem',
         title: '猎聘人才搜索',
         bodyPreview: '搜索条件正在加载',
-        lastError: 'search shell still loading',
+        lastError: 'recruiter-search page exists but is not ready',
       }),
     ]);
-    assert.equal(newPageCalls, 1);
+    assert.equal(newPageCalls, 0);
     assert.deepStrictEqual(loginSession.getPersistCalls(), []);
     assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     assert.equal(loginSession.getCloseCalls().length, 1);
@@ -3376,7 +3574,7 @@ describe('scoring run semantics', () => {
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
 
-  it('surfaces persisted-state verification failures after saving a Liepin session from the current page', async () => {
+  it('does not run fresh-session verification after saving a Liepin session from the current page', async () => {
     const loginSession = createManualLoginSessionStub();
     const originalArgv = process.argv;
     const originalOpenLoginSession = openLoginSessionRef.fn;
@@ -3385,11 +3583,10 @@ describe('scoring run semantics', () => {
     const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
-    const verifyError = new Error('saved state could not be reused');
     const originalUrl = loginSession.page.url;
     const originalLocator = loginSession.page.locator;
 
-    loginSession.setVerifyError(verifyError);
+    loginSession.setVerifyError(new Error('saved state could not be reused'));
     process.argv = ['node', 'test-login-save-session', '--platform', 'liepin'];
     openLoginSessionRef.fn = async (platform) => loginSession.openLoginSession(platform);
     openAuthenticatedSubscribePageSessionRef.fn = (async (_page, platform) => {
@@ -3421,13 +3618,10 @@ describe('scoring run semantics', () => {
     }) as unknown as typeof loginSession.page.locator;
 
     try {
-      await assert.rejects(
-        captureDateNow(async () => {
-          Date.now = () => now;
-          await runManualLoginSessionSave();
-        }),
-        verifyError,
-      );
+      await captureDateNow(async () => {
+        Date.now = () => now;
+        await runManualLoginSessionSave();
+      });
     } finally {
       process.argv = originalArgv;
       openLoginSessionRef.fn = originalOpenLoginSession;
@@ -3440,14 +3634,14 @@ describe('scoring run semantics', () => {
     }
 
     assert.deepStrictEqual(loginSession.getOpenLoginCalls(), ['liepin']);
-    assert.deepStrictEqual(loginSession.getOpenAuthenticatedCalls(), ['liepin']);
+    assert.deepStrictEqual(loginSession.getOpenAuthenticatedCalls(), []);
     assert.deepStrictEqual(loginSession.getPageWaitForTimeoutCalls(), []);
     assert.deepStrictEqual(loginSession.getPersistCalls(), ['liepin']);
-    assert.deepStrictEqual(loginSession.getVerifyCalls(), ['liepin']);
+    assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
 
-  it('verifies saved manual-login state in a headless fresh session', async () => {
+  it('verifies saved manual-login state in a fresh session for non-Liepin only', async () => {
     const loginSession = createManualLoginSessionStub();
     const originalArgv = process.argv;
     const originalOpenLoginSession = openLoginSessionRef.fn;
@@ -3486,6 +3680,39 @@ describe('scoring run semantics', () => {
         Date.now = () => now;
         await runManualLoginSessionSave();
       });
+
+      assert.deepStrictEqual(verifyCalls, [
+        { platform: 'zhilian', options: { headless: true } },
+      ]);
+      assert.deepStrictEqual(loginSession.getPersistCalls(), ['zhilian']);
+      assert.deepStrictEqual(loginSession.getVerifyCalls(), ['zhilian']);
+
+      verifyCalls.length = 0;
+      loginSession.getPersistCalls().length = 0;
+      loginSession.getVerifyCalls().length = 0;
+      loginSession.getOpenLoginCalls().length = 0;
+      loginSession.getOpenAuthenticatedCalls().length = 0;
+      loginSession.getCloseCalls().length = 0;
+      process.argv = ['node', 'test-login-save-session', '--platform', 'liepin'];
+      now = 0;
+      loginSession.page.url = (() => 'https://h.liepin.com/search/getConditionItem') as typeof loginSession.page.url;
+      loginSession.page.locator = ((selector: string) => {
+        if (selector === 'body') {
+          return {
+            innerText: async () => '搜简历 招聘管理 候选人',
+          };
+        }
+        throw new Error(`Unexpected selector: ${selector}`);
+      }) as unknown as typeof loginSession.page.locator;
+
+      await captureDateNow(async () => {
+        Date.now = () => now;
+        await runManualLoginSessionSave();
+      });
+
+      assert.deepStrictEqual(verifyCalls, []);
+      assert.deepStrictEqual(loginSession.getPersistCalls(), ['liepin']);
+      assert.deepStrictEqual(loginSession.getVerifyCalls(), []);
     } finally {
       process.argv = originalArgv;
       openLoginSessionRef.fn = originalOpenLoginSession;
@@ -3494,12 +3721,6 @@ describe('scoring run semantics', () => {
       verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
     }
-
-    assert.deepStrictEqual(verifyCalls, [
-      { platform: 'zhilian', options: { headless: true } },
-    ]);
-    assert.deepStrictEqual(loginSession.getPersistCalls(), ['zhilian']);
-    assert.deepStrictEqual(loginSession.getVerifyCalls(), ['zhilian']);
   });
 
   it('verifies a persisted Liepin session from fresh auth state by requiring recruiter search readiness', async () => {
@@ -3658,13 +3879,17 @@ describe('scoring run semantics', () => {
     assert.equal(closeCalls, 0);
   });
 
-  it('surfaces Liepin fresh-session diagnostics when authenticated browser setup fails', async () => {
+  it('uses headed Liepin browser setup even when global headless mode is enabled', async () => {
     const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
     const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
     const originalCloseBrowserSession = sessionModule.closeBrowserSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
     const originalHeadless = config.playwright.headless;
     const authError = new Error('Liepin authenticated page is not available because the session has fallen back to the login screen.');
+    const refreshRef = (sessionModule as unknown as {
+      refreshExpiredLoginSessionRef: { fn: (platform: string) => Promise<void> };
+    }).refreshExpiredLoginSessionRef;
+    const originalRefreshExpiredLoginSession = refreshRef.fn;
     const freshPage = {
       title: async () => '猎头-猎头招聘服务',
       locator: (selector?: string) => {
@@ -3681,6 +3906,8 @@ describe('scoring run semantics', () => {
       browser: { close: async () => undefined },
     } as unknown as BrowserSession;
     let closeCalls = 0;
+    const refreshCalls: string[] = [];
+    let authenticated = false;
 
     (config.playwright as { headless: boolean }).headless = true;
     sessionModule.createBrowserSessionRef.fn = (async () => freshSession) as typeof sessionModule.createBrowserSessionRef.fn;
@@ -3688,22 +3915,30 @@ describe('scoring run semantics', () => {
       closeCalls += 1;
     }) as typeof sessionModule.closeBrowserSessionRef.fn;
     sessionModule.openAuthenticatedSubscribePageRef.fn = (async () => {
-      throw authError;
+      if (!authenticated) {
+        throw authError;
+      }
+
+      return freshPage;
     }) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
+    refreshRef.fn = async (platform: string) => {
+      refreshCalls.push(platform);
+      authenticated = true;
+    };
 
     try {
-      await assert.rejects(
-        () => sessionModule.ensureAuthenticatedBrowserSession('liepin'),
-        /Liepin login state is invalid and cannot be refreshed in headless mode\. Re-run with PLAYWRIGHT_HEADLESS=false\. Original error: Liepin authenticated page is not available because the session has fallen back to the login screen\..*finalUrl.*https:\/\/h\.liepin\.com\/account\/login.*title.*猎头-猎头招聘服务.*bodyPreview.*立即登录\/注册 密码登录/s,
-      );
+      const session = await sessionModule.ensureAuthenticatedBrowserSession('liepin');
+      assert.equal(session, freshSession);
     } finally {
       sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
       sessionModule.closeBrowserSessionRef.fn = originalCloseBrowserSession;
       sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      refreshRef.fn = originalRefreshExpiredLoginSession;
       (config.playwright as { headless: boolean }).headless = originalHeadless;
     }
 
     assert.equal(closeCalls, 1);
+    assert.deepStrictEqual(refreshCalls, ['liepin']);
   });
 
   it('refreshes expired login state in headed mode and returns a newly authenticated session', async () => {
@@ -4149,6 +4384,248 @@ describe('scoring run semantics', () => {
     assert.equal(artifacts[0]?.candidateShareUrl, candidateShareUrl);
   });
 
+  it('runs Liepin frequent-contact forwarding only for new candidates before parsing resumes', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-liepin-forward';
+    const fetchedAt = '2026-04-20T12:34:56.000Z';
+    const callOrder: string[] = [];
+    const detailPage = createDetailPage();
+
+    await store.saveSeenIds('liepin', jobKey, ['cand-seen']);
+
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('liepin'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({
+        candidates: [
+          { candidateId: 'cand-seen' },
+          { candidateId: 'cand-new' },
+        ],
+      }),
+      openResumeDetail: async (_context, _searchPage, candidate) => {
+        callOrder.push(`open:${candidate.candidateId}`);
+        return detailPage;
+      },
+      afterResumeDetailOpened: async (_page, candidate, actions) => {
+        callOrder.push(`forward:${candidate.candidateId}:${actions.liepinForwardContact ?? ''}`);
+      },
+      parseResumeDetail: async (_page, candidate) => {
+        callOrder.push(`parse:${candidate.candidateId}`);
+        return buildResume(candidate.candidateId);
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
+
+    const result = await indexModule.runResumeCaptureFlow(
+      'liepin',
+      jobKey,
+      {
+        title: 'Test Job',
+        majors: [],
+        languageRequirements: [],
+        responsibilities: [],
+        hardRequirements: [],
+        preferredRequirements: [],
+        regionPreferences: [],
+        industryTags: [],
+      },
+      'search keyword',
+      store,
+      {
+        page: { id: 'root-page' },
+        context: { id: 'browser-context' },
+      } as never,
+      fetchedAt,
+      adapter,
+      { liepinForwardContact: '王经理' },
+    );
+
+    assert.deepStrictEqual(callOrder, [
+      'open:cand-new',
+      'forward:cand-new:王经理',
+      'parse:cand-new',
+    ]);
+    assert.deepStrictEqual(result.newCandidates.map((candidate) => candidate.candidateId), ['cand-new']);
+    assert.deepStrictEqual(await store.readSeenIds('liepin', jobKey), ['cand-seen', 'cand-new']);
+  });
+
+  it('uses platform candidate pacing between every pair of new candidates', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-platform-candidate-pace';
+    const fetchedAt = '2026-04-20T12:34:56.000Z';
+    const paceCalls: string[] = [];
+    const originalWaitPlatformCandidatePace = indexModule.waitPlatformCandidatePaceRef.fn;
+
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('zhilian'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({
+        candidates: [
+          { candidateId: 'cand-1' },
+          { candidateId: 'cand-2' },
+          { candidateId: 'cand-3' },
+        ],
+      }),
+      openResumeDetail: async () => createDetailPage(),
+      parseResumeDetail: async (_page, candidate) => buildResume(candidate.candidateId),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    indexModule.waitPlatformCandidatePaceRef.fn = async (_page, platform) => {
+      paceCalls.push(platform);
+    };
+    indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
+
+    try {
+      await indexModule.runResumeCaptureFlow(
+        'zhilian',
+        jobKey,
+        buildNormalizedJob(),
+        'search keyword',
+        store,
+        {
+          page: { id: 'root-page' },
+          context: { id: 'browser-context' },
+        } as never,
+        fetchedAt,
+        adapter,
+      );
+    } finally {
+      indexModule.waitPlatformCandidatePaceRef.fn = originalWaitPlatformCandidatePace;
+    }
+
+    assert.deepStrictEqual(paceCalls, ['zhilian', 'zhilian']);
+  });
+
+  it('stops Liepin flow on candidate failure and leaves the failed detail page open', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-liepin-stop-on-failure';
+    const fetchedAt = '2026-04-20T12:34:56.000Z';
+    const callOrder: string[] = [];
+    let failedDetailClosed = false;
+
+    const failedDetailPage = {
+      locator: () => ({ innerText: async () => 'raw resume text' }),
+      close: async () => {
+        failedDetailClosed = true;
+      },
+    } as never;
+
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('liepin'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({
+        candidates: [
+          { candidateId: 'cand-fails' },
+          { candidateId: 'cand-should-not-open' },
+        ],
+      }),
+      openResumeDetail: async (_context, _searchPage, candidate) => {
+        callOrder.push(`open:${candidate.candidateId}`);
+        return failedDetailPage;
+      },
+      afterResumeDetailOpened: async (_page, candidate) => {
+        callOrder.push(`forward:${candidate.candidateId}`);
+        throw new Error('forward failed');
+      },
+      parseResumeDetail: async (_page, candidate) => {
+        callOrder.push(`parse:${candidate.candidateId}`);
+        return buildResume(candidate.candidateId);
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    await assert.rejects(
+      () => indexModule.runResumeCaptureFlow(
+        'liepin',
+        jobKey,
+        {
+          title: 'Test Job',
+          majors: [],
+          languageRequirements: [],
+          responsibilities: [],
+          hardRequirements: [],
+          preferredRequirements: [],
+          regionPreferences: [],
+          industryTags: [],
+        },
+        'search keyword',
+        store,
+        {
+          page: { id: 'root-page' },
+          context: { id: 'browser-context' },
+        } as never,
+        fetchedAt,
+        adapter,
+        { liepinForwardContact: '王经理' },
+      ),
+      /Liepin candidate cand-fails failed; stopping flow and leaving the browser open for inspection\. Original error: forward failed/,
+    );
+
+    assert.deepStrictEqual(callOrder, [
+      'open:cand-fails',
+      'forward:cand-fails',
+    ]);
+    assert.equal(failedDetailClosed, false);
+    assert.deepStrictEqual(await store.readSeenIds('liepin', jobKey), []);
+  });
+
+  it('closes successful Liepin detail pages and leaves the session on the search page', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-liepin-return-search';
+    const fetchedAt = '2026-04-20T12:34:56.000Z';
+    const searchPage = createSearchPage() as Page;
+    const session = {
+      page: { id: 'root-page' },
+      context: { id: 'browser-context' },
+    } as unknown as BrowserSession;
+    let detailClosed = false;
+    let searchFocused = false;
+
+    const detailPage = {
+      locator: () => ({ innerText: async () => 'raw resume text' }),
+      close: async () => {
+        detailClosed = true;
+      },
+    } as never;
+    searchPage.bringToFront = async () => {
+      searchFocused = true;
+    };
+
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('liepin'),
+      openSubscribeSearch: async () => searchPage,
+      extractCandidateList: async () => ({
+        candidates: [{ candidateId: 'cand-new' }],
+      }),
+      openResumeDetail: async () => detailPage,
+      parseResumeDetail: async () => buildResume('cand-new'),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
+
+    await indexModule.runResumeCaptureFlow(
+      'liepin',
+      jobKey,
+      buildNormalizedJob(),
+      'search keyword',
+      store,
+      session,
+      fetchedAt,
+      adapter,
+    );
+
+    assert.equal(detailClosed, true);
+    assert.equal(searchFocused, true);
+    assert.equal(session.page, searchPage);
+  });
+
   it('keeps upstream extraction failures retryable by not marking them as seen', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
@@ -4294,6 +4771,25 @@ describe('scoring run semantics', () => {
     });
 
     assert.deepStrictEqual(observedIncludeViewedValues, [true]);
+  });
+
+  it('rejects Liepin forwarding contact on non-Liepin single-platform runs', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        `转发联系人-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：转发联系人',
+        '--liepin-forward-contact',
+        '王经理',
+      ]),
+      /--liepin-forward-contact can only be used with --platform liepin or --platform all/,
+    );
   });
 
   it('persists JD file contents as rawText for a first-time job record', async () => {
