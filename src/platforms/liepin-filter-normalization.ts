@@ -33,6 +33,8 @@ const customWorkYearsInputSpec: SearchFilterOptionInputSpec = {
   ],
 };
 
+const liepinDefaultAnnualSalaryOptions = ['不限', '10万', '20万', '30万', '40万', '50万'];
+
 const liepinStaticFilterTargets: LiepinStaticFilterTarget[] = [
   {
     label: '目前城市',
@@ -57,8 +59,15 @@ const liepinStaticFilterTargets: LiepinStaticFilterTarget[] = [
   {
     label: '期望薪资',
     kind: 'salaryRange',
-    aliases: ['期望薪资', '期望月薪'],
+    aliases: ['期望薪资', '期望月薪', '期望年薪'],
   },
+];
+
+const liepinBodyTextBoundaryLabels = [
+  '目前薪资',
+  '当前薪资',
+  '目前年薪',
+  '当前年薪',
 ];
 
 const knownOptionLabels = [
@@ -134,8 +143,10 @@ function createLiepinFilterKey(label: string): string {
 }
 
 function createSelectorHints(row: LiepinVisibleFilterRow, label: string): SearchFilterDefinition['selectorHints'] {
+  const rowLabel = normalizeLiepinFilterText(row.label).replace(/[:：]$/, '');
   return [
-    { kind: 'text', value: label },
+    { kind: 'text', value: rowLabel || label },
+    ...(rowLabel && rowLabel !== label ? [{ kind: 'text' as const, value: label }] : []),
     { kind: 'containerText', value: row.text.slice(0, 160) },
     ...(row.selectorHint ? [{ kind: 'cssPath' as const, value: row.selectorHint }] : []),
   ];
@@ -228,13 +239,16 @@ function buildLiepinStaticFilter(
   row: LiepinVisibleFilterRow,
 ): SearchFilterDefinition | undefined {
   const rowOptions = uniqueNormalized(row.options)
-    .filter((option) => !target.aliases.includes(option) && option !== `${row.label}：`);
-  if (rowOptions.length === 0) {
+    .filter((option) => !target.aliases.includes(option) && option !== `${row.label}：` && !/[:：]$/.test(option));
+  const sourceOptions = target.kind === 'salaryRange' && listSalaryOptions(rowOptions).length === 0
+    ? liepinDefaultAnnualSalaryOptions
+    : rowOptions;
+  if (sourceOptions.length === 0) {
     return undefined;
   }
 
   if (target.kind === 'salaryRange') {
-    const options = toSalaryOptions(rowOptions);
+    const options = toSalaryOptions(sourceOptions);
     if (options.length === 0) {
       return undefined;
     }
@@ -261,7 +275,7 @@ function buildLiepinStaticFilter(
       childrenLazy: false,
       inputPlaceholder: target.label,
       selectorHints: createSelectorHints(row, target.label),
-      options: rowOptions.map(toTextInputOption),
+      options: sourceOptions.map(toTextInputOption),
     };
   }
 
@@ -272,7 +286,7 @@ function buildLiepinStaticFilter(
     valueShape: 'string',
     status: 'optionsExtracted',
     selectorHints: createSelectorHints(row, target.label),
-    options: rowOptions.map((option) => toSingleSelectOption(option, target.label)),
+    options: sourceOptions.map((option) => toSingleSelectOption(option, target.label)),
   };
 }
 
@@ -301,9 +315,12 @@ function parseRowsFromBodyText(bodyText: string): LiepinVisibleFilterRow[] {
 
   for (const target of liepinStaticFilterTargets) {
     const labelPattern = labelPatternForTarget(target);
-    const nextLabelPattern = liepinStaticFilterTargets
-      .filter((item) => item !== target)
-      .flatMap((item) => item.aliases)
+    const nextLabelPattern = [
+      ...liepinStaticFilterTargets
+        .filter((item) => item !== target)
+        .flatMap((item) => item.aliases),
+      ...liepinBodyTextBoundaryLabels,
+    ]
       .map((alias) => alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
       .join('|');
     const matched = compactBodyText.match(new RegExp(`(${labelPattern})[:：]?(.*?)(?=${nextLabelPattern ? `(?:${nextLabelPattern})[:：]?` : '$'}|$)`));
@@ -343,6 +360,7 @@ export async function readLiepinVisibleFilterRows(page: {
       '学历要求',
       '期望薪资',
       '期望月薪',
+      '期望年薪',
     ];
     const optionSelector = [
       'button',
@@ -453,10 +471,7 @@ function mergeLiepinRows(...rowGroups: LiepinVisibleFilterRow[][]): LiepinVisibl
 
       const current = rowsByTarget.get(target.label);
       if (!current || uniqueNormalized(row.options).length > uniqueNormalized(current.options).length) {
-        rowsByTarget.set(target.label, {
-          ...row,
-          label: target.label,
-        });
+        rowsByTarget.set(target.label, row);
       }
     }
   }
@@ -479,7 +494,7 @@ function shouldKeepGenericLiepinFilter(filter: SearchFilterDefinition): boolean 
   }
 
   const containerText = filter.selectorHints.find((hint) => hint.kind === 'containerText')?.value ?? '';
-  if (/目前城市|期望城市|工作年限|工作经验|教育经历|学历|期望薪资/.test(containerText) && normalizedLabel === '搜 索') {
+  if (/目前城市|期望城市|工作年限|工作经验|教育经历|学历|期望薪资|期望月薪|期望年薪/.test(containerText) && normalizedLabel === '搜 索') {
     return false;
   }
 

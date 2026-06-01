@@ -199,12 +199,12 @@ function createLiepinCatalog(): SearchFilterCatalog {
       },
       {
         key: 'expected-salary-filter',
-        label: '期望薪资',
+        label: '期望年薪',
         controlType: 'cascadeSelect',
         valueShape: 'object',
         status: 'optionsExtracted',
         childrenLazy: true,
-        selectorHints: [{ kind: 'text', value: '期望薪资' }],
+        selectorHints: [{ kind: 'text', value: '期望年薪' }],
         options: [
           { label: '10万', value: '10万', depth: 0, pathLabels: ['10万'] },
           { label: '20万', value: '20万', depth: 0, pathLabels: ['20万'] },
@@ -316,7 +316,7 @@ test('export application filter options normalizes common Liepin fields', () => 
   assert.equal(options.fieldIdByLabel.教育经历, 'education');
   assert.equal(options.fieldIdByLabel.目前城市, 'living_location');
   assert.equal(options.fieldIdByLabel.期望城市, 'expected_location');
-  assert.equal(options.fieldIdByLabel.期望薪资, 'expected_salary');
+  assert.equal(options.fieldIdByLabel.期望年薪, 'expected_salary');
 
   const workYears = options.fieldsById.work_years;
   const livingLocation = options.fieldsById.living_location;

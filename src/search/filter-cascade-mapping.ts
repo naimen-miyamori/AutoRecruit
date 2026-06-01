@@ -61,9 +61,12 @@ export interface SearchFilterCascadeApplicationMapping {
 }
 
 const knownFieldIdByLabel: Record<string, string> = {
+  期望年薪: 'expected_salary',
   期望月薪: 'expected_salary',
   期望薪资: 'expected_salary',
+  目前年薪: 'current_salary',
   目前薪资: 'current_salary',
+  当前年薪: 'current_salary',
   当前薪资: 'current_salary',
 };
 

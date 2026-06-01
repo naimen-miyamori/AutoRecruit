@@ -85,7 +85,7 @@ test('liepin filter normalization splits visible filter text into application fi
     '期望城市：不限上海深圳东莞江苏孝感北京苏州河北其他',
     '工作年限：不限应届生1-3年3-5年5-10年10年以上自定义确 定',
     '教育经历：不限本科硕士博士/博士后大专中专/中技高中及以下',
-    '期望薪资：不限10万20万30万40万50万',
+    '期望年薪：目前年薪：',
     '搜 索',
   ].join(''));
 
@@ -131,6 +131,13 @@ test('liepin filter normalization splits visible filter text into application fi
   assert.deepEqual(livingLocation.allowedValues, ['不限', '上海', '韩国', '新加坡', '深圳', '俄罗斯', '马来西亚', '德国', '浙江', '其他']);
   assert.deepEqual(workYears.allowedValues, ['不限', '应届生', '1-3年', '3-5年', '5-10年', '10年以上']);
   assert.equal(workYears.customInput?.label, '自定义');
+  assert.equal(options.fieldIdByLabel.期望薪资, 'expected_salary');
+  assert.deepEqual(
+    catalog.filters.find((filter) => filter.label === '期望薪资')?.selectorHints
+      .filter((hint) => hint.kind === 'text')
+      .map((hint) => hint.value),
+    ['期望年薪', '期望薪资'],
+  );
   assert.deepEqual(expectedSalary.minOptions, ['不限', '10万', '20万', '30万', '40万', '50万']);
   assert.deepEqual(expectedSalary.maxOptions, ['不限', '10万', '20万', '30万', '40万', '50万']);
 });
