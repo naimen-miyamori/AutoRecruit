@@ -8,6 +8,7 @@ import {
   parseSearchResultTotalFromText,
   saveSearchConditionByCommonDialog,
 } from '../search/page-actions.js';
+import { clickPlatformLocator } from './pacing.js';
 import type { SearchWaitOptions } from '../platforms/types.js';
 
 const talentSearchPageUrl = 'https://ehire.51job.com/Revision/talent/search';
@@ -32,6 +33,17 @@ export async function openPageLevelSearch(page: Page): Promise<Page> {
 async function isLoginPage(page: Page): Promise<boolean> {
   const bodyText = await page.locator('body').innerText();
   return bodyText.includes('登录') || (bodyText.includes('账号') && bodyText.includes('密码'));
+}
+
+async function clear51jobSearchFilters(page: Page): Promise<void> {
+  const clearButton = page.getByText('清空筛选', { exact: true }).first();
+  const isVisible = await clearButton.isVisible({ timeout: 1500 }).catch(() => false);
+  if (!isVisible) {
+    return;
+  }
+
+  await clickPlatformLocator(clearButton, page, platform, 1500);
+  await page.waitForTimeout(300);
 }
 
 export async function fill51jobSearchKeyword(page: Page, keyword: string): Promise<void> {
@@ -69,6 +81,7 @@ export async function expand51jobAdvancedFilters(page: Page): Promise<void> {
 
 export async function prepare51jobSearchConditionPage(page: Page, keyword: string): Promise<Page> {
   const searchPage = await openPageLevelSearchRef.fn(page);
+  await clear51jobSearchFilters(searchPage);
   await fill51jobSearchKeyword(searchPage, keyword);
   await expand51jobAdvancedFilters(searchPage);
   return searchPage;

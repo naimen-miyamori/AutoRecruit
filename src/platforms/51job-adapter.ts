@@ -1439,6 +1439,53 @@ async function read51jobDynamicTextInputDialogSelection(dialog: Locator): Promis
   });
 }
 
+async function clear51jobDynamicTextInputDialogSelection(page: Page, dialog: Locator): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const closedCount = await dialog.evaluate((root) => {
+      const isVisible = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== 'hidden'
+          && style.display !== 'none'
+          && Number.parseFloat(style.opacity || '1') > 0
+          && rect.width > 0
+          && rect.height > 0;
+      };
+
+      const selectedRoots = Array.from(root.querySelectorAll(
+        '.dialog_footer_content_tag, .selected_list_wrapper, .selected-list-wrapper, .selected-list, .selected_list',
+      )).filter(isVisible);
+      const closeButtons = selectedRoots.flatMap((selectedRoot) =>
+        Array.from(selectedRoot.querySelectorAll('.el-tag__close, .el-icon-close'))
+          .filter(isVisible) as HTMLElement[],
+      );
+
+      for (const button of closeButtons) {
+        button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        for (const eventName of ['mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click']) {
+          button.dispatchEvent(new MouseEvent(eventName, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          }));
+        }
+      }
+
+      return closeButtons.length;
+    }).catch(() => 0);
+
+    if (closedCount === 0) {
+      return;
+    }
+
+    await page.waitForTimeout(150);
+  }
+}
+
 function textIncludes51jobSelectedValue(haystack: string, value: string): boolean {
   const normalizedHaystack = haystack.replace(/\s+/g, '');
   const normalizedValue = value.replace(/\s+/g, '');
@@ -1477,6 +1524,24 @@ function build51jobCustomRangePersistedValueCandidates(input: Record<string, unk
   }
 
   return Array.from(new Set(values));
+}
+
+function build51jobSalaryRangePersistedValueCandidates(min: string, max: string): string[] {
+  const values = [
+    `${min}-${max}`,
+    `${min} - ${max}`,
+    `${min}~${max}`,
+  ];
+  const minMatch = min.replace(/\s+/g, '').match(/^(\d+(?:\.\d+)?)(千|万)$/);
+  const maxMatch = max.replace(/\s+/g, '').match(/^(\d+(?:\.\d+)?)(千|万)$/);
+
+  if (minMatch && maxMatch && minMatch[2] === maxMatch[2]) {
+    values.push(`${minMatch[1]}-${maxMatch[1]}${minMatch[2]}`);
+    values.push(`${minMatch[1]} - ${maxMatch[1]}${minMatch[2]}`);
+    values.push(`${minMatch[1]}~${maxMatch[1]}${minMatch[2]}`);
+  }
+
+  return Array.from(new Set(values.map(normalizeApplicationFilterValue).filter(Boolean)));
 }
 
 async function waitFor51jobDynamicTextInputDialogSelection(
@@ -1710,12 +1775,15 @@ async function assert51jobExpectedSalaryApplied(page: Page, min: string, max: st
   }
 
   const appliedText = await read51jobAppliedFilterText(page);
-  const missingValues = [min, max]
-    .filter((value) => !build51jobPersistedValueCandidates(value)
-      .some((candidate) => textIncludes51jobSelectedValue(appliedText, candidate)));
+  const rangeApplied = build51jobSalaryRangePersistedValueCandidates(min, max)
+    .some((candidate) => textIncludes51jobSelectedValue(appliedText, candidate));
+  const minApplied = build51jobPersistedValueCandidates(min)
+    .some((candidate) => textIncludes51jobSelectedValue(appliedText, candidate));
+  const maxApplied = build51jobPersistedValueCandidates(max)
+    .some((candidate) => textIncludes51jobSelectedValue(appliedText, candidate));
 
-  if (missingValues.length > 0) {
-    throw new Error(`51job expected salary filter did not persist selected values: ${missingValues.join(', ')}`);
+  if (!rangeApplied && (!minApplied || !maxApplied)) {
+    throw new Error(`51job expected salary filter did not persist selected range: ${min}-${max}`);
   }
 }
 
@@ -1905,6 +1973,8 @@ async function apply51jobDynamicTextInputApplicationFilter(
   if (normalizedValues.length === 0) {
     throw new Error(`Missing non-empty values for 51job text input filter: ${condition.fieldId}`);
   }
+
+  await clear51jobDynamicTextInputDialogSelection(page, dialog);
 
   for (const item of normalizedValues) {
     const didApplyBySearch = target.preferCascade
