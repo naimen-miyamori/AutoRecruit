@@ -42,7 +42,7 @@ export type SearchCondition =
     kind: 'applicationFilter';
     fieldId: string;
     label: string;
-    fieldKind: 'singleSelect' | 'textInput' | 'salaryRange';
+    fieldKind: 'singleSelect' | 'textInput' | 'salaryRange' | 'numberRange';
     value: unknown;
     values?: Array<{
       value: string;

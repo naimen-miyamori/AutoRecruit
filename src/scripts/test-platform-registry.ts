@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { config, resolveStorageStatePath } from '../config.js';
 import { normalize51jobFilterDefinition } from '../platforms/51job-filter-normalization.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from '../platforms/registry.js';
+import { parseSearchResultTotalFromText } from '../search/page-actions.js';
 
 test('listSupportedPlatforms returns the stable supported platform order', () => {
   assert.deepEqual(listSupportedPlatforms(), ['51job', 'liepin', 'zhilian']);
@@ -115,6 +116,11 @@ test('browser pacing and reuse defaults are platform-specific', () => {
     liepin: 19327,
     zhilian: 19329,
   });
+});
+
+test('parseSearchResultTotalFromText accepts capped and comma-separated totals', () => {
+  assert.equal(parseSearchResultTotalFromText('猎聘 搜索条件 共500+位人选'), 500);
+  assert.equal(parseSearchResultTotalFromText('共搜出 1,234 个结果'), 1234);
 });
 
 test('51job adapter exposes the shared auth contract', () => {

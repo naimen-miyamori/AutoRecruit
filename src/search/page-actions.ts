@@ -3,10 +3,10 @@ import { clickPlatformLocator, fillPlatformLocator } from '../browser/pacing.js'
 import type { SupportedPlatform } from '../platforms/types.js';
 
 export const searchResultTotalTextPatterns = [
-  /共搜出\s*(\d+)\s*个结果/,
-  /共\s*(\d+)\s*位人选/,
-  /共\s*(\d+)\s*条/,
-  /共\s*(\d+)\s*份简历/,
+  /共搜出\s*([\d,]+)\+?\s*个结果/,
+  /共\s*([\d,]+)\+?\s*位人选/,
+  /共\s*([\d,]+)\+?\s*条/,
+  /共\s*([\d,]+)\+?\s*份简历/,
 ];
 
 export function normalizeInlineText(value: string | null | undefined): string {
@@ -18,7 +18,7 @@ export function parseSearchResultTotalFromText(text: string): number | undefined
   for (const pattern of searchResultTotalTextPatterns) {
     const match = normalizedText.match(pattern);
     if (match) {
-      return Number.parseInt(match[1], 10);
+      return Number.parseInt(match[1].replace(/,/g, ''), 10);
     }
   }
 

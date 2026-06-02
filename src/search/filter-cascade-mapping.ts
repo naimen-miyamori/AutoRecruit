@@ -61,6 +61,8 @@ export interface SearchFilterCascadeApplicationMapping {
 }
 
 const knownFieldIdByLabel: Record<string, string> = {
+  年龄: 'age',
+  年龄要求: 'age',
   期望年薪: 'expected_salary',
   期望月薪: 'expected_salary',
   期望薪资: 'expected_salary',
@@ -110,7 +112,7 @@ function buildOrderedRootLabels(
   fieldId: string,
   rootOptions: readonly SearchFilterCascadeApplicationOption[],
 ): string[] | undefined {
-  if (fieldId !== 'expected_salary') {
+  if (fieldId !== 'expected_salary' && fieldId !== 'current_salary') {
     return undefined;
   }
 
@@ -211,7 +213,7 @@ export function buildCascadeApplicationMapping(
     fieldIds.push(fieldId);
     labels.push(filter.label);
     fieldIdByLabel[filter.label] = fieldId;
-    const isExpectedSalary = fieldId === 'expected_salary';
+    const isSalaryRange = fieldId === 'expected_salary' || fieldId === 'current_salary';
     fieldsById[fieldId] = {
       fieldId,
       filterKey: filter.key,
@@ -221,14 +223,14 @@ export function buildCascadeApplicationMapping(
       childrenLazy: Boolean(filter.childrenLazy),
       optionCount: options.length,
       levelCount: readMaxDepth(options) + 1,
-      rootOptions: isExpectedSalary ? rootOptions.map(stripCascadeOptionPaths) : rootOptions,
+      rootOptions: isSalaryRange ? rootOptions.map(stripCascadeOptionPaths) : rootOptions,
       orderedRootLabels: buildOrderedRootLabels(fieldId, rootOptions),
-      optionsByDepth: isExpectedSalary
+      optionsByDepth: isSalaryRange
         ? undefined
         : Array.from(optionsByDepth.entries())
           .sort(([leftDepth], [rightDepth]) => leftDepth - rightDepth)
           .map(([depth, levelOptions]) => ({ depth, options: levelOptions })),
-      tree: isExpectedSalary ? undefined : rootNodes.map((node) => toImmutableTreeNode(node)),
+      tree: isSalaryRange ? undefined : rootNodes.map((node) => toImmutableTreeNode(node)),
       selectorHints: filter.selectorHints.map((hint) => ({ ...hint })),
     };
   }

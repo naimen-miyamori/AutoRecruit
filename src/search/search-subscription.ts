@@ -57,6 +57,14 @@ function normalizeInputValue(value: unknown): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
 }
 
+function normalizeStringOrNumberInputValue(value: unknown): string {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : '';
+  }
+
+  return normalizeInputValue(value);
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -157,8 +165,22 @@ function toApplicationFilterCondition(
       fieldKind: field.kind,
       value,
       values: [
-        { value: normalizeInputValue(value.min) },
-        { value: normalizeInputValue(value.max) },
+        { value: normalizeStringOrNumberInputValue(value.min) },
+        { value: normalizeStringOrNumberInputValue(value.max) },
+      ],
+    };
+  }
+
+  if (field.kind === 'numberRange' && isPlainObject(value)) {
+    return {
+      kind: 'applicationFilter',
+      fieldId: field.fieldId,
+      label: field.label,
+      fieldKind: field.kind,
+      value,
+      values: [
+        { value: normalizeStringOrNumberInputValue(value.min) },
+        { value: normalizeStringOrNumberInputValue(value.max) },
       ],
     };
   }

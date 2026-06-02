@@ -40,7 +40,7 @@ export interface ApplicationFilterTextInputField {
   kind: 'textInput';
   semanticKind: string;
   scope: string;
-  restrictInput: true;
+  restrictInput: boolean;
   valueShape: 'string|string[]';
   acceptedInputShapes: ['string', 'string[]', '{ value: string; pathLabels: string[] }', '{ value: string; pathLabels: string[] }[]'];
   allowedValues: string[];
@@ -76,10 +76,36 @@ export interface ApplicationFilterSalaryRangeField {
   };
 }
 
+export interface ApplicationFilterNumberRangeField {
+  fieldId: string;
+  filterKey: string;
+  label: string;
+  kind: 'numberRange';
+  restrictInput: true;
+  valueShape: 'object';
+  acceptedInputShapes: ['{ min?: number|string; max?: number|string }'];
+  minKey: 'min';
+  maxKey: 'max';
+  minLabel: string;
+  maxLabel: string;
+  unit?: string;
+  min?: number;
+  max?: number;
+  orderedValues: string[];
+  minOptions: string[];
+  maxOptions: string[];
+  rule: {
+    kind: 'orderedRange';
+    comparison: 'maxNumberValue >= minNumberValue';
+    message: string;
+  };
+}
+
 export type ApplicationFilterField =
   | ApplicationFilterSingleSelectField
   | ApplicationFilterTextInputField
-  | ApplicationFilterSalaryRangeField;
+  | ApplicationFilterSalaryRangeField
+  | ApplicationFilterNumberRangeField;
 
 export interface ApplicationFilterOptions {
   platform: SearchFilterCatalog['platform'];
@@ -92,6 +118,7 @@ export interface ApplicationFilterOptions {
     singleSelect: string[];
     textInput: string[];
     salaryRange: string[];
+    numberRange: string[];
   };
   fieldsById: Record<string, ApplicationFilterField>;
 }
@@ -109,6 +136,14 @@ export interface ValidateApplicationFilterInputResult {
 
 function normalizeValue(value: unknown): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+}
+
+function normalizeStringOrNumberValue(value: unknown): string {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : '';
+  }
+
+  return normalizeValue(value);
 }
 
 function buildAllowedValues(options: ApplicationFilterOption[]): string[] {
@@ -172,6 +207,30 @@ function parseSalaryValue(value: string): number | undefined {
   return matched[2] === '万' ? amount * 10000 : amount * 1000;
 }
 
+function parseNumberRangeValue(value: string): number | undefined {
+  if (!value || value === '不限') {
+    return undefined;
+  }
+
+  const matched = value.replace(/\s+/g, '').match(/^(\d+(?:\.\d+)?)/);
+  if (!matched) {
+    return undefined;
+  }
+
+  const numberValue = Number(matched[1]);
+  return Number.isFinite(numberValue) ? numberValue : undefined;
+}
+
+function normalizeNumberRangeInputValue(value: unknown): string {
+  const rawValue = normalizeStringOrNumberValue(value);
+  if (!rawValue) {
+    return '';
+  }
+
+  const parsed = parseNumberRangeValue(rawValue);
+  return parsed === undefined ? rawValue : String(parsed);
+}
+
 function toApplicationOption(option: {
   label: string;
   value: string;
@@ -213,6 +272,7 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
     singleSelect: [],
     textInput: [],
     salaryRange: [],
+    numberRange: [],
   };
 
   for (const fieldId of singleSelectMapping.fieldIds) {
@@ -263,7 +323,7 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
       kind: 'textInput',
       semanticKind: field.semanticKind,
       scope: field.scope,
-      restrictInput: true,
+      restrictInput: field.restrictInput,
       valueShape: 'string|string[]',
       acceptedInputShapes: ['string', 'string[]', '{ value: string; pathLabels: string[] }', '{ value: string; pathLabels: string[] }[]'],
       allowedValues: [...field.values],
@@ -276,20 +336,24 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
     };
   }
 
-  const expectedSalaryField = cascadeMapping.fieldsById.expected_salary;
-  const orderedSalaryValues = expectedSalaryField?.orderedRootLabels ?? [];
-  const expectedSalaryUpperValues = expectedSalaryField
-    ? listUniqueOptionLabelsByDepth(catalog, expectedSalaryField.label, 1)
-    : [];
-  if (expectedSalaryField && orderedSalaryValues.length > 0) {
-    const fieldId = expectedSalaryField.fieldId;
+  const salaryFields = [cascadeMapping.fieldsById.expected_salary, cascadeMapping.fieldsById.current_salary].filter(
+    (field): field is NonNullable<typeof field> => Boolean(field),
+  );
+  for (const salaryField of salaryFields) {
+    const orderedSalaryValues = salaryField.orderedRootLabels ?? [];
+    const salaryUpperValues = listUniqueOptionLabelsByDepth(catalog, salaryField.label, 1);
+    if (orderedSalaryValues.length === 0) {
+      continue;
+    }
+
+    const fieldId = salaryField.fieldId;
     fieldIds.push(fieldId);
-    fieldIdByLabel[expectedSalaryField.label] = fieldId;
+    fieldIdByLabel[salaryField.label] = fieldId;
     groups.salaryRange.push(fieldId);
     fieldsById[fieldId] = {
       fieldId,
-      filterKey: expectedSalaryField.filterKey,
-      label: expectedSalaryField.label,
+      filterKey: salaryField.filterKey,
+      label: salaryField.label,
       kind: 'salaryRange',
       restrictInput: true,
       valueShape: 'object',
@@ -300,11 +364,52 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
       maxLabel: '薪资上限',
       orderedValues: [...orderedSalaryValues],
       minOptions: [...orderedSalaryValues],
-      maxOptions: [...expectedSalaryUpperValues],
+      maxOptions: [...salaryUpperValues],
       rule: {
         kind: 'orderedRange',
         comparison: 'maxSalaryValue >= minSalaryValue',
         message: '右侧薪资上限不能低于左侧薪资下限。',
+      },
+    };
+  }
+
+  const numberRangeFields = [cascadeMapping.fieldsById.age].filter(
+    (field): field is NonNullable<typeof field> => Boolean(field),
+  );
+  for (const numberRangeField of numberRangeFields) {
+    const numericRootOptions = numberRangeField.rootOptions
+      .map((option) => normalizeValue(option.label))
+      .filter((value) => parseNumberRangeValue(value) !== undefined);
+    if (numericRootOptions.length === 0) {
+      continue;
+    }
+
+    const fieldId = numberRangeField.fieldId;
+    fieldIds.push(fieldId);
+    fieldIdByLabel[numberRangeField.label] = fieldId;
+    groups.numberRange.push(fieldId);
+    fieldsById[fieldId] = {
+      fieldId,
+      filterKey: numberRangeField.filterKey,
+      label: numberRangeField.label,
+      kind: 'numberRange',
+      restrictInput: true,
+      valueShape: 'object',
+      acceptedInputShapes: ['{ min?: number|string; max?: number|string }'],
+      minKey: 'min',
+      maxKey: 'max',
+      minLabel: `${numberRangeField.label}下限`,
+      maxLabel: `${numberRangeField.label}上限`,
+      unit: numberRangeField.label === '年龄' ? '岁' : undefined,
+      min: Math.min(...numericRootOptions.map((value) => parseNumberRangeValue(value) ?? Number.POSITIVE_INFINITY)),
+      max: Math.max(...numericRootOptions.map((value) => parseNumberRangeValue(value) ?? Number.NEGATIVE_INFINITY)),
+      orderedValues: [...numericRootOptions],
+      minOptions: [...numericRootOptions],
+      maxOptions: [...numericRootOptions],
+      rule: {
+        kind: 'orderedRange',
+        comparison: 'maxNumberValue >= minNumberValue',
+        message: `右侧${numberRangeField.label}上限不能低于左侧${numberRangeField.label}下限。`,
       },
     };
   }
@@ -475,7 +580,18 @@ function validateTextInputField(
     const normalizedValue = isTextInputValueWithPath(item)
       ? normalizeValue(item.value)
       : normalizeValue(item);
-    if (!normalizedValue || !field.allowedValues.includes(normalizedValue)) {
+    if (!normalizedValue) {
+      errors.push({
+        fieldId: field.fieldId,
+        code: 'invalid_text_input',
+        message: field.restrictInput
+          ? `${field.label} 只能输入采集到的选项文本。`
+          : `${field.label} 需要非空文本。`,
+      });
+      continue;
+    }
+
+    if (field.restrictInput && !field.allowedValues.includes(normalizedValue)) {
       errors.push({
         fieldId: field.fieldId,
         code: 'invalid_text_input',
@@ -485,6 +601,10 @@ function validateTextInputField(
     }
 
     if (isTextInputValueWithPath(item)) {
+      if (!field.restrictInput && field.tree.length === 0) {
+        continue;
+      }
+
       const pathLabels = normalizePathLabels(item.pathLabels);
       const pathNode = findTextInputNodeByPath(field.tree, pathLabels);
       if (!pathNode || normalizeValue(pathNode.label) !== normalizedValue) {
@@ -562,6 +682,75 @@ function validateSalaryRangeField(
   return errors;
 }
 
+function validateNumberRangeField(
+  field: ApplicationFilterNumberRangeField,
+  value: unknown,
+): ValidateApplicationFilterInputError[] {
+  if (!isPlainRecord(value)) {
+    return [{
+      fieldId: field.fieldId,
+      code: 'invalid_value_shape',
+      message: `${field.label} 需要 { min, max } 对象。`,
+    }];
+  }
+
+  const minRaw = normalizeNumberRangeInputValue(value.min);
+  const maxRaw = normalizeNumberRangeInputValue(value.max);
+  const minValue = minRaw ? parseNumberRangeValue(minRaw) : undefined;
+  const maxValue = maxRaw ? parseNumberRangeValue(maxRaw) : undefined;
+  const errors: ValidateApplicationFilterInputError[] = [];
+
+  if (minRaw && minValue === undefined) {
+    errors.push({
+      fieldId: field.fieldId,
+      code: 'invalid_min_number',
+      message: `${field.label} 的下限必须是数字。`,
+    });
+  }
+
+  if (maxRaw && maxValue === undefined) {
+    errors.push({
+      fieldId: field.fieldId,
+      code: 'invalid_max_number',
+      message: `${field.label} 的上限必须是数字。`,
+    });
+  }
+
+  if (!minRaw && !maxRaw) {
+    errors.push({
+      fieldId: field.fieldId,
+      code: 'empty_range',
+      message: `${field.label} 至少需要一个范围边界。`,
+    });
+  }
+
+  if (minValue !== undefined && field.min !== undefined && minValue < field.min) {
+    errors.push({
+      fieldId: field.fieldId,
+      code: 'min_number_too_low',
+      message: `${field.label} 的下限不能低于 ${field.min}${field.unit ?? ''}。`,
+    });
+  }
+
+  if (maxValue !== undefined && field.max !== undefined && maxValue > field.max) {
+    errors.push({
+      fieldId: field.fieldId,
+      code: 'max_number_too_high',
+      message: `${field.label} 的上限不能高于 ${field.max}${field.unit ?? ''}。`,
+    });
+  }
+
+  if (minValue !== undefined && maxValue !== undefined && maxValue < minValue) {
+    errors.push({
+      fieldId: field.fieldId,
+      code: 'invalid_number_order',
+      message: field.rule.message,
+    });
+  }
+
+  return errors;
+}
+
 export function validateApplicationFilterInput(
   options: ApplicationFilterOptions,
   input: Record<string, unknown>,
@@ -586,6 +775,11 @@ export function validateApplicationFilterInput(
 
     if (field.kind === 'textInput') {
       errors.push(...validateTextInputField(field, value));
+      continue;
+    }
+
+    if (field.kind === 'numberRange') {
+      errors.push(...validateNumberRangeField(field, value));
       continue;
     }
 

@@ -213,12 +213,25 @@ function createLiepinCatalog(): SearchFilterCatalog {
           { label: '30万', value: '30万', depth: 1, parentPathLabels: ['20万'], pathLabels: ['20万', '30万'] },
         ],
       },
+      {
+        key: 'school-filter',
+        label: '毕业院校',
+        controlType: 'textInput',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        inputPlaceholder: '请输入学校名称',
+        childrenLazy: false,
+        selectorHints: [{ kind: 'text', value: '毕业院校' }],
+        options: [
+          { label: '请输入学校名称', depth: 0, pathLabels: ['请输入学校名称'] },
+        ],
+      },
     ],
     failures: [],
     stats: {
-      discoveredControls: 5,
-      inspectedControls: 5,
-      optionsExtracted: 16,
+      discoveredControls: 6,
+      inspectedControls: 6,
+      optionsExtracted: 17,
       failedControls: 0,
       unknownControls: 0,
     },
@@ -307,10 +320,11 @@ test('export application filter options normalizes common Liepin fields', () => 
     'education',
     'living_location',
     'expected_location',
+    'school_name',
     'expected_salary',
   ]);
   assert.deepEqual(options.groups.singleSelect, ['work_years', 'education']);
-  assert.deepEqual(options.groups.textInput, ['living_location', 'expected_location']);
+  assert.deepEqual(options.groups.textInput, ['living_location', 'expected_location', 'school_name']);
   assert.deepEqual(options.groups.salaryRange, ['expected_salary']);
   assert.equal(options.fieldIdByLabel.工作经验, 'work_years');
   assert.equal(options.fieldIdByLabel.教育经历, 'education');
@@ -321,6 +335,7 @@ test('export application filter options normalizes common Liepin fields', () => 
   const workYears = options.fieldsById.work_years;
   const livingLocation = options.fieldsById.living_location;
   const expectedLocation = options.fieldsById.expected_location;
+  const schoolName = options.fieldsById.school_name;
   const expectedSalary = options.fieldsById.expected_salary;
   if (workYears.kind !== 'singleSelect') {
     assert.fail('work_years should be a singleSelect field');
@@ -334,6 +349,9 @@ test('export application filter options normalizes common Liepin fields', () => 
   if (expectedSalary.kind !== 'salaryRange') {
     assert.fail('expected_salary should be a salaryRange field');
   }
+  if (schoolName.kind !== 'textInput') {
+    assert.fail('school_name should be a textInput field');
+  }
 
   assert.deepEqual(workYears.allowedValues, ['不限', '1-3年', '3-5年']);
   assert.deepEqual(livingLocation.allowedValues, ['上海', '浦东新区']);
@@ -342,6 +360,8 @@ test('export application filter options normalizes common Liepin fields', () => 
   assert.equal(livingLocation.scope, 'living');
   assert.deepEqual(expectedLocation.allowedValues, ['广东', '深圳']);
   assert.equal(expectedLocation.scope, 'expected');
+  assert.equal(schoolName.restrictInput, false);
+  assert.deepEqual(schoolName.allowedValues, ['请输入学校名称']);
   assert.deepEqual(expectedSalary.minOptions, ['10万', '20万', '30万']);
   assert.deepEqual(expectedSalary.maxOptions, ['20万', '30万']);
 
@@ -353,6 +373,7 @@ test('export application filter options normalizes common Liepin fields', () => 
       pathLabels: ['上海', '浦东新区'],
     },
     expected_location: '深圳',
+    school_name: '辽宁大学',
     expected_salary: {
       min: '10万',
       max: '20万',

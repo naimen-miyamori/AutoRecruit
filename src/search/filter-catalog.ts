@@ -118,6 +118,7 @@ export interface SearchFilterDiscoveryRunOptions {
   maxOptionsPerLevel?: number;
   controlTimeoutMs?: number;
   stabilityWaitMs?: number;
+  slowClick?: boolean;
   includeRemoteProbes?: boolean;
   remoteProbeValues?: string[];
 }

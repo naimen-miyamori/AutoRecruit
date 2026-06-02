@@ -32,19 +32,21 @@ function createOptions(): ApplicationFilterOptions {
     platform: '51job',
     capturedAt: '2026-05-26T13:23:24.638Z',
     keyword: '优衣库',
-    fieldCount: 5,
-    fieldIds: ['work_years', 'expected_location', 'living_location', 'expected_industry', 'expected_salary'],
+    fieldCount: 6,
+    fieldIds: ['work_years', 'expected_location', 'living_location', 'expected_industry', 'expected_salary', 'age'],
     fieldIdByLabel: {
       工作年限: 'work_years',
       期望工作地: 'expected_location',
       居住地: 'living_location',
       期望行业: 'expected_industry',
       期望月薪: 'expected_salary',
+      年龄: 'age',
     },
     groups: {
       singleSelect: ['work_years'],
       textInput: ['expected_location', 'living_location', 'expected_industry'],
       salaryRange: ['expected_salary'],
+      numberRange: ['age'],
     },
     fieldsById: {
       work_years: {
@@ -163,6 +165,30 @@ function createOptions(): ApplicationFilterOptions {
           message: '右侧薪资上限不能低于左侧薪资下限。',
         },
       },
+      age: {
+        fieldId: 'age',
+        filterKey: 'age-filter',
+        label: '年龄',
+        kind: 'numberRange',
+        restrictInput: true,
+        valueShape: 'object',
+        acceptedInputShapes: ['{ min?: number|string; max?: number|string }'],
+        minKey: 'min',
+        maxKey: 'max',
+        minLabel: '年龄下限',
+        maxLabel: '年龄上限',
+        unit: '岁',
+        min: 16,
+        max: 65,
+        orderedValues: ['16', '25', '35', '65'],
+        minOptions: ['16', '25', '35', '65'],
+        maxOptions: ['16', '25', '35', '65'],
+        rule: {
+          kind: 'orderedRange',
+          comparison: 'maxNumberValue >= minNumberValue',
+          message: '右侧年龄上限不能低于左侧年龄下限。',
+        },
+      },
     },
   };
 }
@@ -199,6 +225,10 @@ test('validate application filter input file accepts valid application payload',
     expected_salary: {
       min: '2千',
       max: '3千',
+    },
+    age: {
+      min: 25,
+      max: 35,
     },
   });
 

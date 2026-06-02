@@ -104,8 +104,10 @@ test('51job all-options fixture mirrors current application option pools', async
       continue;
     }
 
-    assert.ok(expectedField.minOptions.length > 0, `${fieldId} should expose minOptions`);
-    assert.ok(expectedField.maxOptions.length > 0, `${fieldId} should expose maxOptions`);
+    if (expectedField.kind === 'salaryRange' || expectedField.kind === 'numberRange') {
+      assert.ok(expectedField.minOptions.length > 0, `${fieldId} should expose minOptions`);
+      assert.ok(expectedField.maxOptions.length > 0, `${fieldId} should expose maxOptions`);
+    }
   }
 });
 
@@ -160,6 +162,10 @@ test('51job application filter input accepts every collected option value', asyn
         `${fieldId} accepts all text options as an array`,
       );
       coverage.textInputArrayPayloads += 1;
+      continue;
+    }
+
+    if (field.kind !== 'salaryRange') {
       continue;
     }
 

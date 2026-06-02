@@ -43,6 +43,8 @@ describe('discover search filters CLI', () => {
       '15',
       '--include-remote-probes',
       'true',
+      '--slow-click',
+      'true',
       '--global-timeout-ms',
       '180000',
       '--output',
@@ -53,9 +55,100 @@ describe('discover search filters CLI', () => {
       maxDepth: 2,
       maxOptionsPerLevel: 15,
       includeRemoteProbes: true,
+      slowClick: true,
       globalTimeoutMs: 180000,
       outputPath: './catalog.json',
     });
+  });
+
+  it('runDiscoverSearchFilters passes slow-click discovery options to adapters', async () => {
+    const module = await loadDiscoverModule();
+    const receivedOptions: unknown[] = [];
+    const session = {
+      page: { id: 'page' },
+      context: { close: async () => undefined },
+      browser: { close: async () => undefined },
+    } as never;
+    const adapter: PlatformAdapter = {
+      platform: 'liepin',
+      displayName: 'Liepin',
+      subscribeSearchUrl: '',
+      loginUrl: '',
+      storageStateFileName: '',
+      openLoginPage: async () => undefined,
+      openAuthenticatedHome: async (page) => page,
+      assertAuthenticated: async () => undefined,
+      openSubscribeSearch: async (page) => page,
+      prepareSearchConditionPage: async (page) => page,
+      discoverSearchFilters: async (_page, options) => {
+        receivedOptions.push(options);
+        return {
+          platform: 'liepin',
+          keyword: options.keyword,
+          capturedAt: '2026-05-26T00:00:00.000Z',
+          pageUrl: 'https://example.com/liepin',
+          filters: [],
+          failures: [],
+          stats: {
+            discoveredControls: 0,
+            inspectedControls: 0,
+            optionsExtracted: 0,
+            failedControls: 0,
+            unknownControls: 0,
+          },
+        } satisfies SearchFilterCatalog;
+      },
+      extractCandidateList: async () => ({ candidates: [] }),
+      openResumeDetail: async (_context, page) => page,
+      parseResumeDetail: async () => ({
+        candidateId: 'x',
+        regions: [],
+        pr: [],
+        workExperiences: [],
+        projectExperiences: [],
+        educationExperiences: [],
+        skill: [],
+        certificates: [],
+      }),
+    };
+
+    const originalGetPlatformAdapter = module.getPlatformAdapterRef.fn;
+    const originalEnsure = module.ensureAuthenticatedBrowserSessionRef.fn;
+    const originalClose = module.closeBrowserSessionRef.fn;
+    const originalSave = module.saveSearchFilterCatalogRef.fn;
+
+    module.getPlatformAdapterRef.fn = (() => adapter) as typeof module.getPlatformAdapterRef.fn;
+    module.ensureAuthenticatedBrowserSessionRef.fn = async () => session;
+    module.closeBrowserSessionRef.fn = async () => undefined;
+    module.saveSearchFilterCatalogRef.fn = async (_store, platform, catalog) => ({
+      latestPath: `/tmp/${platform}/latest.json`,
+      timestampedPath: `/tmp/${platform}/${catalog.capturedAt}.json`,
+    });
+
+    try {
+      await module.runDiscoverSearchFilters({
+        platform: 'liepin',
+        keyword: '优衣库',
+        includeRemoteProbes: true,
+        slowClick: true,
+        maxDepth: 2,
+        maxOptionsPerLevel: 25,
+      });
+    } finally {
+      module.getPlatformAdapterRef.fn = originalGetPlatformAdapter;
+      module.ensureAuthenticatedBrowserSessionRef.fn = originalEnsure;
+      module.closeBrowserSessionRef.fn = originalClose;
+      module.saveSearchFilterCatalogRef.fn = originalSave;
+    }
+
+    assert.deepEqual(receivedOptions, [{
+      keyword: '优衣库',
+      globalTimeoutMs: 180000,
+      maxDepth: 2,
+      maxOptionsPerLevel: 25,
+      includeRemoteProbes: true,
+      slowClick: true,
+    }]);
   });
 
   it('runDiscoverSearchFilters preserves all-platform order and stops on failure', async () => {
@@ -223,6 +316,7 @@ describe('discover search filters CLI', () => {
           platform: 'all',
           keyword: '优衣库',
           includeRemoteProbes: false,
+          slowClick: false,
         }),
         /liepin prepare failed/,
       );

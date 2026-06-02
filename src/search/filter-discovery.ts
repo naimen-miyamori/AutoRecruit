@@ -68,6 +68,7 @@ interface ResolvedDiscoveryOptions {
   maxOptionsPerLevel: number;
   controlTimeoutMs: number;
   stabilityWaitMs: number;
+  slowClick: boolean;
   includeRemoteProbes: boolean;
   remoteProbeValues: string[];
   maxContainers: number;
@@ -99,6 +100,7 @@ function resolveDiscoveryOptions(options: SearchFilterDiscoveryRunOptions): Reso
     maxOptionsPerLevel: options.maxOptionsPerLevel ?? 50,
     controlTimeoutMs: options.controlTimeoutMs ?? 3000,
     stabilityWaitMs: options.stabilityWaitMs ?? 250,
+    slowClick: options.slowClick ?? false,
     includeRemoteProbes: options.includeRemoteProbes ?? false,
     remoteProbeValues: options.remoteProbeValues?.filter(Boolean) ?? defaultRemoteProbeValues,
     maxContainers: Math.max(options.maxControls ?? 40, 60),
@@ -684,6 +686,17 @@ async function captureTextInputScopedContainers(
 
 async function waitForUiStability(page: Page, options: ResolvedDiscoveryOptions): Promise<void> {
   const waitMs = Math.min(options.stabilityWaitMs, remainingTime(options.deadline));
+  if (waitMs > 0) {
+    await page.waitForTimeout(waitMs);
+  }
+}
+
+async function waitForSlowDiscoveryPace(page: Page, options: ResolvedDiscoveryOptions): Promise<void> {
+  if (!options.slowClick) {
+    return;
+  }
+
+  const waitMs = Math.min(Math.max(options.stabilityWaitMs, 2000), remainingTime(options.deadline));
   if (waitMs > 0) {
     await page.waitForTimeout(waitMs);
   }
@@ -1375,6 +1388,7 @@ export async function discoverSearchFiltersOnPage(
           restoreError instanceof Error ? restoreError.message : String(restoreError),
         ));
       });
+      await waitForSlowDiscoveryPace(page, resolvedOptions);
     }
   }
 

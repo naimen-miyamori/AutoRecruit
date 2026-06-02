@@ -15,6 +15,7 @@ export interface DiscoverSearchFiltersCliInput {
   maxDepth?: number;
   maxOptionsPerLevel?: number;
   includeRemoteProbes: boolean;
+  slowClick: boolean;
   globalTimeoutMs?: number;
 }
 
@@ -102,6 +103,9 @@ export function parseArgs(argv: readonly string[]): DiscoverSearchFiltersCliInpu
   const includeRemoteProbes = flags.has('include-remote-probes')
     ? parseOptionalBoolean(values.get('include-remote-probes'), '--include-remote-probes')
     : false;
+  const slowClick = flags.has('slow-click')
+    ? parseOptionalBoolean(values.get('slow-click'), '--slow-click')
+    : false;
   const platform = parsePlatformSelection(values.get('platform'));
 
   if (platform === 'all' && values.has('output')) {
@@ -115,6 +119,7 @@ export function parseArgs(argv: readonly string[]): DiscoverSearchFiltersCliInpu
     maxDepth: parseOptionalNumber(values.get('max-depth'), '--max-depth'),
     maxOptionsPerLevel: parseOptionalNumber(values.get('max-options-per-level'), '--max-options-per-level'),
     includeRemoteProbes,
+    slowClick,
     globalTimeoutMs: parseOptionalNumber(values.get('global-timeout-ms'), '--global-timeout-ms'),
   };
 }
@@ -150,6 +155,7 @@ export async function runDiscoverSearchFilters(
         maxDepth: input.maxDepth,
         maxOptionsPerLevel: input.maxOptionsPerLevel,
         includeRemoteProbes: input.includeRemoteProbes,
+        slowClick: input.slowClick,
       });
       const saved = await saveSearchFilterCatalogRef.fn(
         store,

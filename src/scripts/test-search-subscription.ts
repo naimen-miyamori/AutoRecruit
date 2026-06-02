@@ -212,17 +212,19 @@ describe('search subscription workflow', () => {
         platform: '51job',
         capturedAt: '2026-05-26T13:23:24.638Z',
         keyword: '优衣库',
-        fieldCount: 3,
-        fieldIds: ['language', 'expected_location', 'expected_salary'],
+        fieldCount: 4,
+        fieldIds: ['language', 'expected_location', 'expected_salary', 'age'],
         fieldIdByLabel: {
           语言要求: 'language',
           期望工作地: 'expected_location',
           期望月薪: 'expected_salary',
+          年龄: 'age',
         },
         groups: {
           singleSelect: ['language'],
           textInput: ['expected_location'],
           salaryRange: ['expected_salary'],
+          numberRange: ['age'],
         },
         fieldsById: {
           language: {
@@ -310,6 +312,30 @@ describe('search subscription workflow', () => {
               message: '右侧薪资上限不能低于左侧薪资下限。',
             },
           },
+          age: {
+            fieldId: 'age',
+            filterKey: 'age-filter',
+            label: '年龄',
+            kind: 'numberRange',
+            restrictInput: true,
+            valueShape: 'object',
+            acceptedInputShapes: ['{ min?: number|string; max?: number|string }'],
+            minKey: 'min',
+            maxKey: 'max',
+            minLabel: '年龄下限',
+            maxLabel: '年龄上限',
+            unit: '岁',
+            min: 16,
+            max: 65,
+            orderedValues: ['16', '25', '35', '65'],
+            minOptions: ['16', '25', '35', '65'],
+            maxOptions: ['16', '25', '35', '65'],
+            rule: {
+              kind: 'orderedRange',
+              comparison: 'maxNumberValue >= minNumberValue',
+              message: '右侧年龄上限不能低于左侧年龄下限。',
+            },
+          },
         },
       }), 'utf8');
       await fs.writeFile(inputPath, JSON.stringify({
@@ -321,6 +347,10 @@ describe('search subscription workflow', () => {
         expected_salary: {
           min: '2千',
           max: '3千',
+        },
+        age: {
+          min: 25,
+          max: 35,
         },
       }), 'utf8');
       await fs.writeFile(planPath, JSON.stringify({
@@ -375,6 +405,20 @@ describe('search subscription workflow', () => {
             { value: '3千' },
           ],
         },
+        {
+          kind: 'applicationFilter',
+          fieldId: 'age',
+          label: '年龄',
+          fieldKind: 'numberRange',
+          value: {
+            min: 25,
+            max: 35,
+          },
+          values: [
+            { value: '25' },
+            { value: '35' },
+          ],
+        },
       ]);
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -399,6 +443,7 @@ describe('search subscription workflow', () => {
           singleSelect: [],
           textInput: ['expected_location'],
           salaryRange: [],
+          numberRange: [],
         },
         fieldsById: {
           expected_location: {

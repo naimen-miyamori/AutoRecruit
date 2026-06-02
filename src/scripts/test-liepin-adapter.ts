@@ -373,6 +373,542 @@ test('liepin adapter keeps hide-viewed unchecked when viewed candidates are expl
   assert.equal(hideViewedChecked, false);
 });
 
+test('liepin adapter applies supported application filter tag options', async () => {
+  const calls: string[] = [];
+  const makeOption = (label: string) => ({
+    isVisible: async () => true,
+    innerText: async () => label,
+    page: () => page,
+    boundingBox: async () => null,
+    scrollIntoViewIfNeeded: async () => undefined,
+    click: async () => {
+      calls.push(`click:${label}`);
+    },
+  });
+  const makeLocator = (name: string): unknown => ({
+    first: () => makeLocator(`${name}.first`),
+    nth: () => makeOption('3-5年'),
+    count: async () => 1,
+    isVisible: async () => true,
+    waitFor: async () => undefined,
+    innerText: async () => name,
+    locator: () => makeLocator(`${name}.locator`),
+    filter: () => makeLocator(`${name}.filter`),
+    getByText: () => makeLocator(`${name}.text`),
+    boundingBox: async () => null,
+    scrollIntoViewIfNeeded: async () => undefined,
+    click: async () => {
+      calls.push(`click:${name}`);
+    },
+  });
+  const page = {
+    url: () => 'https://h.liepin.com/search/getConditionItem#session',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async () => undefined,
+    keyboard: { press: async () => undefined },
+    mouse: {
+      move: async () => undefined,
+      click: async () => undefined,
+    },
+    evaluate: async () => ({
+      names: ['XSRF-TOKEN'],
+    }),
+    getByText: () => makeLocator('more'),
+    locator: (selector: string) => {
+      if (selector === 'body' || selector === '.search-filter, .search-form-wrap, body') {
+        return {
+          first: () => ({
+            innerText: async () => liepinSearchReadyText,
+          }),
+          waitFor: async () => undefined,
+          innerText: async () => liepinSearchReadyText,
+        };
+      }
+
+      if (/button/.test(selector)) {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            boundingBox: async () => null,
+            click: async () => {
+              calls.push('search');
+            },
+          }),
+          filter: () => ({
+            first: () => ({
+              waitFor: async () => undefined,
+              boundingBox: async () => null,
+              click: async () => {
+                calls.push('search');
+              },
+            }),
+          }),
+        };
+      }
+
+      return makeLocator(selector);
+    },
+  } as never;
+
+  const result = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'work_years',
+    label: '工作经验',
+    fieldKind: 'singleSelect',
+    value: '3-5年',
+    values: [{ value: '3-5年' }],
+  });
+
+  assert.equal(result.status, 'applied', result.message);
+  assert.ok(calls.includes('click:3-5年'));
+  assert.ok(calls.includes('search'));
+});
+
+test('liepin adapter applies additional verified tag application filters', async () => {
+  const calls: string[] = [];
+  const makeLocator = (name: string): unknown => ({
+    first: () => makeLocator(`${name}.first`),
+    last: () => makeLocator(`${name}.last`),
+    nth: (index: number) => makeLocator(`${name}[${index}]`),
+    isVisible: async () => true,
+    waitFor: async () => undefined,
+    locator: () => makeLocator(`${name}.locator`),
+    getByText: (value: string | RegExp) => makeLocator(typeof value === 'string' ? value : String(value)),
+    count: async () => 1,
+    filter: ({ hasText }: { hasText?: string | RegExp } = {}) => makeLocator(hasText instanceof RegExp ? hasText.source : String(hasText ?? name)),
+    innerText: async () => name,
+    boundingBox: async () => null,
+    click: async () => {
+      calls.push(`click:${name}`);
+    },
+  });
+  const page = {
+    url: () => 'https://h.liepin.com/search/getConditionItem#session',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async () => undefined,
+    keyboard: { press: async () => undefined },
+    evaluate: async () => ({
+      names: ['XSRF-TOKEN'],
+    }),
+    getByText: () => makeLocator('more'),
+    locator: (selector: string, options?: { hasText?: string | RegExp }) => {
+      if (selector === 'body' || selector === '.search-filter, .search-form-wrap, body') {
+        return {
+          first: () => ({
+            innerText: async () => liepinSearchReadyText,
+          }),
+          waitFor: async () => undefined,
+          innerText: async () => liepinSearchReadyText,
+        };
+      }
+
+      if (/button/.test(selector)) {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            boundingBox: async () => null,
+            click: async () => {
+              calls.push('search');
+            },
+          }),
+          filter: () => ({
+            first: () => ({
+              waitFor: async () => undefined,
+              boundingBox: async () => null,
+              click: async () => {
+                calls.push('search');
+              },
+            }),
+          }),
+        };
+      }
+
+      if (selector === '.apply-job-status') {
+        return makeLocator('job-status-select');
+      }
+
+      return makeLocator(options?.hasText instanceof RegExp ? options.hasText.source : String(options?.hasText ?? selector));
+    },
+  } as never;
+
+  const schoolResult = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'school_nature',
+    label: '院校要求',
+    fieldKind: 'singleSelect',
+    value: '211',
+    values: [{ value: '211' }],
+  });
+  const languageResult = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'language',
+    label: '语言',
+    fieldKind: 'singleSelect',
+    value: '英语',
+    values: [{ value: '英语' }],
+  });
+  const activityResult = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'recent_activity_time',
+    label: '活跃度',
+    fieldKind: 'singleSelect',
+    value: '7天内活跃',
+    values: [{ value: '7天内活跃' }],
+  });
+  const genderResult = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'gender',
+    label: '性别',
+    fieldKind: 'singleSelect',
+    value: '女',
+    values: [{ value: '女' }],
+  });
+  const jobHoppingResult = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'job_hopping_count',
+    label: '跳槽频率',
+    fieldKind: 'singleSelect',
+    value: '近3年不超过2段',
+    values: [{ value: '近3年不超过2段' }],
+  });
+  const jobStatusResult = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'job_status',
+    label: '求职状态',
+    fieldKind: 'singleSelect',
+    value: '在职，看看新机会',
+    values: [{ value: '在职，看看新机会' }],
+  });
+  const resumeLanguageResult = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'resume_language',
+    label: '简历语言',
+    fieldKind: 'singleSelect',
+    value: '中文简历',
+    values: [{ value: '中文简历' }],
+  });
+
+  assert.equal(schoolResult.status, 'applied', schoolResult.message);
+  assert.equal(languageResult.status, 'applied', languageResult.message);
+  assert.equal(activityResult.status, 'applied', activityResult.message);
+  assert.equal(genderResult.status, 'applied', genderResult.message);
+  assert.equal(jobHoppingResult.status, 'applied', jobHoppingResult.message);
+  assert.equal(jobStatusResult.status, 'applied', jobStatusResult.message);
+  assert.equal(resumeLanguageResult.status, 'applied', resumeLanguageResult.message);
+  assert.ok(calls.some((call) => call.includes('211')));
+  assert.ok(calls.some((call) => call.includes('英语')));
+  assert.ok(calls.some((call) => call.includes('7天内活跃')));
+  assert.ok(calls.some((call) => call.includes('女')));
+  assert.ok(calls.some((call) => call.includes('近3年不超过2段')));
+  assert.ok(calls.some((call) => call.startsWith('click:job-status-select')));
+  assert.ok(calls.some((call) => call.includes('在职，看看新机会')));
+  assert.ok(calls.some((call) => call.includes('中文简历')));
+  assert.ok(calls.includes('search'));
+});
+
+test('liepin adapter applies expected salary application filter inputs', async () => {
+  const filled: Record<string, string> = {};
+  const calls: string[] = [];
+  const makeInput = (id: string) => ({
+    first: () => makeInput(id),
+    nth: () => makeInput(id),
+    isVisible: async () => true,
+    waitFor: async () => undefined,
+    fill: async (value: string) => {
+      filled[id] = value;
+    },
+  });
+  const makeLocator = (name: string): unknown => ({
+    first: () => makeLocator(`${name}.first`),
+    nth: (index: number) => makeInput(`${name}[${index}]`),
+    isVisible: async () => true,
+    waitFor: async () => undefined,
+    locator: () => makeLocator(`${name}.locator`),
+    getByText: () => makeLocator(`${name}.text`),
+    count: async () => 0,
+    filter: () => makeLocator(`${name}.filter`),
+    innerText: async () => name,
+    boundingBox: async () => null,
+    click: async () => {
+      calls.push(`click:${name}`);
+    },
+  });
+  const page = {
+    url: () => 'https://h.liepin.com/search/getConditionItem#session',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async () => undefined,
+    keyboard: { press: async () => undefined },
+    evaluate: async () => ({
+      names: ['XSRF-TOKEN'],
+    }),
+    getByText: () => makeLocator('more'),
+    locator: (selector: string) => {
+      if (selector === '#wantSalaryLow') {
+        return makeInput('wantSalaryLow');
+      }
+      if (selector === '#wantSalaryHigh') {
+        return makeInput('wantSalaryHigh');
+      }
+      if (selector === 'body' || selector === '.search-filter, .search-form-wrap, body') {
+        return {
+          first: () => ({
+            innerText: async () => liepinSearchReadyText,
+          }),
+          waitFor: async () => undefined,
+          innerText: async () => liepinSearchReadyText,
+        };
+      }
+      if (/button/.test(selector)) {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            boundingBox: async () => null,
+            click: async () => {
+              calls.push('search');
+            },
+          }),
+          filter: () => ({
+            first: () => ({
+              waitFor: async () => undefined,
+              boundingBox: async () => null,
+              click: async () => {
+                calls.push('search');
+              },
+            }),
+          }),
+        };
+      }
+
+      return makeLocator(selector);
+    },
+  } as never;
+
+  const result = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'expected_salary',
+    label: '期望薪资',
+    fieldKind: 'salaryRange',
+    value: {
+      min: '10万',
+      max: '30万',
+    },
+    values: [{ value: '10万' }, { value: '30万' }],
+  });
+
+  assert.equal(result.status, 'applied', result.message);
+  assert.deepEqual(filled, {
+    wantSalaryLow: '10',
+    wantSalaryHigh: '30',
+  });
+  assert.ok(calls.includes('search'));
+});
+
+test('liepin adapter applies current salary application filter inputs', async () => {
+  const filled: Record<string, string> = {};
+  const calls: string[] = [];
+  const makeInput = (id: string) => ({
+    first: () => makeInput(id),
+    nth: () => makeInput(id),
+    isVisible: async () => true,
+    waitFor: async () => undefined,
+    fill: async (value: string) => {
+      filled[id] = value;
+    },
+  });
+  const makeLocator = (name: string): unknown => ({
+    first: () => makeLocator(`${name}.first`),
+    nth: (index: number) => makeInput(`${name}[${index}]`),
+    isVisible: async () => true,
+    waitFor: async () => undefined,
+    locator: () => makeLocator(`${name}.locator`),
+    getByText: () => makeLocator(`${name}.text`),
+    count: async () => 0,
+    filter: () => makeLocator(`${name}.filter`),
+    innerText: async () => name,
+    boundingBox: async () => null,
+    click: async () => {
+      calls.push(`click:${name}`);
+    },
+  });
+  const page = {
+    url: () => 'https://h.liepin.com/search/getConditionItem#session',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async () => undefined,
+    keyboard: { press: async () => undefined },
+    evaluate: async () => ({
+      names: ['XSRF-TOKEN'],
+    }),
+    getByText: () => makeLocator('more'),
+    locator: (selector: string) => {
+      if (selector === '#nowSalaryLow') {
+        return makeInput('nowSalaryLow');
+      }
+      if (selector === '#nowSalaryHigh') {
+        return makeInput('nowSalaryHigh');
+      }
+      if (selector === 'body' || selector === '.search-filter, .search-form-wrap, body') {
+        return {
+          first: () => ({
+            innerText: async () => liepinSearchReadyText,
+          }),
+          waitFor: async () => undefined,
+          innerText: async () => liepinSearchReadyText,
+        };
+      }
+      if (/button/.test(selector)) {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            boundingBox: async () => null,
+            click: async () => {
+              calls.push('search');
+            },
+          }),
+          filter: () => ({
+            first: () => ({
+              waitFor: async () => undefined,
+              boundingBox: async () => null,
+              click: async () => {
+                calls.push('search');
+              },
+            }),
+          }),
+        };
+      }
+
+      return makeLocator(selector);
+    },
+  } as never;
+
+  const result = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'current_salary',
+    label: '目前薪资',
+    fieldKind: 'salaryRange',
+    value: {
+      min: '10万',
+      max: '30万',
+    },
+    values: [{ value: '10万' }, { value: '30万' }],
+  });
+
+  assert.equal(result.status, 'applied', result.message);
+  assert.deepEqual(filled, {
+    nowSalaryLow: '10',
+    nowSalaryHigh: '30',
+  });
+  assert.ok(calls.includes('search'));
+});
+
+test('liepin adapter applies checkbox application filters', async () => {
+  const calls: string[] = [];
+  const checkedByLabel = new Map<string, boolean>([
+    ['海外工作经验', false],
+    ['管理经验', false],
+  ]);
+  const makeLocator = (name: string): unknown => ({
+    first: () => makeLocator(`${name}.first`),
+    nth: (index: number) => makeLocator(`${name}[${index}]`),
+    isVisible: async () => true,
+    waitFor: async () => undefined,
+    locator: () => makeLocator(`${name}.locator`),
+    getByText: (value: string | RegExp) => makeLocator(typeof value === 'string' ? value : String(value)),
+    count: async () => 1,
+    filter: ({ hasText }: { hasText?: string | RegExp } = {}) => makeLocator(hasText instanceof RegExp ? hasText.source : String(hasText ?? name)),
+    innerText: async () => name,
+    boundingBox: async () => null,
+    click: async () => {
+      calls.push(`click:${name}`);
+      if (name.includes('海外工作经验')) {
+        checkedByLabel.set('海外工作经验', true);
+      }
+      if (name.includes('管理经验')) {
+        checkedByLabel.set('管理经验', true);
+      }
+    },
+  });
+  const page = {
+    url: () => 'https://h.liepin.com/search/getConditionItem#session',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async () => undefined,
+    keyboard: { press: async () => undefined },
+    evaluate: async (fn?: unknown, arg?: unknown) => {
+      if (typeof arg === 'string' && checkedByLabel.has(arg)) {
+        return checkedByLabel.get(arg);
+      }
+
+      return {
+      names: ['XSRF-TOKEN'],
+      };
+    },
+    getByText: () => makeLocator('more'),
+    locator: (selector: string, options?: { hasText?: string | RegExp }) => {
+      if (selector === 'body' || selector === '.search-filter, .search-form-wrap, body') {
+        return {
+          first: () => ({
+            innerText: async () => liepinSearchReadyText,
+          }),
+          waitFor: async () => undefined,
+          innerText: async () => liepinSearchReadyText,
+        };
+      }
+
+      if (/button/.test(selector)) {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            boundingBox: async () => null,
+            click: async () => {
+              calls.push('search');
+            },
+          }),
+          filter: () => ({
+            first: () => ({
+              waitFor: async () => undefined,
+              boundingBox: async () => null,
+              click: async () => {
+                calls.push('search');
+              },
+            }),
+          }),
+        };
+      }
+
+      return makeLocator(options?.hasText instanceof RegExp ? options.hasText.source : String(options?.hasText ?? selector));
+    },
+  } as never;
+
+  const overseasResult = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'overseas_work_experience',
+    label: '海外工作经验',
+    fieldKind: 'singleSelect',
+    value: '有海外工作经验',
+    values: [{ value: '有海外工作经验' }],
+  });
+  const managementResult = await liepinAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'management_experience',
+    label: '管理经验',
+    fieldKind: 'singleSelect',
+    value: '有管理经验',
+    values: [{ value: '有管理经验' }],
+  });
+
+  assert.equal(overseasResult.status, 'applied', overseasResult.message);
+  assert.equal(managementResult.status, 'applied', managementResult.message);
+  assert.ok(calls.some((call) => call.includes('海外工作经验')));
+  assert.ok(calls.some((call) => call.includes('管理经验')));
+  assert.equal(checkedByLabel.get('海外工作经验'), true);
+  assert.equal(checkedByLabel.get('管理经验'), true);
+  assert.ok(calls.includes('search'));
+});
+
 test('liepin adapter treats an empty final search response as zero candidates even when stale cards remain in the DOM', async () => {
   let responseListener: ((response: { url(): string; status(): number; text(): string; request(): { timing(): { startTime: number } } }) => void) | undefined;
   const makeSearchResponse = (candidateIds: string[]) => ({

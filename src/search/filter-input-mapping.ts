@@ -31,7 +31,7 @@ export interface SearchFilterTextInputApplicationField {
   scope: SearchFilterTextInputScope;
   controlType: 'textInput';
   inputPlaceholder?: string;
-  restrictInput: true;
+  restrictInput: boolean;
   valueSource: 'label';
   childrenLazy: boolean;
   optionCount: number;
@@ -93,7 +93,13 @@ const knownFieldIdByLabel: Record<string, string> = {
   从事职能: 'engaged_function',
   当前职能: 'engaged_function',
   当前职位: 'engaged_function',
+  职位名称: 'keyword_title',
+  公司名称: 'company_name',
+  毕业院校: 'school_name',
+  毕业学校: 'school_name',
+  学校名称: 'school_name',
   专业: 'major',
+  专业名称: 'major',
 };
 
 const knownSemanticKindByLabel: Record<string, SearchFilterTextInputSemanticKind> = {
@@ -116,7 +122,13 @@ const knownSemanticKindByLabel: Record<string, SearchFilterTextInputSemanticKind
   从事职能: 'function',
   当前职能: 'function',
   当前职位: 'function',
+  职位名称: 'other',
+  公司名称: 'other',
+  毕业院校: 'other',
+  毕业学校: 'other',
+  学校名称: 'other',
   专业: 'major',
+  专业名称: 'major',
 };
 
 const knownScopeByLabel: Record<string, SearchFilterTextInputScope> = {
@@ -139,8 +151,21 @@ const knownScopeByLabel: Record<string, SearchFilterTextInputScope> = {
   从事职能: 'engaged',
   当前职能: 'engaged',
   当前职位: 'engaged',
+  职位名称: 'other',
+  公司名称: 'other',
+  毕业院校: 'education',
+  毕业学校: 'education',
+  学校名称: 'education',
   专业: 'education',
+  专业名称: 'education',
 };
+
+const freeTextFieldIds = new Set([
+  'keyword_title',
+  'company_name',
+  'school_name',
+  'major',
+]);
 
 function normalizeLabel(value: string | undefined): string {
   return (value ?? '').replace(/\s+/g, ' ').trim();
@@ -230,7 +255,7 @@ export function buildTextInputApplicationMapping(
       scope,
       controlType: 'textInput',
       inputPlaceholder: normalizeLabel(pool.inputPlaceholder) || undefined,
-      restrictInput: true,
+      restrictInput: !freeTextFieldIds.has(fieldId),
       valueSource: 'label',
       childrenLazy: pool.childrenLazy,
       optionCount: pool.optionCount,
