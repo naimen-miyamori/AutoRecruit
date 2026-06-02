@@ -445,6 +445,93 @@ test('zhilian adapter clears only 未看过 when viewed candidates are explicitl
   assert.ok(stub.getWaitForTimeoutCalls().length > 0);
 });
 
+test('zhilian search-subscription prepares the saved quick-search tag instead of replacing it with keyword input', async () => {
+  const clickCalls: string[] = [];
+  let quickSearchApplied = false;
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForTimeout: async () => undefined,
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('advanced-search action is optional in this stub');
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => quickSearchApplied
+            ? '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 李宁 关键词：优衣库 李宁 未看过 未聊过'
+            : '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 李宁',
+        };
+      }
+
+      if (/input|button/.test(selector)) {
+        return {
+          first: () => ({
+            waitFor: async () => {
+              throw new Error(`search-subscription should not use raw keyword search selector: ${selector}`);
+            },
+            fill: async () => {
+              throw new Error(`search-subscription should not fill raw keyword search selector: ${selector}`);
+            },
+            click: async () => {
+              throw new Error(`search-subscription should not click raw keyword search selector: ${selector}`);
+            },
+          }),
+          filter: () => ({
+            first: () => ({
+              waitFor: async () => {
+                throw new Error(`search-subscription should not use raw keyword search selector: ${selector}`);
+              },
+            }),
+          }),
+        };
+      }
+
+      return {
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              clickCalls.push('quick-search');
+              quickSearchApplied = true;
+            },
+          }),
+        }),
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+      };
+    },
+  } as never;
+
+  await assert.doesNotReject(() => zhilianTestExports.prepareZhilianSearchConditionPage(page, '优衣库', {
+    deadline: Date.now() + 5000,
+  }));
+  assert.deepEqual(clickCalls, ['quick-search']);
+});
+
+test('zhilian search-subscription reads explicit empty-result text as zero candidates', async () => {
+  const page = {
+    locator: (selector: string) => {
+      assert.equal(selector, 'body');
+      return {
+        innerText: async () => '关键词：优衣库 未看过 未聊过 没有符合条件的人才 请修改搜索条件后再试',
+      };
+    },
+  } as never;
+
+  assert.deepEqual(
+    await zhilianTestExports.readZhilianSearchConditionResultTotal(page),
+    { resultTotal: 0, resultTotalSource: 'page' },
+  );
+});
+
 test('zhilian adapter fails when no saved quick-search tag contains the raw keyword', async () => {
   const page = {
     url: () => 'https://rd6.zhaopin.com/app/search',

@@ -3,9 +3,6 @@ import { config } from '../config.js';
 import { clickPlatformLocator } from '../browser/pacing.js';
 import {
   clickFirstVisibleText,
-  clickPrimarySearchButton,
-  fillFirstVisibleInput,
-  fillInputNearText,
   parseSearchResultTotalFromText,
   saveSearchConditionByCommonDialog,
 } from '../search/page-actions.js';
@@ -455,59 +452,26 @@ async function clearZhilianUnviewedFilter(page: Page, options?: SearchWaitOption
   return clicked;
 }
 
-async function fillZhilianKeywordSearchInput(page: Page, value: string): Promise<boolean> {
-  const inputSelectors = [
-    'input[placeholder*="搜公司"]',
-    'input[placeholder*="职位"]',
-    'input[placeholder*="专业"]',
-    'input[placeholder*="学校"]',
-    'input[placeholder*="行业"]',
-    'input[placeholder*="技能"]',
-    'input[placeholder*="关键词"]',
-    'input[placeholder*="搜索"]',
-    'input[type="search"]',
-    'input[type="text"]',
-  ];
-
-  if (await fillInputNearText(
-    page,
-    value,
-    ['搜公司、职位、专业、学校、行业、技能等', '搜索关键词', '关键词', '职位', '专业', '学校', '行业', '技能'],
-    ['.search-item', '.filter-item', '.form-item', '[class*="search"]', '[class*="filter"]'],
-    inputSelectors,
-    1000,
-    zhilianPlatform,
-  )) {
-    return true;
-  }
-
-  return fillFirstVisibleInput(page, value, inputSelectors, 1000, zhilianPlatform);
-}
-
 async function prepareZhilianSearchConditionPage(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page> {
   const deadline = createSearchDeadline(options);
   clearObservedZhilianCandidateApi(page);
   attachZhilianCandidateApiObserver(page);
   await openZhilianRecruiterHome(page, { deadline });
-
-  const didFillKeyword = await fillZhilianKeywordSearchInput(page, keyword);
-  if (!didFillKeyword) {
-    throw new Error('Search subscription on zhilian could not fill the keyword input on the recruiter search page.');
-  }
-
-  const didTriggerSearch = await clickPrimarySearchButton(page, 1000, zhilianPlatform)
-    || await clickFirstVisibleText(page, ['搜索', '搜 索'], 1000, zhilianPlatform);
-  if (!didTriggerSearch) {
-    throw new Error('Search subscription on zhilian could not trigger the keyword search on the recruiter search page.');
-  }
-
-  await waitForZhilianRecruiterShell(page, { deadline });
+  await clickSavedZhilianQuickSearchTag(page, keyword, deadline);
   await clickFirstVisibleText(page, ['使用高级搜索', '高级搜索', '筛选', '更多筛选'], 1000, zhilianPlatform).catch(() => false);
   return page;
 }
 
 async function readZhilianSearchConditionResultTotal(page: Page): Promise<{ resultTotal: number; resultTotalSource: 'page' }> {
-  const resultTotal = parseSearchResultTotalFromText(await page.locator('body').innerText());
+  const bodyText = await page.locator('body').innerText();
+  const resultTotal = parseSearchResultTotalFromText(bodyText);
+  if (resultTotal === undefined && /没有符合条件的人才|没有搜索到相关的人才|暂无符合条件|暂无数据|未搜索到相关/.test(bodyText)) {
+    return {
+      resultTotal: 0,
+      resultTotalSource: 'page',
+    };
+  }
+
   if (resultTotal === undefined) {
     throw new Error('Search subscription on zhilian could not read the page result total.');
   }
@@ -1504,4 +1468,6 @@ export const zhilianTestExports = {
   hasAppliedZhilianQuickSearchKeyword,
   isZhilianQuickSearchApplied,
   listVisibleZhilianQuickSearchTags,
+  prepareZhilianSearchConditionPage,
+  readZhilianSearchConditionResultTotal,
 };
