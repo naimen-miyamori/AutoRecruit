@@ -46,7 +46,7 @@ If one platform fails during an all-platform run, stop immediately and propagate
 
 | Platform | Storage State | Search Entry | Candidate Extraction | Special Rules |
 | --- | --- | --- | --- | --- |
-| `51job` | `storage-state.json` | Subscription page at `https://ehire.51job.com/Revision/talent/subscribe` | DOM cards anchored around `div[id^="no_interested_"]` | Hover saved keyword card, click talent-search trigger, preserve selector fallbacks, treat filtered-empty text as success. `--include-viewed true` clears `我已看`. After the talent-search page opens, close extra `我的订阅` tabs in the same reusable browser context and keep the active session page on the talent-search page. |
+| `51job` | `storage-state.json` | Subscription page at `https://ehire.51job.com/Revision/talent/subscribe` | DOM cards anchored around `div[id^="no_interested_"]` | Click the saved keyword card, confirm the active subscription detail panel title matches the raw keyword, then click that panel's `去搜索` talent-search trigger. After the talent-search page opens, confirm visible text such as `关键词：<keyword>` before extraction. Preserve selector fallbacks and treat filtered-empty text as success. `--include-viewed true` clears `我已看`. After the talent-search page opens, close extra `我的订阅` tabs in the same reusable browser context and keep the active session page on the talent-search page. |
 | `liepin` | `storage-state.liepin.json` | Recruiter talent search via `找人`, then quick-search tag | DOM-first; API fallback only when DOM has no candidates or needs safe detail URLs | Liepin is always headed. Manual-login polling must avoid unrelated probes before recruiter cookies exist. Click requested quick-search tag, ensure `隐藏已查看` by default, or uncheck it for `--include-viewed true`, then reset/request-start barrier before extraction. |
 | `zhilian` | `storage-state.zhilian.json` | `https://rd6.zhaopin.com/app/search` saved quick-search tag | DOM-first, including Vue candidate props on current card wrappers; API fallback only when DOM yields no candidates | Login starts at `https://passport.zhaopin.com/org/login`. Saved tag text must contain raw `--keyword`, and applied state must show `关键词：<keyword>` before extraction. `--include-viewed true` clears visible `未看过` only and preserves `未聊过`. Resume detail is a modal on `/app/search`; parse the modal subtree, copy `转给同事` -> `链接转发` share link, and persist it as `candidateShareUrl`. |
 
@@ -63,7 +63,7 @@ Detail opening should follow the same total-deadline style across platforms. For
 - Browser auth uses platform-scoped Playwright storage state. Leave `STORAGE_STATE_PATH` unset for normal multi-platform runs so each platform uses its own default file.
 - If a saved session is missing or expired, headed runs may refresh through manual login and then verify the new session. Headless runs cannot refresh sessions and should error with instructions to rerun headed.
 - Browser launch engine defaults to CloakBrowser through `BROWSER_ENGINE=cloakbrowser`; set `BROWSER_ENGINE=playwright` to fall back to Playwright's bundled Chromium.
-- Reusable browser mode is implemented for all production platforms with platform-scoped CDP ports and browser profiles. Liepin defaults to reusable headed mode; 51job and Zhilian are opt-in. Liepin still forces headed mode even when `PLAYWRIGHT_HEADLESS=true`.
+- Reusable browser mode is implemented for all production platforms with platform-scoped CDP ports and browser profiles. 51job, Liepin, and Zhilian default to reusable headed mode. Liepin still forces headed mode even when `PLAYWRIGHT_HEADLESS=true`.
 - Resume extraction can use the optional Crawl4AI runtime at `.venv/bin/python`; if unavailable, the built-in parser fallback should continue.
 - SMTP delivery uses `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM`.
 
@@ -79,8 +79,8 @@ Key browser timing env vars:
 - `PLAYWRIGHT_CANDIDATE_DELAY_MIN_MS` / `PLAYWRIGHT_CANDIDATE_DELAY_MAX_MS` default `0-0` outside Liepin
 - `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_ACTION_DELAY_MIN_MS` / `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_ACTION_DELAY_MAX_MS`
 - `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_CANDIDATE_DELAY_MIN_MS` / `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_CANDIDATE_DELAY_MAX_MS`
-- `PLAYWRIGHT_REUSE_BROWSER` default `false` outside Liepin
-- `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_REUSE_BROWSER`; Liepin default enabled unless set to `false`
+- `PLAYWRIGHT_REUSE_BROWSER` default `false` outside platforms with their own defaults
+- `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_REUSE_BROWSER`; 51job, Liepin, and Zhilian default enabled unless set to `false`
 - `PLAYWRIGHT_51JOB_REUSE_CDP_PORT` default `19325`
 - `PLAYWRIGHT_LIEPIN_REUSE_CDP_PORT` default `19327`
 - `PLAYWRIGHT_ZHILIAN_REUSE_CDP_PORT` default `19329`

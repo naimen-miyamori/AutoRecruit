@@ -107,9 +107,9 @@ test('browser pacing and reuse defaults are platform-specific', () => {
     zhilian: 0,
   });
   assert.deepEqual(config.playwright.reuseBrowserByPlatform, {
-    '51job': false,
+    '51job': true,
     liepin: true,
-    zhilian: false,
+    zhilian: true,
   });
   assert.deepEqual(config.playwright.reuseCdpPortByPlatform, {
     '51job': 19325,

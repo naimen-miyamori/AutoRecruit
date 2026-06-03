@@ -12,28 +12,24 @@ const searchTriggerSelectors = [
   '.to-talent-search-button',
   '[data-role="to-talent-search"]',
   '[data-action*="talent"][data-action*="search"]',
-  '[class*="talent-search"]',
   '[class*="to-talent-search"]',
-  '[class*="search-btn"]',
-  '[class*="search-button"]',
   '[title*="人才搜索"]',
   '[aria-label*="人才搜索"]',
 ];
-const pageLevelSearchSelectors = [
-  ...searchTriggerSelectors,
-  'button:has-text("搜索")',
-  '.el-button:has-text("搜索")',
-  '[role="button"]:has-text("搜索")',
-];
 const cardSelector = '.talent-subscribe-card-main-wrapper';
 const titleSelector = '.card-title';
+const conditionPanelSelector = '.talent-subscribe-condition-popover';
+const conditionPanelTitleSelector = '.subscribe-title';
 const pageReadySelector = `${cardSelector}, .el-empty`;
 const loadingMaskSelector = '.el-loading-mask';
 const subscriptionCardsSettleDelayMs = 3000;
+const subscriptionPanelPollMs = 100;
+const preferredSubscriptionPanelWaitMs = 2500;
 const viewedFilterSelector = 'label.el-checkbox:has-text("我已看"), label:has-text("我已看")';
 const viewedFilterSettleMs = 1000;
 const viewedFilterPollMs = 100;
 const viewedFilterMaxWaitMs = 8000;
+const searchConditionPollMs = 200;
 const platform = '51job';
 const subscribePageUrlPattern = /^https:\/\/ehire\.51job\.com\/Revision\/talent\/subscribe(?:[/?#].*)?$/i;
 
@@ -55,6 +51,17 @@ export const findSubscriptionCardRef = {
 
 function normalizeText(value: string | null | undefined): string {
   return (value ?? '').replace(/\s+/g, '').trim().toLowerCase();
+}
+
+function hasSearchKeywordCondition(pageText: string, searchKeyword: string): boolean {
+  const normalizedText = normalizeText(pageText);
+  const normalizedKeyword = normalizeText(searchKeyword);
+  if (!normalizedText || !normalizedKeyword) {
+    return false;
+  }
+
+  return normalizedText.includes(`关键词:${normalizedKeyword}`)
+    || normalizedText.includes(`关键词：${normalizedKeyword}`);
 }
 
 function getRemainingTimeout(deadline: number): number {
@@ -178,7 +185,84 @@ async function resolveSearchTriggerFromTier(candidates: Locator[], deadline: num
   }));
 }
 
-async function resolveSearchTrigger(page: Page, card: Locator, deadline: number): Promise<Locator> {
+async function waitForActiveSubscriptionConditionPanel(
+  page: Page,
+  searchKeyword: string,
+  deadline: number,
+  options: { returnUndefinedWhenMissing?: boolean } = {},
+): Promise<Locator | undefined> {
+  const normalizedKeyword = normalizeText(searchKeyword);
+  const panels = page.locator(conditionPanelSelector);
+  let visiblePanelTitles: string[] = [];
+
+  while (Date.now() < deadline) {
+    visiblePanelTitles = [];
+    const count = await panels.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const panel = panels.nth(index);
+      const isVisible = await panel.isVisible().catch(() => false);
+      if (!isVisible) {
+        continue;
+      }
+
+      const title = await panel.locator(conditionPanelTitleSelector).first().innerText().catch(() => '');
+      const normalizedTitle = normalizeText(title);
+      if (normalizedTitle) {
+        visiblePanelTitles.push(title.trim());
+      }
+
+      if (normalizedTitle === normalizedKeyword) {
+        return panel;
+      }
+    }
+
+    if (visiblePanelTitles.length > 0) {
+      break;
+    }
+
+    const waitMs = Math.min(subscriptionPanelPollMs, getRemainingTimeout(deadline));
+    if (waitMs <= 1) {
+      break;
+    }
+
+    await page.waitForTimeout(waitMs).catch(() => undefined);
+  }
+
+  if (options.returnUndefinedWhenMissing && visiblePanelTitles.length === 0) {
+    return undefined;
+  }
+
+  throw new Error(`51job saved search "${searchKeyword}" did not become the active subscription detail panel. Visible panel titles: ${visiblePanelTitles.join(' | ') || '(none)'}`);
+}
+
+async function resolveSearchTriggerFromPanel(activePanel: Locator, searchKeyword: string, deadline: number): Promise<Locator> {
+  const panelCandidates = [
+    activePanel.locator('button.to-talent-search-button').first(),
+    activePanel.locator('.to-talent-search-button').first(),
+    activePanel.locator('button:has-text("去搜索")').first(),
+    activePanel.locator('.el-button:has-text("去搜索")').first(),
+    activePanel.locator('[role="button"]:has-text("去搜索")').first(),
+  ];
+  const panelMatch = await resolveSearchTriggerFromTier(panelCandidates, deadline);
+  if (panelMatch) {
+    return panelMatch;
+  }
+
+  throw new Error(`Talent search entry did not appear within the active 51job subscription detail panel for "${searchKeyword}".`);
+}
+
+async function resolveSearchTrigger(page: Page, card: Locator, searchKeyword: string, deadline: number): Promise<Locator> {
+  const preferredPanelDeadline = Math.min(deadline, Date.now() + preferredSubscriptionPanelWaitMs);
+  const preferredActivePanel = await waitForActiveSubscriptionConditionPanel(
+    page,
+    searchKeyword,
+    preferredPanelDeadline,
+    { returnUndefinedWhenMissing: true },
+  );
+  if (preferredActivePanel) {
+    return resolveSearchTriggerFromPanel(preferredActivePanel, searchKeyword, deadline);
+  }
+
   const selectorCandidates = searchTriggerSelectors.map((selector) => card.locator(selector).first());
   const selectorMatch = await resolveSearchTriggerFromTier(selectorCandidates, deadline);
   if (selectorMatch) {
@@ -195,23 +279,60 @@ async function resolveSearchTrigger(page: Page, card: Locator, deadline: number)
     return textMatch;
   }
 
-  const pageSelectorCandidates = pageLevelSearchSelectors.map((selector) => page.locator(selector).filter({ visible: true }).first());
-  const pageSelectorMatch = await resolveSearchTriggerFromTier(pageSelectorCandidates, deadline);
-  if (pageSelectorMatch) {
-    return pageSelectorMatch;
+  const activePanel = await waitForActiveSubscriptionConditionPanel(page, searchKeyword, deadline);
+  if (!activePanel) {
+    throw new Error(`51job saved search "${searchKeyword}" did not become the active subscription detail panel.`);
   }
+  return resolveSearchTriggerFromPanel(activePanel, searchKeyword, deadline);
+}
 
-  const pageTextCandidates = [
-    page.getByText('人才搜索', { exact: false }).first(),
-    page.getByRole('button', { name: /人才搜索|搜索/ }).first(),
-    page.getByRole('link', { name: /人才搜索|搜索/ }).first(),
+async function readSearchPageText(page: Page, deadline: number): Promise<string> {
+  const timeout = Math.min(1000, getRemainingTimeout(deadline));
+  const locators = [
+    page.locator('#app'),
+    page.locator('body'),
   ];
-  const pageTextMatch = await resolveSearchTriggerFromTier(pageTextCandidates, deadline);
-  if (pageTextMatch) {
-    return pageTextMatch;
+  const chunks: string[] = [];
+
+  for (const locator of locators) {
+    const readableLocator = 'first' in locator && typeof locator.first === 'function'
+      ? locator.first()
+      : locator;
+    const readable = readableLocator as Partial<Pick<Locator, 'textContent' | 'innerText'>>;
+    const [textContent, innerText] = await Promise.all([
+      readable.textContent?.({ timeout }).catch(() => '') ?? Promise.resolve(''),
+      readable.innerText?.({ timeout }).catch(() => '') ?? Promise.resolve(''),
+    ]);
+    if (textContent) {
+      chunks.push(textContent);
+    }
+    if (innerText) {
+      chunks.push(innerText);
+    }
   }
 
-  throw new Error('Talent search entry did not appear within the matched subscribe card.');
+  return chunks.join('\n');
+}
+
+async function waitFor51jobSearchKeywordCondition(page: Page, searchKeyword: string, deadline: number): Promise<void> {
+  let latestText = '';
+
+  while (Date.now() < deadline) {
+    latestText = await readSearchPageText(page, deadline);
+    if (hasSearchKeywordCondition(latestText, searchKeyword)) {
+      return;
+    }
+
+    const waitMs = Math.min(searchConditionPollMs, getRemainingTimeout(deadline));
+    if (waitMs <= 1) {
+      break;
+    }
+
+    await page.waitForTimeout(waitMs).catch(() => undefined);
+  }
+
+  const preview = latestText.replace(/\s+/g, ' ').trim().slice(0, 1000) || '(empty)';
+  throw new Error(`51job talent search page did not confirm saved search keyword "${searchKeyword}". URL: ${page.url()}. Page text preview: ${preview}`);
 }
 
 async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: SearchWaitOptions): Promise<void> {
@@ -222,7 +343,8 @@ async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: 
     await waitForSearchTriggerReadyRef.fn(page, searchTrigger, { deadline });
 
     try {
-      await clickPlatformLocator(searchTrigger, page, platform, getRemainingTimeout(deadline));
+      await waitPlatformActionPace(page, platform);
+      await searchTrigger.click({ timeout: getRemainingTimeout(deadline) });
       return;
     } catch (error) {
       lastError = error;
@@ -353,9 +475,9 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
   const card = await findSubscriptionCardRef.fn(page, searchKeyword, { deadline });
   await card.scrollIntoViewIfNeeded();
   await waitPlatformActionPace(page, platform);
-  await card.hover();
+  await card.click({ timeout: getRemainingTimeout(deadline) }).catch(() => undefined);
 
-  const searchTrigger = await resolveSearchTrigger(page, card, deadline);
+  const searchTrigger = await resolveSearchTrigger(page, card, searchKeyword, deadline);
 
   const originalUrl = page.url();
   const popupPromise = page.context().waitForEvent('page', { timeout: getRemainingTimeout(deadline) }).catch(() => null);
@@ -370,6 +492,7 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
 
   if (openOutcome) {
     await openOutcome.page.waitForLoadState('domcontentloaded', { timeout: getRemainingTimeout(deadline) });
+    await waitFor51jobSearchKeywordCondition(openOutcome.page, searchKeyword, deadline);
     if (options?.includeViewedCandidates) {
       await clear51jobViewedFilter(openOutcome.page, { deadline });
     }
@@ -380,6 +503,7 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
   const searchLinkHref = await searchTrigger.getAttribute('href').catch(() => null);
   if (searchLinkHref) {
     await page.goto(searchLinkHref, { waitUntil: 'domcontentloaded', timeout: getRemainingTimeout(deadline) });
+    await waitFor51jobSearchKeywordCondition(page, searchKeyword, deadline);
     if (options?.includeViewedCandidates) {
       await clear51jobViewedFilter(page, { deadline });
     }

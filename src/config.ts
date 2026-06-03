@@ -134,9 +134,9 @@ const candidateDelayMaxMsByPlatform: Record<SupportedPlatform, number> = {
   zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MAX_MS', 0),
 };
 const reuseBrowserByPlatform: Record<SupportedPlatform, boolean> = {
-  '51job': getPlatformBooleanEnv('51job', 'REUSE_BROWSER', false),
+  '51job': getPlatformBooleanEnv('51job', 'REUSE_BROWSER', true),
   liepin: getPlatformBooleanEnv('liepin', 'REUSE_BROWSER', true),
-  zhilian: getPlatformBooleanEnv('zhilian', 'REUSE_BROWSER', false),
+  zhilian: getPlatformBooleanEnv('zhilian', 'REUSE_BROWSER', true),
 };
 const reuseCdpPortByPlatform: Record<SupportedPlatform, number> = {
   '51job': getOptionalNumberEnv('PLAYWRIGHT_51JOB_REUSE_CDP_PORT', 19325),

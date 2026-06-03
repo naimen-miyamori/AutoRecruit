@@ -250,12 +250,15 @@ function createSubscribeSearchOpenStub() {
   const cardWaitForCalls: Array<{ state?: string; timeout?: number }> = [];
   const cardSelectorWaits = new Map<string, number>();
   const pageSelectorWaits = new Map<string, number>();
+  const panelSelectorWaits = new Map<string, number>();
   let popupPage: Record<string, unknown> | null = null;
   let currentUrl = 'https://example.com/subscribe';
   let searchTriggerHref: string | null = null;
   let cardCountSequence: number[] = [];
   let availableCardSelectors = new Set<string>();
-  let availablePageSelectors = new Set<string>();
+  let conditionPanelVisible = false;
+  let conditionPanelTitle = '泰国 英语';
+  let panelSearchTriggerReady = false;
   let cardTextTriggerReady = false;
   let pageTextTriggerReady = false;
   let viewedFilterChecked = false;
@@ -316,10 +319,10 @@ function createSubscribeSearchOpenStub() {
     }),
   };
 
-  const makeWaitable = (kind: 'card' | 'page', key: string, isReady: () => boolean) => ({
+  const makeWaitable = (kind: 'card' | 'page' | 'panel', key: string, isReady: () => boolean) => ({
     first: () => ({
       waitFor: async () => {
-        const waits = kind === 'card' ? cardSelectorWaits : pageSelectorWaits;
+        const waits = kind === 'card' ? cardSelectorWaits : kind === 'panel' ? panelSelectorWaits : pageSelectorWaits;
         waits.set(key, (waits.get(key) ?? 0) + 1);
         if (!isReady()) {
           throw new Error(`missing trigger: ${key}`);
@@ -331,7 +334,7 @@ function createSubscribeSearchOpenStub() {
     filter: () => ({
       first: () => ({
         waitFor: async () => {
-          const waits = kind === 'card' ? cardSelectorWaits : pageSelectorWaits;
+          const waits = kind === 'card' ? cardSelectorWaits : kind === 'panel' ? panelSelectorWaits : pageSelectorWaits;
           waits.set(key, (waits.get(key) ?? 0) + 1);
           if (!isReady()) {
             throw new Error(`missing trigger: ${key}`);
@@ -343,10 +346,28 @@ function createSubscribeSearchOpenStub() {
     }),
   });
 
-  let bodyText = '100228050 在线简历 工作经历 教育经历';
+  const conditionPanel = {
+    isVisible: async () => conditionPanelVisible,
+    locator: (selector?: string) => {
+      if (selector === '.subscribe-title') {
+        return {
+          first: () => ({
+            innerText: async () => conditionPanelTitle,
+          }),
+        };
+      }
+
+      return makeWaitable('panel', selector ?? '', () => panelSearchTriggerReady);
+    },
+  };
+
+  let bodyText = '已选条件 关键词：泰国 英语 100228050 在线简历 工作经历 教育经历';
+  let bodyInnerText = bodyText;
+  let bodyTextContent = bodyText;
 
   const card = {
     scrollIntoViewIfNeeded: async () => undefined,
+    click: async () => undefined,
     hover: async () => undefined,
     locator: (selector?: string) => makeWaitable('card', selector ?? '', () => availableCardSelectors.has(selector ?? '')),
     getByText: (text?: string) => makeWaitable('card', `text:${text ?? ''}`, () => cardTextTriggerReady),
@@ -387,12 +408,33 @@ function createSubscribeSearchOpenStub() {
       if (selector === '.talent-subscribe-card-main-wrapper, .el-empty') {
         return readyLocator;
       }
-      if (selector === 'body') {
+      if (selector === '.talent-subscribe-condition-popover') {
         return {
-          innerText: async () => bodyText,
+          count: async () => 1,
+          nth: () => conditionPanel,
         };
       }
-      return makeWaitable('page', selector ?? '', () => availablePageSelectors.has(selector ?? ''));
+      if (selector === 'body') {
+        return {
+          first: () => ({
+            innerText: async () => bodyInnerText,
+            textContent: async () => bodyTextContent,
+          }),
+          innerText: async () => bodyInnerText,
+          textContent: async () => bodyTextContent,
+        };
+      }
+      if (selector === '#app') {
+        return {
+          first: () => ({
+            innerText: async () => bodyInnerText,
+            textContent: async () => bodyTextContent,
+          }),
+          innerText: async () => bodyInnerText,
+          textContent: async () => bodyTextContent,
+        };
+      }
+      return makeWaitable('page', selector ?? '', () => false);
     },
     getByText: (text?: string) => makeWaitable('page', `text:${text ?? ''}`, () => pageTextTriggerReady),
     getByRole: (role?: string, options?: { name?: RegExp }) => makeWaitable('page', `role:${role ?? ''}:${options?.name?.toString() ?? ''}`, () => pageTextTriggerReady),
@@ -415,14 +457,21 @@ function createSubscribeSearchOpenStub() {
     setAvailableCardSelectors(selectors: string[]) {
       availableCardSelectors = new Set(selectors);
     },
-    setAvailablePageSelectors(selectors: string[]) {
-      availablePageSelectors = new Set(selectors);
-    },
     showCardTextTrigger() {
       cardTextTriggerReady = true;
     },
     showPageTextTrigger() {
       pageTextTriggerReady = true;
+    },
+    showConditionPanelSearchTrigger(title = '泰国 英语') {
+      conditionPanelVisible = true;
+      conditionPanelTitle = title;
+      panelSearchTriggerReady = true;
+    },
+    showConditionPanelWithoutSearchTrigger(title = '泰国 英语') {
+      conditionPanelVisible = true;
+      conditionPanelTitle = title;
+      panelSearchTriggerReady = false;
     },
     showPopup() {
       popupPage = {
@@ -461,6 +510,14 @@ function createSubscribeSearchOpenStub() {
     },
     setBodyText(text: string) {
       bodyText = text;
+      bodyInnerText = text;
+      bodyTextContent = text;
+    },
+    setBodyInnerText(text: string) {
+      bodyInnerText = text;
+    },
+    setBodyTextContent(text: string) {
+      bodyTextContent = text;
     },
     setViewedFilterChecked(checked: boolean) {
       viewedFilterChecked = checked;
@@ -474,6 +531,7 @@ function createSubscribeSearchOpenStub() {
     getTargetWaitForTimeoutCalls: () => targetWaitForTimeoutCalls,
     getCardSelectorWaits: () => new Map(cardSelectorWaits),
     getPageSelectorWaits: () => new Map(pageSelectorWaits),
+    getPanelSelectorWaits: () => new Map(panelSelectorWaits),
     getViewedFilterClicks: () => viewedFilterClicks,
     isViewedFilterChecked: () => viewedFilterChecked,
     getCurrentUrl: () => currentUrl,
@@ -1179,6 +1237,7 @@ describe('scoring run semantics', () => {
     openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
     findSubscriptionCardRef.fn = (async () => ({
       scrollIntoViewIfNeeded: async () => undefined,
+      click: async () => undefined,
       hover: async () => undefined,
       locator: () => ({
         first: () => ({
@@ -1364,10 +1423,67 @@ describe('scoring run semantics', () => {
     }
   });
 
-  it('falls back to page-level triggers when the matched card exposes no descendant trigger', async () => {
+  it('confirms the 51job search condition from textContent after opening subscription search results', async () => {
     const searchOpen = createSubscribeSearchOpenStub();
     searchOpen.showPopup();
-    searchOpen.setAvailablePageSelectors(['[class*="talent-search"]']);
+    searchOpen.showCardTextTrigger();
+    searchOpen.setBodyInnerText('');
+    searchOpen.setBodyTextContent('已选条件\n关键词：泰国 英语\n从事职能：门店经理');
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
+    const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
+    const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
+    const originalClickSearchTrigger = clickSearchTriggerRef.fn;
+
+    openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
+    waitForSearchTriggerReadyRef.fn = async () => undefined;
+    clickSearchTriggerRef.fn = async () => undefined;
+
+    try {
+      const result = await openSubscribeSearch(searchOpen.page, '泰国 英语');
+
+      assert.equal(result !== null, true);
+      assert.deepStrictEqual(searchOpen.getPopupWaitForLoadStateCalls(), ['domcontentloaded']);
+    } finally {
+      openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      findSubscriptionCardRef.fn = originalFindSubscriptionCard;
+      waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
+      clickSearchTriggerRef.fn = originalClickSearchTrigger;
+    }
+  });
+
+  it('rejects the 51job search page when the applied keyword belongs to another subscription', async () => {
+    const searchOpen = createSubscribeSearchOpenStub();
+    searchOpen.showPopup();
+    searchOpen.showCardTextTrigger();
+    searchOpen.setBodyText('已选条件\n关键词：优衣库\n从事职能：门店经理');
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
+    const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
+    const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
+    const originalClickSearchTrigger = clickSearchTriggerRef.fn;
+
+    openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
+    waitForSearchTriggerReadyRef.fn = async () => undefined;
+    clickSearchTriggerRef.fn = async () => undefined;
+
+    try {
+      await assert.rejects(
+        () => openSubscribeSearch(searchOpen.page, '泰国 英语', { deadline: Date.now() + 300 }),
+        /51job talent search page did not confirm saved search keyword "泰国 英语"\./,
+      );
+    } finally {
+      openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      findSubscriptionCardRef.fn = originalFindSubscriptionCard;
+      waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
+      clickSearchTriggerRef.fn = originalClickSearchTrigger;
+    }
+  });
+
+  it('falls back to the active subscription detail panel trigger when the matched card exposes no descendant trigger', async () => {
+    const searchOpen = createSubscribeSearchOpenStub();
+    searchOpen.showPopup();
+    searchOpen.showConditionPanelSearchTrigger('泰国 英语');
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
     const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
     const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
@@ -1387,8 +1503,40 @@ describe('scoring run semantics', () => {
       clickSearchTriggerRef.fn = originalClickSearchTrigger;
     }
 
-    assert.equal(searchOpen.getCardSelectorWaits().get('[class*="talent-search"]') ?? 0, 1);
-    assert.equal(searchOpen.getPageSelectorWaits().get('[class*="talent-search"]'), 1);
+    assert.equal(searchOpen.getCardSelectorWaits().size, 0);
+    assert.equal(searchOpen.getPageSelectorWaits().size, 0);
+    assert.equal(searchOpen.getPanelSelectorWaits().get('button.to-talent-search-button'), 1);
+  });
+
+  it('rejects the 51job subscription detail panel when it belongs to a different saved search', async () => {
+    const searchOpen = createSubscribeSearchOpenStub();
+    searchOpen.showPopup();
+    searchOpen.showConditionPanelSearchTrigger('优衣库');
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
+    const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
+    const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
+    const originalClickSearchTrigger = clickSearchTriggerRef.fn;
+
+    openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
+    waitForSearchTriggerReadyRef.fn = async () => undefined;
+    clickSearchTriggerRef.fn = async () => undefined;
+
+    try {
+      await assert.rejects(
+        () => openSubscribeSearch(searchOpen.page, '泰国 英语', { deadline: Date.now() + 300 }),
+        /51job saved search "泰国 英语" did not become the active subscription detail panel\./,
+      );
+    } finally {
+      openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      findSubscriptionCardRef.fn = originalFindSubscriptionCard;
+      waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
+      clickSearchTriggerRef.fn = originalClickSearchTrigger;
+    }
+
+    assert.equal(searchOpen.getCardSelectorWaits().size, 0);
+    assert.equal(searchOpen.getPageSelectorWaits().size, 0);
+    assert.equal(searchOpen.getPanelSelectorWaits().size, 0);
   });
 
   it('waits for the subscribe page without fixed polling backoff once readiness appears', async () => {
@@ -1897,15 +2045,20 @@ describe('scoring run semantics', () => {
     }
   });
 
-  it('supports reusable browser sessions per platform without changing 51job and Zhilian defaults', () => {
+  it('supports reusable browser sessions per platform with production platforms enabled by default', () => {
     const originalReuseBrowser = { ...config.playwright.reuseBrowserByPlatform };
     const originalHeadless = config.playwright.headless;
 
     try {
       (config.playwright as { headless: boolean }).headless = false;
       assert.equal(isReusableBrowserEnabled('liepin'), true);
-      assert.equal(isReusableBrowserEnabled('51job'), false);
-      assert.equal(isReusableBrowserEnabled('zhilian'), false);
+      assert.equal(isReusableBrowserEnabled('51job'), true);
+      assert.equal(isReusableBrowserEnabled('zhilian'), true);
+
+      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean })['51job'] = false;
+      assert.equal(isReusableBrowserEnabled('51job', false), false);
+      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean }).zhilian = false;
+      assert.equal(isReusableBrowserEnabled('zhilian', false), false);
 
       (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean })['51job'] = true;
       (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean }).zhilian = true;
