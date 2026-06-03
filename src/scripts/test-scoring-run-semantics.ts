@@ -261,7 +261,7 @@ function createSubscribeSearchOpenStub() {
   let panelSearchTriggerReady = false;
   let cardTextTriggerReady = false;
   let pageTextTriggerReady = false;
-  let viewedFilterChecked = false;
+  let viewedFilterChecked = true;
   let viewedFilterClicks = 0;
   const extraPages: Array<{
     label: string;
@@ -272,15 +272,11 @@ function createSubscribeSearchOpenStub() {
 
   const viewedFilterLocator = {
     first: () => ({
-      waitFor: async () => {
-        if (!viewedFilterChecked) {
-          throw new Error('viewed filter not visible');
-        }
-      },
+      waitFor: async () => undefined,
       evaluate: async () => viewedFilterChecked,
       click: async () => {
         viewedFilterClicks += 1;
-        viewedFilterChecked = false;
+        viewedFilterChecked = !viewedFilterChecked;
       },
     }),
   };
@@ -1229,22 +1225,15 @@ describe('scoring run semantics', () => {
   it('opens subscription search without extra fixed waits once the target page is ready', async () => {
     const searchOpen = createSubscribeSearchOpenStub();
     searchOpen.showPopup();
+    searchOpen.showConditionPanelSearchTrigger('泰国 英语');
+    searchOpen.setViewedFilterChecked(true);
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
     const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
     const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
     const originalClickSearchTrigger = clickSearchTriggerRef.fn;
 
     openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
-    findSubscriptionCardRef.fn = (async () => ({
-      scrollIntoViewIfNeeded: async () => undefined,
-      click: async () => undefined,
-      hover: async () => undefined,
-      locator: () => ({
-        first: () => ({
-          waitFor: async () => undefined,
-        }),
-      }),
-    } as never)) as typeof findSubscriptionCardRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
     waitForSearchTriggerReadyRef.fn = async () => undefined;
     clickSearchTriggerRef.fn = async () => undefined;
 
@@ -1288,6 +1277,34 @@ describe('scoring run semantics', () => {
     }
 
     assert.equal(searchOpen.getViewedFilterClicks(), 0);
+    assert.equal(searchOpen.isViewedFilterChecked(), true);
+  });
+
+  it('checks the 51job viewed filter by default when a reusable page left it unchecked', async () => {
+    const searchOpen = createSubscribeSearchOpenStub();
+    searchOpen.showPopup();
+    searchOpen.showCardTextTrigger();
+    searchOpen.setViewedFilterChecked(false);
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
+    const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
+    const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
+    const originalClickSearchTrigger = clickSearchTriggerRef.fn;
+
+    openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
+    waitForSearchTriggerReadyRef.fn = async () => undefined;
+    clickSearchTriggerRef.fn = async () => undefined;
+
+    try {
+      await openSubscribeSearch(searchOpen.page, '泰国 英语');
+    } finally {
+      openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      findSubscriptionCardRef.fn = originalFindSubscriptionCard;
+      waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
+      clickSearchTriggerRef.fn = originalClickSearchTrigger;
+    }
+
+    assert.equal(searchOpen.getViewedFilterClicks(), 1);
     assert.equal(searchOpen.isViewedFilterChecked(), true);
   });
 

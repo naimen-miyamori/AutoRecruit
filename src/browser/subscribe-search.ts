@@ -368,36 +368,54 @@ async function is51jobViewedFilterChecked(viewedFilter: Locator): Promise<boolea
 }
 
 export async function clear51jobViewedFilter(page: Page, options?: SearchWaitOptions): Promise<void> {
+  await set51jobViewedFilterChecked(page, false, options);
+}
+
+async function ensure51jobViewedFilterChecked(page: Page, options?: SearchWaitOptions): Promise<void> {
+  await set51jobViewedFilterChecked(page, true, options);
+}
+
+async function set51jobViewedFilterChecked(page: Page, checked: boolean, options?: SearchWaitOptions): Promise<boolean> {
   const deadline = resolveSearchDeadline(options);
   const waitUntil = Math.min(deadline, Date.now() + viewedFilterMaxWaitMs);
   const viewedFilter = page.locator(viewedFilterSelector).first();
   try {
     await viewedFilter.waitFor({ state: 'visible', timeout: Math.max(1, waitUntil - Date.now()) });
   } catch {
-    return;
+    return false;
   }
 
-  let uncheckedSince: number | undefined;
+  let clicked = false;
+  let stableSince: number | undefined;
 
   while (Date.now() < waitUntil) {
-    if (await is51jobViewedFilterChecked(viewedFilter)) {
-      uncheckedSince = undefined;
+    const currentChecked = await is51jobViewedFilterChecked(viewedFilter);
+    if (currentChecked !== checked) {
+      stableSince = undefined;
       await clickPlatformLocator(
         viewedFilter,
         page,
         platform,
         Math.min(1000, Math.max(1, waitUntil - Date.now())),
-      ).catch(() => undefined);
+      ).then(() => {
+        clicked = true;
+      }).catch(() => undefined);
     } else {
+      if (!clicked) {
+        return false;
+      }
+
       const now = Date.now();
-      uncheckedSince ??= now;
-      if (now - uncheckedSince >= viewedFilterSettleMs) {
-        return;
+      stableSince ??= now;
+      if (now - stableSince >= viewedFilterSettleMs) {
+        return clicked;
       }
     }
 
     await page.waitForTimeout(Math.min(viewedFilterPollMs, Math.max(1, waitUntil - Date.now()))).catch(() => undefined);
   }
+
+  return clicked;
 }
 
 async function findSubscriptionCard(page: Page, searchKeyword: string, options?: SearchWaitOptions): Promise<Locator> {
@@ -495,6 +513,8 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
     await waitFor51jobSearchKeywordCondition(openOutcome.page, searchKeyword, deadline);
     if (options?.includeViewedCandidates) {
       await clear51jobViewedFilter(openOutcome.page, { deadline });
+    } else {
+      await ensure51jobViewedFilterChecked(openOutcome.page, { deadline });
     }
     await closeExtra51jobSubscribePages(openOutcome.page);
     return openOutcome.page;
@@ -506,6 +526,8 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
     await waitFor51jobSearchKeywordCondition(page, searchKeyword, deadline);
     if (options?.includeViewedCandidates) {
       await clear51jobViewedFilter(page, { deadline });
+    } else {
+      await ensure51jobViewedFilterChecked(page, { deadline });
     }
     await closeExtra51jobSubscribePages(page);
     return page;

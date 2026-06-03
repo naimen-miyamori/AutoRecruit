@@ -241,6 +241,17 @@ test('zhilian adapter clicks a saved quick-search tag whose text contains the ra
         };
       }
 
+      if (selector.includes('未看过')) {
+        return {
+          filter: () => ({
+            first: () => ({
+              waitFor: async () => undefined,
+              evaluate: async () => true,
+            }),
+          }),
+        };
+      }
+
       return {
         filter: () => ({
           first: () => ({
@@ -288,7 +299,7 @@ test('zhilian adapter detects whether saved quick-search conditions are active',
   );
 });
 
-function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean }) {
+function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean; quickSearchCheckedAfterClick?: boolean }) {
   const clickCalls: string[] = [];
   const waitForTimeoutCalls: number[] = [];
   let unviewedChecked = options.unviewedChecked;
@@ -359,7 +370,7 @@ function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean
     },
     click: async () => {
       clickCalls.push('未看过');
-      unviewedChecked = false;
+      unviewedChecked = !unviewedChecked;
     },
   };
   const unviewedFilterListLocator = {
@@ -400,7 +411,7 @@ function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean
             click: async () => {
               clickCalls.push('优衣库');
               quickSearchApplied = true;
-              unviewedChecked = true;
+              unviewedChecked = options.quickSearchCheckedAfterClick ?? true;
             },
           }),
         }),
@@ -427,6 +438,21 @@ test('zhilian adapter keeps the unviewed filter by default after opening saved s
 
   assert.deepEqual(stub.getClickCalls(), ['优衣库']);
   assert.equal(stub.isUnviewedChecked(), true);
+});
+
+test('zhilian adapter checks 未看过 by default when a reusable page left it unchecked', async () => {
+  const stub = createZhilianUnviewedFilterPageStub({ unviewedChecked: false, quickSearchCheckedAfterClick: false });
+
+  await captureDateNow(async () => {
+    stub.setDateNow();
+    await zhilianAdapter.openSubscribeSearch(stub.page, '优衣库', {
+      deadline: Date.now() + 5000,
+    });
+  });
+
+  assert.deepEqual(stub.getClickCalls(), ['优衣库', '未看过']);
+  assert.equal(stub.isUnviewedChecked(), true);
+  assert.ok(stub.getWaitForTimeoutCalls().length > 0);
 });
 
 test('zhilian adapter clears only 未看过 when viewed candidates are explicitly included', async () => {
@@ -2351,6 +2377,17 @@ test('zhilian adapter uses the shared deadline for shell and quick-search tag wa
           innerText: async () => quickSearchApplied
             ? '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 关键词：优衣库'
             : '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库',
+        };
+      }
+
+      if (selector.includes('未看过')) {
+        return {
+          filter: () => ({
+            first: () => ({
+              waitFor: async () => undefined,
+              evaluate: async () => true,
+            }),
+          }),
         };
       }
 

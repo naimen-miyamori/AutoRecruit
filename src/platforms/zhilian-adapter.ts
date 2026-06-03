@@ -711,6 +711,27 @@ async function ensureZhilianViewedFilterClearedForQuickSearch(page: Page, keywor
   }
 }
 
+async function ensureZhilianUnviewedFilterCheckedForQuickSearch(page: Page, keyword: string, deadline: number): Promise<void> {
+  if (await setZhilianUnviewedFilterChecked(page, true, { deadline })) {
+    await waitForZhilianRecruiterShell(page, { deadline });
+  }
+
+  if (!await isZhilianQuickSearchApplied(page, keyword)) {
+    await clickSavedZhilianQuickSearchTag(page, keyword, deadline);
+    if (await setZhilianUnviewedFilterChecked(page, true, { deadline })) {
+      await waitForZhilianRecruiterShell(page, { deadline });
+    }
+  }
+
+  if (!await waitForZhilianQuickSearchApplied(page, keyword, deadline)) {
+    throw new Error(`Saved Zhilian quick-search conditions for keyword "${keyword}" were not active after checking 未看过.`);
+  }
+
+  if (!await isZhilianUnviewedFilterChecked(page)) {
+    throw new Error('Zhilian 未看过 filter was not checked before extraction.');
+  }
+}
+
 async function isZhilianUnviewedFilterChecked(page: Page): Promise<boolean> {
   const unviewedFilter = page.locator(zhilianUnviewedFilterSelector).filter({ visible: true }).first();
 
@@ -729,6 +750,10 @@ async function isZhilianUnviewedFilterChecked(page: Page): Promise<boolean> {
 }
 
 async function clearZhilianUnviewedFilter(page: Page, options?: SearchWaitOptions): Promise<boolean> {
+  return setZhilianUnviewedFilterChecked(page, false, options);
+}
+
+async function setZhilianUnviewedFilterChecked(page: Page, checked: boolean, options?: SearchWaitOptions): Promise<boolean> {
   const deadline = createSearchDeadline(options);
   const waitUntil = Math.min(deadline, Date.now() + zhilianViewedFilterMaxWaitMs);
   const unviewedFilter = page.locator(zhilianUnviewedFilterSelector).filter({ visible: true }).first();
@@ -740,11 +765,12 @@ async function clearZhilianUnviewedFilter(page: Page, options?: SearchWaitOption
   }
 
   let clicked = false;
-  let uncheckedSince: number | undefined;
+  let stableSince: number | undefined;
 
   while (Date.now() < waitUntil) {
-    if (await isZhilianUnviewedFilterChecked(page)) {
-      uncheckedSince = undefined;
+    const currentChecked = await isZhilianUnviewedFilterChecked(page);
+    if (currentChecked !== checked) {
+      stableSince = undefined;
       clearObservedZhilianCandidateApi(page);
       try {
         await clickPlatformLocator(
@@ -758,9 +784,13 @@ async function clearZhilianUnviewedFilter(page: Page, options?: SearchWaitOption
         // The search page renders hidden duplicates; retry until a visible control is stable.
       }
     } else {
+      if (!clicked) {
+        return false;
+      }
+
       const now = Date.now();
-      uncheckedSince ??= now;
-      if (now - uncheckedSince >= zhilianViewedFilterSettleMs) {
+      stableSince ??= now;
+      if (now - stableSince >= zhilianViewedFilterSettleMs) {
         return clicked;
       }
     }
@@ -3542,6 +3572,8 @@ export const zhilianAdapter: PlatformAdapter = {
     await clickSavedZhilianQuickSearchTag(page, keyword, deadline);
     if (options?.includeViewedCandidates) {
       await ensureZhilianViewedFilterClearedForQuickSearch(page, keyword, deadline);
+    } else {
+      await ensureZhilianUnviewedFilterCheckedForQuickSearch(page, keyword, deadline);
     }
     return page;
   },
