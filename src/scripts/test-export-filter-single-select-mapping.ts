@@ -8,6 +8,7 @@ import { config } from '../config.js';
 import { exportFilterSingleSelectMapping, parseArgs } from './export-filter-single-select-mapping.js';
 import { JobStore } from '../storage/job-store.js';
 import type { SearchFilterCatalog } from '../search/filter-catalog.js';
+import { buildSingleSelectApplicationMapping } from '../search/filter-single-select-mapping.js';
 
 let tempDir: string;
 let originalDataDir: string;
@@ -208,4 +209,62 @@ test('export filter single-select mapping writes application-oriented json', asy
     ],
     selectorHints: [{ kind: 'containerText', value: '不限 不限男女' }],
   });
+});
+
+test('single-select mapping annotates Zhilian custom select-range options from historical catalogs', () => {
+  const catalog: SearchFilterCatalog = {
+    platform: 'zhilian',
+    keyword: '优衣库',
+    capturedAt: '2026-06-02T17:05:05.441Z',
+    pageUrl: 'https://rd6.zhaopin.com/app/search',
+    filters: [
+      {
+        key: 'education-filter',
+        label: '学历要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '学历要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '本科及以上', value: '本科及以上' },
+          { label: '自定义', value: '自定义' },
+        ],
+      },
+      {
+        key: 'work-years-filter',
+        label: '经验要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '经验要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '3-5年', value: '3-5年' },
+          { label: '自定义', value: '自定义' },
+        ],
+      },
+    ],
+    failures: [],
+    stats: {
+      discoveredControls: 2,
+      inspectedControls: 2,
+      optionsExtracted: 6,
+      failedControls: 0,
+      unknownControls: 0,
+    },
+  };
+
+  const mapping = buildSingleSelectApplicationMapping(catalog);
+
+  assert.equal(mapping.fieldsById.education.customInputOption?.inputSpec?.kind, 'selectRange');
+  assert.deepEqual(mapping.fieldsById.education.customInputOption?.inputSpec?.fields, [
+    { key: 'min', valueType: 'string', label: '最低学历' },
+    { key: 'max', valueType: 'string', label: '最高学历' },
+  ]);
+  assert.equal(mapping.fieldsById.work_years.customInputOption?.inputSpec?.kind, 'selectRange');
+  assert.deepEqual(mapping.fieldsById.work_years.customInputOption?.inputSpec?.fields, [
+    { key: 'min', valueType: 'string', label: '最低经验' },
+    { key: 'max', valueType: 'string', label: '最高经验' },
+  ]);
 });

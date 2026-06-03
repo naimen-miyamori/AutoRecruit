@@ -73,6 +73,7 @@ interface ResolvedDiscoveryOptions {
   remoteProbeValues: string[];
   maxContainers: number;
   maxOptionsPerContainer: number;
+  rootSelectors: string[];
 }
 
 interface OpenedTextInputInteraction {
@@ -105,6 +106,7 @@ function resolveDiscoveryOptions(options: SearchFilterDiscoveryRunOptions): Reso
     remoteProbeValues: options.remoteProbeValues?.filter(Boolean) ?? defaultRemoteProbeValues,
     maxContainers: Math.max(options.maxControls ?? 40, 60),
     maxOptionsPerContainer: Math.max(options.maxOptionsPerLevel ?? 50, 80),
+    rootSelectors: [],
   };
 }
 
@@ -703,7 +705,7 @@ async function waitForSlowDiscoveryPace(page: Page, options: ResolvedDiscoveryOp
 }
 
 async function capturePageSnapshot(page: Page, options: ResolvedDiscoveryOptions): Promise<SearchFilterPageSnapshot> {
-  const snapshot = await page.evaluate(({ controlSelector, optionSelector, containerSelectorValue, maxContainers, maxOptionsPerContainer, controlAttribute }) => {
+  const snapshot = await page.evaluate(({ controlSelector, optionSelector, containerSelectorValue, maxContainers, maxOptionsPerContainer, controlAttribute, rootSelectors }) => {
     const globalWindow = window as typeof window & {
       __autorecruitFilterNextId?: number;
     };
@@ -862,8 +864,50 @@ async function capturePageSnapshot(page: Page, options: ResolvedDiscoveryOptions
       }
       return depth;
     };
+    const uniqueElements = <T extends Element>(elements: T[]): T[] => {
+      const seen = new Set<T>();
+      const unique: T[] = [];
+      for (const element of elements) {
+        if (seen.has(element)) {
+          continue;
+        }
+        seen.add(element);
+        unique.push(element);
+      }
+      return unique;
+    };
+    const rootElements = uniqueElements(
+      rootSelectors
+        .flatMap((selector: string) => Array.from(document.querySelectorAll(selector)))
+        .filter(isVisible),
+    );
+    const searchRoots: ParentNode[] = rootElements.length > 0 ? rootElements : [document];
+    const isInsideScanRoot = (element: Element): boolean => {
+      if (rootElements.length === 0) {
+        return true;
+      }
+      return rootElements.some((root) => root === element || root.contains(element));
+    };
+    const isDetachedOptionContainer = (element: Element): boolean => {
+      if (!isHtmlElement(element)) {
+        return false;
+      }
+      const role = normalizeText(element.getAttribute('role'));
+      const className = normalizeText(element.getAttribute('class'));
+      if (/^(listbox|menu|dialog|tabpanel)$/i.test(role)) {
+        return true;
+      }
+      if (/(dropdown|popover|modal|select|cascader|picker|tooltip|menu|listbox|km-modal|ant-select|el-select|ivu-select)/i.test(className)) {
+        return true;
+      }
+      const style = window.getComputedStyle(element);
+      return /^(fixed|absolute)$/i.test(style.position) && element.querySelector(optionSelector) !== null;
+    };
+    const queryScoped = (selector: string): Element[] => uniqueElements(
+      searchRoots.flatMap((root) => Array.from(root.querySelectorAll(selector))),
+    );
 
-    const controls = Array.from(document.querySelectorAll(controlSelector))
+    const controls = queryScoped(controlSelector)
       .filter(isVisible)
       .map((element) => {
         const rect = element.getBoundingClientRect();
@@ -896,6 +940,7 @@ async function capturePageSnapshot(page: Page, options: ResolvedDiscoveryOptions
       .sort((left, right) => left.y - right.y || left.x - right.x);
 
     const containers = Array.from(document.querySelectorAll(containerSelectorValue))
+      .filter((container) => rootElements.length === 0 || isInsideScanRoot(container) || isDetachedOptionContainer(container))
       .filter(isVisible)
       .slice(0, maxContainers)
       .map((container) => {
@@ -940,6 +985,7 @@ async function capturePageSnapshot(page: Page, options: ResolvedDiscoveryOptions
     maxContainers: options.maxContainers,
     maxOptionsPerContainer: options.maxOptionsPerContainer,
     controlAttribute: controlAttributeName,
+    rootSelectors: options.rootSelectors,
   });
 
   return snapshot as SearchFilterPageSnapshot;
@@ -1293,13 +1339,14 @@ export async function discoverSearchFiltersOnPage(
   platformOptions: SearchFilterDiscoveryPlatformOptions = {},
 ): Promise<SearchFilterCatalog> {
   const resolvedOptions = resolveDiscoveryOptions(options);
-  const catalog = createEmptySearchFilterCatalog(platform, options.keyword, page.url());
+  resolvedOptions.rootSelectors = platformOptions.rootSelectors?.filter(Boolean) ?? [];
 
   if (platformOptions.beforeScan) {
     await platformOptions.beforeScan(page);
     await waitForUiStability(page, resolvedOptions);
   }
 
+  const catalog = createEmptySearchFilterCatalog(platform, options.keyword, page.url());
   const initialSnapshot = await capturePageSnapshot(page, resolvedOptions);
   const queue = buildDiscoveryQueue(initialSnapshot, {
     ignoreTextPatterns: platformOptions.ignoreTextPatterns,

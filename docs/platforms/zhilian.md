@@ -41,6 +41,65 @@ Zhilian 搜索进入方式与 51job、Liepin 不同：
 
 Zhilian 有新增候选人的报告邮件必须使用复制出来的同事转发分享链接，而不是内部 `candidateId`。发送前会校验当前运行的评分产物都包含唯一 `candidateShareUrl`；缺失或重复会作为邮件发送错误记录。无新增候选人的 Zhilian 通知邮件不需要分享链接。
 
+## 筛选发现与搜索订阅
+
+筛选发现必须留在 `https://rd6.zhaopin.com/app/search`，先点击保存的快捷搜索标签并确认 `关键词：<keyword>`，再打开搜索条件面板和 `更多筛选`。
+
+默认 `discover:filters` 只读取可见面板，避免误点推荐页或顶部导航：
+
+```bash
+npm run discover:filters -- --platform zhilian --keyword "优衣库"
+```
+
+需要采集完整 option 池时，显式使用低速点击：
+
+```bash
+npm run discover:filters -- --platform zhilian --keyword "优衣库" --slow-click true
+node --import ./scripts/node-ts-hooks.mjs src/scripts/export-application-filter-options.ts zhilian
+```
+
+`--slow-click true` 会打开已识别的简单下拉和薪资弹层，补采 `活跃日期`、`性别要求`、`求职状态`、`人才类型`、`人才照片`、`简历语言`、`跳槽频率`、`期望月薪`；同时读取 `现居住地`、`户口所在地`、`从事行业`、`期望行业`、`从事职位`、`期望职位` 的 Vue cascader 全量树，并读取 `语言能力` 弹层选项。实站复验已采到 19 个字段、9038 个 catalog options，导出应用层 options 为 19 个字段。
+
+Zhilian 搜索订阅的 `applicationFilter` 当前支持：
+
+`education`、`work_years`、`school_nature`、`recent_activity_time`、`gender`、`job_status`、`language`、`talent_type`、`talent_photo`、`resume_language`、`job_hopping_count`、`living_location`、`hukou_location`、`engaged_industry`、`expected_industry`、`engaged_function`、`expected_function`、`age`、`expected_salary`。
+
+城市、户口、行业和职位等级联字段建议提交 `{ "value": "...", "pathLabels": [...] }`，避免同名叶子跨路径歧义。`expected_location` 当前不是 Zhilian 可见 catalog 字段，搜索订阅页面回放会显式失败。
+
+复用浏览器复跑时会重新点击保存的快捷搜索标签来恢复保存条件基线，避免上次筛选残留；仍不能改为填写顶部关键词输入框。`expected_salary` 的左右列选项要在薪资弹层打开后即时用原生 locator 点击，验证时读取页面已选条件文本，例如 `期望月薪：3千-1万`。
+
+示例：
+
+```json
+{
+  "keyword": "优衣库",
+  "applicationFilterInput": {
+    "education": "本科及以上",
+    "work_years": "3-5年",
+    "school_nature": "985",
+    "recent_activity_time": "近1周",
+    "gender": "女",
+    "job_status": "在职-看看机会",
+    "talent_type": "金领人才",
+    "talent_photo": "有照片",
+    "resume_language": "中文简历",
+    "job_hopping_count": "最近一份工作在职时长>1年",
+    "language": "英语",
+    "living_location": { "value": "上海", "pathLabels": ["热门", "上海"] },
+    "hukou_location": { "value": "上海", "pathLabels": ["热门", "上海"] },
+    "engaged_industry": { "value": "鞋服箱包批发/零售/贸易", "pathLabels": ["批发/零售/贸易", "鞋服箱包批发/零售/贸易"] },
+    "expected_industry": { "value": "鞋服箱包批发/零售/贸易", "pathLabels": ["批发/零售/贸易", "鞋服箱包批发/零售/贸易"] },
+    "engaged_function": { "value": "门店店长", "pathLabels": ["销售", "服务业销售", "门店店长"] },
+    "expected_function": { "value": "门店店长", "pathLabels": ["销售", "服务业销售", "门店店长"] },
+    "age": { "min": 25, "max": 30 },
+    "expected_salary": { "min": "2千", "max": "1万" }
+  },
+  "conditions": []
+}
+```
+
+`education` 和 `work_years` 也支持页面“自定义”范围，例如 `"education": { "label": "自定义", "input": { "min": "大专", "max": "本科" } }`、`"work_years": { "label": "自定义", "input": { "min": "1年", "max": "3年" } }`。`age` 可以使用页面预设范围，例如 `{ "min": 25, "max": 30 }`，也可以使用非预设自定义下拉范围，例如 `{ "min": 24, "max": 31 }`。`expected_salary` 使用智联月薪弹层文案。未支持字段会显式返回 `failed`，显式保存搜索条件时会因此拒绝保存半成品。
+
 ## 推荐验证
 
 真实账号验证顺序：

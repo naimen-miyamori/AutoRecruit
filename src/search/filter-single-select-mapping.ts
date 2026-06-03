@@ -43,6 +43,7 @@ const knownFieldIdByLabel: Record<string, string> = {
   工作年限: 'work_years',
   工作经验: 'work_years',
   工作经验要求: 'work_years',
+  经验要求: 'work_years',
   年龄: 'age',
   年龄要求: 'age',
   学历要求: 'education',
@@ -57,6 +58,7 @@ const knownFieldIdByLabel: Record<string, string> = {
   管理经验: 'management_experience',
   最近活跃时间: 'recent_activity_time',
   活跃度: 'recent_activity_time',
+  活跃日期: 'recent_activity_time',
   更新时间: 'recent_activity_time',
   简历更新时间: 'recent_activity_time',
   毕业时间: 'graduation_year',
@@ -70,13 +72,36 @@ const knownFieldIdByLabel: Record<string, string> = {
   跳槽频率: 'job_hopping_count',
   性别: 'gender',
   性别要求: 'gender',
+  人才类型: 'talent_type',
+  人才照片: 'talent_photo',
   公司规模: 'company_size',
   企业规模: 'company_size',
   融资阶段: 'financing_stage',
 };
 
+const zhilianCustomInputSpecByLabel: Record<string, SearchFilterOptionInputSpec> = {
+  学历要求: {
+    kind: 'selectRange',
+    fields: [
+      { key: 'min', valueType: 'string', label: '最低学历' },
+      { key: 'max', valueType: 'string', label: '最高学历' },
+    ],
+  },
+  经验要求: {
+    kind: 'selectRange',
+    fields: [
+      { key: 'min', valueType: 'string', label: '最低经验' },
+      { key: 'max', valueType: 'string', label: '最高经验' },
+    ],
+  },
+};
+
 function normalizeLabel(value: string | undefined): string {
   return (value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function compactLabel(value: string | undefined): string {
+  return normalizeLabel(value).replace(/\s+/g, '');
 }
 
 function slugifyLabel(value: string): string {
@@ -110,6 +135,27 @@ function toApplicationOption(option: SearchFilterOption): SearchFilterSingleSele
   };
 }
 
+function enrichSingleSelectOptionInputSpec(
+  platform: SearchFilterCatalog['platform'],
+  filterLabel: string,
+  option: SearchFilterOption,
+): SearchFilterOption {
+  if (option.inputSpec || platform !== 'zhilian') {
+    return option;
+  }
+
+  const inputSpec = zhilianCustomInputSpecByLabel[normalizeLabel(filterLabel)];
+  if (!inputSpec) {
+    return option;
+  }
+
+  if (compactLabel(option.label) !== '自定义' && compactLabel(option.value) !== '自定义') {
+    return option;
+  }
+
+  return { ...option, inputSpec };
+}
+
 export function buildSingleSelectApplicationMapping(
   catalog: SearchFilterCatalog,
 ): SearchFilterSingleSelectApplicationMapping {
@@ -127,7 +173,9 @@ export function buildSingleSelectApplicationMapping(
 
   for (const filter of singleSelectFilters) {
     const fieldId = inferFieldId(filter.label);
-    const options = (filter.options ?? []).map(toApplicationOption);
+    const options = (filter.options ?? [])
+      .map((option) => enrichSingleSelectOptionInputSpec(catalog.platform, filter.label, option))
+      .map(toApplicationOption);
     const customInputOption = options.find((option) => option.inputSpec);
 
     fieldIds.push(fieldId);

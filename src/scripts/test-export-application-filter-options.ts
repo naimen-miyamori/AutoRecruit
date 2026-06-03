@@ -238,6 +238,141 @@ function createLiepinCatalog(): SearchFilterCatalog {
   };
 }
 
+function createZhilianCatalog(): SearchFilterCatalog {
+  return {
+    platform: 'zhilian',
+    keyword: '优衣库',
+    capturedAt: '2026-06-02T10:00:00.000Z',
+    pageUrl: 'https://rd6.zhaopin.com/app/search',
+    filters: [
+      {
+        key: 'education-filter',
+        label: '学历要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '学历要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '大专及以上', value: '大专及以上' },
+          { label: '本科及以上', value: '本科及以上' },
+          {
+            label: '自定义',
+            value: '自定义',
+            inputSpec: {
+              kind: 'selectRange',
+              fields: [
+                { key: 'min', valueType: 'string', label: '最低学历' },
+                { key: 'max', valueType: 'string', label: '最高学历' },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        key: 'age-filter',
+        label: '年龄要求',
+        controlType: 'rangeInput',
+        valueShape: 'range',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '年龄要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '20-25', value: '20-25' },
+          { label: '25-30', value: '25-30' },
+          { label: '40以上', value: '40以上' },
+          { label: '自定义', value: '自定义' },
+        ],
+      },
+      {
+        key: 'work-years-filter',
+        label: '经验要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '经验要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '1-3年', value: '1-3年' },
+          { label: '3-5年', value: '3-5年' },
+          {
+            label: '自定义',
+            value: '自定义',
+            inputSpec: {
+              kind: 'selectRange',
+              fields: [
+                { key: 'min', valueType: 'string', label: '最低经验' },
+                { key: 'max', valueType: 'string', label: '最高经验' },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        key: 'school-filter',
+        label: '院校要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '院校要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '统招', value: '统招' },
+          { label: '985', value: '985' },
+        ],
+      },
+      {
+        key: 'activity-filter',
+        label: '活跃日期',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '活跃日期' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '近1天', value: '近1天' },
+          { label: '近1周', value: '近1周' },
+        ],
+      },
+      {
+        key: 'gender-filter',
+        label: '性别要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '性别要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '男', value: '男' },
+          { label: '女', value: '女' },
+        ],
+      },
+      {
+        key: 'salary-filter',
+        label: '期望月薪',
+        controlType: 'rangeInput',
+        valueShape: 'range',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '期望月薪' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '2千', value: '2千' },
+          { label: '3千', value: '3千' },
+          { label: '1万', value: '1万' },
+        ],
+      },
+    ],
+    failures: [],
+    stats: {
+      discoveredControls: 7,
+      inspectedControls: 7,
+      optionsExtracted: 24,
+      failedControls: 0,
+      unknownControls: 0,
+    },
+  };
+}
+
 test('export application filter options parses args', () => {
   assert.deepEqual(parseArgs(['51job']), {
     platform: '51job',
@@ -377,6 +512,192 @@ test('export application filter options normalizes common Liepin fields', () => 
     expected_salary: {
       min: '10万',
       max: '20万',
+    },
+  }), {
+    ok: true,
+    errors: [],
+  });
+});
+
+test('export application filter options normalizes Zhilian panel fields', () => {
+  const options = buildApplicationFilterOptions(createZhilianCatalog());
+
+  assert.equal(options.platform, 'zhilian');
+  assert.deepEqual(options.fieldIds, [
+    'education',
+    'work_years',
+    'school_nature',
+    'recent_activity_time',
+    'gender',
+    'age',
+    'expected_salary',
+  ]);
+  assert.deepEqual(options.groups.singleSelect, [
+    'education',
+    'work_years',
+    'school_nature',
+    'recent_activity_time',
+    'gender',
+  ]);
+  assert.deepEqual(options.groups.numberRange, ['age']);
+  assert.deepEqual(options.groups.salaryRange, ['expected_salary']);
+  assert.equal(options.fieldIdByLabel.经验要求, 'work_years');
+  assert.equal(options.fieldIdByLabel.活跃日期, 'recent_activity_time');
+  assert.equal(options.fieldIdByLabel.年龄要求, 'age');
+  assert.equal(options.fieldIdByLabel.期望月薪, 'expected_salary');
+  assert.equal(options.fieldsById.education.kind === 'singleSelect' ? options.fieldsById.education.customInput?.inputSpec.kind : undefined, 'selectRange');
+  assert.equal(options.fieldsById.work_years.kind === 'singleSelect' ? options.fieldsById.work_years.customInput?.inputSpec.kind : undefined, 'selectRange');
+
+  const age = options.fieldsById.age;
+  const salary = options.fieldsById.expected_salary;
+  if (age.kind !== 'numberRange') {
+    assert.fail('age should be a numberRange field');
+  }
+  if (salary.kind !== 'salaryRange') {
+    assert.fail('expected_salary should be a salaryRange field');
+  }
+
+  assert.equal(age.min, 16);
+  assert.equal(age.max, 65);
+  assert.ok(age.orderedValues.includes('16'));
+  assert.ok(age.orderedValues.includes('31'));
+  assert.ok(age.orderedValues.includes('65'));
+  assert.equal(age.unit, '岁');
+  assert.deepEqual(salary.minOptions, ['2千', '3千', '1万']);
+  assert.deepEqual(salary.maxOptions, ['2千', '3千', '1万']);
+  assert.deepEqual(validateApplicationFilterInput(options, {
+    education: {
+      label: '自定义',
+      input: {
+        min: '大专',
+        max: '本科',
+      },
+    },
+    work_years: {
+      label: '自定义',
+      input: {
+        min: '1年',
+        max: '3年',
+      },
+    },
+    school_nature: '985',
+    recent_activity_time: '近1周',
+    gender: '女',
+    age: {
+      min: 24,
+      max: 31,
+    },
+    expected_salary: {
+      min: '2千',
+      max: '1万',
+    },
+  }), {
+    ok: true,
+    errors: [],
+  });
+});
+
+test('export application filter options includes Zhilian complex discovery pools', () => {
+  const catalog: SearchFilterCatalog = {
+    platform: 'zhilian',
+    keyword: '优衣库',
+    capturedAt: '2026-06-02T10:00:00.000Z',
+    pageUrl: 'https://rd6.zhaopin.com/app/search',
+    filters: [
+      {
+        key: 'language-filter',
+        label: '语言能力',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '语言能力' }],
+        options: [
+          { label: '英语', value: '英语' },
+          { label: '汉语', value: '汉语' },
+          { label: '日语', value: '日语' },
+        ],
+      },
+      {
+        key: 'living-location-filter',
+        label: '现居住地',
+        controlType: 'textInput',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        inputPlaceholder: '搜索城市名/区县',
+        childrenLazy: false,
+        selectorHints: [{ kind: 'text', value: '现居住地' }],
+        options: [
+          { label: '广东', value: '548', depth: 0, pathLabels: ['广东'] },
+          { label: '深圳', value: '765', depth: 1, parentPathLabels: ['广东'], pathLabels: ['广东', '深圳'] },
+        ],
+      },
+      {
+        key: 'engaged-industry-filter',
+        label: '从事行业',
+        controlType: 'textInput',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        inputPlaceholder: '搜索行业类别或产品词',
+        childrenLazy: false,
+        selectorHints: [{ kind: 'text', value: '从事行业' }],
+        options: [
+          { label: '互联网/AI/软件/IT服务', value: '2100000000', depth: 0, pathLabels: ['互联网/AI/软件/IT服务'] },
+          {
+            label: '电子商务',
+            value: '2105000000',
+            depth: 1,
+            parentPathLabels: ['互联网/AI/软件/IT服务'],
+            pathLabels: ['互联网/AI/软件/IT服务', '电子商务'],
+          },
+        ],
+      },
+    ],
+    failures: [],
+    stats: {
+      discoveredControls: 3,
+      inspectedControls: 3,
+      optionsExtracted: 7,
+      failedControls: 0,
+      unknownControls: 0,
+    },
+  };
+
+  const options = buildApplicationFilterOptions(catalog);
+
+  assert.deepEqual(options.fieldIds, ['language', 'living_location', 'engaged_industry']);
+  assert.deepEqual(options.groups.singleSelect, ['language']);
+  assert.deepEqual(options.groups.textInput, ['living_location', 'engaged_industry']);
+  assert.equal(options.fieldIdByLabel.语言能力, 'language');
+  assert.equal(options.fieldIdByLabel.现居住地, 'living_location');
+  assert.equal(options.fieldIdByLabel.从事行业, 'engaged_industry');
+
+  const language = options.fieldsById.language;
+  const livingLocation = options.fieldsById.living_location;
+  const engagedIndustry = options.fieldsById.engaged_industry;
+  if (language.kind !== 'singleSelect') {
+    assert.fail('language should be a singleSelect field');
+  }
+  if (livingLocation.kind !== 'textInput') {
+    assert.fail('living_location should be a textInput field');
+  }
+  if (engagedIndustry.kind !== 'textInput') {
+    assert.fail('engaged_industry should be a textInput field');
+  }
+
+  assert.deepEqual(language.allowedValues, ['英语', '汉语', '日语']);
+  assert.deepEqual(livingLocation.rootValues, ['广东']);
+  assert.deepEqual(livingLocation.allowedValues, ['广东', '深圳']);
+  assert.deepEqual(engagedIndustry.rootValues, ['互联网/AI/软件/IT服务']);
+  assert.deepEqual(engagedIndustry.allowedValues, ['互联网/AI/软件/IT服务', '电子商务']);
+  assert.deepEqual(validateApplicationFilterInput(options, {
+    language: '英语',
+    living_location: {
+      value: '深圳',
+      pathLabels: ['广东', '深圳'],
+    },
+    engaged_industry: {
+      value: '电子商务',
+      pathLabels: ['互联网/AI/软件/IT服务', '电子商务'],
     },
   }), {
     ok: true,

@@ -505,6 +505,75 @@ test('zhilian search-subscription prepares the saved quick-search tag instead of
         }),
         first: () => ({
           waitFor: async () => undefined,
+          innerText: async () => '学历要求 年龄要求 其他筛选 户口所在地 语言能力 人才类型 简历语言 跳槽频率',
+        }),
+      };
+    },
+  } as never;
+
+  await assert.doesNotReject(() => zhilianTestExports.prepareZhilianSearchConditionPage(page, '优衣库', {
+    deadline: Date.now() + 5000,
+  }));
+  assert.deepEqual(clickCalls, ['quick-search']);
+});
+
+test('zhilian search-subscription re-clicks an already active quick-search tag to reset stale filters', async () => {
+  const clickCalls: string[] = [];
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForTimeout: async () => undefined,
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('advanced-search action is optional in this stub');
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 快捷搜索 上海 优衣库 李宁 关键词：优衣库 性别要求：女 期望月薪：1千以下-1万',
+        };
+      }
+
+      if (/input|button/.test(selector)) {
+        return {
+          first: () => ({
+            waitFor: async () => {
+              throw new Error(`search-subscription should not use raw keyword search selector: ${selector}`);
+            },
+            fill: async () => {
+              throw new Error(`search-subscription should not fill raw keyword search selector: ${selector}`);
+            },
+            click: async () => {
+              throw new Error(`search-subscription should not click raw keyword search selector: ${selector}`);
+            },
+          }),
+          filter: () => ({
+            first: () => ({
+              waitFor: async () => {
+                throw new Error(`search-subscription should not use raw keyword search selector: ${selector}`);
+              },
+            }),
+          }),
+        };
+      }
+
+      return {
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => undefined,
+            click: async () => {
+              clickCalls.push('quick-search');
+            },
+          }),
+        }),
+        first: () => ({
+          waitFor: async () => undefined,
+          innerText: async () => '学历要求 年龄要求 其他筛选 户口所在地 语言能力 人才类型 简历语言 跳槽频率',
         }),
       };
     },
@@ -530,6 +599,1365 @@ test('zhilian search-subscription reads explicit empty-result text as zero candi
     await zhilianTestExports.readZhilianSearchConditionResultTotal(page),
     { resultTotal: 0, resultTotalSource: 'page' },
   );
+});
+
+test('zhilian filter discovery keeps search-condition controls and ignores quick-search/nav controls', () => {
+  const baseControl = {
+    discoveryId: 'base',
+    label: '',
+    text: '',
+    placeholder: '',
+    role: '',
+    tagName: 'button',
+    inputType: '',
+    containerText: '',
+    domPath: '',
+    cssPath: '',
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 32,
+    ariaExpanded: '',
+    ariaHasPopup: '',
+    readOnly: false,
+    checked: false,
+    disabled: false,
+    value: '',
+    multi: false,
+  };
+
+  assert.equal(zhilianTestExports.shouldIncludeZhilianFilterDiscoveryControl({
+    ...baseControl,
+    discoveryId: 'education',
+    text: '学历要求',
+    containerText: '学历要求 不限 大专及以上 本科及以上 硕士及以上 自定义',
+  }), true);
+  assert.equal(zhilianTestExports.shouldIncludeZhilianFilterDiscoveryControl({
+    ...baseControl,
+    discoveryId: 'more',
+    text: '更多筛选',
+    containerText: '其他筛选 近6个月 性别要求 求职状态 更多筛选',
+  }), true);
+  assert.equal(zhilianTestExports.shouldIgnoreZhilianFilterDiscoveryControl({
+    ...baseControl,
+    discoveryId: 'quick-search',
+    text: '优衣库',
+    containerText: '快捷搜索 优衣库 李宁 无印良品',
+  }), true);
+  assert.equal(zhilianTestExports.shouldIgnoreZhilianFilterDiscoveryControl({
+    ...baseControl,
+    discoveryId: 'top-keyword',
+    placeholder: '搜公司、职位、专业、学校、行业、技能等',
+    value: '优衣库',
+  }), true);
+  assert.equal(zhilianTestExports.shouldIgnoreZhilianFilterDiscoveryControl({
+    ...baseControl,
+    discoveryId: 'recommend',
+    text: '推荐',
+    containerText: '职位 推荐 搜索 聊天 个人中心',
+  }), true);
+});
+
+test('zhilian static filter discovery groups visible search-condition rows', async () => {
+  const panelLocator = {
+    waitFor: async () => undefined,
+    innerText: async () => '学历要求 年龄要求 其他筛选 户口所在地 语言能力 人才类型 简历语言 跳槽频率',
+    locator: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+  };
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForTimeout: async () => undefined,
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('advanced-search trigger should not be clicked when panel is visible');
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 快捷搜索 关键词：优衣库 未看过 未聊过 使用高级搜索',
+        };
+      }
+
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => panelLocator,
+        };
+      }
+
+      if (selector.includes('km-modal')) {
+        return {
+          filter: () => ({
+            first: () => ({
+              count: async () => 0,
+            }),
+          }),
+        };
+      }
+
+      return {
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => {
+              throw new Error(`unexpected locator: ${selector}`);
+            },
+          }),
+        }),
+        first: () => ({
+          waitFor: async () => {
+            throw new Error(`unexpected locator: ${selector}`);
+          },
+        }),
+      };
+    },
+    evaluate: async () => [
+      {
+        label: '学历要求',
+        options: ['不限', '大专及以上', '本科及以上'],
+        selectorHint: '.filter-panel-new .search-label-wrapper-new',
+      },
+      {
+        label: '年龄要求',
+        options: ['不限', '20-25', '自定义'],
+        selectorHint: '.filter-panel-new .search-label-wrapper-new',
+      },
+      {
+        label: '期望月薪',
+        options: ['2千-1万'],
+        selectorHint: '.filter-other-wrap__content .filter-other__item',
+      },
+      {
+        label: '户口所在地',
+        options: [],
+        selectorHint: '.filter-other-wrap__content .filter-other__item',
+      },
+    ],
+  } as never;
+
+  const catalog = await zhilianAdapter.discoverSearchFilters!(page, {
+    keyword: '优衣库',
+    globalTimeoutMs: 5000,
+  });
+
+  assert.equal(catalog.pageUrl, 'https://rd6.zhaopin.com/app/search');
+  assert.deepEqual(catalog.filters.map((filter) => filter.label), ['学历要求', '年龄要求', '期望月薪', '户口所在地']);
+  assert.deepEqual(catalog.filters[0].options?.map((option) => option.label), ['不限', '大专及以上', '本科及以上']);
+  assert.equal(catalog.filters[1].controlType, 'rangeInput');
+  assert.equal(catalog.filters[3].status, 'inspected');
+  assert.equal(catalog.failures.length, 0);
+});
+
+test('zhilian filter discovery slow-click enriches simple dropdown options', async () => {
+  const panelLocator = {
+    waitFor: async () => undefined,
+    innerText: async () => '学历要求 年龄要求 户口所在地 语言能力 人才类型 简历语言 跳槽频率',
+    locator: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+  };
+  let evaluateCall = 0;
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForTimeout: async () => undefined,
+    keyboard: { press: async () => undefined },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('advanced-search trigger should not be clicked when panel is visible');
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 快捷搜索 关键词：优衣库 未看过 未聊过 使用高级搜索',
+        };
+      }
+
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => panelLocator,
+        };
+      }
+
+      if (selector.includes('km-modal')) {
+        return {
+          filter: () => ({
+            first: () => ({
+              count: async () => 0,
+            }),
+          }),
+        };
+      }
+
+      return {
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => {
+              throw new Error(`unexpected locator: ${selector}`);
+            },
+          }),
+        }),
+        first: () => ({
+          waitFor: async () => {
+            throw new Error(`unexpected locator: ${selector}`);
+          },
+        }),
+      };
+    },
+    evaluate: async (_fn: unknown, arg?: { targetLabel?: string }) => {
+      evaluateCall += 1;
+      if (evaluateCall === 1) {
+        return [
+          {
+            label: '学历要求',
+            options: ['不限', '本科及以上'],
+            selectorHint: '.filter-panel-new .search-label-wrapper-new',
+          },
+          {
+            label: '活跃日期',
+            options: ['近1周'],
+            selectorHint: '.filter-other-wrap__content .filter-other__item',
+          },
+          {
+            label: '性别要求',
+            options: [],
+            selectorHint: '.filter-other-wrap__content .filter-other__item',
+          },
+          {
+            label: '期望月薪',
+            options: ['2千-1万'],
+            selectorHint: '.filter-other-wrap__content .filter-other__item',
+          },
+        ];
+      }
+
+      if (arg?.targetLabel === '活跃日期') {
+        return ['不限', '近1天', '近1周'];
+      }
+      if (arg?.targetLabel === '性别要求') {
+        return ['不限', '男', '女'];
+      }
+      if (arg?.targetLabel === '期望月薪') {
+        return ['不限', '2千', '3千', '1万'];
+      }
+
+      return [];
+    },
+  } as never;
+
+  const catalog = await zhilianAdapter.discoverSearchFilters!(page, {
+    keyword: '优衣库',
+    globalTimeoutMs: 5000,
+    slowClick: true,
+  });
+
+  assert.deepEqual(catalog.filters.find((filter) => filter.label === '活跃日期')?.options?.map((option) => option.label), [
+    '不限',
+    '近1天',
+    '近1周',
+  ]);
+  assert.deepEqual(catalog.filters.find((filter) => filter.label === '性别要求')?.options?.map((option) => option.label), [
+    '不限',
+    '男',
+    '女',
+  ]);
+  assert.deepEqual(catalog.filters.find((filter) => filter.label === '期望月薪')?.options?.map((option) => option.label), [
+    '不限',
+    '2千',
+    '3千',
+    '1万',
+  ]);
+});
+
+test('zhilian filter discovery slow-click captures complex cascader trees and language options', async () => {
+  const panelLocator = {
+    waitFor: async () => undefined,
+    innerText: async () => '学历要求 年龄要求 现居住地 从事行业 语言能力 人才类型 简历语言 跳槽频率',
+    locator: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+  };
+  let evaluateCall = 0;
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForTimeout: async () => undefined,
+    keyboard: { press: async () => undefined },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('advanced-search trigger should not be clicked when panel is visible');
+        },
+      }),
+    }),
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 快捷搜索 关键词：优衣库 未看过 未聊过 使用高级搜索',
+        };
+      }
+
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => panelLocator,
+        };
+      }
+
+      if (selector.includes('km-modal')) {
+        return {
+          filter: () => ({
+            first: () => ({
+              count: async () => 0,
+            }),
+          }),
+        };
+      }
+
+      return {
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => {
+              throw new Error(`unexpected locator: ${selector}`);
+            },
+          }),
+        }),
+        first: () => ({
+          waitFor: async () => {
+            throw new Error(`unexpected locator: ${selector}`);
+          },
+        }),
+      };
+    },
+    evaluate: async (_fn: unknown, arg?: { targetKind?: string; targetLabel?: string }) => {
+      evaluateCall += 1;
+      if (evaluateCall === 1) {
+        return [
+          {
+            label: '现居住地',
+            options: [],
+            selectorHint: '.filter-other-wrap__content .filter-other__item',
+          },
+          {
+            label: '从事行业',
+            options: [],
+            selectorHint: '.filter-other-wrap__content .filter-other__item',
+          },
+          {
+            label: '语言能力',
+            options: [],
+            selectorHint: '.filter-other-wrap__content .filter-other__item',
+          },
+        ];
+      }
+
+      if (arg?.targetKind === 'cascader' && arg.targetLabel === '现居住地') {
+        return {
+          inputPlaceholder: '搜索城市名/区县',
+          options: [
+            { label: '广东', value: '548', depth: 0, pathLabels: ['广东'] },
+            { label: '深圳', value: '765', depth: 1, parentPathLabels: ['广东'], pathLabels: ['广东', '深圳'] },
+            { label: '南山区', value: '2041', depth: 2, parentPathLabels: ['广东', '深圳'], pathLabels: ['广东', '深圳', '南山区'] },
+          ],
+        };
+      }
+
+      if (arg?.targetKind === 'cascader' && arg.targetLabel === '从事行业') {
+        return {
+          inputPlaceholder: '搜索行业类别或产品词',
+          options: [
+            { label: '互联网/AI/软件/IT服务', value: '2100000000', depth: 0, pathLabels: ['互联网/AI/软件/IT服务'] },
+            {
+              label: '电子商务',
+              value: '2105000000',
+              depth: 1,
+              parentPathLabels: ['互联网/AI/软件/IT服务'],
+              pathLabels: ['互联网/AI/软件/IT服务', '电子商务'],
+            },
+          ],
+        };
+      }
+
+      if (arg?.targetKind === 'language') {
+        return ['英语', '汉语', '日语'];
+      }
+
+      return [];
+    },
+  } as never;
+
+  const catalog = await zhilianAdapter.discoverSearchFilters!(page, {
+    keyword: '优衣库',
+    globalTimeoutMs: 5000,
+    slowClick: true,
+  });
+
+  const livingLocation = catalog.filters.find((filter) => filter.label === '现居住地');
+  const engagedIndustry = catalog.filters.find((filter) => filter.label === '从事行业');
+  const language = catalog.filters.find((filter) => filter.label === '语言能力');
+
+  assert.equal(livingLocation?.controlType, 'textInput');
+  assert.equal(livingLocation?.childrenLazy, false);
+  assert.equal(livingLocation?.inputPlaceholder, '搜索城市名/区县');
+  assert.deepEqual(livingLocation?.options?.at(-1)?.pathLabels, ['广东', '深圳', '南山区']);
+  assert.equal(engagedIndustry?.controlType, 'textInput');
+  assert.deepEqual(engagedIndustry?.options?.map((option) => option.label), ['互联网/AI/软件/IT服务', '电子商务']);
+  assert.deepEqual(engagedIndustry?.options?.at(1)?.pathLabels, ['互联网/AI/软件/IT服务', '电子商务']);
+  assert.equal(language?.controlType, 'singleSelect');
+  assert.deepEqual(language?.options?.map((option) => option.label), ['英语', '汉语', '日语']);
+});
+
+test('zhilian adapter applies supported application filters through stable panel controls', async () => {
+  const calls: string[] = [];
+  let salaryText = '1千以下-1万';
+  let activeOtherFilter = '';
+  let pendingCascader: { label: string; value: string } | undefined;
+  const appliedOtherFilters: Record<string, string> = {};
+  const readAppliedText = (): string => Object.entries(appliedOtherFilters)
+    .map(([label, value]) => `${label}：${value}`)
+    .join(' ');
+  const panelLocator = {
+    waitFor: async () => undefined,
+    innerText: async () => '学历要求 年龄要求 经验要求 院校要求 户口所在地 语言能力 人才类型 简历语言 跳槽频率',
+    locator: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+  };
+  const page = {
+    keyboard: {
+      press: async (key: string) => {
+        calls.push(`key:${key}`);
+      },
+    },
+    waitForTimeout: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => panelLocator,
+        };
+      }
+
+      if (selector === 'body') {
+        return {
+          innerText: async () => `关键词：优衣库 期望月薪：${salaryText} ${readAppliedText()} 学历要求 年龄要求 其他筛选 人才类型 简历语言 跳槽频率`,
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+          innerText: async () => '',
+        }),
+        filter: () => ({
+          first: () => ({
+            count: async () => 0,
+          }),
+        }),
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+      }),
+    }),
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      if (arg && typeof arg === 'object' && 'rowLabels' in arg && 'targetValue' in arg) {
+        const payload = arg as { rowLabels: string[]; targetValue: string };
+        calls.push(`basic:${payload.rowLabels.join('/')}:${payload.targetValue}`);
+        return true;
+      }
+
+      if (arg && typeof arg === 'object' && 'targetLabel' in arg) {
+        const payload = arg as { targetLabel: string };
+        activeOtherFilter = payload.targetLabel;
+        calls.push(`open:${payload.targetLabel}`);
+        return true;
+      }
+
+      if (typeof arg === 'string') {
+        calls.push(`option:${arg}`);
+        if (activeOtherFilter === '语言能力') {
+          appliedOtherFilters[activeOtherFilter] = arg;
+        }
+        return true;
+      }
+
+      if (arg && typeof arg === 'object' && 'pathLabels' in arg && 'value' in arg) {
+        const payload = arg as { pathLabels: string[]; value: string };
+        calls.push(`path:${payload.pathLabels.join('/')}:${payload.value}`);
+        pendingCascader = { label: activeOtherFilter, value: payload.value };
+        return true;
+      }
+
+      if (arg && typeof arg === 'object' && 'side' in arg && 'targetValue' in arg) {
+        const payload = arg as { side: string; targetValue: string };
+        calls.push(`salary:${payload.side}:${payload.targetValue}`);
+        if (payload.side === 'max') {
+          salaryText = '2千-1万';
+        }
+        return true;
+      }
+
+      if (arg === undefined) {
+        calls.push('confirm-or-clear');
+        if (pendingCascader) {
+          appliedOtherFilters[pendingCascader.label] = pendingCascader.value;
+          pendingCascader = undefined;
+        }
+        return true;
+      }
+
+      return true;
+    },
+  } as never;
+
+  const workYearsResult = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'work_years',
+    label: '经验要求',
+    fieldKind: 'singleSelect',
+    value: '3-5年',
+    values: [{ value: '3-5年' }],
+  });
+  const genderResult = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'gender',
+    label: '性别要求',
+    fieldKind: 'singleSelect',
+    value: '女',
+    values: [{ value: '女' }],
+  });
+  const ageResult = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'age',
+    label: '年龄要求',
+    fieldKind: 'numberRange',
+    value: {
+      min: 25,
+      max: 30,
+    },
+    values: [{ value: '25' }, { value: '30' }],
+  });
+  const salaryResult = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'expected_salary',
+    label: '期望月薪',
+    fieldKind: 'salaryRange',
+    value: {
+      min: '2千',
+      max: '1万',
+    },
+    values: [{ value: '2千' }, { value: '1万' }],
+  });
+  const languageResult = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'language',
+    label: '语言能力',
+    fieldKind: 'singleSelect',
+    value: '英语',
+    values: [{ value: '英语' }],
+  });
+  const industryResult = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'engaged_industry',
+    label: '从事行业',
+    fieldKind: 'textInput',
+    value: {
+      value: '电子商务',
+      pathLabels: ['互联网/AI/软件/IT服务', '电子商务'],
+    },
+    values: [{ value: '电子商务', pathLabels: ['互联网/AI/软件/IT服务', '电子商务'] }],
+  });
+
+  assert.equal(workYearsResult.status, 'applied', workYearsResult.message);
+  assert.equal(genderResult.status, 'applied', genderResult.message);
+  assert.equal(ageResult.status, 'applied', ageResult.message);
+  assert.equal(salaryResult.status, 'applied', salaryResult.message);
+  assert.equal(languageResult.status, 'applied', languageResult.message);
+  assert.equal(industryResult.status, 'applied', industryResult.message);
+  assert.ok(calls.includes('basic:经验要求:3-5年'));
+  assert.ok(calls.includes('open:性别要求'));
+  assert.ok(calls.includes('option:女'));
+  assert.ok(calls.includes('basic:年龄要求:25-30'));
+  assert.ok(calls.includes('open:期望月薪'));
+  assert.ok(calls.includes('salary:min:2千'));
+  assert.ok(calls.includes('salary:max:1万'));
+  assert.ok(calls.includes('open:语言能力'));
+  assert.ok(calls.includes('option:英语'));
+  assert.ok(calls.includes('open:从事行业'));
+  assert.ok(calls.includes('path:互联网/AI/软件/IT服务/电子商务:电子商务'));
+  assert.ok(calls.includes('confirm-or-clear'));
+});
+
+test('zhilian adapter applies custom select ranges for basic filters', async () => {
+  const calls: string[] = [];
+  let appliedText = '';
+  const customRangeState: Record<string, { min?: string; max?: string }> = {};
+  const panelLocator = {
+    waitFor: async () => undefined,
+    innerText: async () => '学历要求 年龄要求 经验要求 院校要求 其他筛选 语言能力 人才类型 简历语言 跳槽频率',
+    locator: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+  };
+  const page = {
+    keyboard: { press: async (key: string) => calls.push(`key:${key}`) },
+    waitForTimeout: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => panelLocator,
+        };
+      }
+
+      if (selector === 'body') {
+        return {
+          innerText: async () => `关键词：优衣库 ${appliedText} 学历要求 年龄要求 经验要求 其他筛选 人才类型 简历语言 跳槽频率`,
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+          innerText: async () => '',
+        }),
+        filter: () => ({
+          first: () => ({
+            count: async () => 0,
+          }),
+        }),
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+      }),
+    }),
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      if (arg && typeof arg === 'object' && 'rowLabels' in arg && 'expectedMin' in arg && 'expectedMax' in arg) {
+        const payload = arg as { rowLabels: string[]; expectedMin: string; expectedMax: string };
+        const label = payload.rowLabels[0] ?? '';
+        const state = customRangeState[label] ?? {};
+        const inputValues = [state.min, state.max].filter((value): value is string => Boolean(value));
+        return {
+          matches: state.min === payload.expectedMin && state.max === payload.expectedMax,
+          rowText: `${label} ${inputValues.join(' ')}`,
+          inputValues,
+          activeOptions: [],
+        };
+      }
+
+      if (arg && typeof arg === 'object' && 'rowLabels' in arg && 'targetValue' in arg && !('side' in arg)) {
+        const payload = arg as { rowLabels: string[]; targetValue: string };
+        calls.push(`basic:${payload.rowLabels.join('/')}:${payload.targetValue}`);
+        return true;
+      }
+
+      if (arg && typeof arg === 'object' && 'rowLabels' in arg && 'targetValue' in arg && 'side' in arg) {
+        const payload = arg as { rowLabels: string[]; targetValue: string; side: string };
+        calls.push(`custom:${payload.rowLabels.join('/')}:${payload.side}:${payload.targetValue}`);
+        const label = payload.rowLabels[0] ?? '';
+        customRangeState[label] = {
+          ...customRangeState[label],
+          [payload.side]: payload.targetValue,
+        };
+        if (payload.side === 'max') {
+          appliedText = label === '经验要求'
+            ? `${label}：1-3年`
+            : `${label}：大专-本科`;
+        }
+        return true;
+      }
+
+      return true;
+    },
+  } as never;
+
+  const educationResult = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'education',
+    label: '学历要求',
+    fieldKind: 'singleSelect',
+    value: {
+      label: '自定义',
+      input: {
+        min: '大专',
+        max: '本科',
+      },
+    },
+    values: [{ value: '自定义' }],
+  });
+
+  assert.equal(educationResult.status, 'applied', educationResult.message);
+  assert.deepEqual(calls, [
+    'basic:学历要求:自定义',
+    'custom:学历要求:min:大专',
+    'custom:学历要求:max:本科',
+    'key:Escape',
+  ]);
+
+  calls.length = 0;
+  appliedText = '';
+  delete customRangeState['学历要求'];
+
+  const workYearsResult = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'work_years',
+    label: '经验要求',
+    fieldKind: 'singleSelect',
+    value: {
+      label: '自定义',
+      input: {
+        min: '1年',
+        max: '3年',
+      },
+    },
+    values: [{ value: '自定义' }],
+  });
+
+  assert.equal(workYearsResult.status, 'applied', workYearsResult.message);
+  assert.deepEqual(calls, [
+    'basic:经验要求:自定义',
+    'custom:经验要求:min:1年',
+    'custom:经验要求:max:3年',
+    'key:Escape',
+  ]);
+});
+
+test('zhilian adapter applies non-preset age ranges through custom selects', async () => {
+  const calls: string[] = [];
+  let appliedText = '';
+  const customRangeState: Record<string, { min?: string; max?: string }> = {};
+  const panelLocator = {
+    waitFor: async () => undefined,
+    innerText: async () => '学历要求 年龄要求 经验要求 院校要求 其他筛选 语言能力 人才类型 简历语言 跳槽频率',
+    locator: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => {
+          throw new Error('more-filter trigger should not be clicked when expanded labels are already visible');
+        },
+      }),
+    }),
+  };
+  const page = {
+    keyboard: { press: async (key: string) => calls.push(`key:${key}`) },
+    waitForTimeout: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => panelLocator,
+        };
+      }
+
+      if (selector === 'body') {
+        return {
+          innerText: async () => `关键词：优衣库 ${appliedText} 学历要求 年龄要求 经验要求 其他筛选 人才类型 简历语言 跳槽频率`,
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+          innerText: async () => '',
+        }),
+        filter: () => ({
+          first: () => ({
+            count: async () => 0,
+          }),
+        }),
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+      }),
+    }),
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      if (arg && typeof arg === 'object' && 'rowLabels' in arg && 'expectedMin' in arg && 'expectedMax' in arg) {
+        const payload = arg as { rowLabels: string[]; expectedMin: string; expectedMax: string };
+        const label = payload.rowLabels[0] ?? '';
+        const state = customRangeState[label] ?? {};
+        const inputValues = [state.min, state.max].filter((value): value is string => Boolean(value));
+        return {
+          matches: state.min === payload.expectedMin && state.max === payload.expectedMax,
+          rowText: `${label} ${inputValues.join(' ')}`,
+          inputValues,
+          activeOptions: [],
+        };
+      }
+
+      if (arg && typeof arg === 'object' && 'rowLabels' in arg && 'targetValue' in arg && !('side' in arg)) {
+        const payload = arg as { rowLabels: string[]; targetValue: string };
+        calls.push(`basic:${payload.rowLabels.join('/')}:${payload.targetValue}`);
+        return true;
+      }
+
+      if (arg && typeof arg === 'object' && 'rowLabels' in arg && 'targetValue' in arg && 'side' in arg) {
+        const payload = arg as { rowLabels: string[]; targetValue: string; side: string };
+        calls.push(`custom:${payload.rowLabels.join('/')}:${payload.side}:${payload.targetValue}`);
+        const label = payload.rowLabels[0] ?? '';
+        customRangeState[label] = {
+          ...customRangeState[label],
+          [payload.side]: payload.targetValue,
+        };
+        if (payload.side === 'max') {
+          appliedText = '年龄要求：24-31岁';
+        }
+        return true;
+      }
+
+      return true;
+    },
+  } as never;
+
+  const result = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'age',
+    label: '年龄要求',
+    fieldKind: 'numberRange',
+    value: {
+      min: 24,
+      max: 31,
+    },
+    values: [{ value: '24' }, { value: '31' }],
+  });
+
+  assert.equal(result.status, 'applied', result.message);
+  assert.deepEqual(calls, [
+    'basic:年龄要求:自定义',
+    'custom:年龄要求:min:24岁',
+    'custom:年龄要求:max:31岁',
+    'key:Escape',
+  ]);
+});
+
+test('zhilian salary application filter reopens the popover when selecting the min closes it', async () => {
+  const calls: string[] = [];
+  let maxAttempts = 0;
+  let salaryText = '1千以下-1万';
+  const page = {
+    keyboard: { press: async () => undefined },
+    waitForTimeout: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            innerText: async () => '学历要求 年龄要求 其他筛选 人才类型 简历语言 跳槽频率',
+            locator: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+            getByText: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (selector === 'body') {
+        return {
+          innerText: async () => `关键词：优衣库 期望月薪：${salaryText} 学历要求 年龄要求 其他筛选 人才类型 简历语言 跳槽频率`,
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+          innerText: async () => '学历要求 年龄要求 其他筛选 人才类型 简历语言 跳槽频率',
+        }),
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => undefined,
+          }),
+        }),
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+      }),
+    }),
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      if (arg && typeof arg === 'object' && 'targetLabel' in arg) {
+        const payload = arg as { targetLabel: string };
+        calls.push(`open:${payload.targetLabel}`);
+        return true;
+      }
+
+      if (arg && typeof arg === 'object' && 'side' in arg && 'targetValue' in arg) {
+        const payload = arg as { side: string; targetValue: string };
+        calls.push(`salary:${payload.side}:${payload.targetValue}`);
+        if (payload.side === 'max') {
+          maxAttempts += 1;
+          if (maxAttempts > 1) {
+            salaryText = '2千-1万';
+            return true;
+          }
+          return false;
+        }
+        return true;
+      }
+
+      return true;
+    },
+  } as never;
+
+  const result = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'expected_salary',
+    label: '期望月薪',
+    fieldKind: 'salaryRange',
+    value: {
+      min: '2千',
+      max: '1万',
+    },
+    values: [{ value: '2千' }, { value: '1万' }],
+  });
+
+  assert.equal(result.status, 'applied', result.message);
+  assert.deepEqual(calls, [
+    'open:期望月薪',
+    'salary:min:2千',
+    'salary:max:1万',
+    'open:期望月薪',
+    'salary:max:1万',
+  ]);
+});
+
+test('zhilian salary application filter fails when the page keeps the wrong selected range', async () => {
+  const page = {
+    keyboard: { press: async () => undefined },
+    waitForTimeout: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            innerText: async () => '学历要求 年龄要求 其他筛选 人才类型 简历语言 跳槽频率',
+            locator: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+            getByText: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (selector === 'body') {
+        return {
+          innerText: async () => '关键词：优衣库 期望月薪：1千以下-1万 学历要求 年龄要求 其他筛选 人才类型 简历语言 跳槽频率',
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+          innerText: async () => '学历要求 年龄要求 其他筛选 人才类型 简历语言 跳槽频率',
+        }),
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => undefined,
+          }),
+        }),
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+      }),
+    }),
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      if (arg && typeof arg === 'object' && 'targetLabel' in arg) {
+        return true;
+      }
+
+      if (arg && typeof arg === 'object' && 'side' in arg && 'targetValue' in arg) {
+        return true;
+      }
+
+      if (arg === undefined) {
+        return ['1千以下-1万'];
+      }
+
+      return true;
+    },
+  } as never;
+
+  const result = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'expected_salary',
+    label: '期望月薪',
+    fieldKind: 'salaryRange',
+    value: {
+      min: '2千',
+      max: '1万',
+    },
+    values: [{ value: '2千' }, { value: '1万' }],
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.message ?? '', /expected salary did not apply 2千-1万/i);
+});
+
+test('zhilian language application filter fails when the selected condition is not visible', async () => {
+  const page = {
+    keyboard: { press: async () => undefined },
+    waitForTimeout: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            innerText: async () => '学历要求 年龄要求 其他筛选 语言能力 人才类型 简历语言 跳槽频率',
+            locator: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+            getByText: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (selector === 'body') {
+        return {
+          innerText: async () => '关键词：优衣库 学历要求 年龄要求 其他筛选 语言能力 人才类型 简历语言 跳槽频率',
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+          innerText: async () => '学历要求 年龄要求 其他筛选 语言能力 人才类型 简历语言 跳槽频率',
+        }),
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => undefined,
+          }),
+        }),
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+      }),
+    }),
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      if (arg && typeof arg === 'object' && 'targetLabel' in arg) {
+        return true;
+      }
+
+      if (typeof arg === 'string') {
+        return true;
+      }
+
+      return true;
+    },
+  } as never;
+
+  const result = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'language',
+    label: '语言能力',
+    fieldKind: 'singleSelect',
+    value: '英语',
+    values: [{ value: '英语' }],
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.message ?? '', /语言能力 did not apply 英语/i);
+});
+
+test('zhilian language application filter selects the language child option before validating page state', async () => {
+  const calls: string[] = [];
+  let activeOtherFilter = '';
+  let languageText = '';
+  const page = {
+    keyboard: { press: async () => undefined },
+    waitForTimeout: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            innerText: async () => '学历要求 年龄要求 其他筛选 语言能力 人才类型 简历语言 跳槽频率',
+            locator: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+            getByText: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (selector === 'body') {
+        return {
+          innerText: async () => `关键词：优衣库 ${languageText} 学历要求 年龄要求 其他筛选 语言能力 人才类型 简历语言 跳槽频率`,
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+          innerText: async () => '学历要求 年龄要求 其他筛选 语言能力 人才类型 简历语言 跳槽频率',
+        }),
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => undefined,
+          }),
+        }),
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+      }),
+    }),
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      if (arg && typeof arg === 'object' && 'targetLabel' in arg) {
+        const payload = arg as { targetLabel: string };
+        activeOtherFilter = payload.targetLabel;
+        calls.push(`open:${payload.targetLabel}`);
+        return true;
+      }
+
+      if (typeof arg === 'string') {
+        calls.push(`option:${arg}`);
+        if (activeOtherFilter === '语言能力') {
+          languageText = `语言能力：${arg}`;
+        }
+        return true;
+      }
+
+      return true;
+    },
+  } as never;
+
+  const result = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'language',
+    label: '语言能力',
+    fieldKind: 'singleSelect',
+    value: '英语',
+    values: [{ value: '英语' }],
+  });
+
+  assert.equal(result.status, 'applied', result.message);
+  assert.ok(calls.includes('open:语言能力'));
+  assert.ok(calls.includes('option:英语'));
+});
+
+test('zhilian cascader application filter fails when the selected condition is not visible', async () => {
+  const page = {
+    keyboard: { press: async () => undefined },
+    waitForTimeout: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            innerText: async () => '学历要求 年龄要求 其他筛选 现居住地 语言能力 人才类型 简历语言 跳槽频率',
+            locator: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+            getByText: () => ({
+              first: () => ({
+                waitFor: async () => undefined,
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (selector === 'body') {
+        return {
+          innerText: async () => '关键词：优衣库 学历要求 年龄要求 其他筛选 现居住地 语言能力 人才类型 简历语言 跳槽频率',
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+          innerText: async () => '学历要求 年龄要求 其他筛选 现居住地 语言能力 人才类型 简历语言 跳槽频率',
+        }),
+        filter: () => ({
+          first: () => ({
+            waitFor: async () => undefined,
+          }),
+        }),
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+      }),
+    }),
+    evaluate: async (_fn: unknown, arg?: unknown) => {
+      if (arg && typeof arg === 'object' && 'targetLabel' in arg) {
+        return true;
+      }
+
+      if (arg && typeof arg === 'object' && 'pathLabels' in arg && 'value' in arg) {
+        return true;
+      }
+
+      return true;
+    },
+  } as never;
+
+  const result = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'living_location',
+    label: '现居住地',
+    fieldKind: 'textInput',
+    value: {
+      value: '全上海',
+      pathLabels: ['热门', '上海', '全上海'],
+    },
+    values: [{ value: '全上海', pathLabels: ['热门', '上海', '全上海'] }],
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.message ?? '', /现居住地 did not apply 全上海\/上海/i);
+});
+
+test('zhilian adapter reports unsupported application filters as failed', async () => {
+  const page = {
+    keyboard: { press: async () => undefined },
+    waitForTimeout: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === '.search-condition-panel-new') {
+        return {
+          first: () => ({
+            waitFor: async () => undefined,
+            innerText: async () => '学历要求 年龄要求 户口所在地',
+          }),
+        };
+      }
+
+      return {
+        first: () => ({
+          waitFor: async () => undefined,
+        }),
+        filter: () => ({
+          first: () => ({
+            count: async () => 0,
+          }),
+        }),
+      };
+    },
+    getByText: () => ({
+      first: () => ({
+        waitFor: async () => undefined,
+      }),
+    }),
+  } as never;
+
+  const result = await zhilianAdapter.applySearchCondition!(page, {
+    kind: 'applicationFilter',
+    fieldId: 'expected_location',
+    label: '期望工作地',
+    fieldKind: 'textInput',
+    value: '上海',
+    values: [{ value: '上海' }],
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.message ?? '', /Unsupported Zhilian application filter: expected_location/);
 });
 
 test('zhilian adapter fails when no saved quick-search tag contains the raw keyword', async () => {

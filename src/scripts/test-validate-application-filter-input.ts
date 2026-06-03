@@ -193,6 +193,65 @@ function createOptions(): ApplicationFilterOptions {
   };
 }
 
+function createZhilianSelectRangeOptions(): ApplicationFilterOptions {
+  return {
+    platform: 'zhilian',
+    capturedAt: '2026-06-03T10:00:00.000Z',
+    keyword: '优衣库',
+    fieldCount: 1,
+    fieldIds: ['education'],
+    fieldIdByLabel: {
+      学历要求: 'education',
+    },
+    groups: {
+      singleSelect: ['education'],
+      textInput: [],
+      salaryRange: [],
+      numberRange: [],
+    },
+    fieldsById: {
+      education: {
+        fieldId: 'education',
+        filterKey: 'education-filter',
+        label: '学历要求',
+        kind: 'singleSelect',
+        restrictInput: true,
+        valueShape: 'string',
+        acceptedInputShapes: ['string', 'customInput'],
+        allowedValues: ['不限', '本科及以上'],
+        options: [
+          { label: '不限', value: '不限', disabled: false, selected: false },
+          { label: '本科及以上', value: '本科及以上', disabled: false, selected: false },
+          {
+            label: '自定义',
+            value: '自定义',
+            disabled: false,
+            selected: false,
+            inputSpec: {
+              kind: 'selectRange',
+              fields: [
+                { key: 'min', valueType: 'string', label: '最低学历' },
+                { key: 'max', valueType: 'string', label: '最高学历' },
+              ],
+            },
+          },
+        ],
+        customInput: {
+          label: '自定义',
+          value: '自定义',
+          inputSpec: {
+            kind: 'selectRange',
+            fields: [
+              { key: 'min', valueType: 'string', label: '最低学历' },
+              { key: 'max', valueType: 'string', label: '最高学历' },
+            ],
+          },
+        },
+      },
+    },
+  };
+}
+
 test('validate application filter input parses args', () => {
   assert.deepEqual(parseArgs(['51job', './input.json']), {
     platform: '51job',
@@ -204,6 +263,68 @@ test('validate application filter input parses args', () => {
     platform: 'zhilian',
     inputPath: './input.json',
     optionsPath: './options.json',
+  });
+});
+
+test('validate application filter input accepts Zhilian select-range custom input', async () => {
+  const inputPath = path.join(tempDir, 'zhilian-select-range-input.json');
+  const optionsPath = path.join(tempDir, 'zhilian-select-range-options.json');
+  await writeJson(optionsPath, createZhilianSelectRangeOptions());
+  await writeJson(inputPath, {
+    education: {
+      label: '自定义',
+      input: {
+        min: '大专',
+        max: '本科',
+      },
+    },
+  });
+
+  const result = await validateApplicationFilterInputFile({
+    platform: 'zhilian',
+    inputPath,
+    optionsPath,
+  });
+
+  assert.deepEqual({
+    ok: result.ok,
+    errors: result.errors,
+  }, {
+    ok: true,
+    errors: [],
+  });
+});
+
+test('validate application filter input rejects empty Zhilian select-range custom input values', async () => {
+  const inputPath = path.join(tempDir, 'zhilian-select-range-invalid-input.json');
+  const optionsPath = path.join(tempDir, 'zhilian-select-range-invalid-options.json');
+  await writeJson(optionsPath, createZhilianSelectRangeOptions());
+  await writeJson(inputPath, {
+    education: {
+      label: '自定义',
+      input: {
+        min: '大专',
+        max: '',
+      },
+    },
+  });
+
+  const result = await validateApplicationFilterInputFile({
+    platform: 'zhilian',
+    inputPath,
+    optionsPath,
+  });
+
+  assert.deepEqual({
+    ok: result.ok,
+    errors: result.errors,
+  }, {
+    ok: false,
+    errors: [{
+      fieldId: 'education',
+      code: 'invalid_custom_string',
+      message: '学历要求 的 max 必须是非空文本。',
+    }],
   });
 });
 

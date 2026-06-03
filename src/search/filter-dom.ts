@@ -40,6 +40,7 @@ export const FILTER_OPTION_SELECTOR = [
 ].join(', ');
 
 export interface FilterDomScanOptions {
+  rootSelectors?: string[];
   ignoreTextPatterns?: RegExp[];
   filterContainerTextPatterns?: RegExp[];
   maxControls?: number;

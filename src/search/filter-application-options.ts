@@ -155,7 +155,13 @@ function buildAllowedValues(options: ApplicationFilterOption[]): string[] {
       continue;
     }
 
-    for (const value of [normalizeValue(option.value), normalizeValue(option.label)]) {
+    const optionLabel = normalizeValue(option.label);
+    const optionValue = normalizeValue(option.value);
+    if (optionLabel === '自定义' || optionValue === '自定义') {
+      continue;
+    }
+
+    for (const value of [optionValue, optionLabel]) {
       if (value && !seen.has(value)) {
         seen.add(value);
         values.push(value);
@@ -183,6 +189,89 @@ function listUniqueOptionLabelsByDepth(catalog: SearchFilterCatalog, label: stri
 
     seen.add(value);
     values.push(value);
+  }
+
+  return values;
+}
+
+const rangeInputFieldIdByLabel: Record<string, string> = {
+  年龄: 'age',
+  年龄要求: 'age',
+  期望年薪: 'expected_salary',
+  期望月薪: 'expected_salary',
+  期望薪资: 'expected_salary',
+  目前年薪: 'current_salary',
+  目前薪资: 'current_salary',
+  当前年薪: 'current_salary',
+  当前薪资: 'current_salary',
+};
+
+function inferRangeInputFieldId(label: string): string | undefined {
+  return rangeInputFieldIdByLabel[normalizeValue(label)];
+}
+
+function extractNumberRangeBoundaryValues(options: ApplicationFilterOption[]): string[] {
+  const values: string[] = [];
+  const seen = new Set<string>();
+
+  for (const option of options) {
+    if (option.disabled) {
+      continue;
+    }
+
+    const label = normalizeValue(option.label || option.value);
+    for (const match of label.matchAll(/\d+(?:\.\d+)?/g)) {
+      const value = match[0];
+      if (!seen.has(value)) {
+        seen.add(value);
+        values.push(value);
+      }
+    }
+  }
+
+  return values;
+}
+
+function buildZhilianAgeBoundaryValues(values: string[]): string[] {
+  const sourceValues = [...values];
+  for (let age = 16; age <= 50; age += 1) {
+    sourceValues.push(String(age));
+  }
+  sourceValues.push('55', '60', '65');
+
+  const seen = new Set<string>();
+  return sourceValues
+    .map((value) => parseNumberRangeValue(value))
+    .filter((value): value is number => value !== undefined)
+    .sort((left, right) => left - right)
+    .map((value) => String(value))
+    .filter((value) => {
+      if (seen.has(value)) {
+        return false;
+      }
+      seen.add(value);
+      return true;
+    });
+}
+
+function extractSalaryRangeBoundaryValues(options: ApplicationFilterOption[]): string[] {
+  const values: string[] = [];
+  const seen = new Set<string>();
+
+  for (const option of options) {
+    if (option.disabled) {
+      continue;
+    }
+
+    const label = normalizeValue(option.label || option.value);
+    const matches = label.match(/\d+(?:\.\d+)?\s*(?:千|万)/g) ?? [];
+    for (const match of matches) {
+      const value = normalizeValue(match).replace(/\s+/g, '');
+      if (!seen.has(value)) {
+        seen.add(value);
+        values.push(value);
+      }
+    }
   }
 
   return values;
@@ -340,6 +429,10 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
     (field): field is NonNullable<typeof field> => Boolean(field),
   );
   for (const salaryField of salaryFields) {
+    if (fieldsById[salaryField.fieldId]) {
+      continue;
+    }
+
     const orderedSalaryValues = salaryField.orderedRootLabels ?? [];
     const salaryUpperValues = listUniqueOptionLabelsByDepth(catalog, salaryField.label, 1);
     if (orderedSalaryValues.length === 0) {
@@ -377,9 +470,16 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
     (field): field is NonNullable<typeof field> => Boolean(field),
   );
   for (const numberRangeField of numberRangeFields) {
-    const numericRootOptions = numberRangeField.rootOptions
+    if (fieldsById[numberRangeField.fieldId]) {
+      continue;
+    }
+
+    const discoveredNumericRootOptions = numberRangeField.rootOptions
       .map((option) => normalizeValue(option.label))
       .filter((value) => parseNumberRangeValue(value) !== undefined);
+    const numericRootOptions = catalog.platform === 'zhilian' && numberRangeField.fieldId === 'age'
+      ? buildZhilianAgeBoundaryValues(discoveredNumericRootOptions)
+      : discoveredNumericRootOptions;
     if (numericRootOptions.length === 0) {
       continue;
     }
@@ -410,6 +510,99 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
         kind: 'orderedRange',
         comparison: 'maxNumberValue >= minNumberValue',
         message: `右侧${numberRangeField.label}上限不能低于左侧${numberRangeField.label}下限。`,
+      },
+    };
+  }
+
+  const rangeInputFilters = catalog.filters.filter((filter) =>
+    filter.controlType === 'rangeInput'
+    && filter.valueShape === 'range'
+    && filter.status === 'optionsExtracted'
+    && (filter.options?.length ?? 0) > 0,
+  );
+  for (const filter of rangeInputFilters) {
+    const fieldId = inferRangeInputFieldId(filter.label);
+    if (!fieldId || fieldsById[fieldId]) {
+      continue;
+    }
+
+    const options = (filter.options ?? []).map((option) => toApplicationOption({
+      label: option.label,
+      value: option.value ?? option.label,
+      depth: option.depth,
+      disabled: Boolean(option.disabled),
+      selected: Boolean(option.selected),
+      parentPathLabels: option.parentPathLabels,
+      pathLabels: option.pathLabels,
+      inputSpec: option.inputSpec,
+    }));
+
+    if (fieldId === 'expected_salary' || fieldId === 'current_salary') {
+      const salaryValues = extractSalaryRangeBoundaryValues(options);
+      if (salaryValues.length < 2) {
+        continue;
+      }
+
+      fieldIds.push(fieldId);
+      fieldIdByLabel[filter.label] = fieldId;
+      groups.salaryRange.push(fieldId);
+      fieldsById[fieldId] = {
+        fieldId,
+        filterKey: filter.key,
+        label: filter.label,
+        kind: 'salaryRange',
+        restrictInput: true,
+        valueShape: 'object',
+        acceptedInputShapes: ['{ min: string; max: string }'],
+        minKey: 'min',
+        maxKey: 'max',
+        minLabel: '薪资下限',
+        maxLabel: '薪资上限',
+        orderedValues: [...salaryValues],
+        minOptions: [...salaryValues],
+        maxOptions: [...salaryValues],
+        rule: {
+          kind: 'orderedRange',
+          comparison: 'maxSalaryValue >= minSalaryValue',
+          message: '右侧薪资上限不能低于左侧薪资下限。',
+        },
+      };
+      continue;
+    }
+
+    const discoveredNumericValues = extractNumberRangeBoundaryValues(options);
+    const numericValues = catalog.platform === 'zhilian' && fieldId === 'age'
+      ? buildZhilianAgeBoundaryValues(discoveredNumericValues)
+      : discoveredNumericValues;
+    if (numericValues.length === 0) {
+      continue;
+    }
+
+    fieldIds.push(fieldId);
+    fieldIdByLabel[filter.label] = fieldId;
+    groups.numberRange.push(fieldId);
+    fieldsById[fieldId] = {
+      fieldId,
+      filterKey: filter.key,
+      label: filter.label,
+      kind: 'numberRange',
+      restrictInput: true,
+      valueShape: 'object',
+      acceptedInputShapes: ['{ min?: number|string; max?: number|string }'],
+      minKey: 'min',
+      maxKey: 'max',
+      minLabel: `${filter.label}下限`,
+      maxLabel: `${filter.label}上限`,
+      unit: /年龄/.test(filter.label) ? '岁' : undefined,
+      min: Math.min(...numericValues.map((value) => parseNumberRangeValue(value) ?? Number.POSITIVE_INFINITY)),
+      max: Math.max(...numericValues.map((value) => parseNumberRangeValue(value) ?? Number.NEGATIVE_INFINITY)),
+      orderedValues: [...numericValues],
+      minOptions: [...numericValues],
+      maxOptions: [...numericValues],
+      rule: {
+        kind: 'orderedRange',
+        comparison: 'maxNumberValue >= minNumberValue',
+        message: `右侧${filter.label}上限不能低于左侧${filter.label}下限。`,
       },
     };
   }
@@ -502,6 +695,17 @@ function validateCustomInput(
   const numbers: Record<string, number> = {};
   for (const inputField of customInput.inputSpec.fields) {
     const inputValue = value.input[inputField.key];
+    if (inputField.valueType === 'string') {
+      if (!normalizeStringOrNumberValue(inputValue)) {
+        errors.push({
+          fieldId: field.fieldId,
+          code: 'invalid_custom_string',
+          message: `${field.label} 的 ${inputField.key} 必须是非空文本。`,
+        });
+      }
+      continue;
+    }
+
     if (inputField.valueType === 'number') {
       const parsed = readNumber(inputValue);
       if (parsed === undefined) {
