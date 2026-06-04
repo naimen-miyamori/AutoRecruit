@@ -26,6 +26,7 @@ export interface PlatformAdapter {
   openAuthenticatedHome(page: Page): Promise<Page>;
   assertAuthenticated(page: Page): Promise<void>;
   openSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
+  openDirectSearch?(page: Page, keyword: string, conditions: SearchCondition[], options?: SearchWaitOptions): Promise<Page>;
   prepareSearchConditionPage?(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
   discoverSearchFilters?(page: Page, options: SearchFilterDiscoveryRunOptions): Promise<SearchFilterCatalog>;
   applySearchCondition?(page: Page, condition: SearchCondition): Promise<SearchConditionApplyResult>;

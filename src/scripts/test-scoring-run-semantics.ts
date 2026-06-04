@@ -866,6 +866,7 @@ function stubSuccessfulRun(indexModule: Awaited<ReturnType<typeof loadIndexModul
     candidates: [{ candidateId: 'cand-1' }],
   });
   indexModule.openSubscribeSearchRef.fn = (async () => createSearchPage()) as typeof indexModule.openSubscribeSearchRef.fn;
+  indexModule.openDirectSearchRef.fn = (async () => createSearchPage()) as NonNullable<typeof indexModule.openDirectSearchRef.fn>;
   indexModule.openResumeDetailRef.fn = (async () => createDetailPage()) as typeof indexModule.openResumeDetailRef.fn;
   indexModule.extractCandidateListRef.fn = async () => ({
     candidates: [{ candidateId: 'cand-1' }],
@@ -875,12 +876,14 @@ function stubSuccessfulRun(indexModule: Awaited<ReturnType<typeof loadIndexModul
     domSnapshot: { workLines: [] },
   });
   liepinAdapter.openSubscribeSearch = (async () => createSearchPage()) as typeof liepinAdapter.openSubscribeSearch;
+  liepinAdapter.openDirectSearch = (async () => createSearchPage()) as NonNullable<typeof liepinAdapter.openDirectSearch>;
   liepinAdapter.openResumeDetail = (async () => createDetailPage()) as typeof liepinAdapter.openResumeDetail;
   liepinAdapter.extractCandidateList = async () => ({
     candidates: [{ candidateId: 'cand-1' }],
   });
   liepinAdapter.parseResumeDetail = async () => buildResume('cand-1');
   zhilianAdapter.openSubscribeSearch = (async () => createSearchPage()) as typeof zhilianAdapter.openSubscribeSearch;
+  zhilianAdapter.openDirectSearch = (async () => createSearchPage()) as NonNullable<typeof zhilianAdapter.openDirectSearch>;
   zhilianAdapter.openResumeDetail = (async () => createDetailPage()) as typeof zhilianAdapter.openResumeDetail;
   zhilianAdapter.extractCandidateList = async () => ({
     candidates: [{ candidateId: 'cand-1' }],
@@ -4943,6 +4946,160 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(observedIncludeViewedValues, [true]);
   });
 
+  it('runs direct 51job search with application filters and viewed-switch options', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const applicationFilterOptionsPath = path.join(tempDir, '51job', 'filter-catalog', 'application-filter-options.latest.json');
+    const applicationFilterInputPath = path.join(tempDir, 'filter-input.json');
+    const directCalls: Array<{
+      keyword: string;
+      includeViewedCandidates?: boolean;
+      conditions: import('../types/job.js').SearchCondition[];
+    }> = [];
+
+    await fs.mkdir(path.dirname(applicationFilterOptionsPath), { recursive: true });
+    await fs.writeFile(applicationFilterOptionsPath, JSON.stringify({
+      platform: '51job',
+      capturedAt: '2026-06-01T00:00:00.000Z',
+      keyword: 'direct',
+      fieldCount: 1,
+      fieldIds: ['education'],
+      fieldIdByLabel: { 学历要求: 'education' },
+      groups: {
+        singleSelect: ['education'],
+        textInput: [],
+        salaryRange: [],
+        numberRange: [],
+      },
+      fieldsById: {
+        education: {
+          fieldId: 'education',
+          filterKey: 'education',
+          label: '学历要求',
+          kind: 'singleSelect',
+          restrictInput: true,
+          valueShape: 'string',
+          acceptedInputShapes: ['string'],
+          allowedValues: ['本科'],
+          options: [
+            { label: '本科', value: '本科', disabled: false, selected: false },
+          ],
+        },
+      },
+    }, null, 2), 'utf8');
+    await fs.writeFile(applicationFilterInputPath, JSON.stringify({ education: '本科' }), 'utf8');
+
+    stubSuccessfulRun(indexModule);
+    indexModule.openSubscribeSearchRef.fn = (async () => {
+      throw new Error('saved search should not be used for direct mode');
+    }) as typeof indexModule.openSubscribeSearchRef.fn;
+    indexModule.openDirectSearchRef.fn = (async (_page, keyword, conditions, options) => {
+      directCalls.push({
+        keyword,
+        includeViewedCandidates: options?.includeViewedCandidates,
+        conditions,
+      });
+      return createSearchPage();
+    }) as NonNullable<typeof indexModule.openDirectSearchRef.fn>;
+
+    await captureConsole(async () => {
+      await indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        `direct-51job-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：direct 51job',
+        '--search-source',
+        'direct',
+        '--application-filter-input-file',
+        applicationFilterInputPath,
+        '--include-viewed',
+        'true',
+      ]);
+    });
+
+    assert.equal(directCalls.length, 1);
+    assert.equal(directCalls[0]?.includeViewedCandidates, true);
+    assert.equal(directCalls[0]?.conditions.length, 1);
+    assert.deepStrictEqual(directCalls[0]?.conditions[0], {
+      kind: 'applicationFilter',
+      fieldId: 'education',
+      label: '学历要求',
+      fieldKind: 'singleSelect',
+      value: '本科',
+      values: [{ value: '本科', pathLabels: undefined }],
+    });
+  });
+
+  it('rejects application filter input files unless direct search is selected', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const filterPath = path.join(tempDir, 'filter-input.json');
+
+    await fs.writeFile(filterPath, '{}', 'utf8');
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        `filter-saved-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：filter saved',
+        '--application-filter-input-file',
+        filterPath,
+      ]),
+      /--application-filter-input-file requires --search-source direct/,
+    );
+  });
+
+  it('rejects invalid direct search source values before browser work starts', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    let browserCalls = 0;
+
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => {
+      browserCalls += 1;
+      throw new Error('browser should not start before search-source validation rejects');
+    };
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        `invalid-source-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：invalid source',
+        '--search-source',
+        'manual',
+      ]),
+      /--search-source must be saved or direct/,
+    );
+    assert.equal(browserCalls, 0);
+  });
+
+  it('rejects normal-capture direct flags in search-subscription mode', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const subscriptionPath = path.join(tempDir, 'search-subscription.json');
+
+    await fs.writeFile(subscriptionPath, JSON.stringify({ keyword: '订阅搜索', conditions: [] }), 'utf8');
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        '51job',
+        '--search-subscription-file',
+        subscriptionPath,
+        '--search-source',
+        'direct',
+      ]),
+      /--search-subscription-file cannot be combined .*--search-source/,
+    );
+  });
+
   it('rejects Liepin forwarding contact on non-Liepin single-platform runs', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
@@ -5145,6 +5302,52 @@ describe('scoring run semantics', () => {
     assert.equal(zhilianJobRecord.rawText, '职位名称：多平台测试');
   });
 
+  it('runs direct search for every supported platform in registry order when --platform all is provided', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const directOrder: string[] = [];
+
+    stubSuccessfulRun(indexModule);
+    indexModule.openSubscribeSearchRef.fn = (async () => {
+      throw new Error('saved 51job search should not run in direct all-platform mode');
+    }) as typeof indexModule.openSubscribeSearchRef.fn;
+    indexModule.openDirectSearchRef.fn = (async () => {
+      directOrder.push('51job');
+      return createSearchPage();
+    }) as NonNullable<typeof indexModule.openDirectSearchRef.fn>;
+    liepinAdapter.openSubscribeSearch = async () => {
+      throw new Error('saved Liepin search should not run in direct all-platform mode');
+    };
+    liepinAdapter.openDirectSearch = async () => {
+      directOrder.push('liepin');
+      return createSearchPage();
+    };
+    zhilianAdapter.openSubscribeSearch = async () => {
+      throw new Error('saved Zhilian search should not run in direct all-platform mode');
+    };
+    zhilianAdapter.openDirectSearch = async () => {
+      directOrder.push('zhilian');
+      return createSearchPage();
+    };
+
+    await captureConsole(async () => {
+      const result = assertAllPlatformsSummary(await indexModule.main([
+        '--platform',
+        'all',
+        '--keyword',
+        `direct-all-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：direct all',
+        '--search-source',
+        'direct',
+      ]));
+
+      assert.deepStrictEqual(result.map((entry) => entry.platform), ['51job', 'liepin', 'zhilian']);
+    });
+
+    assert.deepStrictEqual(directOrder, ['51job', 'liepin', 'zhilian']);
+  });
+
   it('runs batch jobs in file order with their own JD payloads', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
@@ -5246,6 +5449,153 @@ describe('scoring run semantics', () => {
       'batch-all-two:zhilian',
     ]);
     assert.deepStrictEqual(printedSummary.map((entry) => `${entry.summary.jobKey}:${entry.platform}`), exportOrder);
+  });
+
+  it('allows batch jobs to override direct application filter input files relative to the jobs file', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const jobsDir = path.join(tempDir, 'batch');
+    const jobsFilePath = path.join(jobsDir, 'jobs.json');
+    const applicationFilterOptionsPath = path.join(tempDir, '51job', 'filter-catalog', 'application-filter-options.latest.json');
+    const directConditionsByKeyword = new Map<string, import('../types/job.js').SearchCondition[]>();
+
+    await fs.mkdir(path.dirname(applicationFilterOptionsPath), { recursive: true });
+    await fs.mkdir(jobsDir, { recursive: true });
+    await fs.writeFile(applicationFilterOptionsPath, JSON.stringify({
+      platform: '51job',
+      capturedAt: '2026-06-01T00:00:00.000Z',
+      keyword: 'batch',
+      fieldCount: 1,
+      fieldIds: ['education'],
+      fieldIdByLabel: { 学历要求: 'education' },
+      groups: {
+        singleSelect: ['education'],
+        textInput: [],
+        salaryRange: [],
+        numberRange: [],
+      },
+      fieldsById: {
+        education: {
+          fieldId: 'education',
+          filterKey: 'education',
+          label: '学历要求',
+          kind: 'singleSelect',
+          restrictInput: true,
+          valueShape: 'string',
+          acceptedInputShapes: ['string'],
+          allowedValues: ['本科', '硕士'],
+          options: [
+            { label: '本科', value: '本科', disabled: false, selected: false },
+            { label: '硕士', value: '硕士', disabled: false, selected: false },
+          ],
+        },
+      },
+    }, null, 2), 'utf8');
+    await fs.writeFile(path.join(jobsDir, 'first-filter.json'), JSON.stringify({ education: '本科' }), 'utf8');
+    await fs.writeFile(path.join(jobsDir, 'second-filter.json'), JSON.stringify({ education: '硕士' }), 'utf8');
+    await fs.writeFile(jobsFilePath, JSON.stringify([
+      {
+        keyword: 'batch direct one',
+        jd: '职位名称：批量直接一',
+        searchSource: 'direct',
+        applicationFilterInputFile: 'first-filter.json',
+      },
+      {
+        keyword: 'batch direct two',
+        jd: '职位名称：批量直接二',
+        searchSource: 'direct',
+        applicationFilterInputFile: 'second-filter.json',
+      },
+    ], null, 2), 'utf8');
+
+    stubSuccessfulRun(indexModule);
+    indexModule.openDirectSearchRef.fn = (async (_page, keyword, conditions) => {
+      directConditionsByKeyword.set(keyword, conditions);
+      return createSearchPage();
+    }) as NonNullable<typeof indexModule.openDirectSearchRef.fn>;
+
+    await captureConsole(async () => {
+      await indexModule.main([
+        '--platform',
+        '51job',
+        '--jobs-file',
+        jobsFilePath,
+      ]);
+    });
+
+    const firstFilterConditions = directConditionsByKeyword.get('batch direct one')?.filter((condition) => condition.kind === 'applicationFilter');
+    const secondFilterConditions = directConditionsByKeyword.get('batch direct two')?.filter((condition) => condition.kind === 'applicationFilter');
+    assert.deepStrictEqual(firstFilterConditions?.map((condition) => (condition as { values?: Array<{ value: string }> }).values?.[0]?.value), ['本科']);
+    assert.deepStrictEqual(secondFilterConditions?.map((condition) => (condition as { values?: Array<{ value: string }> }).values?.[0]?.value), ['硕士']);
+  });
+
+  it('allows a batch job to override a CLI direct default back to saved search', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const jobsFilePath = path.join(tempDir, 'jobs.json');
+    const applicationFilterOptionsPath = path.join(tempDir, '51job', 'filter-catalog', 'application-filter-options.latest.json');
+    const applicationFilterInputPath = path.join(tempDir, 'filter-input.json');
+    const searchCalls: string[] = [];
+
+    await fs.mkdir(path.dirname(applicationFilterOptionsPath), { recursive: true });
+    await fs.writeFile(applicationFilterOptionsPath, JSON.stringify({
+      platform: '51job',
+      capturedAt: '2026-06-01T00:00:00.000Z',
+      keyword: 'batch',
+      fieldCount: 1,
+      fieldIds: ['education'],
+      fieldIdByLabel: { 学历要求: 'education' },
+      groups: {
+        singleSelect: ['education'],
+        textInput: [],
+        salaryRange: [],
+        numberRange: [],
+      },
+      fieldsById: {
+        education: {
+          fieldId: 'education',
+          filterKey: 'education',
+          label: '学历要求',
+          kind: 'singleSelect',
+          restrictInput: true,
+          valueShape: 'string',
+          acceptedInputShapes: ['string'],
+          allowedValues: ['本科'],
+          options: [
+            { label: '本科', value: '本科', disabled: false, selected: false },
+          ],
+        },
+      },
+    }, null, 2), 'utf8');
+    await fs.writeFile(applicationFilterInputPath, JSON.stringify({ education: '本科' }), 'utf8');
+    await fs.writeFile(jobsFilePath, JSON.stringify([
+      { keyword: 'batch saved override', jd: '职位名称：批量保存入口', searchSource: 'saved' },
+    ], null, 2), 'utf8');
+
+    stubSuccessfulRun(indexModule);
+    indexModule.openSubscribeSearchRef.fn = (async () => {
+      searchCalls.push('saved');
+      return createSearchPage();
+    }) as typeof indexModule.openSubscribeSearchRef.fn;
+    indexModule.openDirectSearchRef.fn = (async () => {
+      searchCalls.push('direct');
+      return createSearchPage();
+    }) as NonNullable<typeof indexModule.openDirectSearchRef.fn>;
+
+    await captureConsole(async () => {
+      await indexModule.main([
+        '--platform',
+        '51job',
+        '--jobs-file',
+        jobsFilePath,
+        '--search-source',
+        'direct',
+        '--application-filter-input-file',
+        applicationFilterInputPath,
+      ]);
+    });
+
+    assert.deepStrictEqual(searchCalls, ['saved']);
   });
 
   it('allows batch reruns without JD input when the jobKey already exists', async () => {

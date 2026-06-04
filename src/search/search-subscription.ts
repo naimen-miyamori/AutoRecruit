@@ -227,6 +227,27 @@ async function loadApplicationFilterInput(payload: Record<string, unknown>, sour
   return applicationFilterInput;
 }
 
+export async function loadApplicationFilterInputFile(filePath: string, label = '--application-filter-input-file'): Promise<Record<string, unknown>> {
+  const resolvedFilePath = path.resolve(filePath);
+  let payload: unknown;
+
+  try {
+    payload = await readJsonFile<unknown>(resolvedFilePath);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Invalid JSON in ${label} ${filePath}: ${error.message}`);
+    }
+
+    throw error;
+  }
+
+  if (!isPlainObject(payload)) {
+    throw new Error(`${label} must point to a JSON object`);
+  }
+
+  return payload;
+}
+
 export async function buildApplicationFilterConditions(
   platform: SupportedPlatform,
   applicationFilterInput: Record<string, unknown>,
@@ -311,7 +332,7 @@ function buildSkippedConditionResult(adapter: PlatformAdapter, condition: Search
   };
 }
 
-async function applySearchConditions(
+export async function applySearchConditions(
   adapter: PlatformAdapter,
   page: Page,
   conditions: SearchCondition[],

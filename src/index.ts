@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { buildJobKey, parseJobDescription } from './parsers/jd-parser.js';
 import { config } from './config.js';
 import { JobStore } from './storage/job-store.js';
@@ -9,11 +10,11 @@ import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
 import type { CandidatePostOpenActions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
-import { loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
+import { buildApplicationFilterConditions, loadApplicationFilterInputFile, loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
 import { scoreResumeAgainstJob } from './scoring/score-resume.js';
 import { exportJobResults, type ExportJobResultsSummary } from './scripts/export-job-results.js';
 import { sendJobReport, type SendJobReportSummary } from './scripts/send-job-report-email.js';
-import { CandidateListItem, JobRecord, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult, SearchSubscriptionSummary } from './types/job.js';
+import { CandidateListItem, JobRecord, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult, SearchCondition, SearchSubscriptionSummary } from './types/job.js';
 
 interface CandidateProcessResult {
   candidateId: string;
@@ -31,6 +32,7 @@ interface CandidateScoringResult {
 }
 
 type CliPlatformSelection = SupportedPlatform | 'all';
+type SearchSource = 'saved' | 'direct';
 
 interface RunnableJobInput extends ReportDeliveryOptions {
   searchKeyword: string;
@@ -38,6 +40,8 @@ interface RunnableJobInput extends ReportDeliveryOptions {
   jobDescriptionFilePath?: string;
   includeViewedCandidates: boolean;
   liepinForwardContact?: string;
+  searchSource: SearchSource;
+  applicationFilterInputFilePath?: string;
 }
 
 interface SingleJobCliInput extends RunnableJobInput {
@@ -51,6 +55,8 @@ interface BatchCliInput extends ReportDeliveryOptions {
   jobsFilePath: string;
   includeViewedCandidates: boolean;
   liepinForwardContact?: string;
+  searchSource: SearchSource;
+  applicationFilterInputFilePath?: string;
 }
 
 interface SearchSubscriptionCliInput {
@@ -75,6 +81,8 @@ interface SinglePlatformCliInput extends ReportDeliveryOptions {
   jobDescriptionFilePath?: string;
   includeViewedCandidates: boolean;
   liepinForwardContact?: string;
+  searchSource: SearchSource;
+  applicationFilterInputFilePath?: string;
 }
 
 export interface MainRunSummary {
@@ -110,6 +118,7 @@ export type MainResult = MainRunSummary | AllPlatformsRunSummary[] | BatchJobRun
 export const parseJobDescriptionRef = { fn: parseJobDescription };
 export const extractionBoundary = createProductionExtractionBoundary();
 export const openSubscribeSearchRef = { fn: fiftyOneJobAdapter.openSubscribeSearch };
+export const openDirectSearchRef = { fn: fiftyOneJobAdapter.openDirectSearch };
 export const openResumeDetailRef = { fn: fiftyOneJobAdapter.openResumeDetail };
 export const extractCandidateListRef = {
   fn: extractionBoundary.extractCandidateListFromPage,
@@ -140,6 +149,7 @@ export function resolvePlatformAdapter(platform: SupportedPlatform): PlatformAda
     return {
       ...adapter,
       openSubscribeSearch: openSubscribeSearchRef.fn,
+      ...(openDirectSearchRef.fn ? { openDirectSearch: openDirectSearchRef.fn } : {}),
       extractCandidateList: async (page, options) => extractCandidateListRef.fn(page, options),
       openResumeDetail: openResumeDetailRef.fn,
     };
@@ -170,6 +180,18 @@ function parseOptionalBoolean(value: string | undefined, argumentName: string): 
   }
 
   throw new Error(`${argumentName} must be true or false`);
+}
+
+function parseSearchSource(value: string | undefined, argumentName: string): SearchSource {
+  if (value === undefined) {
+    return 'saved';
+  }
+
+  if (value === 'saved' || value === 'direct') {
+    return value;
+  }
+
+  throw new Error(`${argumentName} must be saved or direct`);
 }
 
 function parseBatchCcEmails(value: unknown, itemIndex: number): string[] | undefined {
@@ -210,7 +232,15 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   const jd = parseOptionalString(item.jd, 'jd', itemIndex);
   const jdFile = parseOptionalString(item.jdFile, 'jdFile', itemIndex);
   const email = parseOptionalString(item.email, 'email', itemIndex);
+  const itemSearchSourceValue = parseOptionalString(item.searchSource, 'searchSource', itemIndex);
+  const itemApplicationFilterInputFile = parseOptionalString(item.applicationFilterInputFile, 'applicationFilterInputFile', itemIndex);
   const itemCcEmails = parseBatchCcEmails(item.cc, itemIndex);
+  const searchSource = parseSearchSource(itemSearchSourceValue, `jobs-file item ${itemIndex}.searchSource`);
+  const hasItemSearchSource = item.searchSource !== undefined;
+  const effectiveSearchSource = item.searchSource === undefined ? input.searchSource : searchSource;
+  const effectiveApplicationFilterInputFilePath = itemApplicationFilterInputFile
+    ? path.resolve(path.dirname(path.resolve(input.jobsFilePath)), itemApplicationFilterInputFile)
+    : (hasItemSearchSource && effectiveSearchSource === 'saved' ? undefined : input.applicationFilterInputFilePath);
 
   if (!keyword) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: keyword must be a non-empty string`);
@@ -218,6 +248,10 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
 
   if (jd !== undefined && jdFile !== undefined) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: jd and jdFile are mutually exclusive`);
+  }
+
+  if (effectiveApplicationFilterInputFilePath && effectiveSearchSource !== 'direct') {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: applicationFilterInputFile requires searchSource direct`);
   }
 
   return {
@@ -229,6 +263,8 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     jobDescriptionFilePath: jdFile,
     includeViewedCandidates: input.includeViewedCandidates,
     liepinForwardContact: input.liepinForwardContact,
+    searchSource: effectiveSearchSource,
+    applicationFilterInputFilePath: effectiveApplicationFilterInputFilePath,
   };
 }
 
@@ -293,6 +329,10 @@ function parseArgs(argv: readonly string[]): CliInput {
     ? parseOptionalBoolean(values.get('include-viewed'), '--include-viewed')
     : false;
   const liepinForwardContact = values.get('liepin-forward-contact')?.trim();
+  const searchSource = parseSearchSource(values.get('search-source'), '--search-source');
+  const applicationFilterInputFilePath = values.get('application-filter-input-file')
+    ? path.resolve(values.get('application-filter-input-file')!)
+    : undefined;
 
   if (flagPresence.has('liepin-forward-contact')) {
     if (!liepinForwardContact) {
@@ -305,8 +345,8 @@ function parseArgs(argv: readonly string[]): CliInput {
   }
 
   if (searchSubscriptionFilePath) {
-    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact')) {
-      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, or --liepin-forward-contact');
+    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
+      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --liepin-forward-contact, --search-source, or --application-filter-input-file');
     }
 
     return {
@@ -328,6 +368,10 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error('--jobs-file cannot be combined with --keyword, --jd, or --jd-file');
     }
 
+    if (applicationFilterInputFilePath && searchSource !== 'direct') {
+      throw new Error('--application-filter-input-file requires --search-source direct');
+    }
+
     return {
       mode: 'batch',
       platform,
@@ -336,6 +380,8 @@ function parseArgs(argv: readonly string[]): CliInput {
       ccEmails,
       includeViewedCandidates,
       liepinForwardContact,
+      searchSource,
+      applicationFilterInputFilePath,
     };
   }
 
@@ -345,6 +391,10 @@ function parseArgs(argv: readonly string[]): CliInput {
 
   if (jobDescriptionText && jobDescriptionFilePath) {
     throw new Error('Arguments --jd and --jd-file are mutually exclusive');
+  }
+
+  if (applicationFilterInputFilePath && searchSource !== 'direct') {
+    throw new Error('--application-filter-input-file requires --search-source direct');
   }
 
   return {
@@ -357,6 +407,8 @@ function parseArgs(argv: readonly string[]): CliInput {
     jobDescriptionFilePath,
     includeViewedCandidates,
     liepinForwardContact,
+    searchSource,
+    applicationFilterInputFilePath,
   };
 }
 
@@ -370,6 +422,8 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
     jobDescriptionFilePath: input.jobDescriptionFilePath,
     includeViewedCandidates: input.includeViewedCandidates,
     liepinForwardContact: input.liepinForwardContact,
+    searchSource: input.searchSource,
+    applicationFilterInputFilePath: input.applicationFilterInputFilePath,
   };
 }
 
@@ -488,12 +542,23 @@ async function scoreCapturedResumes(
   };
 }
 
-export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean; liepinForwardContact?: string } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
+export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean; liepinForwardContact?: string; searchSource?: SearchSource; searchConditions?: SearchCondition[] } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
   const searchDeadline = Date.now() + config.playwright.searchPageTimeoutMs;
-  const searchPage = await platformAdapter.openSubscribeSearch(session.page, searchKeyword, {
+  const searchOptions = {
     deadline: searchDeadline,
     includeViewedCandidates: options.includeViewedCandidates,
-  });
+  };
+  const searchSource = options.searchSource ?? 'saved';
+  const searchConditions = options.searchConditions ?? [];
+  const searchPage = searchSource === 'direct'
+    ? await (async () => {
+      if (!platformAdapter.openDirectSearch) {
+        throw new Error(`Platform ${platformAdapter.platform} does not support direct search for resume capture.`);
+      }
+
+      return platformAdapter.openDirectSearch(session.page, searchKeyword, searchConditions, searchOptions);
+    })()
+    : await platformAdapter.openSubscribeSearch(session.page, searchKeyword, searchOptions);
   session.page = searchPage;
   const { candidates } = platformAdapter.platform === '51job'
     ? await extractCandidateListRef.fn(searchPage, { deadline: searchDeadline })
@@ -551,12 +616,22 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   return { candidates, newCandidates, runResult, resultPath };
 }
 
+async function buildResumeCaptureSearchConditions(input: SinglePlatformCliInput): Promise<SearchCondition[]> {
+  if (!input.applicationFilterInputFilePath) {
+    return [];
+  }
+
+  const applicationFilterInput = await loadApplicationFilterInputFile(input.applicationFilterInputFilePath);
+  return buildApplicationFilterConditions(input.platform, applicationFilterInput, {});
+}
+
 async function runSinglePlatform(input: SinglePlatformCliInput, options: { printSummary: boolean } = { printSummary: true }): Promise<MainRunSummary> {
   const platformAdapter = resolvePlatformAdapter(input.platform);
   const store = new JobStore();
   const jobKey = buildJobKey(input.searchKeyword, '');
   const fetchedAt = new Date().toISOString();
   const existingJobRecord = await store.readJobRecordIfExists(input.platform, jobKey);
+  const searchConditions = await buildResumeCaptureSearchConditions(input);
 
   if (!existingJobRecord && !input.jobDescriptionText && !input.jobDescriptionFilePath) {
     throw new Error('Missing required argument --jd or --jd-file');
@@ -621,6 +696,8 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       {
         includeViewedCandidates: input.includeViewedCandidates,
         liepinForwardContact: input.liepinForwardContact,
+        searchSource: input.searchSource,
+        searchConditions,
       },
     );
 

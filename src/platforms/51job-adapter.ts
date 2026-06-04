@@ -1,5 +1,5 @@
 import { collectCandidateList } from '../browser/candidate-list.js';
-import { openSubscribeSearch } from '../browser/subscribe-search.js';
+import { clear51jobViewedFilter, ensure51jobViewedFilterChecked, openSubscribeSearch } from '../browser/subscribe-search.js';
 import {
   prepare51jobSearchConditionPage,
   prepare51jobSearchConditionPageWithOptions,
@@ -2130,6 +2130,30 @@ async function apply51jobSearchCondition(
   return apply51jobApplicationFilter(page, condition);
 }
 
+async function open51jobDirectSearch(
+  page: Page,
+  keyword: string,
+  conditions: SearchCondition[],
+  options?: Parameters<NonNullable<PlatformAdapter['openDirectSearch']>>[3],
+): Promise<Page> {
+  const searchPage = await prepare51jobSearchConditionPageWithOptions(page, keyword, options);
+  for (const condition of conditions) {
+    const result = await apply51jobSearchCondition(searchPage, condition);
+    if (result.status !== 'applied') {
+      throw new Error(`51job direct search condition ${condition.kind} failed: ${result.message ?? result.status}`);
+    }
+  }
+
+  if (options?.includeViewedCandidates) {
+    await clear51jobViewedFilter(searchPage, options);
+  } else {
+    await ensure51jobViewedFilterChecked(searchPage, options);
+  }
+
+  await clickPrimarySearchButton(searchPage, 1500, '51job').catch(() => false);
+  return searchPage;
+}
+
 async function discover51jobDynamicTextInputFilter(
   page: Page,
   target: FiftyOneJobDynamicTextInputTarget,
@@ -2281,6 +2305,7 @@ export const fiftyOneJobAdapter: PlatformAdapter = {
   },
   assertAuthenticated: assertAuthenticatedPage,
   openSubscribeSearch,
+  openDirectSearch: open51jobDirectSearch,
   prepareSearchConditionPage: prepare51jobSearchConditionPageWithOptions,
   discoverSearchFilters: discover51jobSearchFilters,
   applySearchCondition: apply51jobSearchCondition,

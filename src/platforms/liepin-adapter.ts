@@ -2694,6 +2694,70 @@ async function ensureLiepinHideViewedUnchecked(
   return true;
 }
 
+async function applyLiepinViewedFilterForExtraction(
+  page: Page,
+  deadline: number,
+  includeViewedCandidates?: boolean,
+): Promise<void> {
+  if (includeViewedCandidates) {
+    const clickedSearchButton = await clickLiepinSearchButtonIfHideViewedMissing(page, deadline, {
+      beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+    });
+    if (clickedSearchButton) {
+      await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+    }
+
+    await ensureLiepinHideViewedUnchecked(page, deadline, {
+      beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+    });
+    await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
+    if ((await waitForLiepinHideViewedState(page, deadline)).checked) {
+      await ensureLiepinHideViewedUnchecked(page, deadline, {
+        beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+      });
+      await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
+    }
+    await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+    return;
+  }
+
+  if (await clickLiepinSearchButtonIfHideViewedMissing(page, deadline, {
+    beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+  })) {
+    await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+  }
+  await ensureLiepinHideViewedChecked(page, deadline, {
+    beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+  });
+  await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
+  if (!(await waitForLiepinHideViewedState(page, deadline)).checked) {
+    await ensureLiepinHideViewedChecked(page, deadline, {
+      beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
+    });
+    await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
+  }
+  await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+}
+
+async function openLiepinDirectSearch(
+  page: Page,
+  keyword: string,
+  conditions: SearchCondition[],
+  options?: SearchWaitOptions,
+): Promise<Page> {
+  const deadline = createSearchDeadline(options);
+  const searchPage = await prepareLiepinSearchConditionPage(page, keyword, { ...options, deadline });
+  for (const condition of conditions) {
+    const result = await applyLiepinSearchCondition(searchPage, condition);
+    if (result.status !== 'applied') {
+      throw new Error(`Liepin direct search condition ${condition.kind} failed: ${result.message ?? result.status}`);
+    }
+  }
+
+  await applyLiepinViewedFilterForExtraction(searchPage, deadline, options?.includeViewedCandidates);
+  return searchPage;
+}
+
 async function waitForLiepinResumeDetailReady(page: Page, deadline = createDeadline()): Promise<void> {
   let lastError: unknown;
   const maxAttempts = Math.max(1, Math.ceil(remainingTime(deadline) / liepinDetailPollIntervalMs));
@@ -4048,44 +4112,10 @@ export const liepinAdapter: PlatformAdapter = {
     await waitForLiepinQuickSearchResults(page, deadline);
     await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
 
-    if (options?.includeViewedCandidates) {
-      const clickedSearchButton = await clickLiepinSearchButtonIfHideViewedMissing(page, deadline, {
-        beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
-      });
-      if (clickedSearchButton) {
-        await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
-      }
-
-      const clickedHideViewed = await ensureLiepinHideViewedUnchecked(page, deadline, {
-        beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
-      });
-      await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
-      if ((await waitForLiepinHideViewedState(page, deadline)).checked) {
-        await ensureLiepinHideViewedUnchecked(page, deadline, {
-          beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
-        });
-        await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
-      }
-      await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
-      return page;
-    }
-
-    if (await clickLiepinSearchButtonIfHideViewedMissing(page, deadline)) {
-      await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
-    }
-    const clickedHideViewed = await ensureLiepinHideViewedChecked(page, deadline, {
-      beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
-    });
-    await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
-    if (!(await waitForLiepinHideViewedState(page, deadline)).checked) {
-      await ensureLiepinHideViewedChecked(page, deadline, {
-        beforeClick: () => clearObservedLiepinSearchResumesApiBeforeNextAction(page),
-      });
-      await waitForLiepinFinalSearchResumesOrEmptyResults(page, deadline);
-    }
-    await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+    await applyLiepinViewedFilterForExtraction(page, deadline, options?.includeViewedCandidates);
     return page;
   },
+  openDirectSearch: openLiepinDirectSearch,
   prepareSearchConditionPage: prepareLiepinSearchConditionPage,
   discoverSearchFilters: discoverLiepinSearchFilters,
   readSearchConditionResultTotal: readLiepinSearchConditionResultTotal,

@@ -371,7 +371,7 @@ export async function clear51jobViewedFilter(page: Page, options?: SearchWaitOpt
   await set51jobViewedFilterChecked(page, false, options);
 }
 
-async function ensure51jobViewedFilterChecked(page: Page, options?: SearchWaitOptions): Promise<void> {
+export async function ensure51jobViewedFilterChecked(page: Page, options?: SearchWaitOptions): Promise<void> {
   await set51jobViewedFilterChecked(page, true, options);
 }
 
