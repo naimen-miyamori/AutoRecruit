@@ -12,6 +12,7 @@ const SKILL_KEYWORDS = ['渠道销售', '门店/柜台销售', '会展销售', '
 const NOISE_PATTERNS = [/^声明：/, /^相似人才/, /^立即Hi聊$/, /^不感兴趣$/, /^操作动态$/, /^发送$/, /^聊$/, /^天$/, /^举报$/, /^---$/, /^✅/, /^🎯/, /^🌍/, /^🛠️/, /^项目内容[:：]?$/, /^项目成果[:：]?$/, /^成果[:：]?$/, /^候选人似乎处于离职状态/, /^您可对候选人的在职状态进行相关询问/];
 const ROLE_LINE_PATTERNS = ['工程师', '主管', '经理', '总监', '专员', '销售', '顾问', '运营', '业务员', '主任', '检验员', '项目', '教师', '助理'];
 const detailContentPollIntervalMs = 500;
+const detailClickTriggerTimeoutMs = 3000;
 const COMPANY_EXCLUDE_PATTERNS = [
   /^\d+[、.]/,
   /^[-–—]+/,
@@ -1693,6 +1694,10 @@ function remainingTime(deadline: number): number {
   return Math.max(deadline - Date.now(), 1);
 }
 
+function createAttemptDeadline(deadline: number, timeoutMs: number): number {
+  return Math.min(deadline, Date.now() + Math.max(timeoutMs, 1));
+}
+
 function isTimeoutLikeError(error: unknown): boolean {
   return error instanceof Error && /timeout|timed out/i.test(error.message);
 }
@@ -1746,8 +1751,12 @@ async function waitForResumeDetailAfterClick(
   previousUrl: string,
   deadline: number,
   clickAction: () => Promise<void>,
+  options: { triggerTimeoutMs?: number } = {},
 ): Promise<Page | null> {
-  const popupPromise = requireResumeDetailPage(context.waitForEvent('page', { timeout: remainingTime(deadline) })
+  const triggerDeadline = options.triggerTimeoutMs === undefined
+    ? deadline
+    : createAttemptDeadline(deadline, options.triggerTimeoutMs);
+  const popupPromise = requireResumeDetailPage(context.waitForEvent('page', { timeout: remainingTime(triggerDeadline) })
     .then(async (popup) => {
       await popup.waitForLoadState('domcontentloaded');
       const readyPage = await waitForResumeDetailReadyCandidate(popup, candidateId, deadline);
@@ -1762,12 +1771,12 @@ async function waitForResumeDetailAfterClick(
     ? requireResumeDetailPage(waitForFunction(
       (url) => window.location.href !== url,
       previousUrl,
-      { timeout: remainingTime(deadline), polling: 100 },
+      { timeout: remainingTime(triggerDeadline), polling: 100 },
     )
       .then(async () => waitForResumeDetailReadyCandidate(page, candidateId, deadline))
       .catch(() => null))
     : undefined;
-  const currentPageContentPromise = requireResumeDetailPage(waitForResumeDetailReadyCandidate(page, candidateId, deadline).catch(() => null));
+  const currentPageContentPromise = requireResumeDetailPage(waitForResumeDetailReadyCandidate(page, candidateId, triggerDeadline).catch(() => null));
   const readyPromise = Promise.any([
     popupPromise,
     ...(currentPageNavigationPromise ? [currentPageNavigationPromise] : []),
@@ -1844,13 +1853,16 @@ export async function openResumeDetail(context: BrowserContext, page: Page, cand
 
   const card = trigger.locator('xpath=ancestor::*[contains(@class, "card") or self::li][1]');
   const clickableLocators = [
-    card.locator('.img img, img[alt*="头像"], img[src*="avatar"]').first(),
-    card.locator('.user').first(),
+    card.locator('.name').first(),
+    card.locator('.detail').first(),
+    card.locator('.firstline').first(),
     card.locator('.userinfo').first(),
     card.locator('.info_content').first(),
+    card.locator('.user').first(),
+    card.locator('.img img, img[alt*="头像"], img[src*="avatar"]').first(),
+    card.locator('.company_name').first(),
+    card.locator('.job_name').first(),
     card.locator('.info').first(),
-    card.locator('.detail').first(),
-    card.locator('[class*="name"]').first(),
     card.locator('[class*="job"]').first(),
     card.locator('[class*="company"]').first(),
     card,
@@ -1871,6 +1883,7 @@ export async function openResumeDetail(context: BrowserContext, page: Page, cand
         previousUrl,
         deadline,
         () => clickPlatformLocator(locator, page, '51job', remainingTime(deadline), { force: true }),
+        { triggerTimeoutMs: detailClickTriggerTimeoutMs },
       );
       if (detailPage) {
         return detailPage;

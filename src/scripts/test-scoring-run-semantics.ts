@@ -1737,7 +1737,7 @@ describe('scoring run semantics', () => {
     const result = await openResumeDetail(detailPage.context, detailPage.page, candidate);
 
     assert.equal(result, detailPage.page);
-    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.img img, img[alt*="头像"], img[src*="avatar"]']);
+    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.name']);
     assert.deepStrictEqual(detailPage.getGotoCalls(), []);
     assert.equal(candidate.resumeUrl, 'https://example.com/resume/100228050');
     assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
@@ -1754,7 +1754,7 @@ describe('scoring run semantics', () => {
     const result = await openResumeDetail(detailPage.context, detailPage.page, candidate);
 
     assert.equal(result, detailPage.page);
-    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.img img, img[alt*="头像"], img[src*="avatar"]']);
+    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.name']);
     assert.deepStrictEqual(detailPage.getGotoCalls(), []);
     assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
   });
@@ -1771,7 +1771,7 @@ describe('scoring run semantics', () => {
     const result = await openResumeDetail(detailPage.context, detailPage.page, candidate);
 
     assert.equal(result, detailPage.page);
-    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.img img, img[alt*="头像"], img[src*="avatar"]']);
+    assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.name']);
     assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
   });
 
