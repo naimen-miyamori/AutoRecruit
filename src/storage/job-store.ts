@@ -198,6 +198,35 @@ export class JobStore {
     return filePath;
   }
 
+  async readCandidateResume(platform: SupportedPlatform, jobKey: string, candidateId: string): Promise<CandidateResume> {
+    const { resumesDir } = this.getJobPaths(platform, jobKey);
+    return readJsonFile<CandidateResume>(path.join(resumesDir, `${candidateId}.json`));
+  }
+
+  async readCandidateSnapshotIfExists(platform: SupportedPlatform, jobKey: string, candidateId: string): Promise<string | undefined> {
+    const { snapshotsDir } = this.getJobPaths(platform, jobKey);
+
+    try {
+      return await fs.readFile(path.join(snapshotsDir, `${candidateId}.txt`), 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+
+      throw error;
+    }
+  }
+
+  async saveCandidateResumeDocx(platform: SupportedPlatform, jobKey: string, fileName: string, content: Buffer): Promise<string> {
+    const paths = await this.initializeJob(platform, jobKey);
+    const resumeExportsDir = path.join(paths.exportsDir, 'resumes');
+    await ensureDir(resumeExportsDir);
+
+    const filePath = path.join(resumeExportsDir, fileName);
+    await fs.writeFile(filePath, content);
+    return filePath;
+  }
+
   async saveCandidateScoreArtifact(platform: SupportedPlatform, jobKey: string, scoreArtifact: CandidateScoreArtifact): Promise<string> {
     const paths = await this.initializeJob(platform, jobKey);
     const filePath = path.join(paths.scoresDir, `${scoreArtifact.candidateId}.json`);

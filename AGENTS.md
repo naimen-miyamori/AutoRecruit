@@ -136,6 +136,8 @@ Offline maintenance:
 - `rtk npm run reparse:resumes -- <platform> <jobKey>`
 - `rtk npm run score:stored -- <platform> <jobKey>`
 - `rtk npm run export:results -- <platform> <jobKey>`
+- `rtk npm run export:resume-docx -- --platform <platform> <jobKey> <candidateId> [--template /path/to/template.docx] [--output /path/to/resume.docx]`
+- `rtk npm run export:resume-docx -- --resume-file ./resume.json [--snapshot-file ./snapshot.txt] [--template /path/to/template.docx] [--output /path/to/resume.docx]`
 - `rtk npm run migrate:platform-storage`
 - `rtk npm run validate:resumes`
 - `rtk npm run capture:resume-dom -- --platform <platform> <jobKey> <searchKeyword> <candidateId>`
@@ -164,6 +166,7 @@ Platform-specific regression command names keep `experimental` for compatibility
 - `src/search/filter-catalog.ts` - shared search-filter catalog types and discovery result schema.
 - `src/search/filter-dom.ts` - pure DOM scanning helpers for search-filter discovery.
 - `src/search/filter-discovery.ts` - standalone Playwright-based search-filter discovery runner.
+- `src/reporting/resume-docx.ts` - DOCX resume rendering from `/Users/Admin/Downloads/简历模板.docx`, including template photo-slot handling.
 - `src/storage/job-store.ts` - JSON-backed persistence.
 - `src/scripts/*.ts` - offline debug, export, email, reparse, login, migration, and smoke utilities.
 - `项目说明文档.md` - higher-level usage, architecture, and operational notes.
@@ -180,6 +183,7 @@ Each job lives under `data/<platform>/jobs/<jobKey>/`:
 - `scores/<candidateId>.json` - score artifact, including failed scoring artifacts.
 - `results/<timestamp>.json` - lightweight run summary.
 - `exports/latest.md` - latest markdown report.
+- `exports/resumes/<candidateId>-<name>.docx` - optional DOCX resume rendered from the local template by `export:resume-docx`.
 
 Legacy top-level `data/jobs/` content may exist. `rtk npm run migrate:platform-storage` moves legacy jobs into `data/51job/jobs/`, backfills missing platform fields, and must not overwrite existing target job directories.
 
@@ -195,3 +199,5 @@ Search-filter discovery outputs live outside job directories:
 Preserve original field text where possible. Use page-structure cues instead of rewriting resume content or splitting same-company multi-role histories into invented records.
 
 The parser combines whole-page section slicing, DOM work-history snapshots, and Chinese-language heuristics for company names, titles, industries, durations, schools, and noisy UI text. Keep changes narrow and covered by focused tests or stored-snapshot validation when possible.
+
+DOCX resume export is an offline maintenance path, not part of normal capture/scoring/email orchestration. The default template is `/Users/Admin/Downloads/简历模板.docx`; stored-resume exports write under `data/<platform>/jobs/<jobKey>/exports/resumes/` unless `--output` or `--output-dir` is provided. Candidate photos may be embedded only from the candidate's own detail-page avatar evidence. Do not use platform default avatars, school images, logos/icons, SVG assets, or similar-candidate photos; if the real avatar cannot be confidently identified or downloaded, omit the photo rather than inserting the template sample or another person's image.
