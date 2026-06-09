@@ -30,6 +30,19 @@ async function makeIsolatedTempDir(): Promise<string> {
   return tempDir;
 }
 
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
 function setIsolatedDataDir(tempDir: string) {
   process.env.DATA_DIR = tempDir;
   (config as { dataDir: string }).dataDir = tempDir;
@@ -4892,6 +4905,184 @@ describe('scoring run semantics', () => {
     });
 
     assert.equal(parsedText, '职位名称：测试注入解析器');
+  });
+
+  it('answers candidate questions from a stored JD without browser work or JD reparsing', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = buildJobKey('东南亚 销售', buildNormalizedJob().title);
+    const questionInputs: Array<{ platform: string; jobKey: string; question: string }> = [];
+    let browserCalls = 0;
+    let parseCalls = 0;
+
+    await store.saveJobRecord('51job', {
+      jobKey,
+      platform: '51job',
+      searchKeyword: '东南亚 销售',
+      rawText: '职位名称：东南亚销售经理\n薪资范围：15-25K',
+      normalizedJob: {
+        ...buildNormalizedJob(),
+        salaryRange: { raw: '15-25K' },
+      },
+      createdAt: '2026-04-01T00:00:00.000Z',
+    });
+
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => {
+      browserCalls += 1;
+      throw new Error('browser should not start in JD question mode');
+    };
+    indexModule.parseJobDescriptionRef.fn = async () => {
+      parseCalls += 1;
+      throw new Error('JD parser should not run for stored JD question mode');
+    };
+    indexModule.answerCandidateQuestionFromJdRef.fn = async () => {
+      throw new Error('lightweight JD fallback should not run for stored JD question mode');
+    };
+    indexModule.answerQuestionWithRagRef.fn = async (input) => {
+      questionInputs.push({
+        platform: input.platform,
+        jobKey: input.jobKey,
+        question: input.question,
+      });
+      return {
+        answer: '该岗位薪资范围为15-25K。',
+        sources: [{
+          id: 'job-summary',
+          label: '结构化 JD 摘要',
+          text: '薪资：15-25K',
+          score: 10,
+          sourceType: 'jd',
+          sourceId: 'jd-v1',
+          chunkId: 'job-summary',
+          verified: true,
+          active: true,
+        }],
+      };
+    };
+
+    const output = await captureConsole(async () => {
+      await indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        '东南亚 销售',
+        '--jd-question',
+        '这个岗位薪资是多少？',
+      ]);
+    });
+
+    const summary = JSON.parse(output.stdout.at(-1) ?? '{}') as {
+      platform?: string;
+      jobKey?: string;
+      question?: string;
+      answer?: string;
+      sources?: unknown[];
+    };
+
+    assert.equal(browserCalls, 0);
+    assert.equal(parseCalls, 0);
+    assert.deepStrictEqual(questionInputs, [{
+      platform: '51job',
+      jobKey,
+      question: '这个岗位薪资是多少？',
+    }]);
+    assert.equal(summary.platform, '51job');
+    assert.equal(summary.jobKey, jobKey);
+    assert.equal(summary.question, '这个岗位薪资是多少？');
+    assert.equal(summary.answer, '该岗位薪资范围为15-25K。');
+    assert.equal(summary.sources?.length, 1);
+  });
+
+  it('answers candidate questions from inline JD text without creating a job record', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const questionInputs: Array<{ rawJdText: string; normalizedTitle?: string }> = [];
+
+    indexModule.parseJobDescriptionRef.fn = async () => {
+      throw new Error('JD parser should not run for inline JD question mode');
+    };
+    indexModule.answerCandidateQuestionFromJdRef.fn = async (input) => {
+      questionInputs.push({
+        rawJdText: input.rawJdText,
+        normalizedTitle: input.normalizedJob?.title,
+      });
+      return {
+        answer: 'JD中未说明。',
+        sources: [{ id: 'jd-1', label: 'JD 原文片段 1', text: input.rawJdText, score: 0 }],
+      };
+    };
+
+    await captureConsole(async () => {
+      await indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        '临时问答岗位',
+        '--jd',
+        '职位名称：临时问答岗位\n工作地点：上海',
+        '--rag-question',
+        '是否提供住宿？',
+      ]);
+    });
+
+    assert.deepStrictEqual(questionInputs, [{
+      rawJdText: '职位名称：临时问答岗位\n工作地点：上海',
+      normalizedTitle: undefined,
+    }]);
+    assert.equal(await store.readJobRecordIfExists('51job', '临时问答岗位'), undefined);
+    assert.equal(await pathExists(path.join(tempDir, '51job', 'jobs', '临时问答岗位', 'rag', 'answer-logs.jsonl')), false);
+  });
+
+  it('rejects capture-only switches in JD question mode before browser work starts', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    let browserCalls = 0;
+
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => {
+      browserCalls += 1;
+      throw new Error('browser should not start before JD question validation rejects');
+    };
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        '东南亚 销售',
+        '--jd-question',
+        '薪资多少？',
+        '--include-viewed',
+        'true',
+      ]),
+      /--jd-question cannot be combined .*--include-viewed/,
+    );
+    assert.equal(browserCalls, 0);
+  });
+
+  it('rejects empty JD questions before browser work starts', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    let browserCalls = 0;
+
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => {
+      browserCalls += 1;
+      throw new Error('browser should not start before empty JD question validation rejects');
+    };
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        '东南亚 销售',
+        '--jd-question',
+        '   ',
+      ]),
+      /--jd-question must be a non-empty string/,
+    );
+    assert.equal(browserCalls, 0);
   });
 
   it('keeps viewed candidates excluded by default when opening 51job search from the CLI', async () => {

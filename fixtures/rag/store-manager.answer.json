@@ -1,0 +1,70 @@
+{
+  "cases": [
+    {
+      "id": "salary-answer",
+      "question": "这个岗位薪资范围是多少？",
+      "expectedAnswerIncludes": ["税前8-12k", "年13薪以上", "五险一金"],
+      "forbiddenAnswerIncludes": ["15-25K", "面议"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "location-answer",
+      "question": "工作地点在哪里？",
+      "expectedAnswerIncludes": ["环贸店", "世博天地店"],
+      "forbiddenAnswerIncludes": ["远程", "全国"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "education-answer",
+      "question": "大专学历可以投递吗？",
+      "expectedAnswerIncludes": ["大专以上学历"],
+      "forbiddenAnswerIncludes": ["本科", "硕士"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "experience-answer",
+      "question": "需要什么行业经验？",
+      "expectedAnswerIncludes": ["3年以上", "零售或服装行业管理工作经验"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "language-answer",
+      "question": "需要英语吗？",
+      "expectedAnswerIncludes": ["普通话", "英语", "优先"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "responsibilities-answer",
+      "question": "这个店长岗位平时负责什么？",
+      "expectedAnswerIncludes": ["库存管理", "人员培训", "销售指标"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "schedule-answer",
+      "question": "这个岗位是否要接受排班？",
+      "expectedAnswerIncludes": ["弹性工作制", "不同班次"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "housing-allowance-answer",
+      "question": "这个岗位有住宿补贴吗？",
+      "expectedAnswerIncludes": ["每月800元住宿补贴"],
+      "expectedSourceTypes": ["conversation"],
+      "expectedConversationIds": ["hiring-policy"]
+    },
+    {
+      "id": "unverified-transport-allowance-answer",
+      "question": "这个岗位交通补贴是多少？",
+      "expectNoAnswer": true,
+      "expectedNoAnswerIncludes": ["未说明"],
+      "forbiddenAnswerIncludes": ["交通补贴每月500元", "500元"]
+    },
+    {
+      "id": "stock-options-answer",
+      "question": "公司是否提供股票期权？",
+      "expectNoAnswer": true,
+      "expectedNoAnswerIncludes": ["未说明"],
+      "forbiddenAnswerIncludes": ["提供股票期权", "有期权"]
+    }
+  ]
+}

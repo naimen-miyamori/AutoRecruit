@@ -1,0 +1,108 @@
+import fs from 'node:fs/promises';
+import { buildJobKey } from '../parsers/jd-parser.js';
+import { parsePlatformArg } from '../platforms/registry.js';
+import { evaluateRagJob, normalizeRagEvalCases } from '../rag/eval.js';
+
+interface Args {
+  platform: ReturnType<typeof parsePlatformArg>;
+  jobKey?: string;
+  keyword?: string;
+  evalFile?: string;
+  topK?: number;
+  denseTopK?: number;
+  keywordTopK?: number;
+  failOnMismatch: boolean;
+}
+
+function parseOptionalPositiveInteger(value: string | undefined, flagName: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${flagName} must be a positive integer`);
+  }
+
+  return parsed;
+}
+
+function parseBoolean(value: string | undefined, flagName: string, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  if (value === 'true') {
+    return true;
+  }
+
+  if (value === 'false') {
+    return false;
+  }
+
+  throw new Error(`${flagName} must be true or false`);
+}
+
+function parseArgs(argv: string[]): Args {
+  const values = new Map<string, string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (!arg.startsWith('--')) {
+      continue;
+    }
+
+    const value = argv[index + 1];
+    if (!value || value.startsWith('--')) {
+      throw new Error(`Missing value for ${arg}`);
+    }
+
+    values.set(arg.slice(2), value);
+    index += 1;
+  }
+
+  return {
+    platform: parsePlatformArg(values.get('platform')),
+    jobKey: values.get('job-key'),
+    keyword: values.get('keyword'),
+    evalFile: values.get('eval-file'),
+    topK: parseOptionalPositiveInteger(values.get('top-k'), '--top-k'),
+    denseTopK: parseOptionalPositiveInteger(values.get('dense-top-k'), '--dense-top-k'),
+    keywordTopK: parseOptionalPositiveInteger(values.get('keyword-top-k'), '--keyword-top-k'),
+    failOnMismatch: parseBoolean(values.get('fail-on-mismatch'), '--fail-on-mismatch', true),
+  };
+}
+
+async function readEvalCases(filePath: string): Promise<ReturnType<typeof normalizeRagEvalCases>> {
+  const payload = JSON.parse(await fs.readFile(filePath, 'utf8')) as unknown;
+  return normalizeRagEvalCases(payload);
+}
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+  const jobKey = args.jobKey ?? (args.keyword ? buildJobKey(args.keyword, '') : undefined);
+
+  if (!jobKey || !args.evalFile) {
+    throw new Error('Usage: npm run rag:eval -- --platform <platform> --keyword "<keyword>" --eval-file ./rag-eval.json');
+  }
+
+  const summary = await evaluateRagJob({
+    platform: args.platform,
+    jobKey,
+    cases: await readEvalCases(args.evalFile),
+    topK: args.topK,
+    denseTopK: args.denseTopK,
+    keywordTopK: args.keywordTopK,
+  });
+  console.log(JSON.stringify(summary, null, 2));
+
+  if (args.failOnMismatch && summary.failedCount > 0) {
+    process.exitCode = 1;
+  }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

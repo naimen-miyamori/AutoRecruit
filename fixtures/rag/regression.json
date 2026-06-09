@@ -1,0 +1,11 @@
+{
+  "items": [
+    {
+      "id": "51job-store-manager-baseline",
+      "platform": "51job",
+      "jobKey": "优衣库",
+      "retrievalEvalFile": "./store-manager.retrieval.json",
+      "answerEvalFile": "./store-manager.answer.json"
+    }
+  ]
+}

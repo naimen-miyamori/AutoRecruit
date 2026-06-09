@@ -1,0 +1,65 @@
+{
+  "cases": [
+    {
+      "id": "salary",
+      "question": "这个岗位薪资范围是多少？",
+      "expectedTextIncludes": ["税前8-12k", "年13薪以上", "五险一金"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "location",
+      "question": "工作地点在哪里？",
+      "expectedTextIncludes": ["环贸店或世博天地店"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "education",
+      "question": "学历要求是什么？",
+      "expectedTextIncludes": ["大专以上学历"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "experience",
+      "question": "需要几年零售或服装行业管理经验？",
+      "expectedTextIncludes": ["3年以上零售或服装行业管理工作经验"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "language",
+      "question": "这个岗位对语言有什么要求？",
+      "expectedTextIncludes": ["能流利地使用普通话", "懂英语书面和口头表达优先"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "responsibilities",
+      "question": "店长主要负责哪些工作？",
+      "expectedTextIncludes": ["库存管理", "人员培训", "带领团队完成销售指标"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "schedule",
+      "question": "是否接受不同班次或弹性工作制？",
+      "expectedTextIncludes": ["接受弹性工作制和不同班次的安排"],
+      "expectedSourceTypes": ["jd"]
+    },
+    {
+      "id": "housing-allowance",
+      "question": "这个岗位有住宿补贴吗？",
+      "expectedTextIncludes": ["每月800元住宿补贴"],
+      "expectedSourceTypes": ["conversation"],
+      "expectedConversationIds": ["hiring-policy"]
+    },
+    {
+      "id": "unverified-transport-allowance",
+      "question": "这个岗位交通补贴是多少？",
+      "expectNoAnswer": true,
+      "unexpectedTextIncludes": ["交通补贴每月500元"]
+    },
+    {
+      "id": "stock-options",
+      "question": "公司是否提供股票期权？",
+      "expectNoAnswer": true,
+      "unexpectedTextIncludes": ["股票期权"]
+    }
+  ]
+}

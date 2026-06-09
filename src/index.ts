@@ -10,6 +10,8 @@ import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
 import type { CandidatePostOpenActions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
+import { answerCandidateQuestionFromJd, toJdRagSources, type JdRagSource } from './rag/jd-question-answering.js';
+import { answerQuestionWithRag } from './rag/service.js';
 import { buildApplicationFilterConditions, loadApplicationFilterInputFile, loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
 import { scoreResumeAgainstJob } from './scoring/score-resume.js';
 import { exportJobResults, type ExportJobResultsSummary } from './scripts/export-job-results.js';
@@ -68,11 +70,20 @@ interface SearchSubscriptionCliInput {
   savedSearchName?: string;
 }
 
+interface JdQuestionCliInput {
+  mode: 'jd-question';
+  platform: CliPlatformSelection;
+  keyword?: string;
+  jobDescriptionText?: string;
+  jobDescriptionFilePath?: string;
+  question: string;
+}
+
 interface BatchRunnableJobInput extends RunnableJobInput {
   sourceIndex: number;
 }
 
-type CliInput = SingleJobCliInput | BatchCliInput | SearchSubscriptionCliInput;
+type CliInput = SingleJobCliInput | BatchCliInput | SearchSubscriptionCliInput | JdQuestionCliInput;
 
 interface SinglePlatformCliInput extends ReportDeliveryOptions {
   platform: SupportedPlatform;
@@ -113,7 +124,24 @@ export interface BatchJobRunSummary {
   summary: MainRunSummary;
 }
 
-export type MainResult = MainRunSummary | AllPlatformsRunSummary[] | BatchJobRunSummary[] | SearchSubscriptionSummary | SearchSubscriptionSummary[];
+export interface JdQuestionRunSummary {
+  platform: SupportedPlatform;
+  jobKey?: string;
+  question: string;
+  answer: string;
+  sources: JdRagSource[];
+  answered?: boolean;
+  confidence?: number;
+  noAnswerReason?: string;
+}
+
+export type MainResult = MainRunSummary
+  | AllPlatformsRunSummary[]
+  | BatchJobRunSummary[]
+  | SearchSubscriptionSummary
+  | SearchSubscriptionSummary[]
+  | JdQuestionRunSummary
+  | JdQuestionRunSummary[];
 
 export const parseJobDescriptionRef = { fn: parseJobDescription };
 export const extractionBoundary = createProductionExtractionBoundary();
@@ -140,6 +168,8 @@ export const ensureAuthenticatedBrowserSessionRef = { fn: ensureAuthenticatedBro
 export const closeBrowserSessionRef = { fn: closeBrowserSession };
 export const runSearchSubscriptionWorkflowRef = { fn: runSearchSubscriptionWorkflow };
 export const waitPlatformCandidatePaceRef = { fn: waitPlatformCandidatePace };
+export const answerCandidateQuestionFromJdRef = { fn: answerCandidateQuestionFromJd };
+export const answerQuestionWithRagRef = { fn: answerQuestionWithRag };
 export { JobStore };
 
 export function resolvePlatformAdapter(platform: SupportedPlatform): PlatformAdapter {
@@ -325,6 +355,8 @@ function parseArgs(argv: readonly string[]): CliInput {
     ? parseOptionalBoolean(values.get('save-search-subscription'), '--save-search-subscription')
     : false;
   const searchSubscriptionName = values.get('search-subscription-name');
+  const hasJdQuestion = flagPresence.has('jd-question') || flagPresence.has('rag-question');
+  const jdQuestion = values.get('jd-question') ?? values.get('rag-question');
   const includeViewedCandidates = flagPresence.has('include-viewed')
     ? parseOptionalBoolean(values.get('include-viewed'), '--include-viewed')
     : false;
@@ -342,6 +374,37 @@ function parseArgs(argv: readonly string[]): CliInput {
     if (platform !== 'liepin' && platform !== 'all') {
       throw new Error('--liepin-forward-contact can only be used with --platform liepin or --platform all');
     }
+  }
+
+  if (hasJdQuestion) {
+    if (flagPresence.has('jd-question') && flagPresence.has('rag-question')) {
+      throw new Error('--jd-question and --rag-question are aliases; provide only one');
+    }
+
+    if (!jdQuestion?.trim()) {
+      throw new Error('--jd-question must be a non-empty string');
+    }
+
+    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || saveSearchSubscription || searchSubscriptionName) {
+      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --liepin-forward-contact, --search-source, --application-filter-input-file, --save-search-subscription, or --search-subscription-name');
+    }
+
+    if (jobDescriptionText && jobDescriptionFilePath) {
+      throw new Error('Arguments --jd and --jd-file are mutually exclusive');
+    }
+
+    if (!searchKeyword && !jobDescriptionText && !jobDescriptionFilePath) {
+      throw new Error('--jd-question requires --keyword for a stored JD or new JD input through --jd/--jd-file');
+    }
+
+    return {
+      mode: 'jd-question',
+      platform,
+      keyword: searchKeyword,
+      jobDescriptionText,
+      jobDescriptionFilePath,
+      question: jdQuestion.trim(),
+    };
   }
 
   if (searchSubscriptionFilePath) {
@@ -802,8 +865,84 @@ async function runSearchSubscription(input: SearchSubscriptionCliInput): Promise
   return result;
 }
 
+async function resolveJdQuestionContext(
+  platform: SupportedPlatform,
+  input: JdQuestionCliInput,
+  store: JobStore,
+): Promise<{ jobKey?: string; rawText: string; normalizedJob?: NormalizedJob; stored: boolean }> {
+  const keyword = input.keyword?.trim();
+  const jobKey = keyword ? buildJobKey(keyword, '') : undefined;
+  const existingJobRecord = jobKey ? await store.readJobRecordIfExists(platform, jobKey) : undefined;
+
+  if (existingJobRecord) {
+    return {
+      jobKey,
+      rawText: existingJobRecord.rawText,
+      normalizedJob: existingJobRecord.normalizedJob,
+      stored: true,
+    };
+  }
+
+  if (!input.jobDescriptionText && !input.jobDescriptionFilePath) {
+    throw new Error(`Missing stored JD for ${platform}${jobKey ? ` job key ${jobKey}` : ''}; provide --jd or --jd-file`);
+  }
+
+  const rawText = input.jobDescriptionText ?? await readFile(input.jobDescriptionFilePath!, 'utf8');
+
+  return {
+    jobKey,
+    rawText,
+    stored: false,
+  };
+}
+
+async function runJdQuestion(input: JdQuestionCliInput): Promise<JdQuestionRunSummary | JdQuestionRunSummary[]> {
+  const store = new JobStore();
+  const summaries: JdQuestionRunSummary[] = [];
+
+  for (const platform of listSelectedPlatforms(input.platform)) {
+    const context = await resolveJdQuestionContext(platform, input, store);
+    const answer = context.stored && context.jobKey
+      ? await answerQuestionWithRagRef.fn({
+        platform,
+        jobKey: context.jobKey,
+        question: input.question,
+      }).then((ragAnswer) => ({
+        answer: ragAnswer.answer,
+        sources: toJdRagSources(ragAnswer.sources),
+        answered: ragAnswer.answered,
+        confidence: ragAnswer.confidence,
+        noAnswerReason: ragAnswer.noAnswerReason,
+      }))
+      : await answerCandidateQuestionFromJdRef.fn({
+        rawJdText: context.rawText,
+        normalizedJob: context.normalizedJob,
+        question: input.question,
+      });
+
+    summaries.push({
+      platform,
+      jobKey: context.jobKey,
+      question: input.question,
+      answer: answer.answer,
+      sources: answer.sources,
+      answered: answer.answered,
+      confidence: answer.confidence,
+      noAnswerReason: answer.noAnswerReason,
+    });
+  }
+
+  const result = input.platform === 'all' ? summaries : summaries[0];
+  console.log(JSON.stringify(result, null, 2));
+  return result;
+}
+
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<MainResult> {
   const input = parseArgs(argv);
+
+  if (input.mode === 'jd-question') {
+    return runJdQuestion(input);
+  }
 
   if (input.mode === 'search-subscription') {
     return runSearchSubscription(input);

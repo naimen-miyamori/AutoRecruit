@@ -1,0 +1,13 @@
+{
+  "minReviewRate": 0.8,
+  "minCorrectRate": 0.9,
+  "maxIncorrectRate": 0.1,
+  "maxNoAnswerRate": 0.3,
+  "maxLowConfidenceRate": 0.2,
+  "maxMissingSourcesRate": 0.05,
+  "maxErrorTypeRates": {
+    "unsupported_claim": 0.2,
+    "bad_source": 0.2,
+    "unspecified": 0.1
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "turns": [
+    {
+      "id": "turn-1",
+      "role": "candidate",
+      "content": "这个岗位有住宿或住宿补贴吗？",
+      "createdAt": "2026-06-02T09:00:00.000Z"
+    },
+    {
+      "id": "turn-2",
+      "role": "recruiter",
+      "content": "该店长岗位可以提供每月800元住宿补贴，具体发放以入职确认政策为准。",
+      "verified": true,
+      "createdAt": "2026-06-02T09:01:00.000Z"
+    },
+    {
+      "id": "turn-3",
+      "role": "candidate",
+      "content": "那交通补贴呢？",
+      "createdAt": "2026-06-02T09:02:00.000Z"
+    },
+    {
+      "id": "turn-4",
+      "role": "recruiter",
+      "content": "交通补贴每月500元，待招聘负责人确认后再回复。",
+      "verified": false,
+      "createdAt": "2026-06-02T09:03:00.000Z"
+    }
+  ]
+}
