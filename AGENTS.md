@@ -73,6 +73,10 @@ Detail opening should follow the same total-deadline style across platforms. For
 - Node 26 is supported through `scripts/node-ts-hooks.mjs`; runtime scripts do not rely on `tsx`.
 - Environment variables are loaded by `dotenv` in `src/config.ts`.
 - `OPENAI_API_KEY` is required for JD parsing and resume scoring. `OPENAI_BASE_URL`, `OPENAI_MODEL`, `JD_PARSING_MODEL`, and `SCORING_MODEL` can override model routing.
+- RAG answer generation uses `RAG_MODEL` only as an optional override; when it is unset, use `OPENAI_MODEL`. The current local setup should normally configure only `OPENAI_MODEL` for model routing.
+- Persisted RAG uses Qdrant plus local embeddings by default. `QDRANT_URL` points to Qdrant, `RAG_VECTOR_COLLECTION` defaults to `autorecruit_rag_chunks`, `RAG_EMBEDDING_PROVIDER` defaults to `local-http`, `RAG_EMBEDDING_LOCAL_URL` defaults to `http://127.0.0.1:8011`, and `RAG_EMBEDDING_MODEL` defaults to `BAAI/bge-small-zh-v1.5`. Set `RAG_EMBEDDING_PROVIDER=openai` only when intentionally switching embedding back to OpenAI.
+- The local embedding HTTP service can be run from source with `rtk npm run rag:embedding:local`. On this machine the long-running LaunchAgent setup uses `com.autorecruit.embedding`, runtime files under `~/.local/share/autorecruit/embedding/`, and logs under `~/.local/var/log/autorecruit/`. This runtime path intentionally avoids `~/Documents` because macOS background services may not reliably access Documents without extra privacy permissions.
+- For local RAG health checks, use `rtk launchctl list | rtk rg 'com\\.autorecruit\\.(qdrant|embedding)'`, `rtk curl -sSf http://127.0.0.1:6333/collections`, and `rtk curl -sSf http://127.0.0.1:8011/health`.
 - Browser auth uses platform-scoped Playwright storage state. Leave `STORAGE_STATE_PATH` unset for normal multi-platform runs so each platform uses its own default file.
 - If a saved session is missing or expired, headed runs may refresh through manual login and then verify the new session. Headless runs cannot refresh sessions and should error with instructions to rerun headed.
 - Browser launch engine defaults to CloakBrowser through `BROWSER_ENGINE=cloakbrowser`; set `BROWSER_ENGINE=playwright` to fall back to Playwright's bundled Chromium.
@@ -147,6 +151,28 @@ Offline maintenance:
 - `rtk npm run export:resume-docx -- --resume-file ./resume.json [--snapshot-file ./snapshot.txt] [--template /path/to/template.docx] [--output /path/to/resume.docx]`
 - `rtk npm run migrate:platform-storage`
 - `rtk npm run validate:resumes`
+
+RAG maintenance and diagnostics:
+
+- `rtk npm run rag:index -- --platform <platform> --keyword "<keyword>"`
+- `rtk npm run rag:ask -- --platform <platform> --keyword "<keyword>" --question "<question>"`
+- `rtk npm run rag:api -- --host 127.0.0.1 --port 3978`
+- `rtk npm run rag:ingest-conversation -- --platform <platform> --keyword "<keyword>" --conversation-id <id> --conversation-file ./conversation.jsonl`
+- `rtk npm run rag:ingest-conversations -- --file ./conversations.jsonl [--dry-run true] [--doctor true]`
+- `rtk npm run rag:inspect -- --platform <platform> --keyword "<keyword>" [--question "<question>"]`
+- `rtk npm run rag:doctor -- --platform <platform> --keyword "<keyword>" [--question "<question>"]`
+- `rtk npm run rag:doctor:batch -- --file ./rag-doctor-jobs.json [--fail-on-issue true]`
+- `rtk npm run rag:eval -- --platform <platform> --keyword "<keyword>" --eval-file ./rag-eval.json`
+- `rtk npm run rag:answer-eval -- --platform <platform> --keyword "<keyword>" --eval-file ./rag-answer-eval.json`
+- `rtk npm run rag:regression -- --suite-file ./fixtures/rag/regression.json`
+- `rtk npm run test:rag:offline`
+- `rtk npm run rag:review -- --platform <platform> --keyword "<keyword>" [--output ./rag-review.md]`
+- `rtk npm run rag:metrics -- --file ./rag-review-jobs.json [--output ./rag-metrics.json]`
+- `rtk npm run rag:ops -- --file ./rag-review-jobs.json [--policy ./rag-metrics-policy.json] [--fail-on-issue true]`
+- `rtk npm run rag:rebuild -- --platform <platform> --keyword "<keyword>"`
+
+Resume/debug maintenance:
+
 - `rtk npm run capture:resume-dom -- --platform <platform> <jobKey> <searchKeyword> <candidateId>`
 - `rtk npm run capture:resume-dom -- --platform <platform> <jobKey> <candidateId> <resumeUrl>`
 - `rtk node --import ./scripts/node-ts-hooks.mjs src/scripts/debug-work-lines.ts <platform> <jobKey> <candidateId>`
@@ -173,6 +199,7 @@ Platform-specific regression command names keep `experimental` for compatibility
 - `src/search/filter-catalog.ts` - shared search-filter catalog types and discovery result schema.
 - `src/search/filter-dom.ts` - pure DOM scanning helpers for search-filter discovery.
 - `src/search/filter-discovery.ts` - standalone Playwright-based search-filter discovery runner.
+- `src/rag/*.ts` - RAG fact storage, chunking, embeddings, Qdrant vector store, hybrid retrieval, answer generation, diagnostics, eval, review, metrics, ops, baseline, and regression logic.
 - `src/reporting/resume-docx.ts` - DOCX resume rendering from `/Users/Admin/Downloads/简历模板.docx`, including template photo-slot handling.
 - `src/storage/job-store.ts` - JSON-backed persistence.
 - `src/scripts/*.ts` - offline debug, export, email, reparse, login, migration, and smoke utilities.
@@ -191,6 +218,12 @@ Each job lives under `data/<platform>/jobs/<jobKey>/`:
 - `results/<timestamp>.json` - lightweight run summary.
 - `exports/latest.md` - latest markdown report.
 - `exports/resumes/<candidateId>-<name>.docx` - optional DOCX resume rendered from the local template by `export:resume-docx`.
+- `rag/sources.jsonl` - RAG fact source records, including JD and verified conversation sources.
+- `rag/chunks.jsonl` - RAG chunk records. Qdrant is a rebuildable index over these chunks.
+- `rag/embeddings.jsonl` - local embedding cache keyed by provider, model, and content hash.
+- `rag/conversations/<conversationId>.jsonl` - imported conversation turns, deduplicated by stable turn id.
+- `rag/index-manifest.json` - latest RAG index build summary, including embedding provider/model, vector store, and counts.
+- `rag/answer-logs.jsonl` - persisted candidate-facing RAG answers, confidence, sources, no-answer reasons, and human feedback. Temporary JD answers and offline eval/regression paths must not append this file.
 
 Legacy top-level `data/jobs/` content may exist. `rtk npm run migrate:platform-storage` moves legacy jobs into `data/51job/jobs/`, backfills missing platform fields, and must not overwrite existing target job directories.
 
