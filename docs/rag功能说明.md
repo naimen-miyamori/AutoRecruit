@@ -44,7 +44,7 @@ RAG 可以理解为“先查资料，再回答问题”。
 - 重新排序，把更可能回答问题的资料排到前面。
 - 可重建索引，Qdrant 数据可以从本地事实库重新生成。
 - 回答日志、人工反馈、审核报告、质量指标、Doctor 巡检和一键运营报告。
-- 回归评测、离线 CI 基线和产品化 HTTP API。
+- 回归评测、本地/CI 可用的离线基线和产品化 HTTP API。
 
 一句话概括：
 
@@ -1100,7 +1100,7 @@ rtk npm run test:rag:offline
 
 这套基线使用 `fixtures/rag/regression.json`，覆盖薪资、工作地点、学历、经验、语言要求、岗位职责、排班要求、已确认历史对话里的住宿补贴、未确认历史对话不能作为事实的负例，以及一个 JD 未说明的负例问题。`rag:baseline` 会先把 `fixtures/rag/jobs/51job/优衣库/jd.json` 写入本机 `data/51job/jobs/优衣库/jd.json`，并读取 `fixtures/rag/conversations/<platform>/<jobKey>/<conversationId>.json` 下的对话 fixture；随后调用 embedding 和 Qdrant 构建索引，最后运行回归 suite。默认配置下需要 `QDRANT_URL`，且本地 embedding 服务 `RAG_EMBEDDING_LOCAL_URL` 必须可访问；命令也会在写入数据前检查 Qdrant `/collections` 是否可访问。如果显式把 `RAG_EMBEDDING_PROVIDER` 切回 `openai`，才需要 `OPENAI_API_KEY` 参与 embedding。答案评测会调用回答模型，因此仍需要配置可用的 `OPENAI_API_KEY` 和 `OPENAI_MODEL`。默认不覆盖已有职位，除非显式传入 `--overwrite true`。
 
-`test:rag:offline` 是给 CI 和快速冒烟用的确定性版本，底层运行 `rag:baseline:offline -- --summary-only true`。它默认使用临时数据目录、内存向量库和固定算法生成的假 embedding，不需要 OpenAI、本地 embedding 服务或 Qdrant；它只验证 fixture 能否 seed、chunk、索引和完成召回评测，不生成最终回答，也不运行答案评测。CI 默认只打印紧凑摘要；需要完整 JSON 时，可以运行 `rag:baseline:offline -- --output-file tmp/rag-baseline-offline.json`，需要保留本次离线运行产物时再加 `--data-dir /path/to/debug-data`。
+`test:rag:offline` 是给本地快速冒烟和未来 CI 使用的确定性版本，底层运行 `rag:baseline:offline -- --summary-only true`。它默认使用临时数据目录、内存向量库和固定算法生成的假 embedding，不需要 OpenAI、本地 embedding 服务或 Qdrant；它只验证 fixture 能否 seed、chunk、索引和完成召回评测，不生成最终回答，也不运行答案评测。默认只打印紧凑摘要；需要完整 JSON 时，可以运行 `rag:baseline:offline -- --output-file tmp/rag-baseline-offline.json`，需要保留本次离线运行产物时再加 `--data-dir /path/to/debug-data`。
 
 底层命令也可以单独运行：
 
