@@ -299,14 +299,21 @@ test('zhilian adapter detects whether saved quick-search conditions are active',
   );
 });
 
-function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean; quickSearchCheckedAfterClick?: boolean }) {
+function createZhilianUnviewedFilterPageStub(options: {
+  unviewedChecked: boolean;
+  quickSearchCheckedAfterClick?: boolean;
+}) {
   const clickCalls: string[] = [];
   const waitForTimeoutCalls: number[] = [];
   let unviewedChecked = options.unviewedChecked;
   let quickSearchApplied = false;
   let now = 1000;
 
-  const unviewedFilterLocator = {
+  const createCheckboxFilterLocator = (
+    label: string,
+    isChecked: () => boolean,
+    toggleChecked: () => void,
+  ) => ({
     waitFor: async () => undefined,
     evaluate: async (callback: (element: HTMLElement) => boolean) => {
       const restoreHTMLElement = defineGlobalProperty('window', {});
@@ -343,7 +350,7 @@ function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean
       });
 
       try {
-        return callback(new HTMLElementStub(unviewedChecked ? 'km-checkbox km-checkbox--checked' : 'km-checkbox') as unknown as HTMLElement);
+        return callback(new HTMLElementStub(isChecked() ? 'km-checkbox km-checkbox--checked' : 'km-checkbox') as unknown as HTMLElement);
       } finally {
         if (originalHTMLElement === undefined) {
           delete (globalThis as { HTMLElement?: unknown }).HTMLElement;
@@ -369,13 +376,20 @@ function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean
       }
     },
     click: async () => {
-      clickCalls.push('未看过');
-      unviewedChecked = !unviewedChecked;
+      clickCalls.push(label);
+      toggleChecked();
     },
-  };
-  const unviewedFilterListLocator = {
-    filter: () => unviewedFilterListLocator,
-    first: () => unviewedFilterLocator,
+  });
+  const createCheckboxFilterListLocator = (
+    label: string,
+    isChecked: () => boolean,
+    toggleChecked: () => void,
+  ) => {
+    const locator = {
+      filter: () => locator,
+      first: () => createCheckboxFilterLocator(label, isChecked, toggleChecked),
+    };
+    return locator;
   };
 
   const page = {
@@ -397,7 +411,9 @@ function createZhilianUnviewedFilterPageStub(options: { unviewedChecked: boolean
       }
 
       if (selector.includes('未看过')) {
-        return unviewedFilterListLocator;
+        return createCheckboxFilterListLocator('未看过', () => unviewedChecked, () => {
+          unviewedChecked = !unviewedChecked;
+        });
       }
 
       if (selector.includes('未聊过')) {
@@ -2149,6 +2165,7 @@ test('zhilian adapter extracts candidate cards from DOM fallback', async () => {
       currentCompany: '上海测试科技有限公司',
       currentTitle: '海外销售经理',
       cardText: '李四 上海测试科技有限公司 海外销售经理',
+      searchResultIndex: 0,
       sourceText: 'https://rd6.zhaopin.com/resume/detail?resumeId=R654321 <a data-resume-id="R654321" href="https://rd6.zhaopin.com/resume/detail?resumeId=R654321">李四</a> <div>李四 上海测试科技有限公司 海外销售经理</div> 李四 上海测试科技有限公司 海外销售经理',
     },
   ]);
@@ -2199,6 +2216,202 @@ test('zhilian adapter extracts candidate cards from Vue props when no resume lin
       }),
     },
   ]);
+});
+
+test('zhilian adapter ignores related-talent recommendation cards after the boundary', async () => {
+  type FakeElement = {
+    textContent: string;
+    outerHTML: string;
+    previousSibling: FakeElement | null;
+    parentElement: FakeElement | null;
+    __vue__?: {
+      _props?: {
+        candidate?: Record<string, unknown>;
+      };
+    };
+  };
+
+  const root: FakeElement = {
+    textContent: '',
+    outerHTML: '<main></main>',
+    previousSibling: null,
+    parentElement: null,
+  };
+  const searchList: FakeElement = {
+    textContent: '',
+    outerHTML: '<section class="search-list"></section>',
+    previousSibling: null,
+    parentElement: root,
+  };
+  const boundary: FakeElement = {
+    textContent: '更多相关人才',
+    outerHTML: '<div class="related-title">更多相关人才</div>',
+    previousSibling: searchList,
+    parentElement: root,
+  };
+  const relatedList: FakeElement = {
+    textContent: '',
+    outerHTML: '<section class="related-list"></section>',
+    previousSibling: boundary,
+    parentElement: root,
+  };
+  const makeCard = (
+    parentElement: FakeElement,
+    previousSibling: FakeElement | null,
+    textContent: string,
+    candidate: Record<string, unknown>,
+  ): FakeElement => ({
+    textContent,
+    outerHTML: `<div class="search-resume-item-wrap">${textContent}</div>`,
+    previousSibling,
+    parentElement,
+    __vue__: {
+      _props: {
+        candidate,
+      },
+    },
+  });
+
+  const firstSearchCard = makeCard(searchList, null, '林女士\n泰国零售有限公司\n店长', {
+    userMasterId: 101,
+    userName: '林女士',
+    resumeNumber: 'search-resume-1',
+    workExperiences: [{ companyName: '泰国零售有限公司', jobTitle: '店长' }],
+  });
+  const secondSearchCard = makeCard(searchList, firstSearchCard, '周先生\n曼谷贸易有限公司\n运营经理', {
+    userMasterId: 102,
+    userName: '周先生',
+    resumeNumber: 'search-resume-2',
+    workExperiences: [{ companyName: '曼谷贸易有限公司', jobTitle: '运营经理' }],
+  });
+  const firstRelatedCard = makeCard(relatedList, null, '推荐一\n无关公司\n销售', {
+    userMasterId: 201,
+    userName: '推荐一',
+    resumeNumber: 'related-resume-1',
+    workExperiences: [{ companyName: '无关公司', jobTitle: '销售' }],
+  });
+  const secondRelatedCard = makeCard(relatedList, firstRelatedCard, '推荐二\n无关集团\n主管', {
+    userMasterId: 202,
+    userName: '推荐二',
+    resumeNumber: 'related-resume-2',
+    workExperiences: [{ companyName: '无关集团', jobTitle: '主管' }],
+  });
+
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 搜索条件 ·2 更多相关人才',
+        };
+      }
+
+      if (selector === '.search-resume-item-wrap') {
+        return {
+          evaluateAll: async (fn: (elements: Element[]) => unknown) => fn([
+            firstSearchCard,
+            secondSearchCard,
+            firstRelatedCard,
+            secondRelatedCard,
+          ] as unknown as Element[]),
+        };
+      }
+
+      return {
+        evaluateAll: async () => [],
+      };
+    },
+  } as never;
+
+  const result = await zhilianAdapter.extractCandidateList(page, { deadline: Date.now() + 1000 });
+
+  assert.deepEqual(result.candidates.map((candidate) => candidate.candidateId), ['101', '102']);
+  assert.deepEqual(result.candidates.map((candidate) => candidate.searchResultIndex), [0, 1]);
+});
+
+test('zhilian adapter treats recommendation-only related talent cards as zero search results', async () => {
+  type FakeElement = {
+    textContent: string;
+    outerHTML: string;
+    previousSibling: FakeElement | null;
+    parentElement: FakeElement | null;
+    __vue__?: {
+      _props?: {
+        candidate?: Record<string, unknown>;
+      };
+    };
+  };
+
+  const root: FakeElement = {
+    textContent: '',
+    outerHTML: '<main></main>',
+    previousSibling: null,
+    parentElement: null,
+  };
+  const boundary: FakeElement = {
+    textContent: '更多相关人才',
+    outerHTML: '<div class="related-title">更多相关人才</div>',
+    previousSibling: null,
+    parentElement: root,
+  };
+  const relatedList: FakeElement = {
+    textContent: '',
+    outerHTML: '<section class="related-list"></section>',
+    previousSibling: boundary,
+    parentElement: root,
+  };
+  const relatedCard: FakeElement = {
+    textContent: '推荐一\n无关公司\n销售',
+    outerHTML: '<div class="search-resume-item-wrap">推荐一 无关公司 销售</div>',
+    previousSibling: null,
+    parentElement: relatedList,
+    __vue__: {
+      _props: {
+        candidate: {
+          userMasterId: 201,
+          userName: '推荐一',
+          resumeNumber: 'related-resume-1',
+          workExperiences: [{ companyName: '无关公司', jobTitle: '销售' }],
+        },
+      },
+    },
+  };
+  let waitForResponseCalls = 0;
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async () => {
+      waitForResponseCalls += 1;
+      throw new Error('recommendation-only cards should not fall back to candidate API');
+    },
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 搜索条件 ·0 更多相关人才',
+        };
+      }
+
+      if (selector === '.search-resume-item-wrap') {
+        return {
+          evaluateAll: async (fn: (elements: Element[]) => unknown) => fn([relatedCard] as unknown as Element[]),
+        };
+      }
+
+      return {
+        evaluateAll: async () => [],
+      };
+    },
+  } as never;
+
+  const result = await zhilianAdapter.extractCandidateList(page, { deadline: Date.now() + 1000 });
+
+  assert.deepEqual(result, { candidates: [] });
+  assert.equal(waitForResponseCalls, 0);
 });
 
 test('zhilian adapter returns DOM candidates without waiting for the candidate API', async () => {

@@ -77,12 +77,22 @@ type ZhilianDomCandidateSnapshot = {
   containerOuterHtml: string;
   rawText: string;
   anchorText: string;
+  searchResultIndex?: number;
+  isRelatedRecommendation?: boolean;
 };
 
 type ZhilianVueCandidateSnapshot = {
   candidate?: ZhilianApiCandidate;
   rawText: string;
   containerOuterHtml: string;
+  searchResultIndex?: number;
+  isRelatedRecommendation?: boolean;
+};
+
+type ZhilianCollectedCards = {
+  candidates: CandidateListItem[];
+  sawSearchResultCards: boolean;
+  sawRelatedRecommendationCards: boolean;
 };
 
 const observedZhilianSearchApiCandidates = new WeakMap<Page, CandidateListItem[]>();
@@ -734,10 +744,14 @@ async function ensureZhilianUnviewedFilterCheckedForQuickSearch(page: Page, keyw
   }
 }
 
-async function isZhilianUnviewedFilterChecked(page: Page): Promise<boolean> {
-  const unviewedFilter = page.locator(zhilianUnviewedFilterSelector).filter({ visible: true }).first();
+async function isZhilianCheckboxFilterChecked(page: Page, selector: string): Promise<boolean> {
+  const filter = page.locator(selector).filter({ visible: true }).first();
+  const evaluate = (filter as Partial<Pick<typeof filter, 'evaluate'>>).evaluate?.bind(filter);
+  if (!evaluate) {
+    return false;
+  }
 
-  return unviewedFilter.evaluate((element) => {
+  return evaluate((element) => {
     if (!(element instanceof HTMLElement)) {
       return false;
     }
@@ -751,17 +765,31 @@ async function isZhilianUnviewedFilterChecked(page: Page): Promise<boolean> {
   }).catch(() => false);
 }
 
+async function isZhilianUnviewedFilterChecked(page: Page): Promise<boolean> {
+  return isZhilianCheckboxFilterChecked(page, zhilianUnviewedFilterSelector);
+}
+
 async function clearZhilianUnviewedFilter(page: Page, options?: SearchWaitOptions): Promise<boolean> {
-  return setZhilianUnviewedFilterChecked(page, false, options);
+  return setZhilianCheckboxFilterChecked(page, zhilianUnviewedFilterSelector, isZhilianUnviewedFilterChecked, false, options);
 }
 
 async function setZhilianUnviewedFilterChecked(page: Page, checked: boolean, options?: SearchWaitOptions): Promise<boolean> {
+  return setZhilianCheckboxFilterChecked(page, zhilianUnviewedFilterSelector, isZhilianUnviewedFilterChecked, checked, options);
+}
+
+async function setZhilianCheckboxFilterChecked(
+  page: Page,
+  selector: string,
+  isChecked: (page: Page) => Promise<boolean>,
+  checked: boolean,
+  options?: SearchWaitOptions,
+): Promise<boolean> {
   const deadline = createSearchDeadline(options);
   const waitUntil = Math.min(deadline, Date.now() + zhilianViewedFilterMaxWaitMs);
-  const unviewedFilter = page.locator(zhilianUnviewedFilterSelector).filter({ visible: true }).first();
+  const filter = page.locator(selector).filter({ visible: true }).first();
 
   try {
-    await unviewedFilter.waitFor({ state: 'visible', timeout: Math.max(1, waitUntil - Date.now()) });
+    await filter.waitFor({ state: 'visible', timeout: Math.max(1, waitUntil - Date.now()) });
   } catch {
     return false;
   }
@@ -770,13 +798,13 @@ async function setZhilianUnviewedFilterChecked(page: Page, checked: boolean, opt
   let stableSince: number | undefined;
 
   while (Date.now() < waitUntil) {
-    const currentChecked = await isZhilianUnviewedFilterChecked(page);
+    const currentChecked = await isChecked(page);
     if (currentChecked !== checked) {
       stableSince = undefined;
       clearObservedZhilianCandidateApi(page);
       try {
         await clickPlatformLocator(
-          unviewedFilter,
+          filter,
           page,
           zhilianPlatform,
           Math.min(1000, Math.max(1, waitUntil - Date.now())),
@@ -3411,6 +3439,10 @@ function parseZhilianDomCandidateSnapshots(snapshots: ZhilianDomCandidateSnapsho
   const resultById = new Map<string, CandidateListItem>();
 
   for (const snapshot of snapshots) {
+    if (snapshot.isRelatedRecommendation) {
+      continue;
+    }
+
     const rawText = snapshot.rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     const cardText = normalizeText(rawText);
     const sourceText = [snapshot.href, snapshot.anchorOuterHtml, snapshot.containerOuterHtml, cardText].filter(Boolean).join(' ');
@@ -3431,7 +3463,7 @@ function parseZhilianDomCandidateSnapshots(snapshots: ZhilianDomCandidateSnapsho
     const currentCompany = segments.find((line) => /公司|集团|科技|咨询|贸易|有限|股份|工业|制造|信息|电子|商贸/.test(line));
     const currentTitle = segments.find((line) => /工程师|经理|主管|顾问|销售|总监|专员|运营|设计师|分析师|店长|讲师/.test(line));
 
-    resultById.set(candidateId, {
+    const candidate: CandidateListItem = {
       candidateId,
       resumeUrl: snapshot.href || undefined,
       name,
@@ -3439,7 +3471,13 @@ function parseZhilianDomCandidateSnapshots(snapshots: ZhilianDomCandidateSnapsho
       currentTitle,
       cardText,
       sourceText,
-    });
+    };
+
+    if (snapshot.searchResultIndex !== undefined) {
+      candidate.searchResultIndex = snapshot.searchResultIndex;
+    }
+
+    resultById.set(candidateId, candidate);
   }
 
   return Array.from(resultById.values());
@@ -3449,6 +3487,10 @@ function parseZhilianVueCandidateSnapshots(snapshots: ZhilianVueCandidateSnapsho
   const candidatesById = new Map<string, CandidateListItem>();
 
   for (const [index, snapshot] of snapshots.entries()) {
+    if (snapshot.isRelatedRecommendation) {
+      continue;
+    }
+
     if (!snapshot.candidate) {
       continue;
     }
@@ -3465,47 +3507,97 @@ function parseZhilianVueCandidateSnapshots(snapshots: ZhilianVueCandidateSnapsho
       ...candidate,
       cardText,
       sourceText: JSON.stringify(snapshot.candidate),
-      searchResultIndex: index,
+      searchResultIndex: snapshot.searchResultIndex ?? index,
     });
   }
 
   return Array.from(candidatesById.values());
 }
 
-async function collectZhilianCards(page: Page): Promise<CandidateListItem[]> {
-  const vueSnapshots = await page.locator('.search-resume-item-wrap').evaluateAll((elements) => elements.map((element) => {
-    const maybeVueElement = element as Element & {
-      __vue__?: {
-        _props?: {
-          candidate?: ZhilianApiCandidate;
+async function collectZhilianCards(page: Page): Promise<ZhilianCollectedCards> {
+  const vueSnapshots = await page.locator('.search-resume-item-wrap').evaluateAll((elements) => {
+    const isAfterRelatedTalentBoundary = (element: Element): boolean => {
+      const hasBoundaryText = (text: string | null | undefined) => /更多\s*相关\s*人才/.test(text ?? '');
+      let current: Element | null = element;
+      while (current) {
+        let previous = current.previousSibling;
+        while (previous) {
+          if (hasBoundaryText(previous.textContent)) {
+            return true;
+          }
+          previous = previous.previousSibling;
+        }
+        current = current.parentElement;
+      }
+      return false;
+    };
+
+    return elements.map((element, index) => {
+      const maybeVueElement = element as Element & {
+        __vue__?: {
+          _props?: {
+            candidate?: ZhilianApiCandidate;
+          };
         };
       };
-    };
 
-    return {
-      candidate: maybeVueElement.__vue__?._props?.candidate,
-      containerOuterHtml: (element as HTMLElement).outerHTML,
-      rawText: element.textContent ?? '',
-    };
-  })).catch(() => []);
+      return {
+        candidate: maybeVueElement.__vue__?._props?.candidate,
+        containerOuterHtml: (element as HTMLElement).outerHTML,
+        rawText: element.textContent ?? '',
+        searchResultIndex: index,
+        isRelatedRecommendation: isAfterRelatedTalentBoundary(element),
+      };
+    });
+  }).catch(() => []);
   const vueCandidates = parseZhilianVueCandidateSnapshots(vueSnapshots);
-  if (vueCandidates.length > 0) {
-    return vueCandidates;
+  const hasVueSearchResultSnapshots = vueSnapshots.some((snapshot) => !snapshot.isRelatedRecommendation);
+  const hasVueRelatedRecommendationSnapshots = vueSnapshots.some((snapshot) => snapshot.isRelatedRecommendation);
+  if (vueCandidates.length > 0 || (!hasVueSearchResultSnapshots && hasVueRelatedRecommendationSnapshots)) {
+    return {
+      candidates: vueCandidates,
+      sawSearchResultCards: hasVueSearchResultSnapshots,
+      sawRelatedRecommendationCards: hasVueRelatedRecommendationSnapshots,
+    };
   }
 
-  const snapshots = await page.locator(zhilianCandidateLinkSelector).evaluateAll((elements) => elements.map((element) => {
-    const anchor = element as HTMLAnchorElement;
-    const container = anchor.closest('li, [class*="card"], [class*="item"], [class*="resume"], [class*="candidate"], [class*="talent"], article, section, div') ?? anchor;
-    return {
-      href: anchor.href,
-      anchorOuterHtml: anchor.outerHTML,
-      containerOuterHtml: (container as HTMLElement).outerHTML,
-      rawText: container.textContent ?? '',
-      anchorText: anchor.textContent ?? '',
+  const snapshots = await page.locator(zhilianCandidateLinkSelector).evaluateAll((elements) => {
+    const isAfterRelatedTalentBoundary = (element: Element): boolean => {
+      const hasBoundaryText = (text: string | null | undefined) => /更多\s*相关\s*人才/.test(text ?? '');
+      let current: Element | null = element;
+      while (current) {
+        let previous = current.previousSibling;
+        while (previous) {
+          if (hasBoundaryText(previous.textContent)) {
+            return true;
+          }
+          previous = previous.previousSibling;
+        }
+        current = current.parentElement;
+      }
+      return false;
     };
-  }));
 
-  return parseZhilianDomCandidateSnapshots(snapshots);
+    return elements.map((element, index) => {
+      const anchor = element as HTMLAnchorElement;
+      const container = anchor.closest('li, [class*="card"], [class*="item"], [class*="resume"], [class*="candidate"], [class*="talent"], article, section, div') ?? anchor;
+      return {
+        href: anchor.href,
+        anchorOuterHtml: anchor.outerHTML,
+        containerOuterHtml: (container as HTMLElement).outerHTML,
+        rawText: container.textContent ?? '',
+        anchorText: anchor.textContent ?? '',
+        searchResultIndex: index,
+        isRelatedRecommendation: isAfterRelatedTalentBoundary(container),
+      };
+    });
+  });
+
+  return {
+    candidates: parseZhilianDomCandidateSnapshots(snapshots),
+    sawSearchResultCards: snapshots.some((snapshot) => !snapshot.isRelatedRecommendation),
+    sawRelatedRecommendationCards: snapshots.some((snapshot) => snapshot.isRelatedRecommendation),
+  };
 }
 
 function isZhilianExplicitEmptyText(text: string): boolean {
@@ -3527,11 +3619,30 @@ async function clickZhilianSearchResultCard(searchPage: Page, candidate: Candida
     return false;
   }
 
-  const snapshots = await evaluateAll((elements) => elements.map((element, index) => ({
-    index,
-    text: (element.textContent ?? '').replace(/\s+/g, ' ').trim(),
-    html: (element as HTMLElement).outerHTML,
-  })));
+  const snapshots = (await evaluateAll((elements) => {
+    const isAfterRelatedTalentBoundary = (element: Element): boolean => {
+      const hasBoundaryText = (text: string | null | undefined) => /更多\s*相关\s*人才/.test(text ?? '');
+      let current: Element | null = element;
+      while (current) {
+        let previous = current.previousSibling;
+        while (previous) {
+          if (hasBoundaryText(previous.textContent)) {
+            return true;
+          }
+          previous = previous.previousSibling;
+        }
+        current = current.parentElement;
+      }
+      return false;
+    };
+
+    return elements.map((element, index) => ({
+      index,
+      text: (element.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      html: (element as HTMLElement).outerHTML,
+      isRelatedRecommendation: isAfterRelatedTalentBoundary(element),
+    }));
+  })).filter((snapshot) => !snapshot.isRelatedRecommendation);
 
   const normalizedName = normalizeText(candidate.name);
   const normalizedCompany = normalizeText(candidate.currentCompany);
@@ -3706,8 +3817,11 @@ export const zhilianAdapter: PlatformAdapter = {
     await waitForZhilianRecruiterShell(page, { deadline });
 
     const domCandidates = await collectZhilianCards(page);
-    if (domCandidates.length > 0) {
-      return { candidates: domCandidates };
+    if (domCandidates.candidates.length > 0) {
+      return { candidates: domCandidates.candidates };
+    }
+    if (!domCandidates.sawSearchResultCards && domCandidates.sawRelatedRecommendationCards) {
+      return { candidates: [] };
     }
 
     while (Date.now() <= deadline) {
@@ -3720,8 +3834,11 @@ export const zhilianAdapter: PlatformAdapter = {
       }
 
       const nextDomCandidates = await collectZhilianCards(page);
-      if (nextDomCandidates.length > 0) {
-        return { candidates: nextDomCandidates };
+      if (nextDomCandidates.candidates.length > 0) {
+        return { candidates: nextDomCandidates.candidates };
+      }
+      if (!nextDomCandidates.sawSearchResultCards && nextDomCandidates.sawRelatedRecommendationCards) {
+        return { candidates: [] };
       }
 
       if (await hasZhilianExplicitEmptyResults(page)) {
