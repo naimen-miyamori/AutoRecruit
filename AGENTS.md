@@ -26,6 +26,10 @@ If one platform fails during an all-platform run, stop immediately and propagate
 - RAG answer failures or no-answer cases must not invent facts. If no trusted JD or verified conversation chunk meets the confidence threshold, return an explicit no-answer result instead of calling the model to speculate.
 - RAG feedback, review, metrics, ops, eval, answer-eval, and regression commands are operational quality loops. Offline eval/regression paths must not append production `answer-logs.jsonl`.
 - `rag:api` is an internal product HTTP interface for RAG. It may enforce `RAG_API_KEY`/`--api-key`, but it is not a full auth gateway: multi-tenancy, RBAC, rate limiting, centralized audit, monitoring alerts, and front-end management belong to upstream infrastructure or later product layers.
+- The console assistant is only a structured draft layer. `src/server/cli-assistant.ts` may call a model to produce an `AssistantDraft`, but it must reject arbitrary shell/script/file-write requests and must not execute or persist model-suggested commands.
+- `/api/assistant/confirm` must finalize the draft, then reuse `src/server/task-normalizers.ts` and the existing `TaskQueue`. Do not bypass normalizers, do not treat preview argv as an execution source of truth, and do not add a separate assistant-specific task runner.
+- Assistant `rag-answer` is a standalone answer path. It must not create tasks, open browsers, capture resumes, score candidates, export reports, or send email. Stored-job and temporary-JD behavior must follow the same rules as `--jd-question`/`--rag-question`.
+- Assistant drafts for normal capture, batch, search-subscription, login-refresh, and RAG ops must preserve the same mode isolation and platform constraints as the CLI/API paths. Unsupported or unsafe draft fields should be dropped or warned about before confirmation, and confirmation must still fail through the shared normalizers when the request is invalid.
 - Batch mode uses `--jobs-file` as the only source of job definitions. Do not allow it to combine with single-job `--keyword`, `--jd`, or `--jd-file`; normal run-level switches such as `--include-viewed`, `--email`, `--cc`, `--search-source`, `--application-filter-input-file`, and valid Liepin forwarding remain allowed. Jobs-file items may set `searchSource` and `applicationFilterInputFile`; job-level values override CLI-level defaults, and relative job-level filter paths resolve from the jobs file directory.
 - With `--platform all --jobs-file`, the outer loop is jobs-file order and the inner loop is `51job`, `liepin`, `zhilian`.
 - Search-subscription mode (`--search-subscription-file`) is standalone. It must not parse JD text, create job records, capture resumes, score candidates, export reports, or send email.
@@ -201,6 +205,11 @@ Platform-specific regression command names keep `experimental` for compatibility
 - `src/search/filter-dom.ts` - pure DOM scanning helpers for search-filter discovery.
 - `src/search/filter-discovery.ts` - standalone Playwright-based search-filter discovery runner.
 - `src/rag/*.ts` - RAG fact storage, chunking, embeddings, Qdrant vector store, hybrid retrieval, answer generation, diagnostics, eval, review, metrics, ops, baseline, and regression logic.
+- `src/server/routes.ts` - internal product HTTP routes for tasks, RAG, filter inputs, and assistant endpoints.
+- `src/server/task-normalizers.ts` - shared HTTP and assistant request normalization, CLI argv previews, and mode-isolation validation.
+- `src/server/cli-assistant.ts` - model-backed console assistant that produces structured drafts, warnings, missing-field prompts, and confirmable previews only.
+- `src/server/task-queue.ts` - single in-process task queue used by HTTP and assistant-confirmed task runs.
+- `frontend/src/App.tsx` - web console UI, including the `智能助手` page and draft confirmation flow.
 - `src/reporting/resume-docx.ts` - DOCX resume rendering from `/Users/Admin/Downloads/简历模板.docx`, including template photo-slot handling.
 - `src/storage/job-store.ts` - JSON-backed persistence.
 - `src/scripts/*.ts` - offline debug, export, email, reparse, login, migration, and smoke utilities.

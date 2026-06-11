@@ -113,6 +113,9 @@ describe('exportJobResults', () => {
 
   it('writes exports under the requested platform directory', async () => {
     const jobKey = `job-platform-export-${Date.now()}`;
+    createdJobKeys.push(jobKey);
+    await cleanupJob(jobKey);
+
     const store = new JobStore();
     const markdown = '# Platform Export\n';
 

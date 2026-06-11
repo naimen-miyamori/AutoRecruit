@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+
+<html class="light" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Autorecruit Ops Console - Dashboard</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "tertiary-fixed-dim": "#eda049",
+                    "tertiary-dim": "#7a4700",
+                    "on-error": "#fff7f6",
+                    "on-surface": "#013650",
+                    "inverse-on-surface": "#919faa",
+                    "surface-dim": "#b6dfff",
+                    "outline": "#577f9c",
+                    "secondary-dim": "#384e99",
+                    "tertiary-fixed": "#fdad55",
+                    "surface-container-lowest": "#ffffff",
+                    "secondary-container": "#dce1ff",
+                    "on-secondary-container": "#374d97",
+                    "secondary": "#455ba6",
+                    "error-container": "#fe8983",
+                    "primary-dim": "#005d56",
+                    "on-primary-fixed": "#004842",
+                    "on-error-container": "#752121",
+                    "surface-tint": "#006a63",
+                    "tertiary": "#8b5100",
+                    "primary": "#006a63",
+                    "on-tertiary": "#fff7f3",
+                    "tertiary-container": "#fdad55",
+                    "on-secondary-fixed": "#223a84",
+                    "inverse-primary": "#a7fef3",
+                    "secondary-fixed-dim": "#c9d3ff",
+                    "surface-bright": "#f6faff",
+                    "on-tertiary-container": "#583200",
+                    "error": "#9f403d",
+                    "on-surface-variant": "#3a637f",
+                    "surface-variant": "#c8e6ff",
+                    "on-tertiary-fixed-variant": "#643900",
+                    "primary-container": "#9cf2e8",
+                    "inverse-surface": "#030f18",
+                    "error-dim": "#4e0309",
+                    "surface-container-high": "#d4ebff",
+                    "on-secondary": "#faf8ff",
+                    "primary-fixed": "#9cf2e8",
+                    "on-background": "#013650",
+                    "surface-container": "#dff0ff",
+                    "on-primary": "#dbfff9",
+                    "background": "#f6faff",
+                    "secondary-fixed": "#dce1ff",
+                    "primary-fixed-dim": "#8ee4d9",
+                    "on-tertiary-fixed": "#3a1f00",
+                    "surface": "#f6faff",
+                    "on-primary-fixed-variant": "#006760",
+                    "on-secondary-fixed-variant": "#4157a2",
+                    "surface-container-highest": "#c8e6ff",
+                    "outline-variant": "#8eb7d6",
+                    "on-primary-container": "#005c56",
+                    "surface-container-low": "#ebf5ff"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "fontFamily": {
+                    "headline": ["Inter"],
+                    "display": ["Inter"],
+                    "body": ["Inter"],
+                    "label": ["Inter"]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body { font-family: 'Inter', sans-serif; }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+        }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #8eb7d6; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-background text-on-background overflow-hidden">
+<!-- SideNavBar -->
+<aside class="fixed left-0 top-0 h-full w-64 bg-surface-container dark:bg-inverse-surface border-r border-outline-variant dark:border-outline flex flex-col h-full p-4 gap-2 z-20">
+<div class="mb-6 px-2 flex items-center gap-3">
+<div class="w-10 h-10 bg-primary rounded flex items-center justify-center text-on-primary">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">robot_2</span>
+</div>
+<div>
+<h1 class="text-headline-sm font-black text-on-surface dark:text-inverse-on-surface tracking-tighter">Autorecruit</h1>
+<p class="text-[10px] uppercase tracking-widest text-on-surface-variant font-bold">Ops Console</p>
+</div>
+</div>
+<nav class="flex-1 space-y-1">
+<!-- Dashboard (Active) -->
+<a class="flex items-center gap-3 px-4 py-2 bg-primary-container text-on-primary-container rounded-lg transition-all duration-150 ease-in-out active:scale-95 font-body text-label-sm font-medium" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+                Dashboard
+            </a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all duration-150 ease-in-out active:scale-95 font-body text-label-sm font-medium" href="#">
+<span class="material-symbols-outlined">assignment</span>
+                Tasks
+            </a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all duration-150 ease-in-out active:scale-95 font-body text-label-sm font-medium" href="#">
+<span class="material-symbols-outlined">work</span>
+                Jobs
+            </a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all duration-150 ease-in-out active:scale-95 font-body text-label-sm font-medium" href="#">
+<span class="material-symbols-outlined">play_arrow</span>
+                Run Job
+            </a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all duration-150 ease-in-out active:scale-95 font-body text-label-sm font-medium" href="#">
+<span class="material-symbols-outlined">auto_awesome</span>
+                RAG
+            </a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-all duration-150 ease-in-out active:scale-95 font-body text-label-sm font-medium" href="#">
+<span class="material-symbols-outlined">settings</span>
+                Ops
+            </a>
+</nav>
+<div class="mt-auto pt-4 border-t border-outline-variant space-y-1">
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-colors font-body text-label-sm font-medium" href="#">
+<span class="material-symbols-outlined">help</span>
+                Support
+            </a>
+<a class="flex items-center gap-3 px-4 py-2 text-on-surface-variant hover:bg-surface-variant rounded-lg transition-colors font-body text-label-sm font-medium" href="#">
+<span class="material-symbols-outlined">tune</span>
+                Settings
+            </a>
+</div>
+</aside>
+<!-- TopAppBar -->
+<header class="fixed top-0 right-0 w-[calc(100%-16rem)] h-16 bg-surface dark:bg-surface-dim border-b border-outline-variant dark:border-outline flex justify-between items-center px-6 z-10">
+<h2 class="font-headline text-headline-sm font-semibold text-primary dark:text-primary-fixed">Operations Console</h2>
+<div class="flex items-center gap-6">
+<div class="relative group">
+<input class="bg-surface-container-low border-none rounded-full px-4 py-1.5 text-sm w-64 focus:ring-2 focus:ring-primary/20 transition-all" placeholder="Search operations..." type="text"/>
+<span class="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-on-surface-variant text-sm">search</span>
+</div>
+<div class="flex items-center gap-4">
+<span class="material-symbols-outlined text-on-surface-variant cursor-pointer hover:text-on-surface transition-colors active:opacity-70">notifications</span>
+<span class="material-symbols-outlined text-on-surface-variant cursor-pointer hover:text-on-surface transition-colors active:opacity-70">history</span>
+<div class="flex items-center gap-2 pl-4 border-l border-outline-variant">
+<span class="material-symbols-outlined text-primary text-3xl">account_circle</span>
+<div class="flex flex-col">
+<span class="text-xs font-bold leading-none">Admin_User</span>
+<span class="text-[10px] text-on-surface-variant">Super Admin</span>
+</div>
+</div>
+</div>
+</div>
+</header>
+<!-- Main Content Canvas -->
+<main class="ml-64 mt-16 p-6 h-[calc(100vh-4rem)] overflow-y-auto custom-scrollbar bg-background">
+<!-- Metric Grid -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6"><div class="bg-surface-container-lowest p-3 rounded-lg border border-outline-variant shadow-sm flex items-center justify-between"><div class="flex flex-col"><span class="text-on-surface-variant text-[10px] font-medium">排队/运行中</span><span class="text-lg font-black text-on-surface">1,284</span></div><span class="text-[10px] text-primary bg-primary-container px-1.5 rounded-full font-bold">+12%</span></div><div class="bg-surface-container-lowest p-3 rounded-lg border border-outline-variant shadow-sm flex items-center justify-between"><div class="flex flex-col"><span class="text-on-surface-variant text-[10px] font-medium">成功 (24H)</span><span class="text-lg font-black text-on-surface">8,921</span></div><span class="text-[10px] text-primary bg-primary-container px-1.5 rounded-full font-bold">94.2%</span></div><div class="bg-surface-container-lowest p-3 rounded-lg border border-outline-variant shadow-sm flex items-center justify-between"><div class="flex flex-col"><span class="text-on-surface-variant text-[10px] font-medium">失败</span><span class="text-lg font-black text-on-surface">142</span></div><span class="text-[10px] text-error bg-error-container/20 px-1.5 rounded-full font-bold">1.4%</span></div><div class="bg-surface-container-lowest p-3 rounded-lg border border-outline-variant shadow-sm flex items-center justify-between"><div class="flex flex-col"><span class="text-on-surface-variant text-[10px] font-medium">零候选人</span><span class="text-lg font-black text-on-surface">56</span></div><span class="text-[10px] text-on-surface-variant bg-surface-variant px-1.5 rounded-full font-bold">Low</span></div></div>
+<div class="grid grid-cols-12 gap-6"><div class="col-span-12 xl:col-span-9 space-y-6"><section class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden flex flex-col"><div class="p-4 border-b border-outline-variant flex justify-between items-center bg-surface-container-low"><h3 class="font-bold text-on-surface flex items-center gap-2"><span class="material-symbols-outlined text-primary">list_alt</span> 最近任务 (Recent Tasks)</h3><div class="flex gap-2"><button class="text-[10px] px-3 py-1 bg-surface-bright border border-outline-variant rounded-md hover:bg-surface-container transition-colors">Export CSV</button><button class="text-[10px] px-3 py-1 bg-primary text-on-primary rounded-md hover:opacity-90 transition-opacity">Refresh</button></div></div><div class="overflow-x-auto"><table class="w-full text-left text-sm border-collapse"><thead><tr class="text-on-surface-variant bg-surface-container-low/50 border-b border-outline-variant"><th class="px-4 py-3 font-semibold text-xs">任务类型</th><th class="px-4 py-3 font-semibold text-xs">平台</th><th class="px-4 py-3 font-semibold text-xs">关键词/职位</th><th class="px-4 py-3 font-semibold text-xs text-center">状态</th><th class="px-4 py-3 font-semibold text-xs">更新时间</th></tr></thead><tbody class="divide-y divide-outline-variant/30"><tr class="bg-primary-container/10 hover:bg-primary-container/20 transition-colors border-l-4 border-primary"><td class="px-4 py-3">全量同步</td><td class="px-4 py-3"><span class="px-2 py-0.5 rounded bg-secondary-container text-on-secondary-container text-[10px] font-bold">51job</span></td><td class="px-4 py-3 font-medium text-xs">Java高级开发工程师</td><td class="px-4 py-3 text-center"><span class="px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold border border-green-200">成功</span></td><td class="px-4 py-3 text-xs text-on-surface-variant">10:45:22</td></tr><tr class="hover:bg-surface-container-lowest/80 transition-colors"><td class="px-4 py-3">关键词检索</td><td class="px-4 py-3"><span class="px-2 py-0.5 rounded bg-tertiary-container text-on-tertiary-container text-[10px] font-bold">Liepin</span></td><td class="px-4 py-3 font-medium text-xs">产品经理 (PM)</td><td class="px-4 py-3 text-center"><span class="px-2 py-0.5 rounded-full bg-primary-container text-on-primary-container text-[10px] font-bold border border-primary animate-pulse">运行中</span></td><td class="px-4 py-3 text-xs text-on-surface-variant">10:48:15</td></tr></tbody></table></div></section><section class="bg-inverse-surface text-inverse-on-surface rounded-xl p-4 font-mono text-xs h-64 overflow-y-auto custom-scrollbar"><div class="flex justify-between items-center mb-3 border-b border-outline/30 pb-2"><h4 class="font-bold flex items-center gap-2"><span class="material-symbols-outlined text-sm">terminal</span> 实时执行日志 (Real-time Task Log)</h4><span class="text-[10px] opacity-60">Task ID: #TR-99281</span></div><div class="space-y-1"><p class="text-green-600">[10:45:22] INFO: Starting full sync for 51job...</p><p>[10:45:23] INFO: Authenticating with session token...</p><p>[10:45:25] INFO: Fetching job listings for 'Java高级开发工程师'</p><p>[10:45:28] INFO: Found 42 new candidates.</p><p>[10:45:30] INFO: Parsing resumes using RAG-v2 model...</p><p class="text-primary-fixed">[10:45:45] SUCCESS: Sync completed. 42 records updated.</p></div></section></div><div class="col-span-12 xl:col-span-3 space-y-6"><section class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden"><div class="p-4 border-b border-outline-variant bg-surface-container-low"><h3 class="font-bold text-on-surface flex items-center gap-2 text-xs"><span class="material-symbols-outlined text-primary text-sm">hub</span> 平台状态</h3></div><div class="p-4 space-y-4"><div class="flex justify-between items-center"><span class="text-xs font-bold">51job</span><span class="text-[10px] text-green-600 font-bold">Connected</span></div><div class="flex justify-between items-center"><span class="text-xs font-bold">Liepin</span><span class="text-[10px] text-green-600 font-bold">Connected</span></div><div class="flex justify-between items-center"><span class="text-xs font-bold">Zhilian</span><span class="text-[10px] text-error font-bold">Auth Req</span></div></div></section><section class="bg-surface-container-lowest border border-outline-variant rounded-xl overflow-hidden"><div class="p-4 border-b border-outline-variant bg-surface-container-low"><h3 class="font-bold text-on-surface flex items-center gap-2 text-xs"><span class="material-symbols-outlined text-primary text-sm">model_training</span> RAG 质量</h3></div><div class="p-4 space-y-3"><div class="flex justify-between text-[10px]"><span>召回精度</span><span class="text-primary font-bold">94.2%</span></div><div class="h-1 bg-surface-container rounded-full overflow-hidden"><div class="h-full bg-primary" style="width: 94.2%"></div></div><div class="flex justify-between text-[10px]"><span>相关度</span><span class="text-primary font-bold">89.5%</span></div><div class="h-1 bg-surface-container rounded-full overflow-hidden"><div class="h-full bg-primary" style="width: 89.5%"></div></div></div></section></div></div>
+</main>
+<!-- Contextual FAB (Only on relevant main screens) -->
+<button class="fixed bottom-6 right-6 w-14 h-14 bg-primary text-on-primary rounded-2xl shadow-xl hover:shadow-2xl transition-all active:scale-95 flex items-center justify-center group z-30">
+<span class="material-symbols-outlined text-2xl group-hover:rotate-90 transition-transform duration-300">add</span>
+<div class="absolute right-16 bg-inverse-surface text-inverse-on-surface text-[10px] px-3 py-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none font-bold">
+            Create New Task
+        </div>
+</button>
+</body></html>
