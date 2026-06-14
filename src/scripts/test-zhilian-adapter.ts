@@ -2414,6 +2414,104 @@ test('zhilian adapter treats recommendation-only related talent cards as zero se
   assert.equal(waitForResponseCalls, 0);
 });
 
+test('zhilian adapter treats cards inside an inline related-talent separator as zero search results', async () => {
+  type FakeElement = {
+    textContent: string;
+    outerHTML: string;
+    previousSibling: FakeElement | null;
+    parentElement: FakeElement | null;
+    querySelector?: (selector: string) => FakeElement | null;
+    __vue__?: {
+      _props?: {
+        candidate?: Record<string, unknown>;
+      };
+    };
+  };
+
+  const root: FakeElement = {
+    textContent: '',
+    outerHTML: '<main></main>',
+    previousSibling: null,
+    parentElement: null,
+  };
+  const inlineBoundary: FakeElement = {
+    textContent: '更多相关人才',
+    outerHTML: '<div class="search-item-separator">更多相关人才</div>',
+    previousSibling: null,
+    parentElement: null,
+  };
+  const firstRelatedCard: FakeElement = {
+    textContent: '更多相关人才\n肖先生\n无关公司\n销售',
+    outerHTML: '<div class="search-resume-item-wrap"><div class="search-item-separator">更多相关人才</div><div>肖先生 无关公司 销售</div></div>',
+    previousSibling: null,
+    parentElement: root,
+    querySelector: (selector) => (selector === '.search-item-separator' ? inlineBoundary : null),
+    __vue__: {
+      _props: {
+        candidate: {
+          userMasterId: 201,
+          userName: '肖先生',
+          resumeNumber: 'related-resume-1',
+          workExperiences: [{ companyName: '无关公司', jobTitle: '销售' }],
+        },
+      },
+    },
+  };
+  const secondRelatedCard: FakeElement = {
+    textContent: '张先生\n无关集团\n主管',
+    outerHTML: '<div class="search-resume-item-wrap">张先生 无关集团 主管</div>',
+    previousSibling: firstRelatedCard,
+    parentElement: root,
+    querySelector: () => null,
+    __vue__: {
+      _props: {
+        candidate: {
+          userMasterId: 202,
+          userName: '张先生',
+          resumeNumber: 'related-resume-2',
+          workExperiences: [{ companyName: '无关集团', jobTitle: '主管' }],
+        },
+      },
+    },
+  };
+  let waitForResponseCalls = 0;
+  const page = {
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForResponse: async () => {
+      waitForResponseCalls += 1;
+      throw new Error('inline recommendation-only cards should not fall back to candidate API');
+    },
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 搜索条件 ·0 更多相关人才',
+        };
+      }
+
+      if (selector === '.search-resume-item-wrap') {
+        return {
+          evaluateAll: async (fn: (elements: Element[]) => unknown) => fn([
+            firstRelatedCard,
+            secondRelatedCard,
+          ] as unknown as Element[]),
+        };
+      }
+
+      return {
+        evaluateAll: async () => [],
+      };
+    },
+  } as never;
+
+  const result = await zhilianAdapter.extractCandidateList(page, { deadline: Date.now() + 1000 });
+
+  assert.deepEqual(result, { candidates: [] });
+  assert.equal(waitForResponseCalls, 0);
+});
+
 test('zhilian adapter returns DOM candidates without waiting for the candidate API', async () => {
   let waitForResponseCalls = 0;
   const page = {

@@ -3518,6 +3518,10 @@ async function collectZhilianCards(page: Page): Promise<ZhilianCollectedCards> {
   const vueSnapshots = await page.locator('.search-resume-item-wrap').evaluateAll((elements) => {
     const isAfterRelatedTalentBoundary = (element: Element): boolean => {
       const hasBoundaryText = (text: string | null | undefined) => /更多\s*相关\s*人才/.test(text ?? '');
+      const querySelector = (element as Element & { querySelector?: Element['querySelector'] }).querySelector;
+      if (querySelector && hasBoundaryText(querySelector.call(element, '.search-item-separator')?.textContent)) {
+        return true;
+      }
       let current: Element | null = element;
       while (current) {
         let previous = current.previousSibling;
@@ -3564,6 +3568,10 @@ async function collectZhilianCards(page: Page): Promise<ZhilianCollectedCards> {
   const snapshots = await page.locator(zhilianCandidateLinkSelector).evaluateAll((elements) => {
     const isAfterRelatedTalentBoundary = (element: Element): boolean => {
       const hasBoundaryText = (text: string | null | undefined) => /更多\s*相关\s*人才/.test(text ?? '');
+      const querySelector = (element as Element & { querySelector?: Element['querySelector'] }).querySelector;
+      if (querySelector && hasBoundaryText(querySelector.call(element, '.search-item-separator')?.textContent)) {
+        return true;
+      }
       let current: Element | null = element;
       while (current) {
         let previous = current.previousSibling;
@@ -3622,6 +3630,10 @@ async function clickZhilianSearchResultCard(searchPage: Page, candidate: Candida
   const snapshots = (await evaluateAll((elements) => {
     const isAfterRelatedTalentBoundary = (element: Element): boolean => {
       const hasBoundaryText = (text: string | null | undefined) => /更多\s*相关\s*人才/.test(text ?? '');
+      const querySelector = (element as Element & { querySelector?: Element['querySelector'] }).querySelector;
+      if (querySelector && hasBoundaryText(querySelector.call(element, '.search-item-separator')?.textContent)) {
+        return true;
+      }
       let current: Element | null = element;
       while (current) {
         let previous = current.previousSibling;
