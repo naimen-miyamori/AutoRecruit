@@ -112,6 +112,12 @@ export interface AssistantMessage {
   createdAt?: string;
 }
 
+export interface ModelConfig {
+  baseUrl?: string;
+  model?: string;
+  apiKey?: string;
+}
+
 export type AssistantDraft =
   | {
     kind: 'resume-capture';
@@ -158,6 +164,7 @@ export type AssistantDraft =
 export interface AssistantChatRequest {
   messages: AssistantMessage[];
   draft?: AssistantDraft;
+  modelConfig?: ModelConfig;
 }
 
 export interface AssistantChatResponse {

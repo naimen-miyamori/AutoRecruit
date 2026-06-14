@@ -21,6 +21,7 @@ import {
   assistantDraftRequiresRiskAcceptance,
   chatWithCliAssistant,
   finalizeAssistantDraft,
+  normalizeModelConfig,
   validateAssistantDraft,
   type AssistantCompletion,
 } from './cli-assistant.js';
@@ -44,6 +45,7 @@ import type {
   AssistantConfirmResponse,
   AssistantDraft,
   DashboardHealth,
+  ModelConfig,
   TaskDetail,
   TaskKind,
   TaskInput,
@@ -163,6 +165,8 @@ async function enqueueTask(
 }
 
 async function answerRagRequest(request: RouteDependencies, payload: unknown): Promise<Record<string, unknown>> {
+  const item = normalizeJsonObject(payload, 'request body');
+  const llmSettings = normalizeModelConfig(item.modelConfig as ModelConfig | undefined);
   const normalized = normalizeRagAnswerRequest(payload);
   if (normalized.mode === 'temporary-jd') {
     const rawJdText = normalized.jd ?? await readFile(normalized.jdFile!, 'utf8');
@@ -170,6 +174,7 @@ async function answerRagRequest(request: RouteDependencies, payload: unknown): P
     const answer = await answerJdQuestion({
       rawJdText,
       question: normalized.question,
+      ...(llmSettings ? { llmSettings } : {}),
     });
 
     return {
@@ -181,7 +186,10 @@ async function answerRagRequest(request: RouteDependencies, payload: unknown): P
     };
   }
 
-  const requestOptions = normalized.options;
+  const requestOptions = {
+    ...normalized.options,
+    ...(llmSettings ? { llmSettings } : {}),
+  };
   const answerQuestion = request.answerQuestion ?? answerQuestionWithRag;
   const answer = await answerQuestion(requestOptions);
   return {

@@ -1,4 +1,5 @@
 import { completeJsonTextFromOpenAI } from '../llm/openai-client.js';
+import type { OpenAISettingsOverride } from '../llm/openai-client.js';
 import type { SupportedPlatform } from '../platforms/types.js';
 import { JobStore } from '../storage/job-store.js';
 import type { JobRecord } from '../types/job.js';
@@ -74,6 +75,7 @@ export interface AskRagQuestionOptions extends RagDependencies {
   answerLogMetadata?: Record<string, unknown>;
   embeddingModel?: string;
   embeddingProvider?: RagEmbeddingProvider;
+  llmSettings?: OpenAISettingsOverride;
 }
 
 export interface RebuildRagIndexOptions extends RagDependencies {
@@ -551,7 +553,7 @@ export async function rebuildRagIndex(options: RebuildRagIndexOptions): Promise<
   });
 }
 
-async function generateAnswer(question: string, sources: RagAnswerSource[]): Promise<string> {
+async function generateAnswer(question: string, sources: RagAnswerSource[], settings?: OpenAISettingsOverride): Promise<string> {
   const answerText = await completeJsonTextFromOpenAI({
     featureName: 'RAG question answering',
     modelEnvName: 'RAG_MODEL',
@@ -571,6 +573,7 @@ async function generateAnswer(question: string, sources: RagAnswerSource[]): Pro
       '直接输出答案文本，不要输出 JSON、markdown 标题或代码块。',
     ].join('\n'),
     maxOutputTokens: 700,
+    settings,
   });
 
   return cleanAnswerText(answerText);
@@ -645,7 +648,7 @@ export async function answerQuestionWithRag(options: AskRagQuestionOptions): Pro
   }
 
   const answer: RagAnswer = {
-    answer: await generateRagAnswerRef.fn(question, trustedSources),
+    answer: await generateRagAnswerRef.fn(question, trustedSources, options.llmSettings),
     sources: trustedSources,
     answered: true,
     confidence,

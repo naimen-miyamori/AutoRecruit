@@ -210,6 +210,7 @@ describe('console API routes', () => {
   });
 
   it('generates assistant resume-capture drafts from Chinese requests', async () => {
+    const completionRequests: unknown[] = [];
     const response = await handleApiRequest({
       method: 'POST',
       pathname: '/api/assistant/chat',
@@ -218,28 +219,44 @@ describe('console API routes', () => {
           role: 'user',
           content: '帮我在猎聘搜索 Java 后端，筛选本科以上，3-5 年经验，JD 是负责服务端研发。',
         }],
-      },
-      assistantCompleteJsonText: async () => JSON.stringify({
-        reply: '已生成猎聘简历抓取草稿。',
-        draft: {
-          kind: 'resume-capture',
-          input: {
-            platform: 'liepin',
-            keyword: 'Java 后端',
-            jd: '负责服务端研发。',
-            searchSource: 'direct',
-            applicationFilterInputFile: './filters/java.json',
-          },
-          missingFields: [],
-          warnings: [],
+        modelConfig: {
+          baseUrl: 'https://proxy.example.com/v1',
+          model: 'assistant-test-model',
+          apiKey: 'sk-test-assistant',
         },
-        clarificationQuestions: [],
-      }),
+      },
+      assistantCompleteJsonText: async (request) => {
+        completionRequests.push(request);
+        return JSON.stringify({
+          reply: '已生成猎聘简历抓取草稿。',
+          draft: {
+            kind: 'resume-capture',
+            input: {
+              platform: 'liepin',
+              keyword: 'Java 后端',
+              jd: '负责服务端研发。',
+              searchSource: 'direct',
+              applicationFilterInputFile: './filters/java.json',
+            },
+            missingFields: [],
+            warnings: [],
+          },
+          clarificationQuestions: [],
+        });
+      },
     });
 
     assert.equal(response.statusCode, 200);
+    assert.equal(completionRequests.length, 1);
+    assert.deepStrictEqual((completionRequests[0] as { settings?: unknown }).settings, {
+      baseUrl: 'https://proxy.example.com/v1',
+      model: 'assistant-test-model',
+      apiKey: 'sk-test-assistant',
+    });
+    assert.doesNotMatch((completionRequests[0] as { input?: string }).input ?? '', /sk-test-assistant/);
     const body = response.body as { draft?: { kind?: string; missingFields?: string[]; argvPreview?: string[]; input?: Record<string, unknown> } };
     assert.equal(body.draft?.kind, 'resume-capture');
+    assert.doesNotMatch(JSON.stringify(body), /sk-test-assistant/);
     assert.deepStrictEqual(body.draft?.missingFields, []);
     assert.deepStrictEqual(body.draft?.argvPreview, [
       '--platform',
@@ -998,6 +1015,43 @@ describe('console API routes', () => {
     assert.equal((response.body as { noAnswerReason?: string }).noAnswerReason, 'no_trusted_context');
   });
 
+  it('passes console model config to stored RAG answers without leaking API keys', async () => {
+    const persistedCalls: unknown[] = [];
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/rag/answer',
+      body: {
+        platform: '51job',
+        keyword: '优衣库 店长',
+        question: '薪资范围是多少？',
+        logAnswer: false,
+        modelConfig: {
+          baseUrl: 'https://proxy.example.com/v1',
+          model: 'rag-test-model',
+          apiKey: 'sk-test-rag',
+        },
+      },
+      answerQuestion: async (options) => {
+        persistedCalls.push(options);
+        return {
+          answer: '薪资范围以 JD 为准。',
+          answered: true,
+          confidence: 0.9,
+          sources: [],
+        };
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(persistedCalls.length, 1);
+    assert.deepStrictEqual((persistedCalls[0] as { llmSettings?: unknown }).llmSettings, {
+      baseUrl: 'https://proxy.example.com/v1',
+      model: 'rag-test-model',
+      apiKey: 'sk-test-rag',
+    });
+    assert.doesNotMatch(JSON.stringify(response.body), /sk-test-rag/);
+  });
+
   it('answers temporary JD questions without routing through persisted RAG', async () => {
     const persistedCalls: unknown[] = [];
     const temporaryCalls: unknown[] = [];
@@ -1040,6 +1094,58 @@ describe('console API routes', () => {
     assert.equal((response.body as { temporary?: boolean }).temporary, true);
     assert.equal((response.body as { jobKey?: string }).jobKey, '临时-jd');
     assert.equal((response.body as { answer?: string }).answer, '工作地点是上海。');
+  });
+
+  it('passes console model config to temporary JD answers without leaking API keys', async () => {
+    const persistedCalls: unknown[] = [];
+    const temporaryCalls: unknown[] = [];
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/rag/answer',
+      body: {
+        platform: 'zhilian',
+        keyword: '临时配置',
+        jd: '工作地点：杭州。',
+        question: '工作地点在哪里？',
+        modelConfig: {
+          baseUrl: 'https://proxy.example.com/v1',
+          model: 'temporary-rag-test-model',
+          apiKey: 'sk-test-temporary-rag',
+        },
+      },
+      answerQuestion: async (options) => {
+        persistedCalls.push(options);
+        return {
+          answer: 'should not be used',
+          answered: true,
+          sources: [],
+        };
+      },
+      answerTemporaryJdQuestion: async (input) => {
+        temporaryCalls.push(input);
+        return {
+          answer: '工作地点是杭州。',
+          answered: true,
+          confidence: 1,
+          sources: [{
+            id: 'jd-1',
+            label: 'JD 原文片段 1',
+            text: input.rawJdText,
+            score: 1,
+          }],
+        };
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(persistedCalls.length, 0);
+    assert.equal(temporaryCalls.length, 1);
+    assert.deepStrictEqual((temporaryCalls[0] as { llmSettings?: unknown }).llmSettings, {
+      baseUrl: 'https://proxy.example.com/v1',
+      model: 'temporary-rag-test-model',
+      apiKey: 'sk-test-temporary-rag',
+    });
+    assert.doesNotMatch(JSON.stringify(response.body), /sk-test-temporary-rag/);
   });
 
   it('answers temporary JD file questions without creating persisted RAG calls', async () => {

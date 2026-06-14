@@ -1,4 +1,5 @@
 import { completeJsonTextFromOpenAI } from '../llm/openai-client.js';
+import type { OpenAISettingsOverride } from '../llm/openai-client.js';
 import type { NormalizedJob } from '../types/job.js';
 import type { RagAnswerSource } from './types.js';
 
@@ -25,6 +26,7 @@ export interface AnswerCandidateQuestionFromJdInput {
   normalizedJob?: NormalizedJob;
   question: string;
   maxSources?: number;
+  llmSettings?: OpenAISettingsOverride;
 }
 
 interface JdFragment {
@@ -372,6 +374,7 @@ export async function answerCandidateQuestionFromJd(input: AnswerCandidateQuesti
       '直接输出答案文本，不要输出 JSON、markdown 标题或代码块。',
     ].join('\n'),
     maxOutputTokens: 700,
+    settings: input.llmSettings,
   });
 
   return {

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { completeJsonTextFromOpenAI, type OpenAITextCompletionRequest } from '../llm/openai-client.js';
+import { completeJsonTextFromOpenAI, type OpenAISettingsOverride, type OpenAITextCompletionRequest } from '../llm/openai-client.js';
 import {
   normalizeBatchTask,
   normalizeLoginRefreshTask,
@@ -15,6 +15,7 @@ import type {
   AssistantMessage,
   BatchTaskInput,
   LoginRefreshTaskInput,
+  ModelConfig,
   RagAnswerInput,
   RagOpsTaskInput,
   ResumeCaptureTaskInput,
@@ -47,6 +48,12 @@ const modelResponseSchema = z.object({
   clarificationQuestions: z.array(z.string()).default([]),
   rejected: z.boolean().default(false),
 });
+
+const assistantModelConfigSchema = z.object({
+  baseUrl: z.string().trim().min(1).optional(),
+  model: z.string().trim().min(1).optional(),
+  apiKey: z.string().trim().min(1).optional(),
+}).partial();
 
 const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
   'resume-capture': [
@@ -453,6 +460,26 @@ function buildModelInput(request: AssistantChatRequest): string {
   }, null, 2);
 }
 
+export function normalizeModelConfig(value: ModelConfig | undefined): OpenAISettingsOverride | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const parsed = assistantModelConfigSchema.parse(value);
+  const config: OpenAISettingsOverride = {};
+  if (parsed.baseUrl) {
+    config.baseUrl = parsed.baseUrl;
+  }
+  if (parsed.model) {
+    config.model = parsed.model;
+  }
+  if (parsed.apiKey) {
+    config.apiKey = parsed.apiKey;
+  }
+
+  return Object.keys(config).length > 0 ? config : undefined;
+}
+
 export async function chatWithCliAssistant(
   request: AssistantChatRequest,
   options: { completeJsonText?: AssistantCompletion } = {},
@@ -481,6 +508,7 @@ export async function chatWithCliAssistant(
     instructions: buildSystemPrompt(),
     input: buildModelInput(request),
     maxOutputTokens: 1800,
+    settings: normalizeModelConfig(request.modelConfig),
   });
 
   const parsed = modelResponseSchema.parse(extractJsonObject(rawText));

@@ -16,6 +16,7 @@ import {
   Play,
   RefreshCw,
   Search,
+  Save,
   Settings2,
   Sparkles,
   UserRound,
@@ -23,9 +24,9 @@ import {
   XCircle,
 } from 'lucide-react';
 import { api } from './api';
-import type { ApplicationFilterField, ApplicationFilterOptions, AssistantActionKind, AssistantConfirmResponse, AssistantDraft, AssistantMessage, CandidateDetail, CandidateSummary, FilterCatalog, JobDetail, JobSummary, Platform, RagAnswer, SavedFilterInput, TaskDetail, TaskKind, TaskStatus, TaskSummary } from './types';
+import type { ApplicationFilterField, ApplicationFilterOptions, AssistantActionKind, AssistantConfirmResponse, AssistantDraft, AssistantMessage, CandidateDetail, CandidateSummary, FilterCatalog, JobDetail, JobSummary, ModelConfig, Platform, RagAnswer, SavedFilterInput, TaskDetail, TaskKind, TaskStatus, TaskSummary } from './types';
 
-type PageKey = 'dashboard' | 'tasks' | 'jobs' | 'assistant' | 'run' | 'rag' | 'ops' | 'guide' | 'job-detail' | 'candidate-detail';
+type PageKey = 'dashboard' | 'tasks' | 'jobs' | 'assistant' | 'run' | 'rag' | 'ops' | 'settings' | 'guide' | 'job-detail' | 'candidate-detail';
 
 interface RouteState {
   page: PageKey;
@@ -49,6 +50,7 @@ const NAV_ITEMS: Array<{ page: PageKey; label: string; icon: ReactNode; hash: st
   { page: 'run', label: '执行搜索', icon: <Play size={18} />, hash: '#/run' },
   { page: 'rag', label: '问答', icon: <MessageCircleQuestion size={18} />, hash: '#/rag' },
   { page: 'ops', label: '运营', icon: <Settings2 size={18} />, hash: '#/ops' },
+  { page: 'settings', label: '配置', icon: <Settings2 size={18} />, hash: '#/settings' },
   { page: 'guide', label: '说明', icon: <ClipboardList size={18} />, hash: '#/guide' },
 ];
 
@@ -118,7 +120,7 @@ function parseRoute(): RouteState {
     };
   }
 
-  if (['tasks', 'jobs', 'assistant', 'run', 'rag', 'ops', 'guide'].includes(parts[0])) {
+  if (['tasks', 'jobs', 'assistant', 'run', 'rag', 'ops', 'settings', 'guide'].includes(parts[0])) {
     return { page: parts[0] as PageKey };
   }
 
@@ -346,6 +348,7 @@ export function App() {
         {route.page === 'run' && <RunJobView />}
         {route.page === 'rag' && <RagView />}
         {route.page === 'ops' && <OpsView />}
+        {route.page === 'settings' && <SettingsView />}
         {route.page === 'guide' && <GuideView />}
       </main>
     </div>
@@ -1545,6 +1548,50 @@ const ASSISTANT_QUICK_ACTIONS = [
   '问一下这个岗位是否接受远程办公',
 ];
 
+const MODEL_CONFIG_STORAGE_KEY = 'autorecruit.modelConfig';
+const MODEL_CONFIG_SESSION_KEY = 'autorecruit.modelConfig.session';
+
+function loadModelConfig(): ModelConfig {
+  try {
+    const raw = window.localStorage.getItem(MODEL_CONFIG_STORAGE_KEY);
+    const sessionRaw = window.sessionStorage.getItem(MODEL_CONFIG_SESSION_KEY);
+    const parsed = raw ? JSON.parse(raw) as Partial<ModelConfig> : {};
+    const sessionParsed = sessionRaw ? JSON.parse(sessionRaw) as Partial<ModelConfig> : {};
+    return {
+      baseUrl: typeof parsed.baseUrl === 'string' ? parsed.baseUrl : '',
+      model: typeof parsed.model === 'string' ? parsed.model : '',
+      apiKey: typeof sessionParsed.apiKey === 'string' ? sessionParsed.apiKey : '',
+    };
+  } catch {
+    return {};
+  }
+}
+
+function persistModelConfig(config: ModelConfig): void {
+  window.localStorage.setItem(MODEL_CONFIG_STORAGE_KEY, JSON.stringify({
+    baseUrl: config.baseUrl?.trim() || '',
+    model: config.model?.trim() || '',
+  }));
+  window.sessionStorage.setItem(MODEL_CONFIG_SESSION_KEY, JSON.stringify({
+    apiKey: config.apiKey?.trim() || '',
+  }));
+}
+
+function buildModelConfig(config = loadModelConfig()): ModelConfig | undefined {
+  const next: ModelConfig = {};
+  if (config.baseUrl?.trim()) {
+    next.baseUrl = config.baseUrl.trim();
+  }
+  if (config.model?.trim()) {
+    next.model = config.model.trim();
+  }
+  if (config.apiKey?.trim()) {
+    next.apiKey = config.apiKey.trim();
+  }
+
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
 const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; label: string; kind?: 'textarea' | 'checkbox' | 'number' | 'select'; options?: Array<{ value: string; label: string }> }>> = {
   'resume-capture': [
     { key: 'platform', label: '平台', kind: 'select', options: ['51job', 'liepin', 'zhilian', 'all'].map((value) => ({ value, label: PLATFORM_LABELS[value as Platform | 'all'] })) },
@@ -1654,7 +1701,11 @@ function AssistantView({ navigate }: { navigate: (hash: string) => void }) {
     setConfirmState({ loading: false });
 
     try {
-      applyAssistantResponse(await api.chatWithAssistant({ messages: nextMessages, draft }));
+      applyAssistantResponse(await api.chatWithAssistant({
+        messages: nextMessages,
+        draft,
+        modelConfig: buildModelConfig(),
+      }));
     } catch (error) {
       setChatState({ loading: false, error: error instanceof Error ? error.message : String(error) });
     }
@@ -1719,6 +1770,7 @@ function AssistantView({ navigate }: { navigate: (hash: string) => void }) {
     <div className="assistant-page">
       <section className="assistant-chat-panel panel">
         <SectionHeader title="智能助手" />
+        <ModelConfigStatus />
         <div className="assistant-quick-actions">
           {ASSISTANT_QUICK_ACTIONS.map((item) => (
             <button type="button" key={item} onClick={() => void submitText(item)} disabled={chatState.loading}>
@@ -1791,6 +1843,77 @@ function AssistantView({ navigate }: { navigate: (hash: string) => void }) {
           <AssistantConfirmResult result={confirmState.data} navigate={navigate} />
         )}
       </section>
+    </div>
+  );
+}
+
+function ModelConfigStatus() {
+  const config = loadModelConfig();
+  return (
+    <div className="model-config-status">
+      <span>模型配置</span>
+      <strong>{config.model?.trim() || '服务端默认模型'}</strong>
+      <small>{config.baseUrl?.trim() || '服务端默认中转地址'} / {config.apiKey?.trim() ? '已填写 API Key' : '服务端默认 API Key'}</small>
+      <a href="#/settings">编辑配置</a>
+    </div>
+  );
+}
+
+function SettingsView() {
+  const [config, setConfig] = useState<ModelConfig>(() => loadModelConfig());
+  const [savedAt, setSavedAt] = useState<string>();
+
+  const update = (field: keyof ModelConfig, value: string) => {
+    setConfig((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  };
+
+  const save = (event: FormEvent) => {
+    event.preventDefault();
+    persistModelConfig(config);
+    setSavedAt(new Date().toISOString());
+  };
+
+  return (
+    <div className="view-stack">
+      <SectionHeader title="配置" />
+      <form className="panel settings-form" onSubmit={save}>
+        <div className="settings-form-header">
+          <div>
+            <h2>模型调用</h2>
+            <p>用于智能助手生成草稿和控制台 RAG 问答。确认后的抓取任务仍使用各自运行时配置。</p>
+          </div>
+          <button className="primary-button" type="submit">
+            <Save size={17} />
+            保存配置
+          </button>
+        </div>
+        <div className="settings-grid">
+          <label>
+            <span>中转地址</span>
+            <input value={config.baseUrl ?? ''} onChange={(event) => update('baseUrl', event.target.value)} placeholder="https://api.example.com/v1" autoComplete="off" />
+          </label>
+          <label>
+            <span>模型名称</span>
+            <input value={config.model ?? ''} onChange={(event) => update('model', event.target.value)} placeholder="留空使用服务端 OPENAI_MODEL/RAG_MODEL" autoComplete="off" />
+          </label>
+          <label>
+            <span>API Key</span>
+            <input value={config.apiKey ?? ''} onChange={(event) => update('apiKey', event.target.value)} placeholder="留空使用服务端 OPENAI_API_KEY" type="password" autoComplete="off" />
+          </label>
+        </div>
+        <div className="settings-note">
+          中转地址和模型名称保存在浏览器本地；API Key 只保存在当前浏览器会话。提交智能助手和 RAG 问答时会随请求发送到本地控制台 API，不写入任务队列。
+        </div>
+        {savedAt && (
+          <div className="assistant-result notice">
+            <CheckCircle2 size={18} />
+            <span>已保存：{formatDate(savedAt)}</span>
+          </div>
+        )}
+      </form>
     </div>
   );
 }
@@ -2181,24 +2304,27 @@ function RagView() {
 
     try {
       setState({
-        data: await api.askRag(mode === 'temporary-jd'
-          ? {
-            platform: form.platform,
-            jobKey: form.jobKey || undefined,
-            keyword: form.keyword || undefined,
-            jd: form.jd || undefined,
-            jdFile: form.jdFile || undefined,
-            question: form.question,
-          }
-          : {
-            platform: form.platform,
-            jobKey: form.jobKey || undefined,
-            keyword: form.keyword || undefined,
-            question: form.question,
-            topK: Number(form.topK),
-            autoIndex: form.autoIndex,
-            logAnswer: form.logAnswer,
-          }),
+        data: await api.askRag({
+          ...(mode === 'temporary-jd'
+            ? {
+              platform: form.platform,
+              jobKey: form.jobKey || undefined,
+              keyword: form.keyword || undefined,
+              jd: form.jd || undefined,
+              jdFile: form.jdFile || undefined,
+              question: form.question,
+            }
+            : {
+              platform: form.platform,
+              jobKey: form.jobKey || undefined,
+              keyword: form.keyword || undefined,
+              question: form.question,
+              topK: Number(form.topK),
+              autoIndex: form.autoIndex,
+              logAnswer: form.logAnswer,
+            }),
+          modelConfig: buildModelConfig(),
+        }),
         loading: false,
       });
     } catch (error) {

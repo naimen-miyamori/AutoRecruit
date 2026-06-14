@@ -6,26 +6,38 @@ export interface OpenAISettings {
   model: string;
 }
 
+export interface OpenAISettingsOverride {
+  apiKey?: string;
+  baseUrl?: string;
+  model?: string;
+}
+
 export interface OpenAITextCompletionRequest {
   featureName: string;
   modelEnvName: string;
   input: string;
   instructions: string;
   maxOutputTokens: number;
+  settings?: OpenAISettingsOverride;
 }
 
 let openAIClient: OpenAI | undefined;
 
-export function resolveOpenAISettings(featureName: string, modelOverrideEnv: string): OpenAISettings {
-  const apiKey = process.env.OPENAI_API_KEY;
+export function resolveOpenAISettings(
+  featureName: string,
+  modelOverrideEnv: string,
+  overrides: OpenAISettingsOverride = {},
+): OpenAISettings {
+  const apiKey = overrides.apiKey?.trim() || process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error('Missing required environment variable: OPENAI_API_KEY');
   }
 
-  const baseUrl = process.env.OPENAI_BASE_URL?.trim();
+  const baseUrl = overrides.baseUrl?.trim() || process.env.OPENAI_BASE_URL?.trim();
+  const requestModel = overrides.model?.trim();
   const overrideModel = process.env[modelOverrideEnv]?.trim();
   const defaultModel = process.env.OPENAI_MODEL?.trim();
-  const model = overrideModel || defaultModel;
+  const model = requestModel || overrideModel || defaultModel;
 
   if (!model) {
     throw new Error(`Missing required environment variable: OPENAI_MODEL (for ${featureName})`);
@@ -65,10 +77,16 @@ function stringifyOpenAIError(error: unknown): string {
 }
 
 export async function completeJsonTextFromOpenAI(request: OpenAITextCompletionRequest): Promise<string> {
-  const settings = resolveOpenAISettings(request.featureName, request.modelEnvName);
+  const settings = resolveOpenAISettings(request.featureName, request.modelEnvName, request.settings);
+  const client = request.settings && (request.settings.apiKey || request.settings.baseUrl)
+    ? new OpenAI({
+      apiKey: settings.apiKey,
+      baseURL: settings.baseUrl,
+    })
+    : getOpenAIClient();
 
   try {
-    const response = await getOpenAIClient().responses.create({
+    const response = await client.responses.create({
       model: settings.model,
       instructions: request.instructions,
       input: request.input,

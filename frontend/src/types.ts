@@ -119,6 +119,12 @@ export interface AssistantMessage {
   createdAt?: string;
 }
 
+export interface ModelConfig {
+  baseUrl?: string;
+  model?: string;
+  apiKey?: string;
+}
+
 export interface AssistantDraft {
   kind: AssistantActionKind;
   input: Record<string, unknown>;
@@ -130,6 +136,7 @@ export interface AssistantDraft {
 export interface AssistantChatRequest {
   messages: AssistantMessage[];
   draft?: AssistantDraft;
+  modelConfig?: ModelConfig;
 }
 
 export interface AssistantChatResponse {
