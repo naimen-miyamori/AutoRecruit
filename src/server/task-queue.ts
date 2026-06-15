@@ -162,6 +162,7 @@ export class TaskQueue {
   private readonly ragOpsRunner: RagOpsRunner;
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly pendingTaskIds: string[] = [];
+  private readonly persistChains = new Map<string, Promise<void>>();
   private loading: Promise<void>;
   private drainPromise?: Promise<void>;
   private runningTaskId?: string;
@@ -380,9 +381,25 @@ export class TaskQueue {
   }
 
   private async persistTask(task: TaskRecord): Promise<void> {
+    const previous = this.persistChains.get(task.taskId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(() => this.writeTaskFile(task));
+    this.persistChains.set(task.taskId, current);
+
+    try {
+      await current;
+    } finally {
+      if (this.persistChains.get(task.taskId) === current) {
+        this.persistChains.delete(task.taskId);
+      }
+    }
+  }
+
+  private async writeTaskFile(task: TaskRecord): Promise<void> {
     await ensureDir(this.taskDir);
     const filePath = path.join(this.taskDir, toTaskFileName(task.taskId));
-    const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    const tempPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`;
     await fs.writeFile(tempPath, `${JSON.stringify(task, null, 2)}\n`, 'utf8');
     await fs.rename(tempPath, filePath);
   }

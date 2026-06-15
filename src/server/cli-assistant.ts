@@ -357,10 +357,7 @@ export function finalizeAssistantDraft(rawDraft: Pick<AssistantDraft, 'kind' | '
   warnings?: string[];
 }): AssistantDraft {
   const { input, droppedFields } = cleanInput(rawDraft.kind, rawDraft.input ?? {});
-  const missingFields = unique([
-    ...(rawDraft.missingFields ?? []),
-    ...computeMissingFields(rawDraft.kind, input),
-  ]);
+  const missingFields = computeMissingFields(rawDraft.kind, input);
   const warnings = unique([
     ...(rawDraft.warnings ?? []),
     ...computeWarnings(rawDraft.kind, input, droppedFields),

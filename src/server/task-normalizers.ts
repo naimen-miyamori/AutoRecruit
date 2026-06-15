@@ -54,11 +54,12 @@ export function getOptionalString(item: JsonObject, fieldName: string): string |
     return undefined;
   }
 
-  if (typeof value !== 'string' || !value.trim()) {
+  if (typeof value !== 'string') {
     throw new Error(`${fieldName} must be a non-empty string when provided`);
   }
 
-  return value.trim();
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 export function getRequiredString(item: JsonObject, fieldName: string): string {
@@ -144,11 +145,13 @@ function normalizeCc(value: unknown): string[] | undefined {
   }
 
   if (typeof value === 'string') {
-    return value.split(',').map((item) => item.trim()).filter(Boolean);
+    const items = value.split(',').map((item) => item.trim()).filter(Boolean);
+    return items.length > 0 ? items : undefined;
   }
 
   if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
-    return value.map((item) => item.trim()).filter(Boolean);
+    const items = value.map((item) => item.trim()).filter(Boolean);
+    return items.length > 0 ? items : undefined;
   }
 
   throw new Error('cc must be a string or string array');

@@ -115,6 +115,82 @@ describe('console API routes', () => {
     assert.equal(completed.outputSummary?.jobKey, '优衣库-店长');
   });
 
+  it('treats blank optional strings as absent when queueing resume-capture tasks', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      body: {
+        platform: 'liepin',
+        keyword: 'Java 后端',
+        jd: '',
+        jdFile: './fixtures/jd.txt',
+        email: '',
+        cc: '',
+        liepinForwardContact: '',
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+
+    assert.equal(completed.status, 'succeeded');
+    assert.deepStrictEqual(calls[0], [
+      '--platform',
+      'liepin',
+      '--keyword',
+      'Java 后端',
+      '--jd-file',
+      './fixtures/jd.txt',
+    ]);
+  });
+
+  it('keeps task persistence stable when captured logs write concurrently', async () => {
+    const taskDir = await makeTempDir();
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async () => {
+        console.log('first captured log');
+        console.log('second captured log');
+        console.log('third captured log');
+        return buildRunSummary();
+      },
+    });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      body: {
+        platform: '51job',
+        keyword: '泰国',
+        jd: '负责门店运营',
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+    const persisted = JSON.parse(await fs.readFile(path.join(taskDir, `${queued.taskId}.json`), 'utf8')) as TaskDetail;
+
+    assert.equal(completed.status, 'succeeded');
+    assert.equal(persisted.status, 'succeeded');
+    assert.equal(persisted.error, undefined);
+    assert.ok(persisted.logs.some((log) => log.message === 'first captured log'));
+    assert.ok(persisted.logs.some((log) => log.message === 'Task succeeded'));
+  });
+
   it('queues login-refresh tasks through the session refresh runner', async () => {
     const taskDir = await makeTempDir();
     const cliCalls: string[][] = [];
@@ -305,6 +381,40 @@ describe('console API routes', () => {
     assert.match(body.draft?.warnings?.join('\n') ?? '', /全部平台/);
   });
 
+  it('recomputes assistant missing fields after users fill draft inputs', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/validate',
+      body: {
+        draft: {
+          kind: 'resume-capture',
+          input: {
+            platform: 'liepin',
+            keyword: 'Java 后端',
+            jd: '',
+            jdFile: './fixtures/jd.txt',
+          },
+          missingFields: ['jd 或 jdFile'],
+          warnings: [],
+        },
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.body as { draft?: { input?: Record<string, unknown>; missingFields?: string[]; argvPreview?: string[] } };
+    assert.deepStrictEqual(body.draft?.missingFields, []);
+    assert.equal(body.draft?.input?.jd, undefined);
+    assert.equal(body.draft?.input?.jdFile, './fixtures/jd.txt');
+    assert.deepStrictEqual(body.draft?.argvPreview, [
+      '--platform',
+      'liepin',
+      '--keyword',
+      'Java 后端',
+      '--jd-file',
+      './fixtures/jd.txt',
+    ]);
+  });
+
   it('rejects arbitrary shell command requests in assistant chat', async () => {
     let called = false;
     const response = await handleApiRequest({
@@ -441,6 +551,51 @@ describe('console API routes', () => {
       '负责门店运营',
       '--include-viewed',
       'true',
+    ]);
+  });
+
+  it('confirms assistant drafts with jdFile after users leave JD text blank', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/confirm',
+      taskQueue: queue,
+      body: {
+        draft: {
+          kind: 'resume-capture',
+          input: {
+            platform: 'liepin',
+            keyword: 'Java 后端',
+            jd: '',
+            jdFile: './fixtures/jd.txt',
+          },
+          missingFields: ['jd 或 jdFile'],
+          warnings: [],
+          argvPreview: [],
+        },
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const task = (response.body as { task: TaskDetail }).task;
+    const completed = await waitForTask(queue, task.taskId);
+    assert.equal(completed.status, 'succeeded');
+    assert.deepStrictEqual(calls[0], [
+      '--platform',
+      'liepin',
+      '--keyword',
+      'Java 后端',
+      '--jd-file',
+      './fixtures/jd.txt',
     ]);
   });
 
@@ -1197,5 +1352,55 @@ describe('console API routes', () => {
     });
     assert.equal((response.body as { temporary?: boolean }).temporary, true);
     assert.equal((response.body as { jobKey?: string }).jobKey, '临时薪资');
+  });
+
+  it('answers temporary JD file questions when blank JD text is present', async () => {
+    const dataDir = await makeTempDir();
+    const jdFile = path.join(dataDir, 'jd.txt');
+    await fs.writeFile(jdFile, '工作地点：深圳。', 'utf8');
+
+    const persistedCalls: unknown[] = [];
+    const temporaryCalls: unknown[] = [];
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/rag/answer',
+      body: {
+        platform: 'zhilian',
+        jobKey: '临时地点',
+        jd: '',
+        jdFile,
+        question: '工作地点在哪里？',
+      },
+      answerQuestion: async (options) => {
+        persistedCalls.push(options);
+        return {
+          answer: 'should not be used',
+          answered: true,
+          sources: [],
+        };
+      },
+      answerTemporaryJdQuestion: async (input) => {
+        temporaryCalls.push(input);
+        return {
+          answer: '工作地点是深圳。',
+          answered: true,
+          confidence: 1,
+          sources: [{
+            id: 'jd-1',
+            label: 'JD 原文片段 1',
+            text: input.rawJdText,
+            score: 1,
+          }],
+        };
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(persistedCalls.length, 0);
+    assert.equal(temporaryCalls.length, 1);
+    assert.deepStrictEqual(temporaryCalls[0], {
+      rawJdText: '工作地点：深圳。',
+      question: '工作地点在哪里？',
+    });
   });
 });

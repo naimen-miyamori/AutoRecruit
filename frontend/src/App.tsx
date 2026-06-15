@@ -1653,7 +1653,36 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
 };
 
 function assistantDraftCanConfirm(draft?: AssistantDraft): boolean {
-  return Boolean(draft && draft.missingFields.length === 0);
+  if (!draft || !draft.input.platform) {
+    return false;
+  }
+
+  const input = draft.input;
+  if (draft.kind === 'resume-capture') {
+    return Boolean(input.keyword && (input.jd || input.jdFile));
+  }
+  if (draft.kind === 'batch') {
+    return Boolean(input.jobsFile);
+  }
+  if (draft.kind === 'search-subscription') {
+    return Boolean(input.searchSubscriptionFile);
+  }
+  if (draft.kind === 'rag-ops') {
+    if (!input.action) {
+      return false;
+    }
+    if ((input.action === 'doctor' || input.action === 'review' || input.action === 'rebuild') && !input.jobKey && !input.keyword) {
+      return false;
+    }
+    if ((input.action === 'metrics' || input.action === 'ops') && !input.file) {
+      return false;
+    }
+  }
+  if (draft.kind === 'rag-answer') {
+    return Boolean(input.question && (input.jobKey || input.keyword || input.jd || input.jdFile));
+  }
+
+  return true;
 }
 
 function hasAssistantRisk(draft?: AssistantDraft): boolean {
