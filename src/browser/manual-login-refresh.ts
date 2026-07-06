@@ -27,7 +27,7 @@ const liepinReadyTextPattern = /搜简历|找简历|招聘管理|人才管理|�
 
 function getManualLoginVerificationOptions(platform: SupportedPlatform): { headless: boolean } {
   return {
-    headless: platform === 'liepin' ? false : true,
+    headless: platform === 'liepin' || platform === 'boss' ? false : true,
   };
 }
 

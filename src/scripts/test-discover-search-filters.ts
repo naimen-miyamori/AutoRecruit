@@ -295,7 +295,7 @@ describe('discover search filters CLI', () => {
 
     module.getPlatformAdapterRef.fn = ((platform) => adapters.get(platform)!) as typeof module.getPlatformAdapterRef.fn;
     module.listSupportedPlatformsRef.fn = (() => ['51job', 'liepin', 'zhilian']) as typeof module.listSupportedPlatformsRef.fn;
-    module.ensureAuthenticatedBrowserSessionRef.fn = async (platform: '51job' | 'liepin' | 'zhilian') => {
+    module.ensureAuthenticatedBrowserSessionRef.fn = async (platform) => {
       sessionCalls.push(platform);
       return session;
     };

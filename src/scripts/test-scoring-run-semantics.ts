@@ -1964,6 +1964,29 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(gotoCalls, ['https://passport.zhaopin.com/org/login']);
   });
 
+  it('opens Boss manual login on the provided Boss login page', async () => {
+    const loginSession = createManualLoginSessionStub();
+    const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;
+    const originalGoto = loginSession.page.goto;
+
+    const gotoCalls: string[] = [];
+
+    createPersistentBrowserSessionRef.fn = (async (platform) => loginSession.createPersistentBrowserSession(platform)) as typeof createPersistentBrowserSessionRef.fn;
+    loginSession.page.goto = (async (url: string) => {
+      gotoCalls.push(url);
+    }) as typeof loginSession.page.goto;
+
+    try {
+      await openLoginSessionRef.fn('boss');
+    } finally {
+      createPersistentBrowserSessionRef.fn = originalCreatePersistentBrowserSession;
+      loginSession.page.goto = originalGoto;
+    }
+
+    assert.deepStrictEqual(loginSession.getCreatePersistentCalls(), ['boss']);
+    assert.deepStrictEqual(gotoCalls, ['https://www.zhipin.com/web/user/?ka=header-login']);
+  });
+
   it('fails Liepin manual login entry when staged navigation lands on an unexpected page', async () => {
     const loginSession = createManualLoginSessionStub();
     const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;

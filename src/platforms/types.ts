@@ -2,7 +2,8 @@ import type { BrowserContext, Page } from 'playwright';
 import type { SearchFilterCatalog, SearchFilterDiscoveryRunOptions } from '../search/filter-catalog.js';
 import type { CandidateListItem, CandidateResume, SearchCondition, SearchConditionApplyResult } from '../types/job.js';
 
-export const SUPPORTED_PLATFORMS = ['51job', 'liepin', 'zhilian'] as const;
+export const ALL_PLATFORM_RUN_ORDER = ['51job', 'liepin', 'zhilian'] as const;
+export const SUPPORTED_PLATFORMS = [...ALL_PLATFORM_RUN_ORDER, 'boss'] as const;
 
 export type SupportedPlatform = (typeof SUPPORTED_PLATFORMS)[number];
 

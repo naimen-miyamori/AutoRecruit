@@ -10,6 +10,7 @@ const platformEnvPrefixes: Record<SupportedPlatform, string> = {
   '51job': '51JOB',
   liepin: 'LIEPIN',
   zhilian: 'ZHILIAN',
+  boss: 'BOSS',
 };
 
 function getRequiredEnv(name: string): string {
@@ -117,31 +118,37 @@ const actionDelayMinMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MIN_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MIN_MS', 2000),
   zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MIN_MS', 0),
+  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MIN_MS', 0),
 };
 const actionDelayMaxMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MAX_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MAX_MS', 3000),
   zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MAX_MS', 0),
+  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MAX_MS', 0),
 };
 const candidateDelayMinMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'CANDIDATE_DELAY_MIN_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'CANDIDATE_DELAY_MIN_MS', 2000),
   zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MIN_MS', 0),
+  boss: getPlatformNumberEnv('boss', 'CANDIDATE_DELAY_MIN_MS', 0),
 };
 const candidateDelayMaxMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'CANDIDATE_DELAY_MAX_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'CANDIDATE_DELAY_MAX_MS', 3000),
   zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MAX_MS', 0),
+  boss: getPlatformNumberEnv('boss', 'CANDIDATE_DELAY_MAX_MS', 0),
 };
 const reuseBrowserByPlatform: Record<SupportedPlatform, boolean> = {
   '51job': getPlatformBooleanEnv('51job', 'REUSE_BROWSER', true),
   liepin: getPlatformBooleanEnv('liepin', 'REUSE_BROWSER', true),
   zhilian: getPlatformBooleanEnv('zhilian', 'REUSE_BROWSER', true),
+  boss: getPlatformBooleanEnv('boss', 'REUSE_BROWSER', true),
 };
 const reuseCdpPortByPlatform: Record<SupportedPlatform, number> = {
   '51job': getOptionalNumberEnv('PLAYWRIGHT_51JOB_REUSE_CDP_PORT', 19325),
   liepin: getOptionalNumberEnv('PLAYWRIGHT_LIEPIN_REUSE_CDP_PORT', 19327),
   zhilian: getOptionalNumberEnv('PLAYWRIGHT_ZHILIAN_REUSE_CDP_PORT', 19329),
+  boss: getOptionalNumberEnv('PLAYWRIGHT_BOSS_REUSE_CDP_PORT', 19331),
 };
 
 export const config = {

@@ -18,12 +18,13 @@ test('parsePlatformArg accepts supported platform values', () => {
   assert.equal(parsePlatformArg('51job'), '51job');
   assert.equal(parsePlatformArg('liepin'), 'liepin');
   assert.equal(parsePlatformArg('zhilian'), 'zhilian');
+  assert.equal(parsePlatformArg('boss'), 'boss');
 });
 
 test('parsePlatformArg rejects unsupported platforms with supported values in the error', () => {
   assert.throws(
-    () => parsePlatformArg('boss'),
-    /Unsupported platform: boss\. Supported platforms: 51job, liepin, zhilian/,
+    () => parsePlatformArg('lagou'),
+    /Unsupported platform: lagou\. Supported platforms: 51job, liepin, zhilian, boss/,
   );
 });
 
@@ -35,6 +36,7 @@ test('resolveStorageStatePath returns platform-specific default paths', () => {
     assert.match(resolveStorageStatePath('51job'), /storage-state\.json$/);
     assert.match(resolveStorageStatePath('liepin'), /storage-state\.liepin\.json$/);
     assert.match(resolveStorageStatePath('zhilian'), /storage-state\.zhilian\.json$/);
+    assert.match(resolveStorageStatePath('boss'), /storage-state\.boss\.json$/);
   } finally {
     if (originalStorageStatePath === undefined) {
       delete process.env.STORAGE_STATE_PATH;
@@ -56,6 +58,9 @@ test('resolveStorageStatePath honors platform-specific STORAGE_STATE_PATH overri
 
     process.env.STORAGE_STATE_PATH = '/tmp/custom-zhilian-storage-state.json';
     assert.equal(resolveStorageStatePath('zhilian'), '/tmp/custom-zhilian-storage-state.json');
+
+    process.env.STORAGE_STATE_PATH = '/tmp/custom-boss-storage-state.json';
+    assert.equal(resolveStorageStatePath('boss'), '/tmp/custom-boss-storage-state.json');
   } finally {
     if (originalStorageStatePath === undefined) {
       delete process.env.STORAGE_STATE_PATH;
@@ -72,10 +77,12 @@ test('resolveStorageStatePath rejects cross-platform or shared STORAGE_STATE_PAT
     process.env.STORAGE_STATE_PATH = '/tmp/storage-state.json';
     assert.throws(() => resolveStorageStatePath('liepin'), /not safe for liepin/);
     assert.throws(() => resolveStorageStatePath('zhilian'), /not safe for zhilian/);
+    assert.throws(() => resolveStorageStatePath('boss'), /not safe for boss/);
 
     process.env.STORAGE_STATE_PATH = '/tmp/custom-liepin-storage-state.json';
     assert.throws(() => resolveStorageStatePath('51job'), /not safe for 51job/);
     assert.throws(() => resolveStorageStatePath('zhilian'), /not safe for zhilian/);
+    assert.throws(() => resolveStorageStatePath('boss'), /not safe for boss/);
   } finally {
     if (originalStorageStatePath === undefined) {
       delete process.env.STORAGE_STATE_PATH;
@@ -90,31 +97,37 @@ test('browser pacing and reuse defaults are platform-specific', () => {
     '51job': 0,
     liepin: 2000,
     zhilian: 0,
+    boss: 0,
   });
   assert.deepEqual(config.playwright.actionDelayMaxMsByPlatform, {
     '51job': 0,
     liepin: 3000,
     zhilian: 0,
+    boss: 0,
   });
   assert.deepEqual(config.playwright.candidateDelayMinMsByPlatform, {
     '51job': 0,
     liepin: 2000,
     zhilian: 0,
+    boss: 0,
   });
   assert.deepEqual(config.playwright.candidateDelayMaxMsByPlatform, {
     '51job': 0,
     liepin: 3000,
     zhilian: 0,
+    boss: 0,
   });
   assert.deepEqual(config.playwright.reuseBrowserByPlatform, {
     '51job': true,
     liepin: true,
     zhilian: true,
+    boss: true,
   });
   assert.deepEqual(config.playwright.reuseCdpPortByPlatform, {
     '51job': 19325,
     liepin: 19327,
     zhilian: 19329,
+    boss: 19331,
   });
 });
 
@@ -415,4 +428,22 @@ test('zhilian adapter exposes the shared auth contract', () => {
   assert.equal(typeof zhilianAdapter.extractCandidateList, 'function');
   assert.equal(typeof zhilianAdapter.openResumeDetail, 'function');
   assert.equal(typeof zhilianAdapter.parseResumeDetail, 'function');
+});
+
+test('boss adapter exposes login/session and search-page preparation contract only', async () => {
+  const bossAdapter = getPlatformAdapter('boss');
+  assert.equal(bossAdapter.platform, 'boss');
+  assert.equal(bossAdapter.displayName, 'Boss');
+  assert.equal(bossAdapter.subscribeSearchUrl, 'https://www.zhipin.com/web/chat/search');
+  assert.equal(bossAdapter.loginUrl, 'https://www.zhipin.com/web/user/?ka=header-login');
+  assert.equal(bossAdapter.storageStateFileName, 'storage-state.boss.json');
+  assert.equal(typeof bossAdapter.openLoginPage, 'function');
+  assert.equal(typeof bossAdapter.openAuthenticatedHome, 'function');
+  assert.equal(typeof bossAdapter.assertAuthenticated, 'function');
+  assert.equal(typeof bossAdapter.openSubscribeSearch, 'function');
+
+  await assert.rejects(
+    () => bossAdapter.extractCandidateList({} as never),
+    /search-page preparation only; candidate extraction is not implemented yet/,
+  );
 });

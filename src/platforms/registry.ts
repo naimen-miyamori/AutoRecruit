@@ -1,16 +1,18 @@
 import { fiftyOneJobAdapter } from './51job-adapter.js';
+import { bossAdapter } from './boss-adapter.js';
 import { liepinAdapter } from './liepin-adapter.js';
 import { zhilianAdapter } from './zhilian-adapter.js';
-import { SUPPORTED_PLATFORMS, type PlatformAdapter, type SupportedPlatform } from './types.js';
+import { ALL_PLATFORM_RUN_ORDER, SUPPORTED_PLATFORMS, type PlatformAdapter, type SupportedPlatform } from './types.js';
 
 const platformRegistry: Record<SupportedPlatform, PlatformAdapter> = {
   '51job': fiftyOneJobAdapter,
   liepin: liepinAdapter,
   zhilian: zhilianAdapter,
+  boss: bossAdapter,
 };
 
 export function listSupportedPlatforms(): SupportedPlatform[] {
-  return [...SUPPORTED_PLATFORMS];
+  return [...ALL_PLATFORM_RUN_ORDER];
 }
 
 export function parsePlatformArg(platform?: string): SupportedPlatform {

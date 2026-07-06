@@ -58,6 +58,11 @@ const platformPreferredUrlPatterns: Record<SupportedPlatform, RegExp[]> = {
     /^https:\/\/rd6\.zhaopin\.com\/app\/search(?:[/?#].*)?$/i,
     /^https:\/\/(?:rd6|rd5|rd)\.zhaopin\.com\//i,
   ],
+  boss: [
+    /^https:\/\/www\.zhipin\.com\/web\/user\/?(?:[/?#].*)?$/i,
+    /^https:\/\/www\.zhipin\.com\/web\//i,
+    /^https:\/\/www\.zhipin\.com\//i,
+  ],
 };
 
 function resolveReusableBrowserUserDataDir(platform: SupportedPlatform): string {
