@@ -11,3 +11,4 @@ storage-state*.json
 playwright-report/
 test-results/
 .assistant/
+tmp-*.png
