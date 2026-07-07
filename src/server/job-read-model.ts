@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config, resolveStorageStatePath } from '../config.js';
-import { listSupportedPlatforms, parsePlatformArg } from '../platforms/registry.js';
-import type { SupportedPlatform } from '../platforms/types.js';
+import { parsePlatformArg } from '../platforms/registry.js';
+import { SUPPORTED_PLATFORMS, type SupportedPlatform } from '../platforms/types.js';
 import type { SearchFilterCatalog } from '../search/filter-catalog.js';
 import { normalizeFailureMessage, summarizeFailureMessage } from './failure-summary.js';
 import type {
@@ -210,6 +210,10 @@ function truncateSnapshot(snapshot: string): string {
   return normalized.length > 6000 ? `${normalized.slice(0, 6000)}...` : normalized;
 }
 
+function listReadablePlatforms(): SupportedPlatform[] {
+  return [...SUPPORTED_PLATFORMS];
+}
+
 export class JobReadModel {
   private readonly dataDir: string;
 
@@ -218,7 +222,7 @@ export class JobReadModel {
   }
 
   async listJobs(platform?: SupportedPlatform): Promise<JobSummary[]> {
-    const platforms = platform ? [platform] : listSupportedPlatforms();
+    const platforms = platform ? [platform] : listReadablePlatforms();
     const jobs: JobSummary[] = [];
 
     for (const currentPlatform of platforms) {
@@ -309,7 +313,7 @@ export class JobReadModel {
   }
 
   async listFilterCatalogs(platform?: SupportedPlatform): Promise<SearchFilterCatalog[]> {
-    const platforms = platform ? [platform] : listSupportedPlatforms();
+    const platforms = platform ? [platform] : listReadablePlatforms();
     const catalogs = await Promise.all(platforms.map(async (currentPlatform) => {
       const latestPath = path.join(this.dataDir, currentPlatform, 'filter-catalog', 'latest.json');
       return readJsonFileIfExists<SearchFilterCatalog>(latestPath);
@@ -319,7 +323,7 @@ export class JobReadModel {
   }
 
   async getDataAnomalies(platform?: SupportedPlatform): Promise<DataAnomalySummary[]> {
-    const platforms = platform ? [platform] : listSupportedPlatforms();
+    const platforms = platform ? [platform] : listReadablePlatforms();
 
     return Promise.all(platforms.map(async (currentPlatform) => {
       const jobsDir = path.join(this.dataDir, currentPlatform, 'jobs');
@@ -364,7 +368,7 @@ export class JobReadModel {
   }
 
   async getPlatformRunHealth(platform?: SupportedPlatform): Promise<PlatformRunHealth[]> {
-    const platforms = platform ? [platform] : listSupportedPlatforms();
+    const platforms = platform ? [platform] : listReadablePlatforms();
 
     return Promise.all(platforms.map(async (currentPlatform) => {
       const jobs = await this.listJobs(currentPlatform);
@@ -401,7 +405,7 @@ export class JobReadModel {
   }
 
   async getCandidateFunnels(platform?: SupportedPlatform): Promise<CandidateFunnelHealth[]> {
-    const platforms = platform ? [platform] : listSupportedPlatforms();
+    const platforms = platform ? [platform] : listReadablePlatforms();
 
     return Promise.all(platforms.map(async (currentPlatform) => {
       const jobs = await this.listJobs(currentPlatform);
@@ -421,7 +425,7 @@ export class JobReadModel {
   }
 
   async getSessionHealth(tasks: TaskSummary[], platform?: SupportedPlatform): Promise<SessionHealth[]> {
-    const platforms = platform ? [platform] : listSupportedPlatforms();
+    const platforms = platform ? [platform] : listReadablePlatforms();
 
     return Promise.all(platforms.map(async (currentPlatform) => {
       const storageStatePath = resolveStorageStatePath(currentPlatform);
@@ -448,7 +452,7 @@ export class JobReadModel {
   }
 
   async getFilterHealth(platform?: SupportedPlatform): Promise<FilterCatalogHealth[]> {
-    const platforms = platform ? [platform] : listSupportedPlatforms();
+    const platforms = platform ? [platform] : listReadablePlatforms();
     const now = Date.now();
 
     return Promise.all(platforms.map(async (currentPlatform) => {

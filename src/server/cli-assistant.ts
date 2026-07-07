@@ -229,7 +229,7 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
   }
 
   if (input.platform === 'all') {
-    warnings.push('风险：全部平台会按 51job -> 猎聘 -> 智联顺序执行，任一平台失败会停止。');
+    warnings.push('风险：全部平台会按 51job -> 猎聘 -> 智联顺序执行，任一平台失败会停止；Boss 需单独选择。');
   }
 
   if ((kind === 'resume-capture' || kind === 'batch') && input.includeViewed === true) {
@@ -441,10 +441,10 @@ function buildSystemPrompt(): string {
     'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact。',
     'batch 字段：platform, jobsFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact；不要包含 keyword、jd、jdFile。',
     'search-subscription 字段：platform, searchSubscriptionFile, keyword, applicationFilterInputFile, saveSearchSubscription, searchSubscriptionName；不要包含 jd、email、includeViewed、searchSource。',
-    'login-refresh 字段：platform，只允许 51job、liepin、zhilian。',
+    'login-refresh 字段：platform，只允许 51job、liepin、zhilian、boss。',
     'rag-ops 字段：action, platform, jobKey, keyword, question, file, policyFile, reviewer, limit, includeReviewed, failOnIssue；action 只能是 doctor、review、metrics、ops、rebuild。',
     'rag-answer 字段：platform, jobKey, keyword, jd, jdFile, question, topK, autoIndex, logAnswer, metadata。',
-    '平台只能是 51job、liepin、zhilian、all；rag-answer 和 login-refresh 不能使用 all。',
+    '平台只能是 51job、liepin、zhilian、boss、all；all 只代表 51job、liepin、zhilian，不包含 boss；rag-answer 和 login-refresh 不能使用 all。',
     'applicationFilterInputFile 只能用于 direct 普通简历抓取或批量任务，搜索订阅只作为订阅包装输入。',
     '如果信息不足，把字段名放到 missingFields，并用 clarificationQuestions 给出中文追问。',
   ].join('\n');
@@ -493,7 +493,7 @@ export async function chatWithCliAssistant(
         content: '我不能生成或执行任意 shell 命令。请描述要执行的受控招聘任务，例如简历抓取、搜索订阅、登录刷新或 RAG 问答。',
         createdAt: new Date().toISOString(),
       },
-      clarificationQuestions: ['请改用受控功能描述你的目标，例如“刷新智联登录”或“用 JD 执行三平台搜索”。'],
+      clarificationQuestions: ['请改用受控功能描述你的目标，例如“刷新智联登录”或“用 JD 执行全部平台搜索”。'],
       rejected: true,
     };
   }

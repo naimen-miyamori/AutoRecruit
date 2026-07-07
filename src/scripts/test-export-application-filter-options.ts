@@ -373,6 +373,175 @@ function createZhilianCatalog(): SearchFilterCatalog {
   };
 }
 
+function createBossCatalog(): SearchFilterCatalog {
+  return {
+    platform: 'boss',
+    keyword: '物业电工',
+    capturedAt: '2026-07-06T10:00:00.000Z',
+    pageUrl: 'https://www.zhipin.com/web/chat/search#https://www.zhipin.com/web/frame/search/',
+    filters: [
+      {
+        key: 'boss-education',
+        label: '学历要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '学历要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '本科及以上', value: '本科及以上' },
+          { label: '硕士及以上', value: '硕士及以上' },
+          {
+            label: '自定义',
+            value: '自定义',
+            inputSpec: {
+              kind: 'selectRange',
+              fields: [
+                { key: 'min', valueType: 'string', label: '最低学历' },
+                { key: 'max', valueType: 'string', label: '最高学历' },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        key: 'boss-school-nature',
+        label: '院校要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '院校要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '统招本科', value: '统招本科' },
+          { label: '985院校', value: '985院校' },
+        ],
+      },
+      {
+        key: 'boss-work-years',
+        label: '经验要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '经验要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '1-3年', value: '1-3年' },
+          { label: '3-5年', value: '3-5年' },
+          {
+            label: '自定义',
+            value: '自定义',
+            inputSpec: {
+              kind: 'selectRange',
+              fields: [
+                { key: 'min', valueType: 'string', label: '最低经验' },
+                { key: 'max', valueType: 'string', label: '最高经验' },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        key: 'boss-age',
+        label: '年龄要求',
+        controlType: 'rangeInput',
+        valueShape: 'range',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '年龄要求' }],
+        options: [
+          { label: '20-25', value: '20-25' },
+          { label: '25-30', value: '25-30' },
+          { label: '50以上', value: '50以上' },
+        ],
+      },
+      {
+        key: 'boss-gender',
+        label: '性别',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '性别' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '男', value: '男' },
+          { label: '女', value: '女' },
+        ],
+      },
+      {
+        key: 'boss-expected-salary',
+        label: '薪资区间',
+        controlType: 'rangeInput',
+        valueShape: 'range',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '薪资区间' }],
+        options: [
+          { label: '1K', value: '1K' },
+          { label: '5K', value: '5K' },
+          { label: '10K', value: '10K' },
+        ],
+      },
+      {
+        key: 'boss-recent-activity-time',
+        label: '牛人活跃度',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '牛人活跃度' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '刚刚活跃', value: '刚刚活跃' },
+          { label: '今日活跃', value: '今日活跃' },
+        ],
+      },
+      {
+        key: 'boss-job-hopping-count',
+        label: '跳槽频率',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '跳槽频率' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '5年少于3份', value: '5年少于3份' },
+        ],
+      },
+      {
+        key: 'boss-job-status',
+        label: '求职状态',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '求职状态' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '离职-随时到岗', value: '离职-随时到岗' },
+        ],
+      },
+      {
+        key: 'boss-position-requirement',
+        label: '牛人职位要求',
+        controlType: 'singleSelect',
+        valueShape: 'string',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '牛人职位要求' }],
+        options: [
+          { label: '不限', value: '不限' },
+          { label: '仅从事过此职位', value: '仅从事过此职位' },
+          { label: '牛人期望此职位', value: '牛人期望此职位' },
+        ],
+      },
+    ],
+    failures: [],
+    stats: {
+      discoveredControls: 10,
+      inspectedControls: 10,
+      optionsExtracted: 29,
+      failedControls: 0,
+      unknownControls: 0,
+    },
+  };
+}
+
 test('export application filter options parses args', () => {
   assert.deepEqual(parseArgs(['51job']), {
     platform: '51job',
@@ -590,6 +759,67 @@ test('export application filter options normalizes Zhilian panel fields', () => 
     expected_salary: {
       min: '2千',
       max: '1万',
+    },
+  }), {
+    ok: true,
+    errors: [],
+  });
+});
+
+test('export application filter options normalizes Boss search filters', () => {
+  const options = buildApplicationFilterOptions(createBossCatalog());
+
+  assert.equal(options.platform, 'boss');
+  assert.deepEqual(options.fieldIds, [
+    'education',
+    'school_nature',
+    'work_years',
+    'gender',
+    'recent_activity_time',
+    'job_hopping_count',
+    'job_status',
+    'candidate_position_requirement',
+    'age',
+    'expected_salary',
+  ]);
+  assert.deepEqual(options.groups.singleSelect, [
+    'education',
+    'school_nature',
+    'work_years',
+    'gender',
+    'recent_activity_time',
+    'job_hopping_count',
+    'job_status',
+    'candidate_position_requirement',
+  ]);
+  assert.deepEqual(options.groups.numberRange, ['age']);
+  assert.deepEqual(options.groups.salaryRange, ['expected_salary']);
+  assert.equal(options.fieldIdByLabel.牛人活跃度, 'recent_activity_time');
+  assert.equal(options.fieldIdByLabel.薪资区间, 'expected_salary');
+  assert.equal(options.fieldIdByLabel.牛人职位要求, 'candidate_position_requirement');
+
+  const salary = options.fieldsById.expected_salary;
+  if (salary.kind !== 'salaryRange') {
+    assert.fail('expected_salary should be a salaryRange field');
+  }
+
+  assert.deepEqual(salary.minOptions, ['1K', '5K', '10K']);
+  assert.deepEqual(validateApplicationFilterInput(options, {
+    education: '本科及以上',
+    school_nature: '统招本科',
+    work_years: '1-3年',
+    gender: '女',
+    recent_activity_time: '今日活跃',
+    job_hopping_count: '5年少于3份',
+    job_status: '离职-随时到岗',
+    candidate_position_requirement: '仅从事过此职位',
+    age: {
+      min: 25,
+      max: 30,
+    },
+    expected_salary: {
+      min: '1K',
+      max: '10K',
     },
   }), {
     ok: true,

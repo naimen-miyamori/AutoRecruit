@@ -630,6 +630,11 @@ input:disabled {
   color: var(--amber);
 }
 
+.platform-boss {
+  background: #e7f8ef;
+  color: #087443;
+}
+
 .job-detail-hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
@@ -1410,6 +1415,11 @@ input:disabled {
 .platform-filter-zhilian {
   --filter-accent: #0a7c8f;
   --filter-accent-soft: #e4f6f8;
+}
+
+.platform-filter-boss {
+  --filter-accent: #0f8a4d;
+  --filter-accent-soft: #e7f8ef;
 }
 
 .platform-filter-meta {

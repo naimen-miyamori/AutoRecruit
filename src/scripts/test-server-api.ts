@@ -216,7 +216,7 @@ describe('console API routes', () => {
       pathname: '/api/tasks/login-refresh',
       taskQueue: queue,
       body: {
-        platform: 'liepin',
+        platform: 'boss',
       },
     });
 
@@ -226,11 +226,11 @@ describe('console API routes', () => {
 
     assert.equal(completed.status, 'succeeded');
     assert.deepStrictEqual(cliCalls, []);
-    assert.deepStrictEqual(refreshCalls, ['liepin']);
-    assert.equal(completed.inputSummary.platform, 'liepin');
+    assert.deepStrictEqual(refreshCalls, ['boss']);
+    assert.equal(completed.inputSummary.platform, 'boss');
     assert.equal(completed.inputSummary.action, 'manual-login-refresh');
-    assert.equal(completed.outputSummary?.platform, 'liepin');
-    assert.equal(completed.outputSummary?.storageStatePath, '/tmp/storage-state.liepin.json');
+    assert.equal(completed.outputSummary?.platform, 'boss');
+    assert.equal(completed.outputSummary?.storageStatePath, '/tmp/storage-state.boss.json');
   });
 
   it('queues RAG operations through the task queue', async () => {
@@ -285,7 +285,7 @@ describe('console API routes', () => {
     assert.equal(completed.outputSummary?.issueCount, 0);
   });
 
-  it('generates assistant resume-capture drafts from Chinese requests', async () => {
+  it('generates assistant Boss resume-capture drafts from Chinese requests', async () => {
     const completionRequests: unknown[] = [];
     const response = await handleApiRequest({
       method: 'POST',
@@ -293,7 +293,7 @@ describe('console API routes', () => {
       body: {
         messages: [{
           role: 'user',
-          content: '帮我在猎聘搜索 Java 后端，筛选本科以上，3-5 年经验，JD 是负责服务端研发。',
+          content: '帮我在 Boss 搜索物业电工，筛选本科以上，3-5 年经验，JD 是负责物业电气维修。',
         }],
         modelConfig: {
           baseUrl: 'https://proxy.example.com/v1',
@@ -304,15 +304,15 @@ describe('console API routes', () => {
       assistantCompleteJsonText: async (request) => {
         completionRequests.push(request);
         return JSON.stringify({
-          reply: '已生成猎聘简历抓取草稿。',
+          reply: '已生成 Boss 简历抓取草稿。',
           draft: {
             kind: 'resume-capture',
             input: {
-              platform: 'liepin',
-              keyword: 'Java 后端',
-              jd: '负责服务端研发。',
+              platform: 'boss',
+              keyword: '物业电工',
+              jd: '负责物业电气维修。',
               searchSource: 'direct',
-              applicationFilterInputFile: './filters/java.json',
+              applicationFilterInputFile: './filters/boss.json',
             },
             missingFields: [],
             warnings: [],
@@ -329,6 +329,8 @@ describe('console API routes', () => {
       model: 'assistant-test-model',
       apiKey: 'sk-test-assistant',
     });
+    assert.match((completionRequests[0] as { instructions?: string }).instructions ?? '', /boss/);
+    assert.match((completionRequests[0] as { instructions?: string }).instructions ?? '', /all 只代表 51job、liepin、zhilian/);
     assert.doesNotMatch((completionRequests[0] as { input?: string }).input ?? '', /sk-test-assistant/);
     const body = response.body as { draft?: { kind?: string; missingFields?: string[]; argvPreview?: string[]; input?: Record<string, unknown> } };
     assert.equal(body.draft?.kind, 'resume-capture');
@@ -336,17 +338,17 @@ describe('console API routes', () => {
     assert.deepStrictEqual(body.draft?.missingFields, []);
     assert.deepStrictEqual(body.draft?.argvPreview, [
       '--platform',
-      'liepin',
+      'boss',
       '--keyword',
-      'Java 后端',
+      '物业电工',
       '--jd',
-      '负责服务端研发。',
+      '负责物业电气维修。',
       '--search-source',
       'direct',
       '--application-filter-input-file',
-      './filters/java.json',
+      './filters/boss.json',
     ]);
-    assert.equal(body.draft?.input?.platform, 'liepin');
+    assert.equal(body.draft?.input?.platform, 'boss');
   });
 
   it('returns assistant clarification questions when JD is missing', async () => {
@@ -356,7 +358,7 @@ describe('console API routes', () => {
       body: {
         messages: [{
           role: 'user',
-          content: '用这个岗位执行三平台搜索',
+          content: '用这个岗位执行全部平台搜索',
         }],
       },
       assistantCompleteJsonText: async () => JSON.stringify({
@@ -379,6 +381,7 @@ describe('console API routes', () => {
     assert.deepStrictEqual(body.draft?.missingFields, ['jd 或 jdFile']);
     assert.match(body.clarificationQuestions?.join('\n') ?? '', /JD|jd/);
     assert.match(body.draft?.warnings?.join('\n') ?? '', /全部平台/);
+    assert.match(body.draft?.warnings?.join('\n') ?? '', /Boss/);
   });
 
   it('recomputes assistant missing fields after users fill draft inputs', async () => {
@@ -389,8 +392,8 @@ describe('console API routes', () => {
         draft: {
           kind: 'resume-capture',
           input: {
-            platform: 'liepin',
-            keyword: 'Java 后端',
+            platform: 'boss',
+            keyword: '物业电工',
             jd: '',
             jdFile: './fixtures/jd.txt',
           },
@@ -407,9 +410,9 @@ describe('console API routes', () => {
     assert.equal(body.draft?.input?.jdFile, './fixtures/jd.txt');
     assert.deepStrictEqual(body.draft?.argvPreview, [
       '--platform',
-      'liepin',
+      'boss',
       '--keyword',
-      'Java 后端',
+      '物业电工',
       '--jd-file',
       './fixtures/jd.txt',
     ]);
@@ -573,8 +576,8 @@ describe('console API routes', () => {
         draft: {
           kind: 'resume-capture',
           input: {
-            platform: 'liepin',
-            keyword: 'Java 后端',
+            platform: 'boss',
+            keyword: '物业电工',
             jd: '',
             jdFile: './fixtures/jd.txt',
           },
@@ -591,9 +594,9 @@ describe('console API routes', () => {
     assert.equal(completed.status, 'succeeded');
     assert.deepStrictEqual(calls[0], [
       '--platform',
-      'liepin',
+      'boss',
       '--keyword',
-      'Java 后端',
+      '物业电工',
       '--jd-file',
       './fixtures/jd.txt',
     ]);
@@ -953,8 +956,23 @@ describe('console API routes', () => {
     await writeJson(path.join(jobDir, 'scores', 'c1.json'), scoreArtifact);
     await fs.mkdir(path.join(jobDir, 'snapshots'), { recursive: true });
     await fs.writeFile(path.join(jobDir, 'snapshots', 'c1.txt'), '简历原文\n工作经历', 'utf8');
+    await writeJson(path.join(dataDir, 'boss', 'jobs', '物业电工', 'jd.json'), {
+      ...jobRecord,
+      platform: 'boss',
+      jobKey: '物业电工',
+      searchKeyword: '物业电工',
+      normalizedJob: {
+        ...jobRecord.normalizedJob,
+        title: '物业电工',
+      },
+    });
 
     const model = new JobReadModel({ dataDir });
+    const allJobs = await handleApiRequest({
+      method: 'GET',
+      pathname: '/api/jobs',
+      jobReadModel: model,
+    });
     const jobs = await handleApiRequest({
       method: 'GET',
       pathname: '/api/jobs',
@@ -978,6 +996,8 @@ describe('console API routes', () => {
     });
 
     assert.equal(jobs.statusCode, 200);
+    assert.equal(allJobs.statusCode, 200);
+    assert.equal((allJobs.body as { jobs: Array<{ platform: string; jobKey: string }> }).jobs.some((job) => job.platform === 'boss' && job.jobKey === '物业电工'), true);
     assert.equal((jobs.body as { jobs: Array<{ jobKey: string }> }).jobs[0]?.jobKey, jobKey);
     assert.equal(detail.statusCode, 200);
     assert.equal((detail.body as { title?: string }).title, '店长');

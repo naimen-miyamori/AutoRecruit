@@ -59,7 +59,17 @@ const PLATFORM_LABELS: Record<Platform | 'all', string> = {
   '51job': '51job',
   liepin: '猎聘',
   zhilian: '智联',
+  boss: 'Boss直聘',
 };
+
+const SINGLE_PLATFORM_OPTIONS: Platform[] = ['51job', 'liepin', 'zhilian', 'boss'];
+const RUN_PLATFORM_OPTIONS: Array<Platform | 'all'> = [...SINGLE_PLATFORM_OPTIONS, 'all'];
+const FILTER_PLATFORM_OPTIONS: Array<Platform | 'all'> = ['all', ...SINGLE_PLATFORM_OPTIONS];
+const ALL_PLATFORM_NOTE = '全部平台仅包含 51job、猎聘、智联，不包含 Boss。';
+
+function platformSelectOptions(values: Array<Platform | 'all'>): Array<{ value: string; label: string }> {
+  return values.map((value) => ({ value, label: PLATFORM_LABELS[value] }));
+}
 
 const STATUS_LABELS: Record<TaskStatus, string> = {
   queued: '排队中',
@@ -409,7 +419,7 @@ function DashboardView() {
     const jobs = state.data?.jobs ?? [];
     const catalogs = state.data?.catalogs ?? [];
     const health = state.data?.health;
-    return (['51job', 'liepin', 'zhilian'] as Platform[]).map((platform) => ({
+    return SINGLE_PLATFORM_OPTIONS.map((platform) => ({
       platform,
       jobs: jobs.filter((job) => job.platform === platform),
       catalog: catalogs.find((catalog) => catalog.platform === platform),
@@ -567,7 +577,7 @@ function DashboardHealthPanels({ health }: { health: Awaited<ReturnType<typeof a
               </tr>
             </thead>
             <tbody>
-              {(['51job', 'liepin', 'zhilian'] as Platform[]).map((platform) => {
+              {SINGLE_PLATFORM_OPTIONS.map((platform) => {
                 const session = health.sessions.find((item) => item.platform === platform);
                 const filter = health.filters.find((item) => item.platform === platform);
                 const filterIssues = (filter?.failedControls ?? 0) + (filter?.unknownControls ?? 0);
@@ -1294,7 +1304,7 @@ function JobsView({ navigate }: { navigate: (hash: string) => void }) {
           <label>
             <span>平台</span>
             <select value={platform} onChange={(event) => setPlatform(event.target.value)}>
-              {(['all', '51job', 'liepin', 'zhilian'] as const).map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
+              {FILTER_PLATFORM_OPTIONS.map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
             </select>
           </label>
           <label className="search-box job-search-box">
@@ -1541,7 +1551,7 @@ const ASSISTANT_KIND_LABELS: Record<AssistantActionKind, string> = {
 
 const ASSISTANT_QUICK_ACTIONS = [
   '帮我在猎聘搜索 Java 后端，筛选本科以上，3-5 年经验',
-  '用这个岗位 JD 执行三平台搜索',
+  '用这个岗位 JD 执行全部平台搜索',
   '刷新智联登录',
   '跑一下 51job 的搜索订阅',
   '检查 RAG 运维指标',
@@ -1594,7 +1604,7 @@ function buildModelConfig(config = loadModelConfig()): ModelConfig | undefined {
 
 const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; label: string; kind?: 'textarea' | 'checkbox' | 'number' | 'select'; options?: Array<{ value: string; label: string }> }>> = {
   'resume-capture': [
-    { key: 'platform', label: '平台', kind: 'select', options: ['51job', 'liepin', 'zhilian', 'all'].map((value) => ({ value, label: PLATFORM_LABELS[value as Platform | 'all'] })) },
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(RUN_PLATFORM_OPTIONS) },
     { key: 'keyword', label: '关键词' },
     { key: 'jd', label: 'JD 文本', kind: 'textarea' },
     { key: 'jdFile', label: 'JD 文件路径' },
@@ -1606,7 +1616,7 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
     { key: 'liepinForwardContact', label: '猎聘转发联系人' },
   ],
   batch: [
-    { key: 'platform', label: '平台', kind: 'select', options: ['51job', 'liepin', 'zhilian', 'all'].map((value) => ({ value, label: PLATFORM_LABELS[value as Platform | 'all'] })) },
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(RUN_PLATFORM_OPTIONS) },
     { key: 'jobsFile', label: '批量任务文件' },
     { key: 'searchSource', label: '搜索来源', kind: 'select', options: [{ value: 'saved', label: SEARCH_SOURCE_LABELS.saved }, { value: 'direct', label: SEARCH_SOURCE_LABELS.direct }] },
     { key: 'applicationFilterInputFile', label: '筛选条件文件' },
@@ -1616,7 +1626,7 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
     { key: 'liepinForwardContact', label: '猎聘转发联系人' },
   ],
   'search-subscription': [
-    { key: 'platform', label: '平台', kind: 'select', options: ['51job', 'liepin', 'zhilian', 'all'].map((value) => ({ value, label: PLATFORM_LABELS[value as Platform | 'all'] })) },
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(RUN_PLATFORM_OPTIONS) },
     { key: 'searchSubscriptionFile', label: '搜索订阅文件' },
     { key: 'keyword', label: '关键词' },
     { key: 'applicationFilterInputFile', label: '筛选条件文件' },
@@ -1624,11 +1634,11 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
     { key: 'searchSubscriptionName', label: '订阅名称' },
   ],
   'login-refresh': [
-    { key: 'platform', label: '平台', kind: 'select', options: ['51job', 'liepin', 'zhilian'].map((value) => ({ value, label: PLATFORM_LABELS[value as Platform] })) },
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(SINGLE_PLATFORM_OPTIONS) },
   ],
   'rag-ops': [
     { key: 'action', label: '运维动作', kind: 'select', options: Object.entries(RAG_OPS_ACTION_LABELS).map(([value, label]) => ({ value, label })) },
-    { key: 'platform', label: '平台', kind: 'select', options: ['51job', 'liepin', 'zhilian'].map((value) => ({ value, label: PLATFORM_LABELS[value as Platform] })) },
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(SINGLE_PLATFORM_OPTIONS) },
     { key: 'jobKey', label: '岗位 Key' },
     { key: 'keyword', label: '关键词' },
     { key: 'question', label: '诊断问题' },
@@ -1640,7 +1650,7 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
     { key: 'failOnIssue', label: '发现问题时失败', kind: 'checkbox' },
   ],
   'rag-answer': [
-    { key: 'platform', label: '平台', kind: 'select', options: ['51job', 'liepin', 'zhilian'].map((value) => ({ value, label: PLATFORM_LABELS[value as Platform] })) },
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(SINGLE_PLATFORM_OPTIONS) },
     { key: 'jobKey', label: '岗位 Key' },
     { key: 'keyword', label: '关键词' },
     { key: 'jd', label: '临时 JD 文本', kind: 'textarea' },
@@ -2163,8 +2173,9 @@ function RunJobView() {
             <label>
               <span>平台</span>
               <select value={form.platform} onChange={(event) => setField('platform', event.target.value)}>
-                {(['51job', 'liepin', 'zhilian', 'all'] as const).map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
+                {RUN_PLATFORM_OPTIONS.map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
               </select>
+              <small>{ALL_PLATFORM_NOTE}</small>
             </label>
             {mode !== 'batch' && (
               <label>
@@ -2378,7 +2389,7 @@ function RagView() {
         <label>
           <span>平台</span>
           <select value={form.platform} onChange={(event) => setField('platform', event.target.value)}>
-            {(['51job', 'liepin', 'zhilian'] as const).map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
+            {SINGLE_PLATFORM_OPTIONS.map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
           </select>
         </label>
         <label>
@@ -2567,14 +2578,14 @@ function OpsView() {
         <label>
           <span>平台</span>
           <select value={platform} onChange={(event) => setPlatform(event.target.value)}>
-            {(['all', '51job', 'liepin', 'zhilian'] as const).map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
+            {FILTER_PLATFORM_OPTIONS.map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
           </select>
         </label>
       </div>
       <div className="panel">
         <SectionHeader title="登录刷新" />
         <div className="login-refresh-grid">
-          {(['51job', 'liepin', 'zhilian'] as Platform[]).map((item) => (
+          {SINGLE_PLATFORM_OPTIONS.map((item) => (
             <button
               className="ops-action"
               type="button"
@@ -2648,7 +2659,7 @@ function OpsView() {
               <label>
                 <span>平台</span>
                 <select value={ragOpsForm.platform} onChange={(event) => setRagOpsField('platform', event.target.value)}>
-                  {(['51job', 'liepin', 'zhilian'] as const).map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
+                  {SINGLE_PLATFORM_OPTIONS.map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
                 </select>
               </label>
               <label>
@@ -2747,8 +2758,8 @@ function GuideView() {
             <h3>检查登录状态</h3>
             <ol>
               <li>点击左侧“运营”。</li>
-              <li>在顶部“平台”选择“全部平台”，查看三个平台状态。</li>
-              <li>查看“登录刷新”下方三个按钮：51job、猎聘、智联。</li>
+              <li>在顶部“平台”选择“全部平台”，查看所有平台状态。</li>
+              <li>查看“登录刷新”下方四个平台按钮：51job、猎聘、智联、Boss直聘。</li>
               <li>如果总览或运营页提示 session 缺失、过期、最近登录刷新失败，点击对应平台按钮。</li>
               <li>按钮点击后会创建“登录刷新”任务，去“任务”页确认状态。</li>
             </ol>
@@ -2783,7 +2794,7 @@ function GuideView() {
             <ol>
               <li>点击左侧“执行搜索”。</li>
               <li>选择顶部模式“简历抓取”。</li>
-              <li>在“平台”选择 51job、猎聘、智联或全部平台。</li>
+              <li>在“平台”选择 51job、猎聘、智联、Boss直聘或全部平台。</li>
               <li>填写“关键词”，必须和招聘平台保存搜索或直接搜索目标一致。</li>
               <li>新岗位首次运行时，在“JD 文本”粘贴岗位说明，或在“JD 文件”填本地文件路径，二选一。</li>
               <li>选择“搜索来源”：已保存搜索或直接搜索。</li>
@@ -2796,7 +2807,7 @@ function GuideView() {
           <article>
             <h3>字段怎么填</h3>
             <div className="guide-field-table">
-              <div><strong>平台</strong><span>单个平台只跑对应平台；全部平台会按 51job、猎聘、智联顺序执行，前一个失败会停止。</span></div>
+              <div><strong>平台</strong><span>单个平台只跑对应平台；全部平台会按 51job、猎聘、智联顺序执行，前一个失败会停止，不包含 Boss。</span></div>
               <div><strong>关键词</strong><span>必填。用于查找保存搜索、生成 jobKey、复跑已有岗位。</span></div>
               <div><strong>JD 文本</strong><span>新岗位首次运行建议填写。直接粘贴岗位职责、要求、薪资、地点等。</span></div>
               <div><strong>JD 文件</strong><span>本地 JD 文件路径，例如 `./fixtures/jd.txt`。和 JD 文本二选一，不要同时填。</span></div>
@@ -2819,7 +2830,7 @@ function GuideView() {
             <ol>
               <li>点击“执行搜索”。</li>
               <li>选择顶部模式“批量任务”。</li>
-              <li>选择“平台”。如果选择全部平台，外层按 jobs 文件顺序，内层按 51job、猎聘、智联顺序执行。</li>
+              <li>选择“平台”。如果选择全部平台，外层按 jobs 文件顺序，内层按 51job、猎聘、智联顺序执行，不包含 Boss。</li>
               <li>填写“批量任务文件”，这是必填项。</li>
               <li>选择“搜索来源”。批量也可以选择直接搜索。</li>
               <li>直接搜索时，可填写通用“筛选条件文件”；如果 jobs 文件内某个岗位也设置了筛选文件，以岗位级设置为准。</li>

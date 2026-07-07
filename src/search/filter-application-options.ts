@@ -200,6 +200,7 @@ const rangeInputFieldIdByLabel: Record<string, string> = {
   期望年薪: 'expected_salary',
   期望月薪: 'expected_salary',
   期望薪资: 'expected_salary',
+  薪资区间: 'expected_salary',
   目前年薪: 'current_salary',
   目前薪资: 'current_salary',
   当前年薪: 'current_salary',
@@ -264,7 +265,7 @@ function extractSalaryRangeBoundaryValues(options: ApplicationFilterOption[]): s
     }
 
     const label = normalizeValue(option.label || option.value);
-    const matches = label.match(/\d+(?:\.\d+)?\s*(?:千|万)/g) ?? [];
+    const matches = label.match(/\d+(?:\.\d+)?\s*(?:千|万|[Kk])/g) ?? [];
     for (const match of matches) {
       const value = normalizeValue(match).replace(/\s+/g, '');
       if (!seen.has(value)) {
@@ -283,7 +284,7 @@ function parseSalaryValue(value: string): number | undefined {
   }
 
   const normalizedValue = value.replace(/\s+/g, '');
-  const matched = normalizedValue.match(/^(\d+(?:\.\d+)?)(千|万)/);
+  const matched = normalizedValue.match(/^(\d+(?:\.\d+)?)(千|万|[Kk])/);
   if (!matched) {
     return undefined;
   }

@@ -430,7 +430,7 @@ test('zhilian adapter exposes the shared auth contract', () => {
   assert.equal(typeof zhilianAdapter.parseResumeDetail, 'function');
 });
 
-test('boss adapter exposes login/session and search-page preparation contract only', async () => {
+test('boss adapter exposes login/session, search-page preparation, direct search, filter discovery, candidate-list extraction, resume-detail opening, and resume parsing contract', () => {
   const bossAdapter = getPlatformAdapter('boss');
   assert.equal(bossAdapter.platform, 'boss');
   assert.equal(bossAdapter.displayName, 'Boss');
@@ -441,9 +441,12 @@ test('boss adapter exposes login/session and search-page preparation contract on
   assert.equal(typeof bossAdapter.openAuthenticatedHome, 'function');
   assert.equal(typeof bossAdapter.assertAuthenticated, 'function');
   assert.equal(typeof bossAdapter.openSubscribeSearch, 'function');
-
-  await assert.rejects(
-    () => bossAdapter.extractCandidateList({} as never),
-    /search-page preparation only; candidate extraction is not implemented yet/,
-  );
+  assert.equal(typeof bossAdapter.prepareSearchConditionPage, 'function');
+  assert.equal(typeof bossAdapter.discoverSearchFilters, 'function');
+  assert.equal(typeof bossAdapter.applySearchCondition, 'function');
+  assert.equal(typeof bossAdapter.readSearchConditionResultTotal, 'function');
+  assert.equal(typeof bossAdapter.openDirectSearch, 'function');
+  assert.equal(typeof bossAdapter.extractCandidateList, 'function');
+  assert.equal(typeof bossAdapter.openResumeDetail, 'function');
+  assert.equal(typeof bossAdapter.parseResumeDetail, 'function');
 });

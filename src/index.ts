@@ -16,7 +16,7 @@ import { buildApplicationFilterConditions, loadApplicationFilterInputFile, loadS
 import { scoreResumeAgainstJob } from './scoring/score-resume.js';
 import { exportJobResults, type ExportJobResultsSummary } from './scripts/export-job-results.js';
 import { sendJobReport, type SendJobReportSummary } from './scripts/send-job-report-email.js';
-import { CandidateListItem, JobRecord, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult, SearchCondition, SearchSubscriptionSummary } from './types/job.js';
+import { CandidateListItem, CandidateResume, JobRecord, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult, SearchCondition, SearchSubscriptionSummary } from './types/job.js';
 
 interface CandidateProcessResult {
   candidateId: string;
@@ -490,6 +490,63 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
   };
 }
 
+function formatResumeSnapshot(resume: CandidateResume): string {
+  const lines: string[] = [
+    `候选人ID：${resume.candidateId}`,
+    resume.name ? `姓名：${resume.name}` : '',
+    resume.age ? `年龄：${resume.age}` : '',
+    resume.education ? `学历：${resume.education}` : '',
+    resume.regions.length > 0 ? `地区：${resume.regions.join('、')}` : '',
+  ].filter(Boolean);
+
+  if (resume.pr.length > 0) {
+    lines.push('', '个人优势', ...resume.pr);
+  }
+
+  if (resume.workExperiences.length > 0) {
+    lines.push('', '工作经历');
+    for (const work of resume.workExperiences) {
+      lines.push([
+        work.start && work.end ? `${work.start}-${work.end}` : work.start ?? work.end,
+        work.company,
+        work.title,
+      ].filter(Boolean).join(' | '));
+      lines.push(...work.details);
+    }
+  }
+
+  if (resume.projectExperiences.length > 0) {
+    lines.push('', '项目经历');
+    for (const project of resume.projectExperiences) {
+      lines.push([
+        project.start && project.end ? `${project.start}-${project.end}` : project.start ?? project.end,
+        project.company,
+        project.name,
+      ].filter(Boolean).join(' | '));
+      lines.push(...project.details);
+    }
+  }
+
+  if (resume.educationExperiences.length > 0) {
+    lines.push('', '教育经历');
+    for (const education of resume.educationExperiences) {
+      lines.push([
+        education.start && education.end ? `${education.start}-${education.end}` : education.start ?? education.end,
+        education.school,
+        education.degree,
+        education.major,
+      ].filter(Boolean).join(' | '));
+      lines.push(...education.details);
+    }
+  }
+
+  if (resume.certificates.length > 0) {
+    lines.push('', '证书/技能', ...resume.certificates);
+  }
+
+  return `${lines.filter((line, index, values) => line || values[index - 1]).join('\n')}\n`;
+}
+
 async function captureCandidateResume(
   platform: SupportedPlatform,
   jobKey: string,
@@ -512,7 +569,9 @@ async function captureCandidateResume(
         resume: await platformAdapter.parseResumeDetail(detailPage, candidate),
       };
     const { resume, domSnapshot } = extraction;
-    const rawSource = await detailPage.locator('body').innerText().catch(() => undefined);
+    const rawSource = platform === 'boss'
+      ? formatResumeSnapshot(resume)
+      : await detailPage.locator('body').innerText().catch(() => undefined);
     await store.saveCandidateResume(platform, jobKey, resume, rawSource, domSnapshot);
 
     return {

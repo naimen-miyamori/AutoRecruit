@@ -58,6 +58,7 @@ const knownFieldIdByLabel: Record<string, string> = {
   管理经验: 'management_experience',
   最近活跃时间: 'recent_activity_time',
   活跃度: 'recent_activity_time',
+  牛人活跃度: 'recent_activity_time',
   活跃日期: 'recent_activity_time',
   更新时间: 'recent_activity_time',
   简历更新时间: 'recent_activity_time',
@@ -77,6 +78,7 @@ const knownFieldIdByLabel: Record<string, string> = {
   公司规模: 'company_size',
   企业规模: 'company_size',
   融资阶段: 'financing_stage',
+  牛人职位要求: 'candidate_position_requirement',
 };
 
 const zhilianCustomInputSpecByLabel: Record<string, SearchFilterOptionInputSpec> = {

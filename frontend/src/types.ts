@@ -1,4 +1,4 @@
-export type Platform = '51job' | 'liepin' | 'zhilian';
+export type Platform = '51job' | 'liepin' | 'zhilian' | 'boss';
 export type PlatformSelection = Platform | 'all';
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type TaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'login-refresh' | 'rag-ops';
