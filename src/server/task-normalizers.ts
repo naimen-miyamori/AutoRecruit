@@ -3,7 +3,7 @@ import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { buildJobKey } from '../parsers/jd-parser.js';
 import { parsePlatformArg } from '../platforms/registry.js';
-import type { SupportedPlatform } from '../platforms/types.js';
+import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
 import type {
   BatchTaskInput,
   ConsolePlatformSelection,
@@ -139,6 +139,35 @@ export function normalizeSearchSource(value: unknown): SearchSource | undefined 
   throw new Error('searchSource must be saved or direct');
 }
 
+function normalizeBossForwardMode(value: unknown): BossForwardMode | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === 'colleague' || value === 'email') {
+    return value;
+  }
+
+  throw new Error('bossForwardMode must be colleague or email');
+}
+
+function normalizeBossForwarding(
+  item: JsonObject,
+  platform: ConsolePlatformSelection,
+): { bossForwardMode?: BossForwardMode; bossForwardRecipient?: string } {
+  const bossForwardMode = normalizeBossForwardMode(getOptionalString(item, 'bossForwardMode'));
+  const bossForwardRecipient = getOptionalString(item, 'bossForwardRecipient');
+  if (Boolean(bossForwardMode) !== Boolean(bossForwardRecipient)) {
+    throw new Error('bossForwardMode and bossForwardRecipient must be provided together');
+  }
+
+  if (bossForwardMode && platform !== 'boss') {
+    throw new Error('Boss forwarding can only be used with platform boss');
+  }
+
+  return { bossForwardMode, bossForwardRecipient };
+}
+
 function normalizeCc(value: unknown): string[] | undefined {
   if (value === undefined) {
     return undefined;
@@ -196,6 +225,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
   const email = getOptionalString(item, 'email');
   const cc = normalizeCc(item.cc);
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
+  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform);
 
   if (jd && jdFile) {
     throw new Error('jd and jdFile are mutually exclusive');
@@ -220,6 +250,8 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
     email,
     cc,
     liepinForwardContact,
+    bossForwardMode,
+    bossForwardRecipient,
   };
   const argv = ['--platform', platform, '--keyword', keyword];
   pushOptional(argv, '--jd', jd);
@@ -230,6 +262,8 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
   pushOptional(argv, '--email', email);
   pushOptional(argv, '--cc', cc?.join(','));
   pushOptional(argv, '--liepin-forward-contact', liepinForwardContact);
+  pushOptional(argv, '--boss-forward-mode', bossForwardMode);
+  pushOptional(argv, '--boss-forward-recipient', bossForwardRecipient);
 
   return {
     input,
@@ -246,6 +280,8 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
       email,
       ccCount: cc?.length ?? 0,
       liepinForwardContact,
+      bossForwardMode,
+      bossForwardRecipient,
     },
   };
 }
@@ -262,6 +298,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   const email = getOptionalString(item, 'email');
   const cc = normalizeCc(item.cc);
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
+  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform);
 
   if (applicationFilterInputFile && searchSource !== 'direct') {
     throw new Error('applicationFilterInputFile requires searchSource direct');
@@ -280,6 +317,8 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
     email,
     cc,
     liepinForwardContact,
+    bossForwardMode,
+    bossForwardRecipient,
   };
   const argv = ['--platform', platform, '--jobs-file', jobsFile];
   pushOptionalBoolean(argv, '--include-viewed', includeViewed);
@@ -288,6 +327,8 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   pushOptional(argv, '--email', email);
   pushOptional(argv, '--cc', cc?.join(','));
   pushOptional(argv, '--liepin-forward-contact', liepinForwardContact);
+  pushOptional(argv, '--boss-forward-mode', bossForwardMode);
+  pushOptional(argv, '--boss-forward-recipient', bossForwardRecipient);
 
   return {
     input,
@@ -301,13 +342,15 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
       email,
       ccCount: cc?.length ?? 0,
       liepinForwardContact,
+      bossForwardMode,
+      bossForwardRecipient,
     },
   };
 }
 
 export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTask<SearchSubscriptionTaskInput> {
   const item = normalizeJsonObject(payload, 'request body');
-  assertAbsent(item, ['jd', 'jdFile', 'email', 'cc', 'includeViewed', 'liepinForwardContact', 'searchSource'], 'search-subscription task');
+  assertAbsent(item, ['jd', 'jdFile', 'email', 'cc', 'includeViewed', 'liepinForwardContact', 'bossForwardMode', 'bossForwardRecipient', 'searchSource'], 'search-subscription task');
 
   const platform = normalizePlatformSelection(item.platform);
   const searchSubscriptionFile = getRequiredString(item, 'searchSubscriptionFile');

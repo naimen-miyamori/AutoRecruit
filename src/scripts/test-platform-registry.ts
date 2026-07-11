@@ -430,7 +430,7 @@ test('zhilian adapter exposes the shared auth contract', () => {
   assert.equal(typeof zhilianAdapter.parseResumeDetail, 'function');
 });
 
-test('boss adapter exposes login/session, search-page preparation, direct search, filter discovery, candidate-list extraction, resume-detail opening, and resume parsing contract', () => {
+test('boss adapter exposes search, resume parsing, and configured forwarding contracts', () => {
   const bossAdapter = getPlatformAdapter('boss');
   assert.equal(bossAdapter.platform, 'boss');
   assert.equal(bossAdapter.displayName, 'Boss');
@@ -448,5 +448,6 @@ test('boss adapter exposes login/session, search-page preparation, direct search
   assert.equal(typeof bossAdapter.openDirectSearch, 'function');
   assert.equal(typeof bossAdapter.extractCandidateList, 'function');
   assert.equal(typeof bossAdapter.openResumeDetail, 'function');
+  assert.equal(typeof bossAdapter.afterResumeDetailOpened, 'function');
   assert.equal(typeof bossAdapter.parseResumeDetail, 'function');
 });

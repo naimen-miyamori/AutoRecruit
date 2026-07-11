@@ -156,6 +156,50 @@ describe('console API routes', () => {
     ]);
   });
 
+  it('queues Boss email forwarding with explicit mode and recipient', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      body: {
+        platform: 'boss',
+        keyword: '物业电工',
+        jd: '负责物业电气维修',
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'recruiter@example.com',
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+    assert.equal(completed.status, 'succeeded');
+    assert.deepStrictEqual(calls[0], [
+      '--platform',
+      'boss',
+      '--keyword',
+      '物业电工',
+      '--jd',
+      '负责物业电气维修',
+      '--boss-forward-mode',
+      'email',
+      '--boss-forward-recipient',
+      'recruiter@example.com',
+    ]);
+    assert.equal(completed.inputSummary.bossForwardMode, 'email');
+    assert.equal(completed.inputSummary.bossForwardRecipient, 'recruiter@example.com');
+  });
+
   it('keeps task persistence stable when captured logs write concurrently', async () => {
     const taskDir = await makeTempDir();
     const queue = new TaskQueue({
@@ -313,6 +357,8 @@ describe('console API routes', () => {
               jd: '负责物业电气维修。',
               searchSource: 'direct',
               applicationFilterInputFile: './filters/boss.json',
+              bossForwardMode: 'email',
+              bossForwardRecipient: 'recruiter@example.com',
             },
             missingFields: [],
             warnings: [],
@@ -332,7 +378,7 @@ describe('console API routes', () => {
     assert.match((completionRequests[0] as { instructions?: string }).instructions ?? '', /boss/);
     assert.match((completionRequests[0] as { instructions?: string }).instructions ?? '', /all 只代表 51job、liepin、zhilian/);
     assert.doesNotMatch((completionRequests[0] as { input?: string }).input ?? '', /sk-test-assistant/);
-    const body = response.body as { draft?: { kind?: string; missingFields?: string[]; argvPreview?: string[]; input?: Record<string, unknown> } };
+    const body = response.body as { draft?: { kind?: string; missingFields?: string[]; warnings?: string[]; argvPreview?: string[]; input?: Record<string, unknown> } };
     assert.equal(body.draft?.kind, 'resume-capture');
     assert.doesNotMatch(JSON.stringify(body), /sk-test-assistant/);
     assert.deepStrictEqual(body.draft?.missingFields, []);
@@ -347,8 +393,13 @@ describe('console API routes', () => {
       'direct',
       '--application-filter-input-file',
       './filters/boss.json',
+      '--boss-forward-mode',
+      'email',
+      '--boss-forward-recipient',
+      'recruiter@example.com',
     ]);
     assert.equal(body.draft?.input?.platform, 'boss');
+    assert.match(body.draft?.warnings?.join('\n') ?? '', /Boss 会把简历转发/);
   });
 
   it('returns assistant clarification questions when JD is missing', async () => {
@@ -684,6 +735,27 @@ describe('console API routes', () => {
         includeViewed: true,
       },
     });
+    const bossForwardWithoutRecipient = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      body: {
+        platform: 'boss',
+        keyword: '物业电工',
+        bossForwardMode: 'colleague',
+      },
+    });
+    const bossForwardOnOtherPlatform = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      body: {
+        platform: '51job',
+        keyword: '物业电工',
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'recruiter@example.com',
+      },
+    });
 
     assert.equal(filterWithoutDirect.statusCode, 400);
     assert.match((filterWithoutDirect.body as { error?: { message?: string } }).error?.message ?? '', /searchSource direct/);
@@ -691,6 +763,10 @@ describe('console API routes', () => {
     assert.match((batchWithKeyword.body as { error?: { message?: string } }).error?.message ?? '', /cannot include keyword/);
     assert.equal(subscriptionWithIncludeViewed.statusCode, 400);
     assert.match((subscriptionWithIncludeViewed.body as { error?: { message?: string } }).error?.message ?? '', /cannot include includeViewed/);
+    assert.equal(bossForwardWithoutRecipient.statusCode, 400);
+    assert.match((bossForwardWithoutRecipient.body as { error?: { message?: string } }).error?.message ?? '', /must be provided together/);
+    assert.equal(bossForwardOnOtherPlatform.statusCode, 400);
+    assert.match((bossForwardOnOtherPlatform.body as { error?: { message?: string } }).error?.message ?? '', /only be used with platform boss/);
   });
 
   it('reads application filter options and saves validated filter input files', async () => {

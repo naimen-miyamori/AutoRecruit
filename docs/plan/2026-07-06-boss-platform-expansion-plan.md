@@ -745,4 +745,64 @@ rtk node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-server-api
 
 本地临时截图：`/tmp/autorecruit-boss-console-smoke.png`。
 
-下一步建议：按需要提交当前 Boss 平台扩展改动；提交前可再跑一次完整 `rtk npm run test`，耗时会比本阶段定向测试更长。
+**阶段 8：Boss 简历转发**
+
+目标：Boss 打开候选人简历后，可按任务配置选择转发给站内同事或指定邮箱，留言固定使用当前候选人 ID。
+
+参数：
+
+```bash
+--boss-forward-mode colleague --boss-forward-recipient "同事姓名"
+--boss-forward-mode email --boss-forward-recipient "recipient@example.com"
+```
+
+约束：
+
+- 两个参数必须同时提供。
+- `bossForwardMode` 只允许 `colleague` 或 `email`。
+- 只允许 `--platform boss` 的普通抓取或批量任务；Boss 仍不进入 `--platform all`。
+- 站内同事模式会填写姓名，并要求下拉结果唯一匹配后再选择。
+- 邮件模式填写“请输入收件人邮箱”。
+- 两种模式的“请输入留言”都固定填写 `candidate.candidateId`。
+- 只有配置转发参数时才点击右上角 `.btn-coop-forward` 和最终 `a[ka="geek_coop_forward"]`。
+- 转发失败时不解析、不标记 seen，候选人保持可重试。
+- 转发弹窗会替换简历 iframe，因此执行转发前先读取并缓存详情 API payload；转发成功后从缓存继续解析。
+- 不点击“联系Ta”、打招呼、交换微信或交换电话。
+
+现场结构：
+
+- 简历浮窗右上转发入口：`.btn-coop-forward`
+- 转发弹窗：`.dialog-wrap.active .c-share-box`
+- 站内同事 tab：`.nav-list .item` 文本 `站内同事`
+- 站内同事输入：`input[placeholder="姓名、职位、邮箱"]`
+- 邮件 tab：`.nav-list .item` 文本 `邮件转发`
+- 邮件输入：`input[placeholder="请输入收件人邮箱"]`
+- 留言：`textarea[placeholder="请输入留言"]`
+- 最终转发：`a[ka="geek_coop_forward"]`
+
+受控现场验证：
+
+- 复用当前 Boss reusable browser 和搜索页，没有打开登录页。
+- 使用 `prepare-only` 内部测试模式填写测试邮箱 `autorecruit-smoke@example.com` 和候选人 ID `1583748930`。
+- 已确认活动模式为“邮件转发”、收件人和留言值正确、最终转发按钮唯一存在。
+- 没有点击最终转发按钮，没有向站内同事或邮箱发送简历。
+- 关闭转发弹窗后，已确认可从预读缓存解析候选人 `1583748930`，搜索页保持打开。
+
+回归验证：
+
+```bash
+rtk npm run typecheck
+rtk node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-server-api.ts
+rtk node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-scoring-run-semantics.ts
+```
+
+验证结果：
+
+- `rtk npm run typecheck` 通过。
+- `rtk npm run web:build` 通过。
+- `test-platform-registry.ts` 20 个测试通过。
+- `test-server-api.ts` 27 个测试通过。
+- `test-scoring-run-semantics.ts` 所在定向测试 123 个测试通过。
+- 完整 `rtk npm run test` 通过：scoring 282、export 55、maintenance 44，全部 0 失败。
+- 本地控制台 smoke 确认 Boss 转发方式包含“不转发 / 站内同事 / 邮件转发”，收件人字段随模式切换，Boss 平台下不会显示猎聘转发字段。
+- 本地 UI 临时截图：`/tmp/autorecruit-boss-forward-ui.png`。

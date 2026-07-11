@@ -1,5 +1,5 @@
 import type { MainResult } from '../index.js';
-import type { SupportedPlatform } from '../platforms/types.js';
+import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
 import type {
   CandidateResume,
   CandidateScoreArtifact,
@@ -32,6 +32,8 @@ export interface ResumeCaptureTaskInput {
   email?: string;
   cc?: string[];
   liepinForwardContact?: string;
+  bossForwardMode?: BossForwardMode;
+  bossForwardRecipient?: string;
 }
 
 export interface BatchTaskInput {
@@ -43,6 +45,8 @@ export interface BatchTaskInput {
   email?: string;
   cc?: string[];
   liepinForwardContact?: string;
+  bossForwardMode?: BossForwardMode;
+  bossForwardRecipient?: string;
 }
 
 export interface SearchSubscriptionTaskInput {

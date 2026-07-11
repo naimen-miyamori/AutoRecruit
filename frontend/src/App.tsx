@@ -1614,6 +1614,8 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
     { key: 'email', label: '收件邮箱' },
     { key: 'cc', label: '抄送邮箱' },
     { key: 'liepinForwardContact', label: '猎聘转发联系人' },
+    { key: 'bossForwardMode', label: 'Boss 转发方式', kind: 'select', options: [{ value: 'colleague', label: '站内同事' }, { value: 'email', label: '邮件转发' }] },
+    { key: 'bossForwardRecipient', label: 'Boss 转发收件人' },
   ],
   batch: [
     { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(RUN_PLATFORM_OPTIONS) },
@@ -1624,6 +1626,8 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
     { key: 'email', label: '收件邮箱' },
     { key: 'cc', label: '抄送邮箱' },
     { key: 'liepinForwardContact', label: '猎聘转发联系人' },
+    { key: 'bossForwardMode', label: 'Boss 转发方式', kind: 'select', options: [{ value: 'colleague', label: '站内同事' }, { value: 'email', label: '邮件转发' }] },
+    { key: 'bossForwardRecipient', label: 'Boss 转发收件人' },
   ],
   'search-subscription': [
     { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(RUN_PLATFORM_OPTIONS) },
@@ -2098,6 +2102,8 @@ function RunJobView() {
     email: '',
     cc: '',
     liepinForwardContact: '',
+    bossForwardMode: '',
+    bossForwardRecipient: '',
     saveSearchSubscription: false,
     searchSubscriptionName: '',
   });
@@ -2118,7 +2124,9 @@ function RunJobView() {
       applicationFilterInputFile: form.searchSource === 'direct' ? form.applicationFilterInputFile || undefined : undefined,
       email: form.email || undefined,
       cc: form.cc || undefined,
-      liepinForwardContact: form.liepinForwardContact || undefined,
+      liepinForwardContact: form.platform === 'liepin' || form.platform === 'all' ? form.liepinForwardContact || undefined : undefined,
+      bossForwardMode: form.platform === 'boss' ? form.bossForwardMode || undefined : undefined,
+      bossForwardRecipient: form.platform === 'boss' && form.bossForwardMode ? form.bossForwardRecipient || undefined : undefined,
     };
     const body = mode === 'resume-capture'
       ? {
@@ -2265,10 +2273,32 @@ function RunJobView() {
                 <span>抄送邮箱</span>
                 <input value={form.cc} onChange={(event) => setField('cc', event.target.value)} />
               </label>
-              <label>
-                <span>猎聘转发联系人</span>
-                <input value={form.liepinForwardContact} onChange={(event) => setField('liepinForwardContact', event.target.value)} />
-              </label>
+              {(form.platform === 'liepin' || form.platform === 'all') && (
+                <label>
+                  <span>猎聘转发联系人</span>
+                  <input value={form.liepinForwardContact} onChange={(event) => setField('liepinForwardContact', event.target.value)} />
+                </label>
+              )}
+              {form.platform === 'boss' && (
+                <label>
+                  <span>Boss 转发方式</span>
+                  <select value={form.bossForwardMode} onChange={(event) => setField('bossForwardMode', event.target.value)}>
+                    <option value="">不转发</option>
+                    <option value="colleague">站内同事</option>
+                    <option value="email">邮件转发</option>
+                  </select>
+                </label>
+              )}
+              {form.platform === 'boss' && form.bossForwardMode && (
+                <label>
+                  <span>{form.bossForwardMode === 'colleague' ? '站内同事姓名' : '收件人邮箱'}</span>
+                  <input
+                    value={form.bossForwardRecipient}
+                    onChange={(event) => setField('bossForwardRecipient', event.target.value)}
+                    placeholder={form.bossForwardMode === 'colleague' ? '输入姓名并由任务选择匹配项' : 'name@example.com'}
+                  />
+                </label>
+              )}
               <label className="checkbox-row">
                 <input type="checkbox" checked={form.includeViewed} onChange={(event) => setField('includeViewed', event.target.checked)} />
                 <span>包含已查看候选人</span>
@@ -2801,6 +2831,7 @@ function GuideView() {
               <li>直接搜索时，可以用下方可视化筛选构建器生成“筛选条件文件”。</li>
               <li>需要邮件通知时填写“收件邮箱”和“抄送邮箱”。</li>
               <li>猎聘需要转发简历时填写“猎聘转发联系人”。</li>
+              <li>Boss 需要转发简历时，选择站内同事或邮件转发，再填写对应姓名或邮箱；留言会自动填写候选人 ID。</li>
               <li>确认无误后点击“提交”。</li>
             </ol>
           </article>
@@ -2816,6 +2847,8 @@ function GuideView() {
               <div><strong>收件邮箱</strong><span>可选。填写后任务完成会发送报告。</span></div>
               <div><strong>抄送邮箱</strong><span>可选。多个邮箱用英文逗号分隔。</span></div>
               <div><strong>猎聘转发联系人</strong><span>只对猎聘普通抓取有效。填写招聘平台里可搜索到的联系人名。</span></div>
+              <div><strong>Boss 转发方式</strong><span>只对 Boss 单平台普通抓取有效。可选择站内同事或邮件转发；不选择则不转发。</span></div>
+              <div><strong>Boss 转发收件人</strong><span>站内同事模式填写姓名并匹配唯一同事；邮件模式填写收件人邮箱。留言自动使用候选人 ID。</span></div>
               <div><strong>包含已查看候选人</strong><span>默认不勾选。勾选后会把平台里已查看的候选人也纳入本次搜索。</span></div>
             </div>
           </article>
@@ -2834,7 +2867,7 @@ function GuideView() {
               <li>填写“批量任务文件”，这是必填项。</li>
               <li>选择“搜索来源”。批量也可以选择直接搜索。</li>
               <li>直接搜索时，可填写通用“筛选条件文件”；如果 jobs 文件内某个岗位也设置了筛选文件，以岗位级设置为准。</li>
-              <li>填写邮件、抄送、猎聘联系人等可选项。</li>
+              <li>填写邮件、抄送、猎聘联系人或 Boss 转发配置等可选项。</li>
               <li>点击“提交”。</li>
             </ol>
           </article>

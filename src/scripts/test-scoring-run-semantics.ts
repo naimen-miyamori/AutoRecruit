@@ -4661,6 +4661,68 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(await store.readSeenIds('liepin', jobKey), ['cand-seen', 'cand-new']);
   });
 
+  it('runs Boss forwarding for new candidates before parsing resumes', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-forward';
+    const fetchedAt = '2026-07-11T12:34:56.000Z';
+    const callOrder: string[] = [];
+    const detailPage = createDetailPage();
+
+    await store.saveSeenIds('boss', jobKey, ['boss-seen']);
+
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({
+        candidates: [
+          { candidateId: 'boss-seen' },
+          { candidateId: 'boss-new' },
+        ],
+      }),
+      openResumeDetail: async (_context, _searchPage, candidate) => {
+        callOrder.push(`open:${candidate.candidateId}`);
+        return detailPage;
+      },
+      afterResumeDetailOpened: async (_page, candidate, actions) => {
+        callOrder.push(`forward:${candidate.candidateId}:${actions.bossForwardMode ?? ''}:${actions.bossForwardRecipient ?? ''}`);
+      },
+      parseResumeDetail: async (_page, candidate) => {
+        callOrder.push(`parse:${candidate.candidateId}`);
+        return buildResume(candidate.candidateId);
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
+
+    const result = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      {
+        page: { id: 'root-page' },
+        context: { id: 'browser-context' },
+      } as never,
+      fetchedAt,
+      adapter,
+      {
+        bossForwardMode: 'colleague',
+        bossForwardRecipient: '王经理',
+      },
+    );
+
+    assert.deepStrictEqual(callOrder, [
+      'open:boss-new',
+      'forward:boss-new:colleague:王经理',
+      'parse:boss-new',
+    ]);
+    assert.deepStrictEqual(result.newCandidates.map((candidate) => candidate.candidateId), ['boss-new']);
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), ['boss-seen', 'boss-new']);
+  });
+
   it('uses platform candidate pacing between every pair of new candidates', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
@@ -5330,6 +5392,41 @@ describe('scoring run semantics', () => {
         '王经理',
       ]),
       /--liepin-forward-contact can only be used with --platform liepin or --platform all/,
+    );
+  });
+
+  it('rejects incomplete and cross-platform Boss forwarding arguments', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        'boss',
+        '--keyword',
+        `Boss转发-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：物业电工',
+        '--boss-forward-mode',
+        'colleague',
+      ]),
+      /--boss-forward-mode and --boss-forward-recipient must be provided together/,
+    );
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        `Boss邮件转发-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：物业电工',
+        '--boss-forward-mode',
+        'email',
+        '--boss-forward-recipient',
+        'recruiter@example.com',
+      ]),
+      /--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss/,
     );
   });
 

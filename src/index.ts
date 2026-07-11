@@ -9,7 +9,7 @@ import { createProductionExtractionBoundary } from './extraction/production-extr
 import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
-import type { CandidatePostOpenActions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
+import type { BossForwardMode, CandidatePostOpenActions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
 import { answerCandidateQuestionFromJd, toJdRagSources, type JdRagSource } from './rag/jd-question-answering.js';
 import { answerQuestionWithRag } from './rag/service.js';
 import { buildApplicationFilterConditions, loadApplicationFilterInputFile, loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
@@ -42,6 +42,8 @@ interface RunnableJobInput extends ReportDeliveryOptions {
   jobDescriptionFilePath?: string;
   includeViewedCandidates: boolean;
   liepinForwardContact?: string;
+  bossForwardMode?: BossForwardMode;
+  bossForwardRecipient?: string;
   searchSource: SearchSource;
   applicationFilterInputFilePath?: string;
 }
@@ -57,6 +59,8 @@ interface BatchCliInput extends ReportDeliveryOptions {
   jobsFilePath: string;
   includeViewedCandidates: boolean;
   liepinForwardContact?: string;
+  bossForwardMode?: BossForwardMode;
+  bossForwardRecipient?: string;
   searchSource: SearchSource;
   applicationFilterInputFilePath?: string;
 }
@@ -92,6 +96,8 @@ interface SinglePlatformCliInput extends ReportDeliveryOptions {
   jobDescriptionFilePath?: string;
   includeViewedCandidates: boolean;
   liepinForwardContact?: string;
+  bossForwardMode?: BossForwardMode;
+  bossForwardRecipient?: string;
   searchSource: SearchSource;
   applicationFilterInputFilePath?: string;
 }
@@ -224,6 +230,18 @@ function parseSearchSource(value: string | undefined, argumentName: string): Sea
   throw new Error(`${argumentName} must be saved or direct`);
 }
 
+function parseBossForwardMode(value: string | undefined): BossForwardMode | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === 'colleague' || value === 'email') {
+    return value;
+  }
+
+  throw new Error('--boss-forward-mode must be colleague or email');
+}
+
 function parseBatchCcEmails(value: unknown, itemIndex: number): string[] | undefined {
   if (value === undefined) {
     return undefined;
@@ -293,6 +311,8 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     jobDescriptionFilePath: jdFile,
     includeViewedCandidates: input.includeViewedCandidates,
     liepinForwardContact: input.liepinForwardContact,
+    bossForwardMode: input.bossForwardMode,
+    bossForwardRecipient: input.bossForwardRecipient,
     searchSource: effectiveSearchSource,
     applicationFilterInputFilePath: effectiveApplicationFilterInputFilePath,
   };
@@ -361,6 +381,8 @@ function parseArgs(argv: readonly string[]): CliInput {
     ? parseOptionalBoolean(values.get('include-viewed'), '--include-viewed')
     : false;
   const liepinForwardContact = values.get('liepin-forward-contact')?.trim();
+  const bossForwardMode = parseBossForwardMode(values.get('boss-forward-mode')?.trim());
+  const bossForwardRecipient = values.get('boss-forward-recipient')?.trim();
   const searchSource = parseSearchSource(values.get('search-source'), '--search-source');
   const applicationFilterInputFilePath = values.get('application-filter-input-file')
     ? path.resolve(values.get('application-filter-input-file')!)
@@ -376,6 +398,18 @@ function parseArgs(argv: readonly string[]): CliInput {
     }
   }
 
+  if (flagPresence.has('boss-forward-mode') !== flagPresence.has('boss-forward-recipient')) {
+    throw new Error('--boss-forward-mode and --boss-forward-recipient must be provided together');
+  }
+
+  if (flagPresence.has('boss-forward-recipient') && !bossForwardRecipient) {
+    throw new Error('--boss-forward-recipient must be a non-empty string');
+  }
+
+  if (bossForwardMode && platform !== 'boss') {
+    throw new Error('--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss');
+  }
+
   if (hasJdQuestion) {
     if (flagPresence.has('jd-question') && flagPresence.has('rag-question')) {
       throw new Error('--jd-question and --rag-question are aliases; provide only one');
@@ -385,8 +419,8 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error('--jd-question must be a non-empty string');
     }
 
-    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || saveSearchSubscription || searchSubscriptionName) {
-      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --liepin-forward-contact, --search-source, --application-filter-input-file, --save-search-subscription, or --search-subscription-name');
+    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || saveSearchSubscription || searchSubscriptionName) {
+      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, --application-filter-input-file, --save-search-subscription, or --search-subscription-name');
     }
 
     if (jobDescriptionText && jobDescriptionFilePath) {
@@ -408,8 +442,8 @@ function parseArgs(argv: readonly string[]): CliInput {
   }
 
   if (searchSubscriptionFilePath) {
-    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
-      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --liepin-forward-contact, --search-source, or --application-filter-input-file');
+    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
+      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, or --application-filter-input-file');
     }
 
     return {
@@ -443,6 +477,8 @@ function parseArgs(argv: readonly string[]): CliInput {
       ccEmails,
       includeViewedCandidates,
       liepinForwardContact,
+      bossForwardMode,
+      bossForwardRecipient,
       searchSource,
       applicationFilterInputFilePath,
     };
@@ -470,6 +506,8 @@ function parseArgs(argv: readonly string[]): CliInput {
     jobDescriptionFilePath,
     includeViewedCandidates,
     liepinForwardContact,
+    bossForwardMode,
+    bossForwardRecipient,
     searchSource,
     applicationFilterInputFilePath,
   };
@@ -485,6 +523,8 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
     jobDescriptionFilePath: input.jobDescriptionFilePath,
     includeViewedCandidates: input.includeViewedCandidates,
     liepinForwardContact: input.liepinForwardContact,
+    bossForwardMode: input.bossForwardMode,
+    bossForwardRecipient: input.bossForwardRecipient,
     searchSource: input.searchSource,
     applicationFilterInputFilePath: input.applicationFilterInputFilePath,
   };
@@ -664,7 +704,7 @@ async function scoreCapturedResumes(
   };
 }
 
-export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean; liepinForwardContact?: string; searchSource?: SearchSource; searchConditions?: SearchCondition[] } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
+export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean; liepinForwardContact?: string; bossForwardMode?: BossForwardMode; bossForwardRecipient?: string; searchSource?: SearchSource; searchConditions?: SearchCondition[] } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
   const searchDeadline = Date.now() + config.playwright.searchPageTimeoutMs;
   const searchOptions = {
     deadline: searchDeadline,
@@ -697,6 +737,8 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
 
     candidateResults.push(await captureCandidateResume(platform, jobKey, candidate, store, session, searchPage, platformAdapter, {
       liepinForwardContact: platform === 'liepin' ? options.liepinForwardContact : undefined,
+      bossForwardMode: platform === 'boss' ? options.bossForwardMode : undefined,
+      bossForwardRecipient: platform === 'boss' ? options.bossForwardRecipient : undefined,
     }));
   }
 
@@ -818,6 +860,8 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       {
         includeViewedCandidates: input.includeViewedCandidates,
         liepinForwardContact: input.liepinForwardContact,
+        bossForwardMode: input.bossForwardMode,
+        bossForwardRecipient: input.bossForwardRecipient,
         searchSource: input.searchSource,
         searchConditions,
       },

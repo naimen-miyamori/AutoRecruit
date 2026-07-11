@@ -6,6 +6,7 @@ export const ALL_PLATFORM_RUN_ORDER = ['51job', 'liepin', 'zhilian'] as const;
 export const SUPPORTED_PLATFORMS = [...ALL_PLATFORM_RUN_ORDER, 'boss'] as const;
 
 export type SupportedPlatform = (typeof SUPPORTED_PLATFORMS)[number];
+export type BossForwardMode = 'colleague' | 'email';
 
 export interface SearchWaitOptions {
   deadline?: number;
@@ -15,6 +16,9 @@ export interface SearchWaitOptions {
 export interface CandidatePostOpenActions {
   liepinForwardContact?: string;
   liepinForwardContactMode?: 'confirm' | 'select-only';
+  bossForwardMode?: BossForwardMode;
+  bossForwardRecipient?: string;
+  bossForwardActionMode?: 'confirm' | 'prepare-only';
 }
 
 export interface PlatformAdapter {

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { BrowserContext, Frame, Page } from 'playwright';
+import type { BrowserContext, Frame, Locator, Page } from 'playwright';
 import { config } from '../config.js';
 import {
   buildSearchFilterDiscoveryStats,
@@ -22,7 +22,7 @@ import type {
   SearchConditionApplyResult,
   WorkExperience,
 } from '../types/job.js';
-import type { PlatformAdapter, SearchWaitOptions } from './types.js';
+import type { BossForwardMode, CandidatePostOpenActions, PlatformAdapter, SearchWaitOptions } from './types.js';
 
 const bossLoginUrl = 'https://www.zhipin.com/web/user/?ka=header-login';
 const bossAuthenticatedHomeUrl = 'https://www.zhipin.com/web/user/';
@@ -51,6 +51,8 @@ type BossResumeApiPayload = {
     showExpectPosition?: Record<string, unknown>;
   };
 };
+
+const bossResumePayloadCache = new WeakMap<Page, Map<string, BossResumeApiPayload>>();
 
 type BossStaticFilterSnapshot = {
   key: string;
@@ -1777,7 +1779,7 @@ async function closeExistingBossResumeDialog(page: Page, deadline: number): Prom
     return;
   }
 
-  const closeButton = activeDialog.locator('.close-btn, [ka="dialog_close"], .boss-dialog__close, [class*="close"]').last();
+  const closeButton = activeDialog.locator('.boss-popup__close, .close-btn, [ka="dialog_close"], .boss-dialog__close').first();
   await closeButton.click({ timeout: Math.min(remainingTime(deadline), 3000) }).catch(async () => {
     await page.keyboard.press('Escape').catch(() => undefined);
   });
@@ -1888,6 +1890,165 @@ async function readBossResumeApiPayload(page: Page, deadline: number): Promise<B
 
     return response.json();
   }) as Promise<BossResumeApiPayload>;
+}
+
+function cacheBossResumePayload(page: Page, candidateId: string, payload: BossResumeApiPayload): void {
+  const pageCache = bossResumePayloadCache.get(page) ?? new Map<string, BossResumeApiPayload>();
+  pageCache.set(candidateId, payload);
+  bossResumePayloadCache.set(page, pageCache);
+}
+
+function takeCachedBossResumePayload(page: Page, candidateId: string): BossResumeApiPayload | undefined {
+  const pageCache = bossResumePayloadCache.get(page);
+  const payload = pageCache?.get(candidateId);
+  pageCache?.delete(candidateId);
+  return payload;
+}
+
+async function waitForBossForwardDialog(page: Page, deadline: number): Promise<Locator> {
+  const dialog = page.locator('.dialog-wrap.active .c-share-box').first();
+  await dialog.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+  return dialog;
+}
+
+async function openBossForwardDialog(page: Page, deadline: number): Promise<Locator> {
+  await waitForBossResumeDetailReady(page, deadline);
+  const action = page.locator('.dialog-wrap.active:has(iframe[src*="/web/frame/c-resume/"]) .btn-coop-forward');
+  const actionCount = await action.count();
+  if (actionCount !== 1) {
+    throw new Error(`Expected one visible Boss resume forward action, found ${actionCount}.`);
+  }
+
+  await action.click({ timeout: remainingTime(deadline) });
+  return waitForBossForwardDialog(page, deadline);
+}
+
+function bossForwardModeLabel(mode: BossForwardMode): string {
+  return mode === 'colleague' ? '站内同事' : '邮件转发';
+}
+
+async function selectBossForwardMode(dialog: Locator, mode: BossForwardMode, deadline: number): Promise<Locator> {
+  const label = bossForwardModeLabel(mode);
+  const tab = dialog.locator('.nav-list .item').filter({ hasText: label });
+  const tabCount = await tab.count();
+  if (tabCount !== 1) {
+    throw new Error(`Expected one Boss forward mode tab "${label}", found ${tabCount}.`);
+  }
+
+  if (!normalizeText(await tab.getAttribute('class') ?? '').split(' ').includes('cur')) {
+    await tab.click({ timeout: remainingTime(deadline) });
+  }
+
+  const placeholder = mode === 'colleague' ? '姓名、职位、邮箱' : '请输入收件人邮箱';
+  const input = dialog.locator(`input[placeholder="${placeholder}"]`);
+  await input.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+  return input;
+}
+
+async function selectBossForwardColleague(dialog: Locator, input: Locator, recipient: string, deadline: number): Promise<void> {
+  await input.fill(recipient, { timeout: remainingTime(deadline) });
+  const options = dialog.locator('.check-list li, .selector [class*="option"], .selector [class*="result-item"]');
+  await options.first().waitFor({ state: 'visible', timeout: remainingTime(deadline) });
+
+  const matches = await options.evaluateAll((elements, target) => {
+    const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+    const normalizedTarget = normalize(target);
+    return elements
+      .map((element, index) => ({
+        index,
+        text: normalize(element.textContent),
+        visible: element instanceof HTMLElement && Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length),
+      }))
+      .filter((item) => item.visible && (item.text === normalizedTarget || item.text.startsWith(normalizedTarget)));
+  }, recipient);
+
+  if (matches.length !== 1) {
+    const optionTexts = await options.evaluateAll((elements) => elements
+      .filter((element) => element instanceof HTMLElement && Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length))
+      .map((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean));
+    throw new Error(`Boss colleague forward recipient "${recipient}" matched ${matches.length} options. Visible options: ${optionTexts.slice(0, 10).join(' | ') || '(none)'}`);
+  }
+
+  await options.nth(matches[0]!.index).click({ timeout: remainingTime(deadline) });
+}
+
+async function fillBossForwardForm(
+  dialog: Locator,
+  mode: BossForwardMode,
+  recipient: string,
+  candidateId: string,
+  deadline: number,
+): Promise<void> {
+  const input = await selectBossForwardMode(dialog, mode, deadline);
+  if (mode === 'colleague') {
+    await selectBossForwardColleague(dialog, input, recipient, deadline);
+  } else {
+    await input.fill(recipient, { timeout: remainingTime(deadline) });
+  }
+
+  const message = dialog.locator('textarea[placeholder="请输入留言"]');
+  await message.fill(candidateId, { timeout: remainingTime(deadline) });
+  const actualMessage = await message.inputValue();
+  if (actualMessage !== candidateId) {
+    throw new Error(`Boss forward message did not retain candidate ID ${candidateId}.`);
+  }
+}
+
+async function confirmBossForward(dialog: Locator, candidateId: string, deadline: number): Promise<void> {
+  const forwardButton = dialog.locator('a[ka="geek_coop_forward"]');
+  const buttonCount = await forwardButton.count();
+  if (buttonCount !== 1) {
+    throw new Error(`Expected one Boss forward confirmation button for candidate ${candidateId}, found ${buttonCount}.`);
+  }
+
+  await forwardButton.click({ timeout: remainingTime(deadline) });
+  await dialog.waitFor({ state: 'hidden', timeout: remainingTime(deadline) }).catch(async () => {
+    const dialogText = await dialog.innerText().catch(() => '');
+    throw new Error(`Boss resume forward did not complete for candidate ${candidateId}. Dialog text: ${normalizeText(dialogText).slice(0, 500)}`);
+  });
+}
+
+async function forwardBossResume(
+  page: Page,
+  candidate: CandidateListItem,
+  mode: BossForwardMode,
+  recipient: string,
+  actionMode: NonNullable<CandidatePostOpenActions['bossForwardActionMode']> = 'confirm',
+): Promise<void> {
+  const normalizedRecipient = normalizeText(recipient);
+  if (!normalizedRecipient) {
+    throw new Error('Boss forward recipient must be a non-empty string.');
+  }
+
+  const deadline = createResumeDetailDeadline();
+  const payload = await readBossResumeApiPayload(page, deadline);
+  cacheBossResumePayload(page, candidate.candidateId, payload);
+  const dialog = await openBossForwardDialog(page, deadline);
+  await fillBossForwardForm(dialog, mode, normalizedRecipient, candidate.candidateId, deadline);
+  if (actionMode === 'prepare-only') {
+    return;
+  }
+
+  await confirmBossForward(dialog, candidate.candidateId, deadline);
+}
+
+async function runBossPostOpenActions(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions): Promise<void> {
+  const hasMode = actions.bossForwardMode !== undefined;
+  const hasRecipient = actions.bossForwardRecipient !== undefined;
+  if (hasMode !== hasRecipient) {
+    throw new Error('Boss forward mode and recipient must be provided together.');
+  }
+
+  if (actions.bossForwardMode && actions.bossForwardRecipient) {
+    await forwardBossResume(
+      page,
+      candidate,
+      actions.bossForwardMode,
+      actions.bossForwardRecipient,
+      actions.bossForwardActionMode,
+    );
+  }
 }
 
 function parseBossAge(ageDesc?: string): number | undefined {
@@ -2057,7 +2218,8 @@ function parseBossResumeFromApi(payload: BossResumeApiPayload, page: Page, candi
 
 async function parseBossResumeDetail(page: Page, candidate: CandidateListItem): Promise<CandidateResume> {
   const deadline = createResumeDetailDeadline();
-  const payload = await readBossResumeApiPayload(page, deadline);
+  const payload = takeCachedBossResumePayload(page, candidate.candidateId)
+    ?? await readBossResumeApiPayload(page, deadline);
   if (payload.code !== undefined && payload.code !== 0) {
     throw new Error(`Boss resume detail API failed: ${payload.message ?? `code ${payload.code}`}`);
   }
@@ -2066,7 +2228,7 @@ async function parseBossResumeDetail(page: Page, candidate: CandidateListItem): 
 }
 
 function bossUnsupported(feature: string): never {
-  throw new Error(`Boss platform currently supports manual login/session persistence, search-page preparation, direct search, candidate-list extraction, resume-detail opening, resume parsing, search-filter discovery, and application-filter replay for supported fields only; ${feature} is not implemented yet.`);
+  throw new Error(`Boss platform currently supports manual login/session persistence, search-page preparation, direct search, candidate-list extraction, resume-detail opening, resume parsing, configured colleague/email resume forwarding, search-filter discovery, and application-filter replay for supported fields only; ${feature} is not implemented yet.`);
 }
 
 export const bossAdapter: PlatformAdapter = {
@@ -2088,5 +2250,6 @@ export const bossAdapter: PlatformAdapter = {
   readSearchConditionResultTotal: readBossSearchConditionResultTotal,
   extractCandidateList: extractBossCandidateList,
   openResumeDetail: openBossResumeDetail,
+  afterResumeDetailOpened: runBossPostOpenActions,
   parseResumeDetail: parseBossResumeDetail,
 };

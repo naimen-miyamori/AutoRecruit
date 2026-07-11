@@ -67,6 +67,8 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'email',
     'cc',
     'liepinForwardContact',
+    'bossForwardMode',
+    'bossForwardRecipient',
   ],
   batch: [
     'platform',
@@ -77,6 +79,8 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'email',
     'cc',
     'liepinForwardContact',
+    'bossForwardMode',
+    'bossForwardRecipient',
   ],
   'search-subscription': [
     'platform',
@@ -188,6 +192,11 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
     }
   }
 
+  if ((kind === 'resume-capture' || kind === 'batch')
+    && isPresent(input.bossForwardMode) !== isPresent(input.bossForwardRecipient)) {
+    missing.push(isPresent(input.bossForwardMode) ? 'bossForwardRecipient' : 'bossForwardMode');
+  }
+
   if (kind === 'batch' && !isPresent(input.jobsFile)) {
     missing.push('jobsFile');
   }
@@ -242,6 +251,10 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
 
   if ((kind === 'resume-capture' || kind === 'batch') && isPresent(input.liepinForwardContact)) {
     warnings.push('风险：猎聘会执行简历转发动作。');
+  }
+
+  if ((kind === 'resume-capture' || kind === 'batch') && isPresent(input.bossForwardMode)) {
+    warnings.push('风险：Boss 会把简历转发给指定站内同事或邮箱。');
   }
 
   if ((kind === 'resume-capture' || kind === 'batch') && isPresent(input.applicationFilterInputFile) && input.searchSource !== 'direct') {
@@ -349,6 +362,8 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   pushPreview(argv, '--email', input.email);
   pushPreview(argv, '--cc', Array.isArray(input.cc) ? input.cc.join(',') : input.cc);
   pushPreview(argv, '--liepin-forward-contact', input.liepinForwardContact);
+  pushPreview(argv, '--boss-forward-mode', input.bossForwardMode);
+  pushPreview(argv, '--boss-forward-recipient', input.bossForwardRecipient);
   return argv;
 }
 
@@ -438,8 +453,9 @@ function buildSystemPrompt(): string {
     '允许的 kind 只有：resume-capture、batch、search-subscription、login-refresh、rag-ops、rag-answer。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
     'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
-    'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact。',
-    'batch 字段：platform, jobsFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact；不要包含 keyword、jd、jdFile。',
+    'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。',
+    'batch 字段：platform, jobsFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
+    'Boss 转发只允许 platform=boss；bossForwardMode 只能是 colleague 或 email，必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',
     'search-subscription 字段：platform, searchSubscriptionFile, keyword, applicationFilterInputFile, saveSearchSubscription, searchSubscriptionName；不要包含 jd、email、includeViewed、searchSource。',
     'login-refresh 字段：platform，只允许 51job、liepin、zhilian、boss。',
     'rag-ops 字段：action, platform, jobKey, keyword, question, file, policyFile, reviewer, limit, includeReviewed, failOnIssue；action 只能是 doctor、review、metrics、ops、rebuild。',
