@@ -6,6 +6,7 @@ import { parsePlatformArg } from '../platforms/registry.js';
 import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
 import type {
   BatchTaskInput,
+  BossAutoChatTaskInput,
   ConsolePlatformSelection,
   LoginRefreshTaskInput,
   RagAnswerInput,
@@ -92,6 +93,24 @@ export function getOptionalPositiveInteger(item: JsonObject, fieldName: string):
 
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new Error(`${fieldName} must be a positive integer`);
+  }
+
+  return value;
+}
+
+export function getOptionalNumberInRange(
+  item: JsonObject,
+  fieldName: string,
+  min: number,
+  max: number,
+): number | undefined {
+  const value = item[fieldName];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${fieldName} must be a number from ${min} to ${max}`);
   }
 
   return value;
@@ -382,6 +401,75 @@ export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTas
       applicationFilterInputFile,
       saveSearchSubscription: saveSearchSubscription ?? false,
       searchSubscriptionName,
+    },
+  };
+}
+
+export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<BossAutoChatTaskInput> {
+  const item = normalizeJsonObject(payload, 'request body');
+  assertAbsent(item, [
+    'keyword',
+    'jd',
+    'jdFile',
+    'jobsFile',
+    'includeViewed',
+    'searchSource',
+    'applicationFilterInputFile',
+    'email',
+    'cc',
+    'liepinForwardContact',
+    'searchSubscriptionFile',
+    'saveSearchSubscription',
+    'searchSubscriptionName',
+  ], 'boss-auto-chat task');
+
+  const platform = normalizePlatform(item.platform);
+  if (platform !== 'boss') {
+    throw new Error('boss-auto-chat task requires platform boss');
+  }
+
+  const scoreThreshold = getOptionalNumberInRange(item, 'scoreThreshold', 0, 100);
+  const requireAllHardRequirements = getOptionalBoolean(item, 'requireAllHardRequirements');
+  const summaryEmail = getOptionalString(item, 'summaryEmail');
+  const summaryCc = normalizeCc(item.summaryCc);
+  if (summaryCc && !summaryEmail) {
+    throw new Error('boss-auto-chat summaryCc requires summaryEmail');
+  }
+  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform);
+  if (!bossForwardMode || !bossForwardRecipient) {
+    throw new Error('boss-auto-chat task requires bossForwardMode and bossForwardRecipient');
+  }
+
+  const input: BossAutoChatTaskInput = {
+    platform: 'boss',
+    scoreThreshold,
+    requireAllHardRequirements,
+    bossForwardMode,
+    bossForwardRecipient,
+    summaryEmail,
+    summaryCc,
+  };
+  const argv = ['--platform', 'boss', '--boss-auto-chat', 'true'];
+  if (scoreThreshold !== undefined) {
+    argv.push('--boss-chat-score-threshold', String(scoreThreshold));
+  }
+  pushOptionalBoolean(argv, '--boss-chat-require-all', requireAllHardRequirements);
+  pushOptional(argv, '--boss-forward-mode', bossForwardMode);
+  pushOptional(argv, '--boss-forward-recipient', bossForwardRecipient);
+  pushOptional(argv, '--boss-chat-summary-email', summaryEmail);
+  pushOptional(argv, '--boss-chat-summary-cc', summaryCc?.join(','));
+
+  return {
+    input,
+    argv,
+    inputSummary: {
+      platform: 'boss',
+      scoreThreshold: scoreThreshold ?? 70,
+      requireAllHardRequirements: requireAllHardRequirements ?? false,
+      bossForwardMode,
+      bossForwardRecipient,
+      summaryEmail,
+      summaryCcCount: summaryCc?.length ?? 0,
     },
   };
 }

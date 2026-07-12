@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { completeJsonTextFromOpenAI, type OpenAISettingsOverride, type OpenAITextCompletionRequest } from '../llm/openai-client.js';
 import {
   normalizeBatchTask,
+  normalizeBossAutoChatTask,
   normalizeLoginRefreshTask,
   normalizeRagAnswerInput,
   normalizeRagOpsTask,
@@ -14,6 +15,7 @@ import type {
   AssistantDraft,
   AssistantMessage,
   BatchTaskInput,
+  BossAutoChatTaskInput,
   LoginRefreshTaskInput,
   ModelConfig,
   RagAnswerInput,
@@ -29,6 +31,7 @@ const assistantKindSchema = z.enum([
   'resume-capture',
   'batch',
   'search-subscription',
+  'boss-auto-chat',
   'login-refresh',
   'rag-ops',
   'rag-answer',
@@ -90,6 +93,15 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'saveSearchSubscription',
     'searchSubscriptionName',
   ],
+  'boss-auto-chat': [
+    'platform',
+    'scoreThreshold',
+    'requireAllHardRequirements',
+    'bossForwardMode',
+    'bossForwardRecipient',
+    'summaryEmail',
+    'summaryCc',
+  ],
   'login-refresh': ['platform'],
   'rag-ops': [
     'action',
@@ -131,7 +143,7 @@ function coerceScalar(field: string, value: unknown): unknown {
     return undefined;
   }
 
-  if ((field === 'includeViewed' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer') && typeof value === 'string') {
+  if ((field === 'includeViewed' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements') && typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
     if (normalized === 'true') {
       return true;
@@ -141,12 +153,12 @@ function coerceScalar(field: string, value: unknown): unknown {
     }
   }
 
-  if ((field === 'limit' || field === 'topK') && typeof value === 'string' && value.trim()) {
+  if ((field === 'limit' || field === 'topK' || field === 'scoreThreshold') && typeof value === 'string' && value.trim()) {
     const parsed = Number(value);
     return Number.isInteger(parsed) ? parsed : value;
   }
 
-  if (Array.isArray(value) && field === 'cc') {
+  if (Array.isArray(value) && (field === 'cc' || field === 'summaryCc')) {
     return value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim());
   }
 
@@ -195,6 +207,18 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
   if ((kind === 'resume-capture' || kind === 'batch')
     && isPresent(input.bossForwardMode) !== isPresent(input.bossForwardRecipient)) {
     missing.push(isPresent(input.bossForwardMode) ? 'bossForwardRecipient' : 'bossForwardMode');
+  }
+
+  if (kind === 'boss-auto-chat') {
+    if (!isPresent(input.bossForwardMode)) {
+      missing.push('bossForwardMode');
+    }
+    if (!isPresent(input.bossForwardRecipient)) {
+      missing.push('bossForwardRecipient');
+    }
+    if (isPresent(input.summaryCc) && !isPresent(input.summaryEmail)) {
+      missing.push('summaryEmail');
+    }
   }
 
   if (kind === 'batch' && !isPresent(input.jobsFile)) {
@@ -257,6 +281,16 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
     warnings.push('风险：Boss 会把简历转发给指定站内同事或邮箱。');
   }
 
+  if (kind === 'boss-auto-chat') {
+    warnings.push('风险：Boss 自动沟通审查会打开未读会话；对符合规则的候选人发送固定聊天消息、发起换电话请求，并把简历转发给指定站内同事或邮箱。');
+    if (input.requireAllHardRequirements === true) {
+      warnings.push('风险：只有所有硬性要求都有明确简历证据时才会转发；缺失信息按不符合处理。');
+    }
+    if (isPresent(input.summaryEmail)) {
+      warnings.push('风险：任务结束后会把候选人姓名、ID和判断理由发送到总结邮箱。');
+    }
+  }
+
   if ((kind === 'resume-capture' || kind === 'batch') && isPresent(input.applicationFilterInputFile) && input.searchSource !== 'direct') {
     warnings.push('校验提示：applicationFilterInputFile 只能和 searchSource=direct 一起使用。');
   }
@@ -289,6 +323,8 @@ function previewArgv(kind: AssistantDraft['kind'], input: Record<string, unknown
         return normalizeBatchTask(input).argv;
       case 'search-subscription':
         return normalizeSearchSubscriptionTask(input).argv;
+      case 'boss-auto-chat':
+        return normalizeBossAutoChatTask(input).argv;
       case 'login-refresh':
         return normalizeLoginRefreshTask(input).argv;
       case 'rag-ops':
@@ -337,6 +373,17 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
 
   if (kind === 'login-refresh') {
     return [];
+  }
+
+  if (kind === 'boss-auto-chat') {
+    const argv = ['--platform', String(input.platform ?? ''), '--boss-auto-chat', 'true'];
+    pushPreview(argv, '--boss-chat-score-threshold', input.scoreThreshold);
+    pushBooleanPreview(argv, '--boss-chat-require-all', input.requireAllHardRequirements);
+    pushPreview(argv, '--boss-forward-mode', input.bossForwardMode);
+    pushPreview(argv, '--boss-forward-recipient', input.bossForwardRecipient);
+    pushPreview(argv, '--boss-chat-summary-email', input.summaryEmail);
+    pushPreview(argv, '--boss-chat-summary-cc', Array.isArray(input.summaryCc) ? input.summaryCc.join(',') : input.summaryCc);
+    return argv;
   }
 
   const argv = ['--platform', String(input.platform ?? '')].filter(Boolean);
@@ -389,7 +436,7 @@ export function finalizeAssistantDraft(rawDraft: Pick<AssistantDraft, 'kind' | '
 
   return {
     kind: rawDraft.kind,
-    input: input as Partial<ResumeCaptureTaskInput | BatchTaskInput | SearchSubscriptionTaskInput | LoginRefreshTaskInput | RagOpsTaskInput> & Record<string, unknown>,
+    input: input as Partial<ResumeCaptureTaskInput | BatchTaskInput | SearchSubscriptionTaskInput | BossAutoChatTaskInput | LoginRefreshTaskInput | RagOpsTaskInput> & Record<string, unknown>,
     missingFields,
     warnings,
     argvPreview: previewArgv(rawDraft.kind, input),
@@ -450,12 +497,13 @@ function buildSystemPrompt(): string {
   return [
     '你是招聘自动化 CLI 助手，只能把中文需求转换成受控任务草稿 JSON。',
     '绝对禁止输出 shell 命令、npm script、文件写入动作、破坏性命令或任何绕过后端 normalizer 的参数。',
-    '允许的 kind 只有：resume-capture、batch、search-subscription、login-refresh、rag-ops、rag-answer。',
+    '允许的 kind 只有：resume-capture、batch、search-subscription、boss-auto-chat、login-refresh、rag-ops、rag-answer。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
     'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
     'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。',
     'batch 字段：platform, jobsFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
     'Boss 转发只允许 platform=boss；bossForwardMode 只能是 colleague 或 email，必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',
+    'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, bossForwardMode, bossForwardRecipient, summaryEmail, summaryCc；platform 必须是 boss。requireAllHardRequirements=true 时所有硬性条件都必须有明确证据；summaryEmail 配置后任务结束发送总结，summaryCc 需要 summaryEmail。',
     'search-subscription 字段：platform, searchSubscriptionFile, keyword, applicationFilterInputFile, saveSearchSubscription, searchSubscriptionName；不要包含 jd、email、includeViewed、searchSource。',
     'login-refresh 字段：platform，只允许 51job、liepin、zhilian、boss。',
     'rag-ops 字段：action, platform, jobKey, keyword, question, file, policyFile, reviewer, limit, includeReviewed, failOnIssue；action 只能是 doctor、review、metrics、ops、rebuild。',

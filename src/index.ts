@@ -9,14 +9,25 @@ import { createProductionExtractionBoundary } from './extraction/production-extr
 import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
+import { forwardBossResume } from './platforms/boss-adapter.js';
+import {
+  closeBossChatResume,
+  collectBossUnreadConversations,
+  contactBossQualifiedCandidate,
+  openAndParseBossChatResume,
+  openBossChatPage,
+  openBossUnreadConversation,
+} from './platforms/boss-chat.js';
 import type { BossForwardMode, CandidatePostOpenActions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
 import { answerCandidateQuestionFromJd, toJdRagSources, type JdRagSource } from './rag/jd-question-answering.js';
 import { answerQuestionWithRag } from './rag/service.js';
 import { buildApplicationFilterConditions, loadApplicationFilterInputFile, loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
 import { scoreResumeAgainstJob } from './scoring/score-resume.js';
+import { evaluatePropertyElectricianHardRequirements } from './scoring/boss-chat-hard-requirements.js';
+import { sendBossChatSummary } from './reporting/boss-chat-summary.js';
 import { exportJobResults, type ExportJobResultsSummary } from './scripts/export-job-results.js';
 import { sendJobReport, type SendJobReportSummary } from './scripts/send-job-report-email.js';
-import { CandidateListItem, CandidateResume, JobRecord, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult, SearchCondition, SearchSubscriptionSummary } from './types/job.js';
+import { BossChatReviewItem, BossChatReviewRun, CandidateListItem, CandidateResume, JobRecord, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult, SearchCondition, SearchSubscriptionSummary } from './types/job.js';
 
 interface CandidateProcessResult {
   candidateId: string;
@@ -83,11 +94,22 @@ interface JdQuestionCliInput {
   question: string;
 }
 
+interface BossAutoChatCliInput {
+  mode: 'boss-auto-chat';
+  platform: 'boss';
+  scoreThreshold: number;
+  requireAllHardRequirements: boolean;
+  bossForwardMode: BossForwardMode;
+  bossForwardRecipient: string;
+  summaryEmail?: string;
+  summaryCcEmails?: string[];
+}
+
 interface BatchRunnableJobInput extends RunnableJobInput {
   sourceIndex: number;
 }
 
-type CliInput = SingleJobCliInput | BatchCliInput | SearchSubscriptionCliInput | JdQuestionCliInput;
+type CliInput = SingleJobCliInput | BatchCliInput | SearchSubscriptionCliInput | JdQuestionCliInput | BossAutoChatCliInput;
 
 interface SinglePlatformCliInput extends ReportDeliveryOptions {
   platform: SupportedPlatform;
@@ -141,13 +163,20 @@ export interface JdQuestionRunSummary {
   noAnswerReason?: string;
 }
 
+export interface BossAutoChatRunSummary extends BossChatReviewRun {
+  resultPath: string;
+  summaryEmailRecipient?: string;
+  summaryEmailSubject?: string;
+}
+
 export type MainResult = MainRunSummary
   | AllPlatformsRunSummary[]
   | BatchJobRunSummary[]
   | SearchSubscriptionSummary
   | SearchSubscriptionSummary[]
   | JdQuestionRunSummary
-  | JdQuestionRunSummary[];
+  | JdQuestionRunSummary[]
+  | BossAutoChatRunSummary;
 
 export const parseJobDescriptionRef = { fn: parseJobDescription };
 export const extractionBoundary = createProductionExtractionBoundary();
@@ -176,6 +205,15 @@ export const runSearchSubscriptionWorkflowRef = { fn: runSearchSubscriptionWorkf
 export const waitPlatformCandidatePaceRef = { fn: waitPlatformCandidatePace };
 export const answerCandidateQuestionFromJdRef = { fn: answerCandidateQuestionFromJd };
 export const answerQuestionWithRagRef = { fn: answerQuestionWithRag };
+export const openBossChatPageRef = { fn: openBossChatPage };
+export const collectBossUnreadConversationsRef = { fn: collectBossUnreadConversations };
+export const openBossUnreadConversationRef = { fn: openBossUnreadConversation };
+export const openAndParseBossChatResumeRef = { fn: openAndParseBossChatResume };
+export const forwardBossResumeRef = { fn: forwardBossResume };
+export const closeBossChatResumeRef = { fn: closeBossChatResume };
+export const contactBossQualifiedCandidateRef = { fn: contactBossQualifiedCandidate };
+export const evaluateBossChatHardRequirementsRef = { fn: evaluatePropertyElectricianHardRequirements };
+export const sendBossChatSummaryRef = { fn: sendBossChatSummary };
 export { JobStore };
 
 export function resolvePlatformAdapter(platform: SupportedPlatform): PlatformAdapter {
@@ -240,6 +278,19 @@ function parseBossForwardMode(value: string | undefined): BossForwardMode | unde
   }
 
   throw new Error('--boss-forward-mode must be colleague or email');
+}
+
+function parseBossChatScoreThreshold(value: string | undefined): number {
+  if (value === undefined) {
+    return 70;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+    throw new Error('--boss-chat-score-threshold must be a number from 0 to 100');
+  }
+
+  return parsed;
 }
 
 function parseBatchCcEmails(value: unknown, itemIndex: number): string[] | undefined {
@@ -383,10 +434,33 @@ function parseArgs(argv: readonly string[]): CliInput {
   const liepinForwardContact = values.get('liepin-forward-contact')?.trim();
   const bossForwardMode = parseBossForwardMode(values.get('boss-forward-mode')?.trim());
   const bossForwardRecipient = values.get('boss-forward-recipient')?.trim();
+  const bossAutoChat = flagPresence.has('boss-auto-chat')
+    ? parseOptionalBoolean(values.get('boss-auto-chat'), '--boss-auto-chat')
+    : false;
+  const bossChatScoreThreshold = parseBossChatScoreThreshold(values.get('boss-chat-score-threshold'));
+  const bossChatRequireAll = flagPresence.has('boss-chat-require-all')
+    ? parseOptionalBoolean(values.get('boss-chat-require-all'), '--boss-chat-require-all')
+    : false;
+  const bossChatSummaryEmail = values.get('boss-chat-summary-email')?.trim();
+  const bossChatSummaryCcEmails = flagPresence.has('boss-chat-summary-cc')
+    ? parseEmailList(values.get('boss-chat-summary-cc'))
+    : undefined;
   const searchSource = parseSearchSource(values.get('search-source'), '--search-source');
   const applicationFilterInputFilePath = values.get('application-filter-input-file')
     ? path.resolve(values.get('application-filter-input-file')!)
     : undefined;
+
+  if (flagPresence.has('boss-auto-chat') && !bossAutoChat) {
+    throw new Error('--boss-auto-chat must be true when provided');
+  }
+
+  if (flagPresence.has('boss-chat-summary-email') && !bossChatSummaryEmail) {
+    throw new Error('--boss-chat-summary-email must be a non-empty email address');
+  }
+
+  if (flagPresence.has('boss-chat-summary-cc') && !bossChatSummaryEmail) {
+    throw new Error('--boss-chat-summary-cc requires --boss-chat-summary-email');
+  }
 
   if (flagPresence.has('liepin-forward-contact')) {
     if (!liepinForwardContact) {
@@ -408,6 +482,58 @@ function parseArgs(argv: readonly string[]): CliInput {
 
   if (bossForwardMode && platform !== 'boss') {
     throw new Error('--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss');
+  }
+
+  if (bossAutoChat) {
+    if (platform !== 'boss') {
+      throw new Error('--boss-auto-chat can only be used with --platform boss');
+    }
+
+    if (!bossForwardMode || !bossForwardRecipient) {
+      throw new Error('--boss-auto-chat requires --boss-forward-mode and --boss-forward-recipient');
+    }
+
+    const incompatibleFlags = [
+      'keyword',
+      'jobs-file',
+      'jd',
+      'jd-file',
+      'email',
+      'cc',
+      'include-viewed',
+      'liepin-forward-contact',
+      'search-source',
+      'application-filter-input-file',
+      'search-subscription-file',
+      'save-search-subscription',
+      'search-subscription-name',
+      'jd-question',
+      'rag-question',
+    ].filter((flag) => flagPresence.has(flag));
+    if (incompatibleFlags.length > 0) {
+      throw new Error(`--boss-auto-chat cannot be combined with ${incompatibleFlags.map((flag) => `--${flag}`).join(', ')}`);
+    }
+
+    return {
+      mode: 'boss-auto-chat',
+      platform: 'boss',
+      scoreThreshold: bossChatScoreThreshold,
+      requireAllHardRequirements: bossChatRequireAll,
+      bossForwardMode,
+      bossForwardRecipient,
+      summaryEmail: bossChatSummaryEmail,
+      summaryCcEmails: bossChatSummaryCcEmails,
+    };
+  }
+
+  const bossChatOnlyFlags = [
+    'boss-chat-score-threshold',
+    'boss-chat-require-all',
+    'boss-chat-summary-email',
+    'boss-chat-summary-cc',
+  ].filter((flag) => flagPresence.has(flag));
+  if (bossChatOnlyFlags.length > 0) {
+    throw new Error(`${bossChatOnlyFlags.map((flag) => `--${flag}`).join(', ')} require --boss-auto-chat true`);
   }
 
   if (hasJdQuestion) {
@@ -702,6 +828,222 @@ async function scoreCapturedResumes(
     scoredCandidates: scoredCandidates.filter((candidateId) => capturedCandidateIdSet.has(candidateId)),
     failedCandidates,
   };
+}
+
+function supportsPropertyElectricianHardRequirements(jobKey: string, job: NormalizedJob): boolean {
+  if (jobKey !== buildJobKey('物业电工', '')) {
+    return false;
+  }
+
+  const requirements = job.hardRequirements.join(' ');
+  return /47岁|年龄/.test(requirements)
+    && /高压/.test(requirements)
+    && /低压/.test(requirements)
+    && /物业/.test(requirements)
+    && /2年|两年|24个月/.test(requirements);
+}
+
+async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoChatRunSummary> {
+  const store = new JobStore();
+  const reviewedAt = new Date().toISOString();
+  const session = await ensureAuthenticatedBrowserSessionRef.fn('boss');
+  const items: BossChatReviewItem[] = [];
+
+  try {
+    const chatPage = await openBossChatPageRef.fn(session.page);
+    session.page = chatPage;
+    const retryItems = await store.readBossChatRetryItems();
+    const retryConversationIds = new Set(retryItems.map((item) => item.conversationId));
+    const conversations = await collectBossUnreadConversationsRef.fn(chatPage, retryItems.map((item) => ({
+      conversationId: item.conversationId,
+      candidateName: item.candidateName,
+      jobName: item.jobName,
+      unreadCount: item.unreadCount,
+    })));
+    const reviewedConversationIds = await store.readBossChatReviewedConversationIds();
+    const reviewedConversationIdSet = new Set(
+      reviewedConversationIds.filter((conversationId) => !retryConversationIds.has(conversationId)),
+    );
+    if (reviewedConversationIdSet.size !== reviewedConversationIds.length) {
+      await store.saveBossChatReviewedConversationIds([...reviewedConversationIdSet]);
+    }
+
+    for (const conversation of conversations) {
+      const jobKey = buildJobKey(conversation.jobName, '');
+      if (reviewedConversationIdSet.has(conversation.conversationId)) {
+        items.push({
+          conversationId: conversation.conversationId,
+          candidateName: conversation.candidateName,
+          jobName: conversation.jobName,
+          jobKey,
+          unreadCount: conversation.unreadCount,
+          status: 'skipped_previously_reviewed',
+        });
+        continue;
+      }
+
+      const jobRecord = await store.readJobRecordIfExists('boss', jobKey);
+      if (!jobRecord) {
+        items.push({
+          conversationId: conversation.conversationId,
+          candidateName: conversation.candidateName,
+          jobName: conversation.jobName,
+          jobKey,
+          unreadCount: conversation.unreadCount,
+          status: 'skipped_missing_jd',
+          error: `Missing stored Boss JD for job ${conversation.jobName}`,
+        });
+        continue;
+      }
+
+      if (input.requireAllHardRequirements && !supportsPropertyElectricianHardRequirements(jobKey, jobRecord.normalizedJob)) {
+        items.push({
+          conversationId: conversation.conversationId,
+          candidateName: conversation.candidateName,
+          jobName: conversation.jobName,
+          jobKey,
+          unreadCount: conversation.unreadCount,
+          status: 'skipped_unsupported_hard_requirements',
+          error: `All-hard-requirements evaluation is not configured for Boss job ${conversation.jobName}`,
+        });
+        continue;
+      }
+
+      let opened: Awaited<ReturnType<typeof openBossUnreadConversation>> | undefined;
+      let item: BossChatReviewItem = {
+        conversationId: conversation.conversationId,
+        candidateName: conversation.candidateName,
+        jobName: conversation.jobName,
+        jobKey,
+        unreadCount: conversation.unreadCount,
+        status: 'failed',
+      };
+
+      try {
+        opened = await openBossUnreadConversationRef.fn(chatPage, conversation);
+        const resume = await openAndParseBossChatResumeRef.fn(chatPage, opened);
+        item = {
+          ...item,
+          candidateId: resume.candidateId,
+          candidateName: resume.name ?? conversation.candidateName,
+        };
+        await store.saveCandidateResume('boss', jobKey, resume, formatResumeSnapshot(resume));
+
+        let matched: boolean;
+        if (input.requireAllHardRequirements) {
+          const hardRequirementEvaluation = evaluateBossChatHardRequirementsRef.fn(resume);
+          matched = hardRequirementEvaluation.allMet;
+          item = {
+            ...item,
+            hardRequirementEvaluation,
+            matched,
+            forwarded: false,
+            status: matched ? 'failed' : 'not_matched',
+          };
+        } else {
+          const scoredAt = new Date().toISOString();
+          try {
+            const score = await scoreResumeAgainstJobRef.fn(jobRecord.normalizedJob, resume);
+            await store.saveCandidateScoreArtifact('boss', jobKey, {
+              candidateId: resume.candidateId,
+              candidateShareUrl: resume.candidateShareUrl,
+              model: config.scoring.model,
+              scoredAt,
+              status: 'success',
+              score,
+            });
+            matched = score.totalScore >= input.scoreThreshold;
+            item = {
+              ...item,
+              score,
+              matched,
+              forwarded: false,
+              status: matched ? 'failed' : 'not_matched',
+            };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await store.saveCandidateScoreArtifact('boss', jobKey, {
+              candidateId: resume.candidateId,
+              candidateShareUrl: resume.candidateShareUrl,
+              model: config.scoring.model,
+              scoredAt,
+              status: 'failed',
+              error: message,
+            });
+            throw error;
+          }
+        }
+
+        if (matched) {
+          await forwardBossResumeRef.fn(
+            chatPage,
+            opened.candidate,
+            input.bossForwardMode,
+            input.bossForwardRecipient,
+          );
+          item = {
+            ...item,
+            forwarded: true,
+            status: 'forwarded',
+          };
+          await closeBossChatResumeRef.fn(chatPage);
+          const contactResult = await contactBossQualifiedCandidateRef.fn(chatPage);
+          item = {
+            ...item,
+            chatMessageSent: contactResult.messageSent,
+            phoneExchangeRequested: contactResult.phoneExchangeRequested,
+          };
+        }
+      } catch (error) {
+        item = {
+          ...item,
+          status: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+        };
+      } finally {
+        await closeBossChatResumeRef.fn(chatPage).catch(() => undefined);
+        if (opened && (item.status !== 'failed' || item.forwarded === true)) {
+          reviewedConversationIdSet.add(conversation.conversationId);
+          await store.saveBossChatReviewedConversationIds([...reviewedConversationIdSet]);
+        }
+      }
+
+      items.push(item);
+    }
+
+    const run: BossChatReviewRun = {
+      platform: 'boss',
+      reviewedAt,
+      scoreThreshold: input.scoreThreshold,
+      matchMode: input.requireAllHardRequirements ? 'all-hard-requirements' : 'score-threshold',
+      unreadConversations: conversations.length,
+      reviewedConversations: items.filter((item) => !item.status.startsWith('skipped_')).length,
+      matchedCandidates: items.filter((item) => item.matched).length,
+      chatMessagesSent: items.filter((item) => item.chatMessageSent).length,
+      phoneExchangeRequests: items.filter((item) => item.phoneExchangeRequested).length,
+      forwardedCandidates: items.filter((item) => item.forwarded).length,
+      skippedConversations: items.filter((item) => item.status.startsWith('skipped_')).length,
+      failedConversations: items.filter((item) => item.status === 'failed').length,
+      items,
+    };
+    const resultPath = await store.saveBossChatReviewRun(run);
+    const emailSummary = input.summaryEmail
+      ? await sendBossChatSummaryRef.fn(run, {
+        recipient: input.summaryEmail,
+        ccEmails: input.summaryCcEmails,
+      })
+      : undefined;
+    const summary = {
+      ...run,
+      resultPath,
+      summaryEmailRecipient: emailSummary?.recipient,
+      summaryEmailSubject: emailSummary?.subject,
+    };
+    console.log(JSON.stringify(summary, null, 2));
+    return summary;
+  } finally {
+    await closeBrowserSessionRef.fn(session);
+  }
 }
 
 export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean; liepinForwardContact?: string; bossForwardMode?: BossForwardMode; bossForwardRecipient?: string; searchSource?: SearchSource; searchConditions?: SearchCondition[] } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
@@ -1042,6 +1384,10 @@ async function runJdQuestion(input: JdQuestionCliInput): Promise<JdQuestionRunSu
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<MainResult> {
   const input = parseArgs(argv);
+
+  if (input.mode === 'boss-auto-chat') {
+    return runBossAutoChat(input);
+  }
 
   if (input.mode === 'jd-question') {
     return runJdQuestion(input);

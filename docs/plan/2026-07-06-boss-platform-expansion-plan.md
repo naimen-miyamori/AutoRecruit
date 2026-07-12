@@ -806,3 +806,112 @@ rtk node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-scoring-ru
 - 完整 `rtk npm run test` 通过：scoring 282、export 55、maintenance 44，全部 0 失败。
 - 本地控制台 smoke 确认 Boss 转发方式包含“不转发 / 站内同事 / 邮件转发”，收件人字段随模式切换，Boss 平台下不会显示猎聘转发字段。
 - 本地 UI 临时截图：`/tmp/autorecruit-boss-forward-ui.png`。
+
+**阶段 9：Boss 自动沟通审查**
+
+目标：复用当前 Boss 浏览器中的沟通页，自动检查未读会话，读取候选人沟通岗位和简历简介，按该岗位已保存 JD 评分，并把达到阈值的简历转发给指定站内同事或邮箱。
+
+CLI 参数：
+
+```bash
+PLAYWRIGHT_HEADLESS=false rtk npm run dev -- \
+  --platform boss \
+  --boss-auto-chat true \
+  --boss-chat-score-threshold 70 \
+  --boss-forward-mode colleague \
+  --boss-forward-recipient "同事姓名"
+```
+
+邮件转发时把 `--boss-forward-mode` 改为 `email`，并把收件人设置为邮箱地址。
+
+行为约束：
+
+- 该功能是独立模式，只允许 `--platform boss`，不进入 `--platform all`、普通搜索抓取、批量、搜索订阅、报告邮件或 RAG 问答路径。
+- 必须复用当前已打开的 Boss reusable browser 页面。当前页不在沟通页时只点击左侧 `a[ka="menu-im"]`，不新开登录页或新标签。
+- 沟通页固定为 `https://www.zhipin.com/web/chat/index`，先选择 `.chat-message-filter-left` 中的“未读”。
+- 只处理 `.user-list .geek-item` 内存在 `.figure .badge-count` 的会话；候选人和岗位分别读取 `.geek-name`、`.source-job`。
+- 点击会话会改变未读状态，因此先采集未读列表快照，再逐项按 `data-id` 定位。
+- 用岗位名构造 Boss `jobKey` 并读取 `data/boss/jobs/<jobKey>/jd.json`。缺少 JD 时记录 `skipped_missing_jd`，不点击该会话，保持其未读状态。
+- 右侧会话通过 `.resume-btn-online` 打开在线简历；兼容页面显示“简历简介”或“在线简历”。详情仍复用 `/web/frame/c-resume/`、右上角 `.btn-coop-forward` 和现有站内同事/邮件转发实现。
+- 沟通页详情 API 使用 `/wapi/zpjob/view/geek/info/v2`；基础简历字段从当前 Vue 会话摘要读取，详情接口存在可用结构时再合并详情字段。
+- 使用统一 `scoreResumeAgainstJob` 评分。默认符合阈值为 70，允许通过 `--boss-chat-score-threshold 0..100` 调整。
+- 只有 `totalScore >= threshold` 才转发；转发留言继续固定为候选人 ID。
+- 不自动发送聊天消息，不点击快速回复、感兴趣、不合适、求简历、换电话、换微信或发送按钮。
+- 已打开会话写入 `data/boss/chat-review/reviewed-conversation-ids.json`，避免任务重跑时重复转发。
+- 每次运行结果写入 `data/boss/chat-review/runs/<timestamp>.json`，记录会话 ID、候选人 ID、岗位、评分、是否符合、是否转发和错误。
+- 单个会话失败时关闭简历浮窗、记录失败并继续下一个会话；任务结束后保持 Boss 沟通页打开。
+
+控制台/API：
+
+- 新增任务类型和接口 `POST /api/tasks/boss-auto-chat`。
+- Web 控制台“提交任务”增加“Boss 自动沟通”，平台固定为 Boss，分数线默认 70，转发方式和收件人必填。
+- Assistant 可生成 `boss-auto-chat` 草稿，确认前必须接受“打开未读会话并执行达标简历转发”的风险提示。
+
+受控 DOM 验证：
+
+- 复用 CDP `19331` 中已经打开的 `https://www.zhipin.com/web/chat/index`，没有打开登录页或新标签。
+- 已确认未读徽标、候选人、岗位、会话摘要和“在线简历”入口结构。
+- 只在当前已打开的已读会话中打开在线简历，确认详情 iframe 为 `/web/frame/c-resume/?source=chat-resume-online`，转发入口唯一存在。
+- 验证后关闭简历浮窗，沟通页保持打开；未点击新的未读候选人、未评分、未发送消息、未执行真实转发。
+
+阶段 9 硬性条件与总结邮件扩展：
+
+- 本机 `data/boss/jobs/物业电工/jd.json` 已更新为：`47岁以下，高低压证、物业行业电工经验、一家公司工作至少2年以上`。
+- `47岁以下` 按严格小于 47 处理，即最大 46 岁。
+- 新增 `--boss-chat-require-all true`。启用后不使用总分阈值决定转发，而是逐项要求明确证据：
+  - 年龄小于 47 岁。
+  - 明确持有高压电工证。
+  - 明确持有低压电工证。
+  - 简历同时存在物业行业和电工/电气工作证据。
+  - 至少一段同一公司工作经历达到 24 个月。
+- 任一条件没有明确简历证据时按不符合处理，不进行推测。
+- 在线简历 iframe 的正文由 WASM 绘制到 canvas。任务在打开简历前监听 iframe 的 `IFRAME_DONE` 消息，读取 WASM 已解密的 `abstractData`，解析工作、项目、教育和证书字段后立即转换为共享 `CandidateResume`；不持久化原始解密载荷。
+- 只有 `hardRequirementEvaluation.allMet=true` 才执行 Boss 邮件转发。
+- 新增任务结束总结邮件：
+  - `--boss-chat-summary-email <收件邮箱>`
+  - `--boss-chat-summary-cc <抄送邮箱1,抄送邮箱2>`
+- 总结邮件在所有红点会话处理完成、运行结果落盘后发送。正文包括符合候选人的姓名和 ID、不符合或无法确认候选人的姓名和 ID，以及逐项不符合理由；解析或转发失败也会列入。
+- 总结邮件复用现有 SMTP 配置。发送失败会保留已经写入的审查结果，并使任务失败，避免误报为已送达。
+
+物业电工严格模式调用模板：
+
+```bash
+PLAYWRIGHT_HEADLESS=false rtk npm run dev -- \
+  --platform boss \
+  --boss-auto-chat true \
+  --boss-chat-require-all true \
+  --boss-forward-mode email \
+  --boss-forward-recipient "resume@qq.com" \
+  --boss-chat-summary-email "summary@qq.com" \
+  --boss-chat-summary-cc "audit@hotmail.com"
+```
+
+上述地址是参数格式示例，真实运行前必须替换为用户指定的完整邮箱地址。
+
+阶段 9 达标候选人沟通动作扩展：
+
+- 对匹配规则判定为符合的候选人依次执行：
+  1. 保持当前在线简历浮窗打开，先执行已有的简历转发。
+  2. 转发成功后立即记录 `forwarded: true`，再关闭在线简历浮窗返回右侧聊天区域。
+  3. 在 `#boss-chat-editor-input[contenteditable="true"]` 填写固定文本：`方便发一份你的简历过来吗？`
+  4. 点击 `.conversation-editor .submit`，并等待消息出现在 `.chat-message-list .message-item .text-content` 且编辑器清空。
+  5. 等待 `.operate-exchange-left` 中的“换电话”按钮移除 `disabled` 状态。
+  6. 点击“换电话”，等待 `.exchange-tooltip` 出现，再点击其中 `.boss-btn-primary` 的“确定”。
+  7. 确认 Vue `ExchangePhone` 会话状态中的 `requestPhone`、`phone` 或交换电话消息状态已更新。
+- 转发失败时不发送聊天消息或请求换电话，候选人结果记为 `failed`。
+- 转发成功后的聊天或换电话步骤失败时，候选人仍保留 `forwarded: true` 并记为 `failed`，总结邮件显示“已转发，但联系动作未完成”及错误原因。
+- 动作具有幂等保护：消息列表已有完全相同的固定文本时不重复发送；`requestPhone`、已交换电话或待交换电话状态已存在时不重复请求。
+- 不符合要求的候选人不发送消息、不点击换电话、不转发简历。
+- 运行结果增加 `chatMessageSent`、`phoneExchangeRequested`，汇总增加 `chatMessagesSent`、`phoneExchangeRequests`；总结邮件会显示每位符合候选人的聊天、换电话和转发状态。
+- 现场结构只做只读确认，没有在当前已读会话或红点候选人上发送消息、确认换电话或执行转发。
+
+阶段 9 首次真实运行修复与结果：
+
+- 真实沟通页的“在线简历”入口必须使用 Playwright 原生 `locator.click()`；DOM `element.click()` 只会创建保持隐藏的 iframe。现已改为原生点击。
+- 打开会话后，`.chat-conversation` 的当前会话 ID 会先更新，`.base-info-single-container` 的候选人详情稍后异步水合。现等待目标会话 ID、候选人详情和 `ageDesc` 同时就绪后再读取，避免年龄、学历和工作经历被误记为空。
+- 失败且尚未转发的会话会从历史运行结果恢复重试；即使首次点击已经清除红点，只要会话仍在当前未读列表中就可继续处理。已成功转发但后续联系失败的会话不自动重试转发，避免重复发送简历。
+- 最终校正运行审查 12 个物业电工会话，12 个成功解析，0 个流程失败。
+- 12 人均未同时满足全部硬性条件，最终 `matchedCandidates=0`、`forwardedCandidates=0`、`chatMessagesSent=0`、`phoneExchangeRequests=0`。
+- 最终运行结果：`data/boss/chat-review/runs/2026-07-12T06-48-26-707Z.json`。
+- 最终总结邮件已发送到 `240738516@qq.com`，并抄送 `wd-cmgmt@hotmail.com`。
+- 全程复用 CDP `19331` 的当前 Boss 沟通页，没有打开登录页或新标签。

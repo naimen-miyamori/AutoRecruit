@@ -243,6 +243,7 @@ async function main(): Promise<void> {
       'POST /api/tasks/resume-capture',
       'POST /api/tasks/batch',
       'POST /api/tasks/search-subscription',
+      'POST /api/tasks/boss-auto-chat',
       'GET /api/jobs',
       'POST /api/rag/answer',
       'POST /api/rag/conversations',

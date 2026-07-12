@@ -48,6 +48,7 @@ type BossResumeApiPayload = {
   zpData?: {
     expectId?: number | string;
     geekDetail?: Record<string, unknown>;
+    geekDetailInfo?: Record<string, unknown>;
     showExpectPosition?: Record<string, unknown>;
   };
 };
@@ -1773,8 +1774,8 @@ async function extractBossCandidateList(page: Page, options?: SearchWaitOptions)
   return { candidates: parseBossCandidateSnapshots(snapshots) };
 }
 
-async function closeExistingBossResumeDialog(page: Page, deadline: number): Promise<void> {
-  const activeDialog = page.locator('.dialog-wrap.active[data-type="boss-dialog"], .dialog-wrap.active:has(iframe[src*="/web/frame/c-resume/"])').first();
+export async function closeExistingBossResumeDialog(page: Page, deadline: number): Promise<void> {
+  const activeDialog = page.locator('.dialog-wrap.active[data-type="boss-dialog"], .dialog-wrap.active:has(iframe[src*="/web/frame/c-resume/"]), .dialog-wrap.active:has(.c-share-box)').first();
   if (await activeDialog.count().catch(() => 0) === 0) {
     return;
   }
@@ -1786,7 +1787,7 @@ async function closeExistingBossResumeDialog(page: Page, deadline: number): Prom
   await activeDialog.waitFor({ state: 'hidden', timeout: Math.min(remainingTime(deadline), 5000) }).catch(() => undefined);
 }
 
-async function waitForBossResumeDetailReady(page: Page, deadline: number): Promise<void> {
+export async function waitForBossResumeDetailReady(page: Page, deadline: number): Promise<void> {
   await page.locator('.dialog-wrap.active[data-type="boss-dialog"] iframe[src*="/web/frame/c-resume/"], .dialog-wrap.active iframe[src*="/web/frame/c-resume/"]').first().waitFor({
     state: 'visible',
     timeout: remainingTime(deadline),
@@ -1878,7 +1879,7 @@ async function readBossResumeApiPayload(page: Page, deadline: number): Promise<B
     const apiUrl = performance.getEntriesByType('resource')
       .map((entry) => entry.name)
       .reverse()
-      .find((url) => /\/wapi\/zpitem\/web\/boss\/search\/geek\/info\?/.test(url));
+      .find((url) => /\/wapi\/(?:zpitem\/web\/boss\/search\/geek\/info|zpjob\/view\/geek\/info\/v2)\?/.test(url));
     if (!apiUrl) {
       throw new Error('Boss resume detail API resource was not found in the detail frame.');
     }
@@ -2009,7 +2010,7 @@ async function confirmBossForward(dialog: Locator, candidateId: string, deadline
   });
 }
 
-async function forwardBossResume(
+export async function forwardBossResume(
   page: Page,
   candidate: CandidateListItem,
   mode: BossForwardMode,
@@ -2075,6 +2076,9 @@ function readBossTextList(value: unknown): string[] {
     readString(value, 'desc'),
     readString(value, 'description'),
     readString(value, 'name'),
+    readString(value, 'certName'),
+    readString(value, 'certificateName'),
+    readString(value, 'skillName'),
     readString(value, 'label'),
     readString(value, 'value'),
   ]);
@@ -2087,6 +2091,7 @@ function parseBossWorkExperiences(geekDetail: Record<string, unknown>, candidate
       const responsibility = readString(entry, 'responsibility');
       const workPerformance = readString(entry, 'workPerformance');
       const department = readString(entry, 'department');
+      const workYearDesc = readString(entry, 'workYearDesc');
       const workEmphasis = readBossTextList(entry.workEmphasisList);
       return {
         company: readString(entry, 'company'),
@@ -2095,6 +2100,7 @@ function parseBossWorkExperiences(geekDetail: Record<string, unknown>, candidate
         end: readString(entry, 'endYearMonStr'),
         details: uniqueStrings([
           department ? `部门：${department}` : undefined,
+          workYearDesc ? `工作时长：${workYearDesc}` : undefined,
           responsibility,
           workPerformance,
           ...workEmphasis,
@@ -2184,7 +2190,9 @@ function parseBossCertificates(geekDetail: Record<string, unknown>): string[] {
 
 function parseBossResumeFromApi(payload: BossResumeApiPayload, page: Page, candidate: CandidateListItem): CandidateResume {
   const zpData = payload.zpData ?? {};
-  const geekDetail = isRecord(zpData.geekDetail) ? zpData.geekDetail : {};
+  const geekDetail = isRecord(zpData.geekDetail)
+    ? zpData.geekDetail
+    : (isRecord(zpData.geekDetailInfo) ? zpData.geekDetailInfo : {});
   const baseInfo = readRecord(geekDetail, 'geekBaseInfo') ?? {};
   const highestEduExp = readRecord(geekDetail, 'highestEduExp');
   const showExpectPosition = readRecord(geekDetail, 'showExpectPosition') ?? (isRecord(zpData.showExpectPosition) ? zpData.showExpectPosition : undefined);
@@ -2216,7 +2224,15 @@ function parseBossResumeFromApi(payload: BossResumeApiPayload, page: Page, candi
   };
 }
 
-async function parseBossResumeDetail(page: Page, candidate: CandidateListItem): Promise<CandidateResume> {
+export function parseBossResumeData(
+  geekDetail: Record<string, unknown>,
+  page: Page,
+  candidate: CandidateListItem,
+): CandidateResume {
+  return parseBossResumeFromApi({ zpData: { geekDetail } }, page, candidate);
+}
+
+export async function parseBossResumeDetail(page: Page, candidate: CandidateListItem): Promise<CandidateResume> {
   const deadline = createResumeDetailDeadline();
   const payload = takeCachedBossResumePayload(page, candidate.candidateId)
     ?? await readBossResumeApiPayload(page, deadline);

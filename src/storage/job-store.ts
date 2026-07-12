@@ -6,6 +6,8 @@ import type { SearchFilterCatalog } from '../search/filter-catalog.js';
 import {
   CandidateListItem,
   CandidateResume,
+  BossChatReviewItem,
+  BossChatReviewRun,
   CandidateScoreArtifact,
   JobRecord,
   ResumeDomSnapshot,
@@ -27,6 +29,12 @@ interface JobPaths {
 interface FilterCatalogPaths {
   dir: string;
   latestPath: string;
+}
+
+interface BossChatReviewPaths {
+  dir: string;
+  runsDir: string;
+  reviewedConversationIdsPath: string;
 }
 
 interface LegacyResumeSnapshotSource {
@@ -102,6 +110,15 @@ function normalizeRunResult(runResult: LegacyRunResult): RunResult {
 }
 
 export class JobStore {
+  private getBossChatReviewPaths(): BossChatReviewPaths {
+    const dir = path.join(config.dataDir, 'boss', 'chat-review');
+    return {
+      dir,
+      runsDir: path.join(dir, 'runs'),
+      reviewedConversationIdsPath: path.join(dir, 'reviewed-conversation-ids.json'),
+    };
+  }
+
   private getFilterCatalogPaths(platform: SupportedPlatform): FilterCatalogPaths {
     const dir = path.join(config.dataDir, platform, 'filter-catalog');
     return {
@@ -321,6 +338,45 @@ export class JobStore {
       ...runResult,
       platform,
     });
+    return filePath;
+  }
+
+  async readBossChatReviewedConversationIds(): Promise<string[]> {
+    const { reviewedConversationIdsPath } = this.getBossChatReviewPaths();
+    return readJsonFile<string[]>(reviewedConversationIdsPath, []);
+  }
+
+  async saveBossChatReviewedConversationIds(conversationIds: string[]): Promise<void> {
+    const paths = this.getBossChatReviewPaths();
+    await ensureDir(paths.dir);
+    await writeJson(paths.reviewedConversationIdsPath, [...new Set(conversationIds)]);
+  }
+
+  async readBossChatRetryItems(): Promise<BossChatReviewItem[]> {
+    const { runsDir } = this.getBossChatReviewPaths();
+    const files = await listJsonFiles(runsDir);
+    const runs = await Promise.all(files.map((file) => readJsonFile<BossChatReviewRun>(path.join(runsDir, file))));
+    const retryItems = new Map<string, BossChatReviewItem>();
+
+    for (const run of runs.sort((left, right) => left.reviewedAt.localeCompare(right.reviewedAt))) {
+      for (const item of run.items) {
+        if (item.status === 'failed' && item.forwarded !== true) {
+          retryItems.set(item.conversationId, item);
+        } else {
+          retryItems.delete(item.conversationId);
+        }
+      }
+    }
+
+    return [...retryItems.values()];
+  }
+
+  async saveBossChatReviewRun(run: BossChatReviewRun): Promise<string> {
+    const paths = this.getBossChatReviewPaths();
+    await ensureDir(paths.runsDir);
+    const timestamp = run.reviewedAt.replace(/[:.]/g, '-');
+    const filePath = path.join(paths.runsDir, `${timestamp}.json`);
+    await writeJson(filePath, run);
     return filePath;
   }
 

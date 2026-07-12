@@ -108,7 +108,7 @@ export const api = {
       candidateId,
     });
   },
-  async submitTask(kind: 'resume-capture' | 'batch' | 'search-subscription' | 'login-refresh' | 'rag-ops', body: Record<string, unknown>) {
+  async submitTask(kind: 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'login-refresh' | 'rag-ops', body: Record<string, unknown>) {
     return requestJson<TaskDetail>(`/tasks/${kind}`, {
       method: 'POST',
       body: JSON.stringify(body),

@@ -142,6 +142,22 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
     };
   }
 
+  if ('unreadConversations' in output) {
+    return {
+      platform: output.platform,
+      unreadConversations: output.unreadConversations,
+      reviewedConversations: output.reviewedConversations,
+      matchedCandidates: output.matchedCandidates,
+      chatMessagesSent: output.chatMessagesSent,
+      phoneExchangeRequests: output.phoneExchangeRequests,
+      forwardedCandidates: output.forwardedCandidates,
+      failedConversations: output.failedConversations,
+      resultPath: output.resultPath,
+      summaryEmailRecipient: output.summaryEmailRecipient,
+      summaryEmailSubject: output.summaryEmailSubject,
+    };
+  }
+
   if ('question' in output) {
     return {
       platform: output.platform,

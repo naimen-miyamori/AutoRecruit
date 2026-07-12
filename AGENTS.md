@@ -4,7 +4,7 @@ Repository guidance for coding agents working on this project.
 
 ## Project Scope
 
-This repository is a TypeScript CLI for recruitment automation. The supported production browser platforms are `51job`, `liepin`, and `zhilian`.
+This repository is a TypeScript CLI for recruitment automation. The three core production browser platforms are `51job`, `liepin`, and `zhilian`. Boss (`boss`) is a supported single-platform extension for search/capture, configured resume forwarding, and unread-chat review, but it is deliberately excluded from multi-platform `all` runs.
 
 Keep the platform adapter boundary intact. Platform-specific behavior belongs under `src/platforms/`; shared orchestration belongs in `src/index.ts`, shared browser helpers under `src/browser/`, and storage behavior under `src/storage/`.
 
@@ -15,6 +15,8 @@ Keep the platform adapter boundary intact. Platform-specific behavior belongs un
 3. `zhilian`
 
 If one platform fails during an all-platform run, stop immediately and propagate that error.
+
+Boss must run only through `--platform boss`. Do not add it to `listSupportedPlatforms()`, `--platform all`, or the inner loop of `--platform all --jobs-file` unless the public all-platform contract is explicitly redesigned.
 
 ## Do Not Break
 
@@ -30,7 +32,7 @@ If one platform fails during an all-platform run, stop immediately and propagate
 - Console model settings from the web UI (`baseUrl`, `model`, `apiKey`) are request-scoped overrides for assistant draft generation and console RAG question answering only. Do not store the API key in task records, assistant drafts, persisted config files, logs, answer logs, or model input text, and do not let it alter confirmed task execution.
 - `/api/assistant/confirm` must finalize the draft, then reuse `src/server/task-normalizers.ts` and the existing `TaskQueue`. Do not bypass normalizers, do not treat preview argv as an execution source of truth, and do not add a separate assistant-specific task runner.
 - Assistant `rag-answer` is a standalone answer path. It must not create tasks, open browsers, capture resumes, score candidates, export reports, or send email. Stored-job and temporary-JD behavior must follow the same rules as `--jd-question`/`--rag-question`.
-- Assistant drafts for normal capture, batch, search-subscription, login-refresh, and RAG ops must preserve the same mode isolation and platform constraints as the CLI/API paths. Unsupported or unsafe draft fields should be dropped or warned about before confirmation, and confirmation must still fail through the shared normalizers when the request is invalid.
+- Assistant drafts for normal capture, batch, search-subscription, login-refresh, Boss auto-chat, and RAG ops must preserve the same mode isolation and platform constraints as the CLI/API paths. Unsupported or unsafe draft fields should be dropped or warned about before confirmation, and confirmation must still fail through the shared normalizers when the request is invalid.
 - Batch mode uses `--jobs-file` as the only source of job definitions. Do not allow it to combine with single-job `--keyword`, `--jd`, or `--jd-file`; normal run-level switches such as `--include-viewed`, `--email`, `--cc`, `--search-source`, `--application-filter-input-file`, and valid Liepin forwarding remain allowed. Jobs-file items may set `searchSource` and `applicationFilterInputFile`; job-level values override CLI-level defaults, and relative job-level filter paths resolve from the jobs file directory.
 - With `--platform all --jobs-file`, the outer loop is jobs-file order and the inner loop is `51job`, `liepin`, `zhilian`.
 - Search-subscription mode (`--search-subscription-file`) is standalone. It must not parse JD text, create job records, capture resumes, score candidates, export reports, or send email.
@@ -43,6 +45,14 @@ If one platform fails during an all-platform run, stop immediately and propagate
 - Model scoring failures must persist `status: failed` score artifacts and must not undo seen state.
 - Latest run-result files stay lightweight: store platform, counts, and candidate ID lists rather than full candidate card payloads.
 - Exported markdown reports and email bodies must preserve a visible platform-source label.
+- Boss work must reuse the platform-scoped headed browser and the existing Boss tab whenever possible. Search and chat automation must not repeatedly open the Boss login URL, create extra Boss tabs, or replace the current authenticated search/chat page; the reusable Boss CDP port defaults to `19331`.
+- Boss forwarding options `--boss-forward-mode colleague|email` and `--boss-forward-recipient` must be provided together and are valid only for Boss. Both modes put the candidate ID in the forwarding message. Colleague mode must select one exact dropdown match; email mode fills the recipient address. A forward failure before successful capture keeps the candidate retryable.
+- Boss auto-chat (`--boss-auto-chat true`) is standalone and requires `--platform boss` plus explicit forwarding mode and recipient. It must not combine with normal capture, batch, search-subscription, report-email, or JD/RAG question flags. Summary delivery uses `--boss-chat-summary-email` and optional `--boss-chat-summary-cc` and is separate from normal job-report delivery.
+- Boss auto-chat must snapshot red-dot conversations before opening any of them, read the conversation job, reuse the stored Boss JD, and process only conversations whose job is supported. Missing JD must leave the conversation unopened and unread. Opened conversations are deduplicated under `data/boss/chat-review/`.
+- Boss strict matching with `--boss-chat-require-all true` is currently configured for `物业电工`: age must be strictly below 47, both high-voltage and low-voltage certificates need explicit evidence, property-industry electrician experience needs explicit evidence, and at least one company tenure must reach 24 months. Missing evidence is a rejection, not permission to infer.
+- For a matched Boss chat candidate, keep the resume dialog open and forward first. Record `forwarded: true` immediately after success, then close the resume, send `方便发一份你的简历过来吗？`, and request phone exchange through `换电话` -> `确定`. Do not contact or forward unmatched candidates. Message and phone actions must remain idempotent.
+- A Boss contact failure after successful forwarding must preserve `forwarded: true`, record `status: failed`, and render `已转发，但联系动作未完成`. Do not automatically forward that resume again. Failures before forwarding remain retryable even if opening the conversation removed its red dot; recover the latest unforwarded failed item from prior chat-review runs when it is still visible.
+- On the current Boss chat page, open `.resume-btn-online` with Playwright's native locator click. A DOM `element.click()` can create a hidden iframe without opening the dialog. Wait for both the target conversation ID and hydrated `.base-info-single-container` data, including `ageDesc`, before reading the snapshot. Resume details may arrive through iframe `IFRAME_DONE` WASM data; do not persist the raw decrypted payload.
 - Zhilian scored-candidate emails must use copied colleague-forward resume share links. Missing or duplicated current-run Zhilian share links are delivery errors.
 - In direct normal resume-capture mode, Zhilian must not click a saved quick-search tag. It should open `/app/search`, clear stale conditions when possible, fill the top keyword input, trigger search, confirm visible `关键词：<keyword>`, apply requested filters, then set `未看过` according to `--include-viewed` while preserving `未聊过`.
 - Zhilian search extraction must run only after the saved quick-search condition is confirmed active, using visible text such as `关键词：<raw --keyword>`. If setting `未看过` for default runs or clearing it for `--include-viewed true` drops the quick-search condition, reselect the saved quick-search tag and set `未看过` to the requested state again before extraction. Do not clear `未聊过` for include-viewed reruns.
@@ -68,10 +78,11 @@ If one platform fails during an all-platform run, stop immediately and propagate
 | `51job` | `storage-state.json` | Saved mode: subscription page at `https://ehire.51job.com/Revision/talent/subscribe`; direct mode: talent search page | DOM cards anchored around `div[id^="no_interested_"]` | Saved mode clicks the saved keyword card, confirms the active subscription detail panel title matches the raw keyword, then clicks that panel's `去搜索` trigger. Direct mode opens talent search, clears old filters, fills the keyword, applies requested filters, then searches. Before extraction confirm visible text such as `关键词：<keyword>` when using saved mode. Preserve selector fallbacks and treat filtered-empty text as success. Default runs explicitly check `我已看`; `--include-viewed true` clears it. After the talent-search page opens, close extra `我的订阅` tabs in the same reusable browser context and keep the active session page on the talent-search page. |
 | `liepin` | `storage-state.liepin.json` | Saved mode: recruiter talent search via `找人`, then quick-search tag; direct mode: recruiter talent search keyword input | DOM-first; API fallback only when DOM has no candidates or needs safe detail URLs | Liepin is always headed. Manual-login polling must avoid unrelated probes before recruiter cookies exist. Saved mode clicks the requested quick-search tag. Direct mode clears existing filters, fills the keyword, triggers search, and applies requested filters. Both modes ensure `隐藏已查看` by default, or uncheck it for `--include-viewed true`, then reset/request-start barrier before extraction. |
 | `zhilian` | `storage-state.zhilian.json` | Saved mode: `/app/search` saved quick-search tag; direct mode: `/app/search` keyword input | DOM-first, including Vue candidate props on current card wrappers; API fallback only when DOM yields no candidates | Login starts at `https://passport.zhaopin.com/org/login`. Saved mode tag text must contain raw `--keyword`, and applied state must show `关键词：<keyword>` before extraction. Direct mode must not click the saved tag; it clears stale conditions, fills the keyword input, triggers search, and confirms `关键词：<keyword>`. Default runs explicitly check visible `未看过`; `--include-viewed true` clears visible `未看过` only and preserves `未聊过`. Resume detail is a modal on `/app/search`; parse the modal subtree, copy `转给同事` -> `链接转发` share link, and persist it as `candidateShareUrl`. |
+| `boss` | `storage-state.boss.json` | Reuse the current Boss search page for normal capture/direct filters; reuse `/web/chat/index` for auto-chat | Search cards plus Boss resume modal/API/WASM data; chat conversations use Vue state and red-dot snapshots | Boss is single-platform only and never part of `all`. Keep the current authenticated page/tab open. Configured resume forwarding supports colleague or email with candidate ID as the message. Auto-chat selects `未读`, evaluates against the conversation job's stored JD, forwards matched resumes before chat/phone actions, persists review runs, and sends an optional SMTP summary. |
 
 All adapters share one search wait contract: the main workflow creates a single search deadline before opening platform search entry and passes it through search opening and candidate extraction. Avoid adding fixed waits in series that exceed the shared deadline.
 
-Detail opening should follow the same total-deadline style across platforms. For 51job and Liepin, race popup/current-page navigation/content readiness within the deadline. For Zhilian, use the modal readiness path without repeating a full detail wait.
+Detail opening should follow the same total-deadline style across platforms. For 51job and Liepin, race popup/current-page navigation/content readiness within the deadline. For Zhilian and Boss, use the modal readiness path without repeating a full detail wait.
 
 ## Runtime
 
@@ -86,7 +97,7 @@ Detail opening should follow the same total-deadline style across platforms. For
 - Browser auth uses platform-scoped Playwright storage state. Leave `STORAGE_STATE_PATH` unset for normal multi-platform runs so each platform uses its own default file.
 - If a saved session is missing or expired, headed runs may refresh through manual login and then verify the new session. Headless runs cannot refresh sessions and should error with instructions to rerun headed.
 - Browser launch engine defaults to CloakBrowser through `BROWSER_ENGINE=cloakbrowser`; set `BROWSER_ENGINE=playwright` to fall back to Playwright's bundled Chromium.
-- Reusable browser mode is implemented for all production platforms with platform-scoped CDP ports and browser profiles. 51job, Liepin, and Zhilian default to reusable headed mode. Liepin still forces headed mode even when `PLAYWRIGHT_HEADLESS=true`.
+- Reusable browser mode is implemented for all browser platforms with platform-scoped CDP ports and browser profiles. 51job, Liepin, Zhilian, and Boss default to reusable headed mode. Liepin still forces headed mode even when `PLAYWRIGHT_HEADLESS=true`.
 - Resume extraction can use the optional Crawl4AI runtime at `.venv/bin/python`; if unavailable, the built-in parser fallback should continue.
 - SMTP delivery uses `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM`.
 
@@ -100,13 +111,14 @@ Key browser timing env vars:
 - `PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS` default `20000`
 - `PLAYWRIGHT_ACTION_DELAY_MIN_MS` / `PLAYWRIGHT_ACTION_DELAY_MAX_MS` default `0-0` outside Liepin
 - `PLAYWRIGHT_CANDIDATE_DELAY_MIN_MS` / `PLAYWRIGHT_CANDIDATE_DELAY_MAX_MS` default `0-0` outside Liepin
-- `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_ACTION_DELAY_MIN_MS` / `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_ACTION_DELAY_MAX_MS`
-- `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_CANDIDATE_DELAY_MIN_MS` / `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_CANDIDATE_DELAY_MAX_MS`
+- `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN|BOSS>_ACTION_DELAY_MIN_MS` / `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN|BOSS>_ACTION_DELAY_MAX_MS`
+- `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN|BOSS>_CANDIDATE_DELAY_MIN_MS` / `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN|BOSS>_CANDIDATE_DELAY_MAX_MS`
 - `PLAYWRIGHT_REUSE_BROWSER` default `false` outside platforms with their own defaults
-- `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN>_REUSE_BROWSER`; 51job, Liepin, and Zhilian default enabled unless set to `false`
+- `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN|BOSS>_REUSE_BROWSER`; 51job, Liepin, Zhilian, and Boss default enabled unless set to `false`
 - `PLAYWRIGHT_51JOB_REUSE_CDP_PORT` default `19325`
 - `PLAYWRIGHT_LIEPIN_REUSE_CDP_PORT` default `19327`
 - `PLAYWRIGHT_ZHILIAN_REUSE_CDP_PORT` default `19329`
+- `PLAYWRIGHT_BOSS_REUSE_CDP_PORT` default `19331`
 - Existing `PLAYWRIGHT_LIEPIN_*ACTION_DELAY*`, `PLAYWRIGHT_LIEPIN_*CANDIDATE_DELAY*`, and `PLAYWRIGHT_LIEPIN_REUSE_*` names remain supported as the Liepin platform overrides.
 
 ## Common Commands
@@ -122,15 +134,17 @@ Install and verify:
 
 Run from source:
 
-- First run with inline JD: `rtk npm run dev -- --platform <51job|liepin|zhilian|all> --keyword "<keyword>" --jd "<JD text>" [--email user@example.com] [--cc a@example.com,b@example.com]`
+- First run with inline JD: `rtk npm run dev -- --platform <51job|liepin|zhilian|boss|all> --keyword "<keyword>" --jd "<JD text>" [--email user@example.com] [--cc a@example.com,b@example.com]`; `all` still excludes Boss.
 - First run with JD file: `rtk npm run dev -- --platform <platform> --keyword "<keyword>" --jd-file ./fixtures/jd.txt`
 - Rerun existing job key: `rtk npm run dev -- --platform <platform> --keyword "<keyword>"`
 - Include already-viewed candidates: `rtk npm run dev -- --platform <platform|all> --keyword "<keyword>" --include-viewed true`
 - Liepin forward contact: `rtk npm run dev -- --platform <liepin|all> --keyword "<keyword>" --liepin-forward-contact "<contact name>"`
+- Boss email forwarding during a first normal capture: `rtk npm run dev -- --platform boss --keyword "<keyword>" --jd "<JD text>" --boss-forward-mode email --boss-forward-recipient "recipient@example.com"`; an existing Boss job key may omit `--jd`.
+- Boss strict unread-chat review: `PLAYWRIGHT_HEADLESS=false rtk npm run dev -- --platform boss --boss-auto-chat true --boss-chat-require-all true --boss-forward-mode email --boss-forward-recipient "resume@example.com" --boss-chat-summary-email "summary@example.com" [--boss-chat-summary-cc "audit@example.com"]`
 - Direct normal capture with filter input: `rtk npm run dev -- --platform <platform|all> --keyword "<keyword>" --jd-file ./fixtures/jd.txt --search-source direct --application-filter-input-file ./filter-input.json [--include-viewed true] [--liepin-forward-contact "<contact name>"]`
 - Batch mode: `rtk npm run dev -- --platform <platform|all> --jobs-file ./jobs.json [--search-source direct] [--application-filter-input-file ./filter-input.json] [--include-viewed true] [--liepin-forward-contact "<contact name>"]`
 - Search-subscription mode: `rtk npm run dev -- --platform <platform|all> --search-subscription-file ./search-subscription.json [--keyword "<keyword>"] [--search-subscription-name "<name>"] [--save-search-subscription true]`
-- Search-filter discovery: `rtk npm run discover:filters -- --platform <51job|liepin|zhilian|all> --keyword "<keyword>" [--max-depth 3] [--max-options-per-level 50] [--include-remote-probes true] [--slow-click true]`
+- Search-filter discovery: `rtk npm run discover:filters -- --platform <51job|liepin|zhilian|boss|all> --keyword "<keyword>" [--max-depth 3] [--max-options-per-level 50] [--include-remote-probes true] [--slow-click true]`; `all` still excludes Boss.
 - Liepin industry tree discovery: `rtk npm run discover:liepin-industry-tree -- --keyword "<keyword>" [--field engaged_industry,expected_industry]`
 - Liepin option verification dry-run: `rtk npm run verify:liepin-filter-options -- --keyword "<keyword>" [--limit 10] [--field work_years,education]`; industry fields use tree leaf paths when the industry catalog has been collected.
 - Liepin option verification live run: `rtk npm run verify:liepin-filter-options -- --keyword "<keyword>" --run true --limit 10`; for industry-only checks use `--field engaged_industry,expected_industry`.
@@ -142,7 +156,7 @@ Run compiled CLI:
 
 Session and live diagnostics:
 
-- `rtk npm run login:session -- --platform <51job|liepin|zhilian> [--keep-open]`
+- `rtk npm run login:session -- --platform <51job|liepin|zhilian|boss> [--keep-open]`
 - `rtk npm run debug:liepin-forward`
 - `rtk npm run debug:zhilian -- --keyword "<keyword>"`
 - `rtk npm run smoke:liepin -- --keyword "<keyword>" [--parse-first]`
@@ -191,7 +205,7 @@ Platform-specific regression command names keep `experimental` for compatibility
 
 ## Architecture Map
 
-- `src/index.ts` - CLI parsing and orchestration for single jobs, all-platform jobs, batch mode, saved/direct normal capture, and search-subscription mode.
+- `src/index.ts` - CLI parsing and orchestration for single jobs, all-platform jobs, batch mode, saved/direct normal capture, search-subscription mode, and standalone Boss auto-chat.
 - `src/config.ts` - environment loading and runtime configuration.
 - `src/types/job.ts` - shared contracts for jobs, candidates, resumes, scores, and run results.
 - `src/parsers/jd-parser.ts` - model-based JD normalization with Zod validation and keyword-first `jobKey` derivation.
@@ -200,7 +214,7 @@ Platform-specific regression command names keep `experimental` for compatibility
 - `src/browser/subscribe-search.ts` - 51job subscription-search entry flow.
 - `src/browser/candidate-list.ts` - 51job candidate card extraction and empty-result readiness.
 - `src/browser/resume-detail.ts` - 51job resume opening and heuristic resume parsing.
-- `src/platforms/*.ts` - adapter contract and concrete 51job, Liepin, and Zhilian implementations.
+- `src/platforms/*.ts` - adapter contract and concrete 51job, Liepin, Zhilian, and Boss implementations; `boss-chat.ts` owns Boss conversation/resume/contact actions.
 - `src/search/search-subscription.ts` - standalone search-subscription orchestration.
 - `src/search/filter-catalog.ts` - shared search-filter catalog types and discovery result schema.
 - `src/search/filter-dom.ts` - pure DOM scanning helpers for search-filter discovery.
@@ -212,6 +226,8 @@ Platform-specific regression command names keep `experimental` for compatibility
 - `src/server/task-queue.ts` - single in-process task queue used by HTTP and assistant-confirmed task runs.
 - `frontend/src/App.tsx` - web console UI, including the `智能助手` page and draft confirmation flow.
 - `src/reporting/resume-docx.ts` - DOCX resume rendering from `/Users/Admin/Downloads/简历模板.docx`, including template photo-slot handling.
+- `src/reporting/boss-chat-summary.ts` - Boss chat-review summary rendering and SMTP delivery.
+- `src/scoring/boss-chat-hard-requirements.ts` - explicit-evidence hard-requirement evaluation for the configured Boss property-electrician flow.
 - `src/storage/job-store.ts` - JSON-backed persistence.
 - `src/scripts/*.ts` - offline debug, export, email, reparse, login, migration, and smoke utilities.
 - `项目说明文档.md` - higher-level usage, architecture, and operational notes.
@@ -242,6 +258,11 @@ Search-filter discovery outputs live outside job directories:
 
 - `data/<platform>/filter-catalog/latest.json`
 - `data/<platform>/filter-catalog/<timestamp>.json`
+
+Boss chat-review state is separate from per-job run results:
+
+- `data/boss/chat-review/reviewed-conversation-ids.json` - conversations whose processing is complete or whose resume was already forwarded.
+- `data/boss/chat-review/runs/<timestamp>.json` - per-run conversation decisions, evidence, action states, and errors. The latest unforwarded failed item is the retry source when its red dot has already disappeared.
 
 ## Resume Parsing Guidance
 

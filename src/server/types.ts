@@ -10,7 +10,7 @@ import type {
 
 export type ConsolePlatformSelection = SupportedPlatform | 'all';
 export type SearchSource = 'saved' | 'direct';
-export type TaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'login-refresh' | 'rag-ops';
+export type TaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'login-refresh' | 'rag-ops';
 export type AssistantActionKind = TaskKind | 'rag-answer';
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type TaskLogLevel = 'info' | 'warn' | 'error';
@@ -62,6 +62,16 @@ export interface LoginRefreshTaskInput {
   platform: SupportedPlatform;
 }
 
+export interface BossAutoChatTaskInput {
+  platform: 'boss';
+  scoreThreshold?: number;
+  requireAllHardRequirements?: boolean;
+  bossForwardMode: BossForwardMode;
+  bossForwardRecipient: string;
+  summaryEmail?: string;
+  summaryCc?: string[];
+}
+
 export interface LoginRefreshTaskOutput {
   platform: SupportedPlatform;
   storageStatePath: string;
@@ -107,7 +117,7 @@ export interface RagOpsTaskOutput {
   summary: Record<string, unknown>;
 }
 
-export type TaskInput = ResumeCaptureTaskInput | BatchTaskInput | SearchSubscriptionTaskInput | LoginRefreshTaskInput | RagOpsTaskInput;
+export type TaskInput = ResumeCaptureTaskInput | BatchTaskInput | SearchSubscriptionTaskInput | BossAutoChatTaskInput | LoginRefreshTaskInput | RagOpsTaskInput;
 export type TaskOutput = MainResult | LoginRefreshTaskOutput | RagOpsTaskOutput;
 
 export interface AssistantMessage {
@@ -147,6 +157,13 @@ export type AssistantDraft =
   | {
     kind: 'login-refresh';
     input: Partial<LoginRefreshTaskInput> & Record<string, unknown>;
+    missingFields: string[];
+    warnings: string[];
+    argvPreview: string[];
+  }
+  | {
+    kind: 'boss-auto-chat';
+    input: Partial<BossAutoChatTaskInput> & Record<string, unknown>;
     missingFields: string[];
     warnings: string[];
     argvPreview: string[];

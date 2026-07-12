@@ -200,6 +200,107 @@ describe('console API routes', () => {
     assert.equal(completed.inputSummary.bossForwardRecipient, 'recruiter@example.com');
   });
 
+  it('queues Boss auto-chat review with an explicit forwarding target', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return {
+          platform: 'boss',
+          reviewedAt: '2026-07-12T00:00:00.000Z',
+          scoreThreshold: 75,
+          matchMode: 'all-hard-requirements',
+          unreadConversations: 3,
+          reviewedConversations: 2,
+          matchedCandidates: 1,
+          chatMessagesSent: 1,
+          phoneExchangeRequests: 1,
+          forwardedCandidates: 1,
+          skippedConversations: 1,
+          failedConversations: 0,
+          items: [],
+          resultPath: '/tmp/boss-chat-review.json',
+          summaryEmailRecipient: 'summary@qq.com',
+          summaryEmailSubject: '物业电工 Boss未读候选人审查总结',
+        };
+      },
+    });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/boss-auto-chat',
+      taskQueue: queue,
+      body: {
+        platform: 'boss',
+        scoreThreshold: 75,
+        requireAllHardRequirements: true,
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'resume@qq.com',
+        summaryEmail: 'summary@qq.com',
+        summaryCc: ['audit@hotmail.com'],
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+    assert.equal(completed.status, 'succeeded');
+    assert.deepStrictEqual(calls[0], [
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+      '--boss-chat-score-threshold',
+      '75',
+      '--boss-chat-require-all',
+      'true',
+      '--boss-forward-mode',
+      'email',
+      '--boss-forward-recipient',
+      'resume@qq.com',
+      '--boss-chat-summary-email',
+      'summary@qq.com',
+      '--boss-chat-summary-cc',
+      'audit@hotmail.com',
+    ]);
+    assert.equal(completed.outputSummary?.forwardedCandidates, 1);
+    assert.equal(completed.outputSummary?.chatMessagesSent, 1);
+    assert.equal(completed.outputSummary?.phoneExchangeRequests, 1);
+    assert.equal(completed.outputSummary?.summaryEmailRecipient, 'summary@qq.com');
+  });
+
+  it('rejects Boss auto-chat review without a Boss forwarding target', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/boss-auto-chat',
+      body: {
+        platform: 'boss',
+        scoreThreshold: 70,
+      },
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.match((response.body as { error: { message: string } }).error.message, /requires bossForwardMode and bossForwardRecipient/);
+  });
+
+  it('rejects Boss auto-chat summary cc without a summary recipient', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/boss-auto-chat',
+      body: {
+        platform: 'boss',
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'resume@qq.com',
+        summaryCc: ['audit@hotmail.com'],
+      },
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.match((response.body as { error: { message: string } }).error.message, /summaryCc requires summaryEmail/);
+  });
+
   it('keeps task persistence stable when captured logs write concurrently', async () => {
     const taskDir = await makeTempDir();
     const queue = new TaskQueue({

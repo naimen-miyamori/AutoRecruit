@@ -5430,6 +5430,253 @@ describe('scoring run semantics', () => {
     );
   });
 
+  it('keeps Boss auto-chat isolated to Boss with explicit forwarding', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        'all',
+        '--boss-auto-chat',
+        'true',
+        '--boss-forward-mode',
+        'email',
+        '--boss-forward-recipient',
+        'recruiter@example.com',
+      ]),
+      /--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss|--boss-auto-chat can only be used with --platform boss/,
+    );
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        'boss',
+        '--boss-auto-chat',
+        'true',
+      ]),
+      /--boss-auto-chat requires --boss-forward-mode and --boss-forward-recipient/,
+    );
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        'boss',
+        '--boss-auto-chat',
+        'true',
+        '--boss-chat-score-threshold',
+        '101',
+        '--boss-forward-mode',
+        'email',
+        '--boss-forward-recipient',
+        'recruiter@example.com',
+      ]),
+      /--boss-chat-score-threshold must be a number from 0 to 100/,
+    );
+  });
+
+  it('requires all Boss hard requirements before forwarding and sends one summary email', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = buildJobKey('物业电工', '');
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: '物业电工',
+      rawText: '负责物业电气维修',
+      normalizedJob: {
+        ...buildNormalizedJob(),
+        title: '物业电工',
+        hardRequirements: ['年龄小于47岁', '高压电工证', '低压电工证', '物业电工经验', '一家公司工作2年以上'],
+      },
+      createdAt: '2026-07-12T00:00:00.000Z',
+    });
+
+    const chatPage = {} as Page;
+    const forwardedCandidates: string[] = [];
+    const contactedCandidates: string[] = [];
+    const qualifiedActionOrder: string[] = [];
+    const summaryDeliveries: Array<{ recipient: string; ccEmails?: string[] }> = [];
+    let scoreCalled = false;
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => ({
+      page: chatPage,
+      context: {},
+    }) as never;
+    indexModule.closeBrowserSessionRef.fn = async () => undefined;
+    indexModule.openBossChatPageRef.fn = async () => chatPage;
+    indexModule.collectBossUnreadConversationsRef.fn = async () => [{
+      conversationId: 'conversation-matched',
+      candidateName: '候选人甲',
+      jobName: '物业电工',
+      unreadCount: 2,
+    }, {
+      conversationId: 'conversation-without-jd',
+      candidateName: '候选人乙',
+      jobName: '未保存岗位',
+      unreadCount: 1,
+    }];
+    indexModule.openBossUnreadConversationRef.fn = async (_page, conversation) => ({
+      conversation,
+      candidate: {
+        candidateId: 'candidate-matched',
+        name: '候选人甲',
+      },
+      resume: buildResume('candidate-matched'),
+    });
+    indexModule.openAndParseBossChatResumeRef.fn = async (_page, opened) => opened.resume;
+    indexModule.scoreResumeAgainstJobRef.fn = async () => {
+      scoreCalled = true;
+      return buildScore();
+    };
+    indexModule.evaluateBossChatHardRequirementsRef.fn = () => ({
+      allMet: true,
+      criteria: [],
+      rejectionReasons: [],
+    });
+    indexModule.forwardBossResumeRef.fn = async (_page, candidate) => {
+      qualifiedActionOrder.push('forward');
+      forwardedCandidates.push(candidate.candidateId);
+    };
+    indexModule.contactBossQualifiedCandidateRef.fn = async () => {
+      qualifiedActionOrder.push('contact');
+      contactedCandidates.push('candidate-matched');
+      return {
+        messageSent: true,
+        messageAlreadyPresent: false,
+        phoneExchangeRequested: true,
+        phoneExchangeAlreadyRequested: false,
+      };
+    };
+    indexModule.closeBossChatResumeRef.fn = async () => undefined;
+    indexModule.sendBossChatSummaryRef.fn = async (_run, delivery) => {
+      summaryDeliveries.push(delivery);
+      return {
+        recipient: delivery.recipient,
+        subject: '物业电工 Boss未读候选人审查总结',
+      };
+    };
+
+    const result = await indexModule.main([
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+      '--boss-chat-score-threshold',
+      '80',
+      '--boss-chat-require-all',
+      'true',
+      '--boss-forward-mode',
+      'email',
+      '--boss-forward-recipient',
+      'recruiter@example.com',
+      '--boss-chat-summary-email',
+      'summary@qq.com',
+      '--boss-chat-summary-cc',
+      'audit@hotmail.com',
+    ]);
+
+    assert.equal(Array.isArray(result), false);
+    const summary = result as import('../index.js').BossAutoChatRunSummary;
+    assert.equal(summary.unreadConversations, 2);
+    assert.equal(summary.reviewedConversations, 1);
+    assert.equal(summary.matchedCandidates, 1);
+    assert.equal(summary.forwardedCandidates, 1);
+    assert.equal(summary.chatMessagesSent, 1);
+    assert.equal(summary.phoneExchangeRequests, 1);
+    assert.equal(summary.skippedConversations, 1);
+    assert.equal(summary.matchMode, 'all-hard-requirements');
+    assert.equal(summary.summaryEmailRecipient, 'summary@qq.com');
+    assert.equal(scoreCalled, false);
+    assert.deepStrictEqual(forwardedCandidates, ['candidate-matched']);
+    assert.deepStrictEqual(contactedCandidates, ['candidate-matched']);
+    assert.deepStrictEqual(qualifiedActionOrder, ['forward', 'contact']);
+    assert.deepStrictEqual(summaryDeliveries, [{
+      recipient: 'summary@qq.com',
+      ccEmails: ['audit@hotmail.com'],
+    }]);
+    assert.equal(summary.items[1]?.status, 'skipped_missing_jd');
+    assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), ['conversation-matched']);
+  });
+
+  it('preserves successful Boss forwarding when a later contact action fails', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = buildJobKey('物业电工', '');
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: '物业电工',
+      rawText: '负责物业电气维修',
+      normalizedJob: {
+        ...buildNormalizedJob(),
+        title: '物业电工',
+        hardRequirements: ['年龄小于47岁', '高压电工证', '低压电工证', '物业电工经验', '一家公司工作2年以上'],
+      },
+      createdAt: '2026-07-12T00:00:00.000Z',
+    });
+
+    const chatPage = {} as Page;
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => ({
+      page: chatPage,
+      context: {},
+    }) as never;
+    indexModule.closeBrowserSessionRef.fn = async () => undefined;
+    indexModule.openBossChatPageRef.fn = async () => chatPage;
+    indexModule.collectBossUnreadConversationsRef.fn = async () => [{
+      conversationId: 'conversation-contact-failure',
+      candidateName: '候选人甲',
+      jobName: '物业电工',
+      unreadCount: 1,
+    }];
+    indexModule.openBossUnreadConversationRef.fn = async (_page, conversation) => ({
+      conversation,
+      candidate: {
+        candidateId: 'candidate-contact-failure',
+        name: '候选人甲',
+      },
+      resume: buildResume('candidate-contact-failure'),
+    });
+    indexModule.openAndParseBossChatResumeRef.fn = async (_page, opened) => opened.resume;
+    indexModule.evaluateBossChatHardRequirementsRef.fn = () => ({
+      allMet: true,
+      criteria: [],
+      rejectionReasons: [],
+    });
+    indexModule.forwardBossResumeRef.fn = async () => undefined;
+    indexModule.closeBossChatResumeRef.fn = async () => undefined;
+    indexModule.contactBossQualifiedCandidateRef.fn = async () => {
+      throw new Error('换电话确认失败');
+    };
+    indexModule.sendBossChatSummaryRef.fn = async (_run, delivery) => ({
+      recipient: delivery.recipient,
+      subject: '物业电工 Boss未读候选人审查总结',
+    });
+
+    const result = await indexModule.main([
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+      '--boss-chat-require-all',
+      'true',
+      '--boss-forward-mode',
+      'email',
+      '--boss-forward-recipient',
+      'recruiter@example.com',
+    ]);
+
+    const summary = result as import('../index.js').BossAutoChatRunSummary;
+    assert.equal(summary.forwardedCandidates, 1);
+    assert.equal(summary.failedConversations, 1);
+    assert.equal(summary.items[0]?.forwarded, true);
+    assert.equal(summary.items[0]?.status, 'failed');
+    assert.equal(summary.items[0]?.error, '换电话确认失败');
+    assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), ['conversation-contact-failure']);
+    assert.deepStrictEqual(await store.readBossChatRetryItems(), []);
+  });
+
   it('persists JD file contents as rawText for a first-time job record', async () => {
     const tempDir = await makeIsolatedTempDir();
     const freshDataDir = path.join(tempDir, 'fresh-data');

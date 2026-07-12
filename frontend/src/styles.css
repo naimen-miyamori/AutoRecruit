@@ -959,7 +959,7 @@ input:disabled {
 
 .run-mode-bar {
   display: inline-grid;
-  grid-template-columns: repeat(3, minmax(110px, 1fr));
+  grid-template-columns: repeat(4, minmax(110px, 1fr));
   width: fit-content;
   padding: 3px;
   border: 1px solid var(--line-strong);

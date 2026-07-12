@@ -245,6 +245,63 @@ export interface CandidateScore {
   summary: string;
 }
 
+export type BossChatReviewStatus =
+  | 'skipped_missing_jd'
+  | 'skipped_unsupported_hard_requirements'
+  | 'skipped_previously_reviewed'
+  | 'not_matched'
+  | 'forwarded'
+  | 'failed';
+
+export type BossChatMatchMode = 'score-threshold' | 'all-hard-requirements';
+
+export interface BossHardRequirementCriterion {
+  key: 'age' | 'high_voltage_certificate' | 'low_voltage_certificate' | 'property_electrician_experience' | 'company_tenure';
+  label: string;
+  met: boolean;
+  evidence: string[];
+  reason: string;
+}
+
+export interface BossHardRequirementEvaluation {
+  allMet: boolean;
+  criteria: BossHardRequirementCriterion[];
+  rejectionReasons: string[];
+}
+
+export interface BossChatReviewItem {
+  conversationId: string;
+  candidateId?: string;
+  candidateName?: string;
+  jobName: string;
+  jobKey: string;
+  unreadCount: number;
+  status: BossChatReviewStatus;
+  score?: CandidateScore;
+  hardRequirementEvaluation?: BossHardRequirementEvaluation;
+  matched?: boolean;
+  chatMessageSent?: boolean;
+  phoneExchangeRequested?: boolean;
+  forwarded?: boolean;
+  error?: string;
+}
+
+export interface BossChatReviewRun {
+  platform: 'boss';
+  reviewedAt: string;
+  scoreThreshold: number;
+  matchMode: BossChatMatchMode;
+  unreadConversations: number;
+  reviewedConversations: number;
+  matchedCandidates: number;
+  chatMessagesSent: number;
+  phoneExchangeRequests: number;
+  forwardedCandidates: number;
+  skippedConversations: number;
+  failedConversations: number;
+  items: BossChatReviewItem[];
+}
+
 export interface CandidateScoreInputSummary {
   candidateId: string;
   candidateName?: string;

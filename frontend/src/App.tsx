@@ -83,6 +83,7 @@ const TASK_KIND_LABELS: Record<TaskKind, string> = {
   'resume-capture': '简历抓取',
   batch: '批量任务',
   'search-subscription': '搜索订阅',
+  'boss-auto-chat': 'Boss 自动沟通',
   'login-refresh': '登录刷新',
   'rag-ops': '问答运维',
 };
@@ -1637,6 +1638,15 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
     { key: 'saveSearchSubscription', label: '保存搜索订阅', kind: 'checkbox' },
     { key: 'searchSubscriptionName', label: '订阅名称' },
   ],
+  'boss-auto-chat': [
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(['boss']) },
+    { key: 'scoreThreshold', label: '符合分数线', kind: 'number' },
+    { key: 'requireAllHardRequirements', label: '所有硬性要求必须满足', kind: 'checkbox' },
+    { key: 'bossForwardMode', label: 'Boss 转发方式', kind: 'select', options: [{ value: 'colleague', label: '站内同事' }, { value: 'email', label: '邮件转发' }] },
+    { key: 'bossForwardRecipient', label: 'Boss 转发收件人' },
+    { key: 'summaryEmail', label: '总结邮件收件人' },
+    { key: 'summaryCc', label: '总结邮件抄送' },
+  ],
   'login-refresh': [
     { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(SINGLE_PLATFORM_OPTIONS) },
   ],
@@ -2088,7 +2098,7 @@ function AssistantConfirmResult({ result, navigate }: { result: AssistantConfirm
 }
 
 function RunJobView() {
-  const [mode, setMode] = useState<'resume-capture' | 'batch' | 'search-subscription'>('resume-capture');
+  const [mode, setMode] = useState<'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat'>('resume-capture');
   const [form, setForm] = useState({
     platform: '51job',
     keyword: '',
@@ -2104,10 +2114,25 @@ function RunJobView() {
     liepinForwardContact: '',
     bossForwardMode: '',
     bossForwardRecipient: '',
+    bossChatScoreThreshold: '70',
+    bossChatRequireAll: true,
+    bossChatSummaryEmail: '',
+    bossChatSummaryCc: '',
     saveSearchSubscription: false,
     searchSubscriptionName: '',
   });
   const [submitState, setSubmitState] = useState<AsyncState<TaskDetail>>({ loading: false });
+  const bossChatThreshold = Number(form.bossChatScoreThreshold);
+  const bossAutoChatInvalid = mode === 'boss-auto-chat' && (
+    !form.bossForwardMode
+    || !form.bossForwardRecipient.trim()
+    || (!form.bossChatRequireAll && (
+      !form.bossChatScoreThreshold.trim()
+      || !Number.isFinite(bossChatThreshold)
+      || bossChatThreshold < 0
+      || bossChatThreshold > 100
+    ))
+  );
 
   const setField = (field: keyof typeof form, value: string | boolean) => setForm((current) => ({
     ...current,
@@ -2128,7 +2153,17 @@ function RunJobView() {
       bossForwardMode: form.platform === 'boss' ? form.bossForwardMode || undefined : undefined,
       bossForwardRecipient: form.platform === 'boss' && form.bossForwardMode ? form.bossForwardRecipient || undefined : undefined,
     };
-    const body = mode === 'resume-capture'
+    const body = mode === 'boss-auto-chat'
+      ? {
+        platform: 'boss',
+        scoreThreshold: Number(form.bossChatScoreThreshold),
+        requireAllHardRequirements: form.bossChatRequireAll,
+        bossForwardMode: form.bossForwardMode || undefined,
+        bossForwardRecipient: form.bossForwardRecipient || undefined,
+        summaryEmail: form.bossChatSummaryEmail || undefined,
+        summaryCc: form.bossChatSummaryCc || undefined,
+      }
+      : mode === 'resume-capture'
       ? {
         ...common,
         keyword: form.keyword,
@@ -2165,8 +2200,19 @@ function RunJobView() {
             ['resume-capture', '简历抓取'],
             ['batch', '批量任务'],
             ['search-subscription', '搜索订阅'],
+            ['boss-auto-chat', 'Boss 自动沟通'],
           ] as const).map(([item, label]) => (
-            <button type="button" className={mode === item ? 'active' : ''} key={item} onClick={() => setMode(item)}>
+            <button
+              type="button"
+              className={mode === item ? 'active' : ''}
+              key={item}
+              onClick={() => {
+                setMode(item);
+                if (item === 'boss-auto-chat') {
+                  setField('platform', 'boss');
+                }
+              }}
+            >
               {label}
             </button>
           ))}
@@ -2176,16 +2222,16 @@ function RunJobView() {
           <section className="run-job-column">
             <div className="form-section-title">
               <span>执行范围</span>
-              <strong>{mode === 'resume-capture' ? '抓取' : mode === 'batch' ? '批量' : '订阅'}</strong>
+              <strong>{mode === 'resume-capture' ? '抓取' : mode === 'batch' ? '批量' : mode === 'search-subscription' ? '订阅' : '未读审查'}</strong>
             </div>
             <label>
               <span>平台</span>
               <select value={form.platform} onChange={(event) => setField('platform', event.target.value)}>
-                {RUN_PLATFORM_OPTIONS.map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
+                {(mode === 'boss-auto-chat' ? ['boss'] as const : RUN_PLATFORM_OPTIONS).map((item) => <option key={item} value={item}>{PLATFORM_LABELS[item]}</option>)}
               </select>
-              <small>{ALL_PLATFORM_NOTE}</small>
+              {mode !== 'boss-auto-chat' && <small>{ALL_PLATFORM_NOTE}</small>}
             </label>
-            {mode !== 'batch' && (
+            {mode !== 'batch' && mode !== 'boss-auto-chat' && (
               <label>
                 <span>关键词</span>
                 <input value={form.keyword} onChange={(event) => setField('keyword', event.target.value)} placeholder="例如：泰国 零售 运营" />
@@ -2217,7 +2263,7 @@ function RunJobView() {
 
           <section className="run-job-column run-job-primary">
             <div className="form-section-title">
-              <span>{mode === 'resume-capture' ? '职位输入' : mode === 'batch' ? '执行选项' : '订阅选项'}</span>
+              <span>{mode === 'resume-capture' ? '职位输入' : mode === 'batch' ? '执行选项' : mode === 'search-subscription' ? '订阅选项' : '评分条件'}</span>
               <strong>{mode === 'resume-capture' ? '职位说明' : '选项'}</strong>
             </div>
             {mode === 'resume-capture' && (
@@ -2232,7 +2278,7 @@ function RunJobView() {
                 </label>
               </>
             )}
-            {mode !== 'search-subscription' && (
+            {mode !== 'search-subscription' && mode !== 'boss-auto-chat' && (
               <>
                 <label>
                   <span>搜索来源</span>
@@ -2255,6 +2301,30 @@ function RunJobView() {
                 <span>保存搜索订阅</span>
               </label>
             )}
+            {mode === 'boss-auto-chat' && (
+              <>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={form.bossChatRequireAll}
+                    onChange={(event) => setField('bossChatRequireAll', event.target.checked)}
+                  />
+                  <span>所有硬性要求必须同时满足</span>
+                </label>
+                {!form.bossChatRequireAll && (
+                  <label>
+                    <span>符合分数线</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      value={form.bossChatScoreThreshold}
+                      onChange={(event) => setField('bossChatScoreThreshold', event.target.value)}
+                    />
+                  </label>
+                )}
+              </>
+            )}
           </section>
         </div>
 
@@ -2262,17 +2332,21 @@ function RunJobView() {
           <section className="run-advanced">
             <div className="form-section-title">
               <span>通知与附加动作</span>
-              <strong>可选</strong>
+              <strong>{mode === 'boss-auto-chat' ? '转发必填' : '可选'}</strong>
             </div>
             <div className="run-advanced-grid">
-              <label>
-                <span>收件邮箱</span>
-                <input value={form.email} onChange={(event) => setField('email', event.target.value)} />
-              </label>
-              <label>
-                <span>抄送邮箱</span>
-                <input value={form.cc} onChange={(event) => setField('cc', event.target.value)} />
-              </label>
+              {mode !== 'boss-auto-chat' && (
+                <label>
+                  <span>收件邮箱</span>
+                  <input value={form.email} onChange={(event) => setField('email', event.target.value)} />
+                </label>
+              )}
+              {mode !== 'boss-auto-chat' && (
+                <label>
+                  <span>抄送邮箱</span>
+                  <input value={form.cc} onChange={(event) => setField('cc', event.target.value)} />
+                </label>
+              )}
               {(form.platform === 'liepin' || form.platform === 'all') && (
                 <label>
                   <span>猎聘转发联系人</span>
@@ -2283,7 +2357,7 @@ function RunJobView() {
                 <label>
                   <span>Boss 转发方式</span>
                   <select value={form.bossForwardMode} onChange={(event) => setField('bossForwardMode', event.target.value)}>
-                    <option value="">不转发</option>
+                    <option value="">{mode === 'boss-auto-chat' ? '请选择' : '不转发'}</option>
                     <option value="colleague">站内同事</option>
                     <option value="email">邮件转发</option>
                   </select>
@@ -2299,21 +2373,47 @@ function RunJobView() {
                   />
                 </label>
               )}
-              <label className="checkbox-row">
-                <input type="checkbox" checked={form.includeViewed} onChange={(event) => setField('includeViewed', event.target.checked)} />
-                <span>包含已查看候选人</span>
-              </label>
+              {mode === 'boss-auto-chat' && (
+                <label>
+                  <span>总结邮件收件人</span>
+                  <input
+                    value={form.bossChatSummaryEmail}
+                    onChange={(event) => setField('bossChatSummaryEmail', event.target.value)}
+                    placeholder="name@qq.com"
+                  />
+                </label>
+              )}
+              {mode === 'boss-auto-chat' && (
+                <label>
+                  <span>总结邮件抄送</span>
+                  <input
+                    value={form.bossChatSummaryCc}
+                    onChange={(event) => setField('bossChatSummaryCc', event.target.value)}
+                    placeholder="name@hotmail.com"
+                  />
+                </label>
+              )}
+              {mode !== 'boss-auto-chat' && (
+                <label className="checkbox-row">
+                  <input type="checkbox" checked={form.includeViewed} onChange={(event) => setField('includeViewed', event.target.checked)} />
+                  <span>包含已查看候选人</span>
+                </label>
+              )}
             </div>
           </section>
         )}
 
         <div className="run-submit-row">
-          <span>{form.searchSource === 'direct' && mode !== 'search-subscription'
+          <span>{mode === 'boss-auto-chat'
+            ? form.bossChatRequireAll
+              ? '任务会向严格符合要求的候选人发送固定消息、请求换电话并转发简历，结束后可发送总结。'
+              : '任务会审查未读会话，并转发达到分数线的简历。'
+            : form.searchSource === 'direct' && mode !== 'search-subscription'
             ? '直接搜索会使用下方筛选条件文件。'
             : mode === 'search-subscription' && form.applicationFilterInputFile
               ? '搜索订阅会把筛选条件写入临时订阅文件后执行。'
               : '提交后任务进入队列执行。'}</span>
-          <button className="primary-button" type="submit" disabled={submitState.loading}>
+          <button className="primary-button" type="submit" disabled={submitState.loading || bossAutoChatInvalid}>
             {submitState.loading ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
             提交
           </button>
@@ -2331,7 +2431,7 @@ function RunJobView() {
           </div>
         </section>
       )}
-      {((mode !== 'search-subscription' && form.searchSource === 'direct') || mode === 'search-subscription') && (
+      {((mode !== 'search-subscription' && mode !== 'boss-auto-chat' && form.searchSource === 'direct') || mode === 'search-subscription') && (
         <FilterBuilder
           platform={form.platform}
           onGenerated={(filePath) => setField('applicationFilterInputFile', filePath)}
