@@ -443,6 +443,25 @@ async function openZhilianRecruiterHome(page: Page, options?: SearchWaitOptions)
   await waitForZhilianRecruiterShell(page, { deadline });
 }
 
+async function reloadZhilianSearchPage(page: Page, deadline: number): Promise<void> {
+  const reload = (page as Partial<Pick<Page, 'reload'>>).reload?.bind(page);
+  if (!reload) {
+    return;
+  }
+
+  clearObservedZhilianCandidateApi(page);
+  try {
+    await reload({ waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
+  } catch (error) {
+    if (!isAbortNavigationError(error) || !isZhilianSearchUrl(page.url())) {
+      throw error;
+    }
+  }
+
+  await waitForZhilianRecruiterShell(page, { deadline });
+  clearObservedZhilianCandidateApi(page);
+}
+
 async function listVisibleZhilianQuickSearchTags(page: Page): Promise<string[]> {
   const bodyText = await page.locator('body').innerText().catch(() => '');
   const quickSearchSectionMatch = bodyText.match(/(?:快捷搜索|猜你想搜：?)([\s\S]{0,600})/);
@@ -3803,7 +3822,8 @@ export const zhilianAdapter: PlatformAdapter = {
     clearObservedZhilianCandidateApi(page);
     attachZhilianCandidateApiObserver(page);
     await openZhilianRecruiterHome(page, { deadline });
-    await clickSavedZhilianQuickSearchTag(page, keyword, deadline);
+    await reloadZhilianSearchPage(page, deadline);
+    await clickSavedZhilianQuickSearchTag(page, keyword, deadline, { force: true });
     if (options?.includeViewedCandidates) {
       await ensureZhilianViewedFilterClearedForQuickSearch(page, keyword, deadline);
     } else {
@@ -3825,6 +3845,7 @@ export const zhilianAdapter: PlatformAdapter = {
   },
   extractCandidateList: async (page, options) => {
     const deadline = createSearchDeadline(options);
+    let stableEmptyApiStartedAt: number | undefined;
     attachZhilianCandidateApiObserver(page);
     await waitForZhilianRecruiterShell(page, { deadline });
 
@@ -3858,8 +3879,16 @@ export const zhilianAdapter: PlatformAdapter = {
       }
 
       if (observedZhilianSearchApiSeenPages.has(page)) {
-        return { candidates: [] };
+        const now = Date.now();
+        stableEmptyApiStartedAt ??= now;
+        if (now - stableEmptyApiStartedAt >= config.playwright.emptyResultsStableMs) {
+          return { candidates: [] };
+        }
+      } else {
+        stableEmptyApiStartedAt = undefined;
       }
+
+      await page.waitForTimeout(Math.min(zhilianSearchStatePollMs, remainingTime(deadline))).catch(() => undefined);
     }
 
     return { candidates: observedZhilianSearchApiCandidates.get(page) ?? [] };

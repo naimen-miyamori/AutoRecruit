@@ -302,11 +302,13 @@ test('zhilian adapter detects whether saved quick-search conditions are active',
 function createZhilianUnviewedFilterPageStub(options: {
   unviewedChecked: boolean;
   quickSearchCheckedAfterClick?: boolean;
+  quickSearchApplied?: boolean;
 }) {
   const clickCalls: string[] = [];
   const waitForTimeoutCalls: number[] = [];
   let unviewedChecked = options.unviewedChecked;
-  let quickSearchApplied = false;
+  let quickSearchApplied = options.quickSearchApplied ?? false;
+  let reloadCalls = 0;
   let now = 1000;
 
   const createCheckboxFilterLocator = (
@@ -394,6 +396,11 @@ function createZhilianUnviewedFilterPageStub(options: {
 
   const page = {
     url: () => 'https://rd6.zhaopin.com/app/search',
+    reload: async () => {
+      reloadCalls += 1;
+      quickSearchApplied = false;
+      unviewedChecked = false;
+    },
     waitForLoadState: async () => undefined,
     waitForFunction: async () => undefined,
     waitForTimeout: async (timeout: number) => {
@@ -439,6 +446,7 @@ function createZhilianUnviewedFilterPageStub(options: {
   return {
     page,
     getClickCalls: () => clickCalls,
+    getReloadCalls: () => reloadCalls,
     getWaitForTimeoutCalls: () => waitForTimeoutCalls,
     isUnviewedChecked: () => unviewedChecked,
     setDateNow: () => {
@@ -448,10 +456,14 @@ function createZhilianUnviewedFilterPageStub(options: {
 }
 
 test('zhilian adapter keeps the unviewed filter by default after opening saved search results', async () => {
-  const stub = createZhilianUnviewedFilterPageStub({ unviewedChecked: true });
+  const stub = createZhilianUnviewedFilterPageStub({
+    unviewedChecked: true,
+    quickSearchApplied: true,
+  });
 
   await assert.doesNotReject(() => zhilianAdapter.openSubscribeSearch(stub.page, '优衣库'));
 
+  assert.equal(stub.getReloadCalls(), 1);
   assert.deepEqual(stub.getClickCalls(), ['优衣库']);
   assert.equal(stub.isUnviewedChecked(), true);
 });
@@ -2577,6 +2589,65 @@ test('zhilian adapter treats an empty visible list as a successful zero-candidat
 
   const result = await zhilianAdapter.extractCandidateList(page);
   assert.deepEqual(result, { candidates: [] });
+});
+
+test('zhilian adapter waits past an intermediate empty candidate API response for DOM cards', async () => {
+  let cardReads = 0;
+  const emptyListResponse = {
+    url: () => 'https://rd6.zhaopin.com/api/talent/search/list',
+    status: () => 200,
+    text: async () => JSON.stringify({ code: 200, data: { list: [] } }),
+  };
+  const candidateElement = {
+    textContent: '赵女士\n优衣库\n门店店长',
+    outerHTML: '<div class="search-resume-item-wrap">赵女士 优衣库 门店店长</div>',
+    previousSibling: null,
+    parentElement: null,
+    __vue__: {
+      _props: {
+        candidate: {
+          userMasterId: 99887766,
+          userName: '赵女士',
+          resumeNumber: 'resume-after-empty',
+          workExperiences: [{ companyName: '优衣库', jobTitle: '门店店长' }],
+        },
+      },
+    },
+  };
+  const page = {
+    on: () => undefined,
+    url: () => 'https://rd6.zhaopin.com/app/search',
+    waitForLoadState: async () => undefined,
+    waitForFunction: async () => undefined,
+    waitForTimeout: async () => undefined,
+    waitForResponse: async () => emptyListResponse,
+    locator: (selector: string) => {
+      if (selector === 'body') {
+        return {
+          waitFor: async () => undefined,
+          innerText: async () => '智联招聘 搜索 人才管理 使用高级搜索 候选人',
+        };
+      }
+
+      if (selector === '.search-resume-item-wrap') {
+        return {
+          evaluateAll: async (fn: (elements: Element[]) => unknown) => {
+            cardReads += 1;
+            return fn(cardReads >= 3 ? [candidateElement as unknown as Element] : []);
+          },
+        };
+      }
+
+      return {
+        evaluateAll: async () => [],
+      };
+    },
+  } as never;
+
+  const result = await zhilianAdapter.extractCandidateList(page, { deadline: Date.now() + 1000 });
+
+  assert.deepEqual(result.candidates.map((candidate) => candidate.candidateId), ['99887766']);
+  assert.ok(cardReads >= 3);
 });
 
 test('zhilian adapter waits for the real talent search list response instead of unrelated search APIs', async () => {
