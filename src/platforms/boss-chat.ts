@@ -11,6 +11,7 @@ import {
 const bossChatUrl = 'https://www.zhipin.com/web/chat/index';
 export const bossQualifiedCandidateChatMessage = '方便发一份你的简历过来吗？';
 export const bossUnqualifiedCandidateChatMessage = '对不起，看了你的简历以后觉得不太合适，希望你早日找到满意的工作机会';
+export const bossShanghaiOriginQuestionMessage = '是上海人吗？';
 
 export interface BossUnreadConversation {
   conversationId: string;
@@ -38,6 +39,7 @@ export interface BossOpenedConversationSnapshot {
   candidateName?: string;
   jobName: string;
   ageDesc?: string;
+  nativePlace?: string;
   education?: string;
   city?: string;
   currentCompany?: string;
@@ -115,6 +117,7 @@ export function parseBossChatResumeSnapshot(snapshot: BossOpenedConversationSnap
     resumeUrl,
     name: normalizeText(snapshot.candidateName),
     age: parseAge(snapshot.ageDesc),
+    nativePlace: normalizeText(snapshot.nativePlace),
     education: normalizeText(snapshot.education),
     regions: [normalizeText(snapshot.city)].filter((value): value is string => Boolean(value)),
     pr: [],
@@ -135,6 +138,7 @@ function mergeBossChatResume(summary: CandidateResume, detail: CandidateResume):
     ...summary,
     name: detail.name ?? summary.name,
     age: detail.age ?? summary.age,
+    nativePlace: detail.nativePlace ?? summary.nativePlace,
     education: detail.education ?? summary.education,
     regions: detail.regions.length > 0 ? detail.regions : summary.regions,
     pr: detail.pr.length > 0 ? detail.pr : summary.pr,
@@ -211,6 +215,17 @@ async function readOpenedBossConversation(page: Page, conversation: BossUnreadCo
       };
     };
     const readString = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : undefined;
+    const readPlace = (value: unknown) => {
+      if (typeof value === 'string') {
+        return readString(value);
+      }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return undefined;
+      }
+
+      const record = value as Record<string, unknown>;
+      return readString(record.name) ?? readString(record.cityName) ?? readString(record.label);
+    };
     const readNumberString = (value: unknown) => typeof value === 'number' || typeof value === 'string'
       ? String(value)
       : undefined;
@@ -233,6 +248,11 @@ async function readOpenedBossConversation(page: Page, conversation: BossUnreadCo
       candidateName: readString(conversationData.name) ?? readString(currentData.name) ?? fallbackName,
       jobName: readString(currentData.jobName) ?? readString(conversationData.toPosition) ?? fallbackJobName,
       ageDesc: readString(conversationData.ageDesc),
+      nativePlace: readString(conversationData.hometownName)
+        ?? readPlace(conversationData.hometown)
+        ?? readString(conversationData.nativePlaceName)
+        ?? readPlace(conversationData.nativePlace)
+        ?? readPlace(conversationData.householdRegistration),
       education: readString(conversationData.edu),
       city: readString(conversationData.city),
       currentCompany: readString(conversationData.lastCompany2) ?? readString(conversationData.lastCompany),
@@ -448,6 +468,45 @@ export async function sendBossCommonPhraseMessage(
   return { sent: true, alreadyPresent: false };
 }
 
+async function sendBossEditorMessage(
+  page: Page,
+  message: string,
+): Promise<{ sent: boolean; alreadyPresent: boolean }> {
+  if (await hasBossChatMessage(page, message)) {
+    return { sent: true, alreadyPresent: true };
+  }
+
+  const editor = page.locator('#boss-chat-editor-input[contenteditable="true"]');
+  const submit = page.locator('.conversation-editor .submit');
+  const editorCount = await editor.count();
+  const submitCount = await submit.count();
+  if (editorCount !== 1 || submitCount !== 1) {
+    throw new Error(`Expected one Boss chat editor and submit control, found editor=${editorCount}, submit=${submitCount}.`);
+  }
+
+  const currentEditorText = normalizeText(await editor.textContent() ?? '');
+  if (currentEditorText && currentEditorText !== message) {
+    throw new Error(`Boss chat editor contains unexpected text before typing a message: ${currentEditorText}`);
+  }
+  if (currentEditorText !== message) {
+    await editor.fill(message, { timeout: config.playwright.resumeDetailTimeoutMs });
+  }
+  await page.waitForFunction((expectedMessage) => {
+    const editorElement = document.querySelector<HTMLElement>('#boss-chat-editor-input[contenteditable="true"]');
+    return (editorElement?.innerText ?? editorElement?.textContent ?? '').replace(/\s+/g, ' ').trim() === expectedMessage;
+  }, message, { timeout: config.playwright.resumeDetailTimeoutMs, polling: 100 });
+
+  await submit.click({ timeout: config.playwright.resumeDetailTimeoutMs });
+  await page.waitForFunction((expectedMessage) => {
+    const messageExists = Array.from(document.querySelectorAll('.chat-message-list .message-item .text-content'))
+      .some((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim() === expectedMessage);
+    const editorElement = document.querySelector<HTMLElement>('#boss-chat-editor-input[contenteditable="true"]');
+    return messageExists && !(editorElement?.innerText ?? editorElement?.textContent ?? '').trim();
+  }, message, { timeout: config.playwright.resumeDetailTimeoutMs, polling: 200 });
+
+  return { sent: true, alreadyPresent: false };
+}
+
 export async function sendBossQualifiedCandidateMessage(
   page: Page,
 ): Promise<{ sent: boolean; alreadyPresent: boolean }> {
@@ -458,6 +517,12 @@ export async function sendBossUnqualifiedCandidateMessage(
   page: Page,
 ): Promise<{ sent: boolean; alreadyPresent: boolean }> {
   return sendBossCommonPhraseMessage(page, bossUnqualifiedCandidateChatMessage);
+}
+
+export async function sendBossShanghaiOriginQuestionMessage(
+  page: Page,
+): Promise<{ sent: boolean; alreadyPresent: boolean }> {
+  return sendBossEditorMessage(page, bossShanghaiOriginQuestionMessage);
 }
 
 async function readBossPhoneExchangeState(page: Page): Promise<{
@@ -542,6 +607,14 @@ export async function contactBossQualifiedCandidate(page: Page): Promise<BossQua
 
 export async function contactBossUnqualifiedCandidate(page: Page): Promise<BossChatMessageResult> {
   const message = await sendBossUnqualifiedCandidateMessage(page);
+  return {
+    messageSent: message.sent,
+    messageAlreadyPresent: message.alreadyPresent,
+  };
+}
+
+export async function contactBossShanghaiOriginCandidate(page: Page): Promise<BossChatMessageResult> {
+  const message = await sendBossShanghaiOriginQuestionMessage(page);
   return {
     messageSent: message.sent,
     messageAlreadyPresent: message.alreadyPresent,

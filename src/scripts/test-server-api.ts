@@ -271,18 +271,38 @@ describe('console API routes', () => {
     assert.equal(completed.outputSummary?.summaryEmailRecipient, 'summary@qq.com');
   });
 
-  it('rejects Boss auto-chat review without a Boss forwarding target', async () => {
+  it('queues Boss auto-chat review without repeated forwarding arguments', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
     const response = await handleApiRequest({
       method: 'POST',
       pathname: '/api/tasks/boss-auto-chat',
+      taskQueue: queue,
       body: {
         platform: 'boss',
         scoreThreshold: 70,
       },
     });
 
-    assert.equal(response.statusCode, 400);
-    assert.match((response.body as { error: { message: string } }).error.message, /requires bossForwardMode and bossForwardRecipient/);
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+    assert.equal(completed.status, 'succeeded');
+    assert.deepStrictEqual(calls[0], [
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+      '--boss-chat-score-threshold',
+      '70',
+    ]);
   });
 
   it('rejects Boss auto-chat summary cc without a summary recipient', async () => {

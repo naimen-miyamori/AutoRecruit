@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { chromium } from 'playwright';
+import { chromium, type Page } from 'playwright';
 import {
   bossQualifiedCandidateChatMessage,
+  bossShanghaiOriginQuestionMessage,
   bossUnqualifiedCandidateChatMessage,
   collectBossUnreadConversations,
   contactBossQualifiedCandidate,
+  contactBossShanghaiOriginCandidate,
   contactBossUnqualifiedCandidate,
   parseBossChatResumeSnapshot,
 } from '../platforms/boss-chat.js';
+import { parseBossResumeData } from '../platforms/boss-adapter.js';
 import { evaluatePropertyElectricianHardRequirements } from '../scoring/boss-chat-hard-requirements.js';
 import { renderBossChatSummaryMarkdown } from '../reporting/boss-chat-summary.js';
 import type { BossChatReviewRun, CandidateResume } from '../types/job.js';
@@ -59,6 +62,7 @@ describe('Boss auto-chat resume parsing', () => {
       candidateName: '候选人甲',
       jobName: '物业电工',
       ageDesc: '48岁',
+      nativePlace: '上海',
       education: '高中',
       city: '上海',
       currentCompany: '示例物业',
@@ -78,6 +82,7 @@ describe('Boss auto-chat resume parsing', () => {
     assert.equal(resume.candidateId, 'encrypted-expect-id');
     assert.equal(resume.name, '候选人甲');
     assert.equal(resume.age, 48);
+    assert.equal(resume.nativePlace, '上海');
     assert.equal(resume.education, '高中');
     assert.deepStrictEqual(resume.regions, ['上海']);
     assert.deepStrictEqual(resume.workExperiences[0], {
@@ -113,6 +118,27 @@ describe('Boss auto-chat resume parsing', () => {
       title: '电工',
       details: [],
     }]);
+  });
+
+  it('parses explicit native place from Boss resume detail data', () => {
+    const resume = parseBossResumeData({
+      geekBaseInfo: {
+        name: '候选人甲',
+        ageDesc: '46岁',
+        hometown: { name: '上海' },
+      },
+      geekEduExpList: [{
+        school: '上海电机学院',
+        degreeName: '大专',
+      }],
+    }, {
+      url: () => 'https://www.zhipin.com/web/chat/index',
+    } as Page, {
+      candidateId: 'candidate-native-place',
+    });
+
+    assert.equal(resume.nativePlace, '上海');
+    assert.equal(resume.educationExperiences[0]?.school, '上海电机学院');
   });
 });
 
@@ -173,6 +199,9 @@ describe('Boss candidate contact actions', () => {
         phraseContent.querySelectorAll('li').forEach((item) => {
           item.addEventListener('click', (event) => {
             event.stopPropagation();
+            const selections = JSON.parse(document.body.dataset.phraseSelections ?? '[]') as string[];
+            selections.push(item.getAttribute('title') ?? '');
+            document.body.dataset.phraseSelections = JSON.stringify(selections);
             editor.innerText = item.getAttribute('title') ?? '';
             phraseContent.style.display = 'none';
           });
@@ -199,6 +228,8 @@ describe('Boss candidate contact actions', () => {
 
       const first = await contactBossQualifiedCandidate(page);
       const second = await contactBossQualifiedCandidate(page);
+      const clarificationFirst = await contactBossShanghaiOriginCandidate(page);
+      const clarificationSecond = await contactBossShanghaiOriginCandidate(page);
       const unmatchedFirst = await contactBossUnqualifiedCandidate(page);
       const unmatchedSecond = await contactBossUnqualifiedCandidate(page);
 
@@ -214,6 +245,14 @@ describe('Boss candidate contact actions', () => {
         phoneExchangeRequested: true,
         phoneExchangeAlreadyRequested: true,
       });
+      assert.deepStrictEqual(clarificationFirst, {
+        messageSent: true,
+        messageAlreadyPresent: false,
+      });
+      assert.deepStrictEqual(clarificationSecond, {
+        messageSent: true,
+        messageAlreadyPresent: true,
+      });
       assert.deepStrictEqual(unmatchedFirst, {
         messageSent: true,
         messageAlreadyPresent: false,
@@ -222,11 +261,47 @@ describe('Boss candidate contact actions', () => {
         messageSent: true,
         messageAlreadyPresent: true,
       });
-      assert.equal(await page.locator('.chat-message-list .message-item').count(), 2);
+      assert.equal(await page.locator('.chat-message-list .message-item').count(), 3);
       assert.deepStrictEqual(
         await page.locator('.chat-message-list .message-item .text-content').allTextContents(),
+        [bossQualifiedCandidateChatMessage, bossShanghaiOriginQuestionMessage, bossUnqualifiedCandidateChatMessage],
+      );
+      assert.deepStrictEqual(
+        JSON.parse(await page.locator('body').getAttribute('data-phrase-selections') ?? '[]'),
         [bossQualifiedCandidateChatMessage, bossUnqualifiedCandidateChatMessage],
       );
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('does not overwrite an existing editor draft when typing the Shanghai-origin question', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+
+    try {
+      await page.setContent(`
+        <div class="chat-message-list"></div>
+        <div class="toolbar-box-left">
+          <div class="operate-icon-item">
+            <div class="toolbar-icon changyongyu">常</div>
+            <div class="phrase-content" style="display:none">
+              <ul><li title="${bossQualifiedCandidateChatMessage}">${bossQualifiedCandidateChatMessage}</li></ul>
+            </div>
+          </div>
+        </div>
+        <div class="conversation-editor">
+          <div id="boss-chat-editor-input" contenteditable="true">已有草稿</div>
+          <div class="submit">发送</div>
+        </div>
+      `);
+
+      await assert.rejects(
+        () => contactBossShanghaiOriginCandidate(page),
+        /editor contains unexpected text before typing a message: 已有草稿/,
+      );
+      assert.equal(await page.locator('#boss-chat-editor-input').textContent(), '已有草稿');
+      assert.equal(await page.locator('.chat-message-list .message-item').count(), 0);
     } finally {
       await browser.close();
     }
@@ -239,6 +314,7 @@ describe('Boss property electrician hard requirements', () => {
       candidateId: 'candidate-qualified',
       name: '候选人甲',
       age: 46,
+      nativePlace: '上海',
       regions: ['上海'],
       pr: [],
       workExperiences: [{
@@ -260,9 +336,72 @@ describe('Boss property electrician hard requirements', () => {
     const evaluation = evaluatePropertyElectricianHardRequirements(buildResume());
 
     assert.equal(evaluation.allMet, true);
-    assert.equal(evaluation.criteria.length, 5);
+    assert.equal(evaluation.criteria.length, 6);
     assert.ok(evaluation.criteria.every((criterion) => criterion.met));
     assert.deepStrictEqual(evaluation.rejectionReasons, []);
+  });
+
+  it('requests Shanghai-origin clarification only from an otherwise qualified Shanghai-school candidate', () => {
+    const evaluation = evaluatePropertyElectricianHardRequirements(buildResume({
+      nativePlace: undefined,
+      regions: ['上海'],
+      educationExperiences: [{
+        school: '上海电机学院',
+        degree: '大专',
+        details: [],
+      }],
+    }));
+
+    assert.equal(evaluation.allMet, false);
+    assert.equal(evaluation.criteria.find((criterion) => criterion.key === 'shanghai_origin')?.met, false);
+    assert.deepStrictEqual(evaluation.clarification, {
+      criterionKey: 'shanghai_origin',
+      question: bossShanghaiOriginQuestionMessage,
+      evidence: ['上海电机学院 | 大专'],
+      reason: '简历未明确是否为上海人，但发现上海就读线索，需要发送“是上海人吗？”确认',
+    });
+  });
+
+  it('does not ask about Shanghai origin when another requirement fails or native place is explicitly elsewhere', () => {
+    const otherwiseRejected = evaluatePropertyElectricianHardRequirements(buildResume({
+      age: 47,
+      nativePlace: undefined,
+      educationExperiences: [{ school: '同济大学', details: [] }],
+    }));
+    const explicitlyElsewhere = evaluatePropertyElectricianHardRequirements(buildResume({
+      nativePlace: '江苏',
+      educationExperiences: [{ school: '复旦大学', details: [] }],
+    }));
+    const explicitlyNotShanghai = evaluatePropertyElectricianHardRequirements(buildResume({
+      nativePlace: undefined,
+      pr: ['本人不是上海人，目前在上海工作'],
+      educationExperiences: [{ school: '上海电机学院', details: [] }],
+    }));
+
+    assert.equal(otherwiseRejected.clarification, undefined);
+    assert.equal(explicitlyElsewhere.clarification, undefined);
+    assert.equal(explicitlyNotShanghai.allMet, false);
+    assert.equal(explicitlyNotShanghai.clarification, undefined);
+    assert.match(
+      explicitlyElsewhere.criteria.find((criterion) => criterion.key === 'shanghai_origin')?.reason ?? '',
+      /籍贯为江苏/,
+    );
+  });
+
+  it('accepts explicit Shanghai-origin text instead of expected-city evidence', () => {
+    const expectedCityOnly = evaluatePropertyElectricianHardRequirements(buildResume({
+      nativePlace: undefined,
+      regions: ['上海'],
+    }));
+    const explicitProfileText = evaluatePropertyElectricianHardRequirements(buildResume({
+      nativePlace: undefined,
+      regions: [],
+      pr: ['本人是上海人，熟悉本地物业项目'],
+    }));
+
+    assert.equal(expectedCityOnly.allMet, false);
+    assert.equal(expectedCityOnly.clarification, undefined);
+    assert.equal(explicitProfileText.allMet, true);
   });
 
   it('treats missing evidence and age 47 as not qualified', () => {
@@ -342,6 +481,45 @@ describe('Boss property electrician hard requirements', () => {
     assert.match(markdown, /年龄为48岁，不满足小于47岁/);
     assert.match(markdown, /简历未发现明确的高压电工证证据/);
     assert.match(markdown, /不合适常用语已发送/);
+  });
+
+  it('renders Shanghai-origin clarification separately from rejection contact', () => {
+    const evaluation = evaluatePropertyElectricianHardRequirements(buildResume({
+      nativePlace: undefined,
+      educationExperiences: [{ school: '上海电机学院', details: [] }],
+    }));
+    const run: BossChatReviewRun = {
+      platform: 'boss',
+      reviewedAt: '2026-07-13T00:00:00.000Z',
+      scoreThreshold: 70,
+      matchMode: 'all-hard-requirements',
+      unreadConversations: 1,
+      reviewedConversations: 1,
+      matchedCandidates: 0,
+      chatMessagesSent: 1,
+      phoneExchangeRequests: 0,
+      forwardedCandidates: 0,
+      skippedConversations: 0,
+      failedConversations: 0,
+      items: [{
+        conversationId: 'conversation-clarification',
+        candidateId: 'candidate-clarification',
+        candidateName: '候选人待确认',
+        jobName: '物业电工',
+        jobKey: '物业电工',
+        unreadCount: 1,
+        status: 'awaiting_clarification',
+        clarificationQuestionSent: true,
+        chatMessageSent: true,
+        forwarded: false,
+        hardRequirementEvaluation: evaluation,
+      }],
+    };
+
+    const markdown = renderBossChatSummaryMarkdown(run);
+    assert.match(markdown, /等待上海籍确认: 1/);
+    assert.match(markdown, /上海籍确认消息已发送，等待回复/);
+    assert.doesNotMatch(markdown, /不合适常用语已发送/);
   });
 
   it('renders a contact failure without hiding successful forwarding', () => {

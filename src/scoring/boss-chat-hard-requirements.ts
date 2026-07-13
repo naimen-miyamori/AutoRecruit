@@ -22,6 +22,21 @@ function formatWork(work: WorkExperience): string {
   ].filter(Boolean).join(' | ');
 }
 
+function formatEducation(resume: CandidateResume): string[] {
+  return resume.educationExperiences.map((education) => [
+    education.start && education.end ? `${education.start}-${education.end}` : education.start ?? education.end,
+    education.school,
+    education.degree,
+    education.major,
+    ...education.details,
+  ].filter(Boolean).join(' | ')).filter(Boolean);
+}
+
+const shanghaiOriginQuestion = '是上海人吗？';
+const explicitShanghaiOriginPattern = /上海本地人|上海人|沪籍|上海户籍|上海户口|(?:籍贯|户籍|户口|出生地|家乡)(?:是|为|在|[:：])?\s*(?:上海|沪)/;
+const explicitNonShanghaiOriginPattern = /不是上海人|非上海人|非上海籍|非沪籍|(?:籍贯|户籍|户口|出生地|家乡)(?:是|为|在|[:：])?\s*(?!上海|沪)[\u4e00-\u9fff]{2,8}|(?:江苏|浙江|安徽|山东|河南|湖北|湖南|江西|四川|重庆|福建|广东|广西|云南|贵州|河北|山西|陕西|甘肃|辽宁|吉林|黑龙江|北京|天津|内蒙古|新疆|西藏|青海|宁夏|海南)人/;
+const shanghaiSchoolPattern = /上海|复旦大学|同济大学|华东师范大学|华东理工大学|东华大学|华东政法大学/;
+
 function parseYearMonth(value: string | undefined, endBoundary: boolean): { year: number; month: number } | undefined {
   const normalized = normalizeText(value);
   if (!normalized) {
@@ -112,6 +127,30 @@ export function evaluatePropertyElectricianHardRequirements(resume: CandidateRes
 
     return [`${work.company}：${work.start ?? '?'}-${work.end ?? '?'}（${durationMonths}个月）`];
   });
+  const explicitShanghaiOriginEvidence = unique([
+    resume.nativePlace && /上海|沪/.test(resume.nativePlace) ? `籍贯：${resume.nativePlace}` : '',
+    ...resume.pr.filter((value) => (
+      explicitShanghaiOriginPattern.test(value)
+      && !explicitNonShanghaiOriginPattern.test(value)
+    )),
+  ]);
+  const explicitNonShanghaiOrigin = Boolean(
+    resume.nativePlace
+    && !/上海|沪/.test(resume.nativePlace),
+  ) || resume.pr.some((value) => explicitNonShanghaiOriginPattern.test(value));
+  const shanghaiSchoolEvidence = unique(formatEducation(resume).filter((value) => shanghaiSchoolPattern.test(value)));
+  const shanghaiOriginCriterion = buildCriterion(
+    'shanghai_origin',
+    '上海人',
+    explicitShanghaiOriginEvidence,
+    explicitNonShanghaiOrigin
+      ? resume.nativePlace
+        ? `简历明确籍贯为${resume.nativePlace}，不满足上海人要求`
+        : '简历明确说明候选人不是上海人，不满足上海人要求'
+      : shanghaiSchoolEvidence.length > 0
+        ? `简历未明确是否为上海人，但发现上海就读线索，需要发送“${shanghaiOriginQuestion}”确认`
+        : '简历未发现明确的上海人证据，也未发现可用于确认的上海就读线索',
+  );
 
   const criteria: BossHardRequirementCriterion[] = [
     {
@@ -149,12 +188,28 @@ export function evaluatePropertyElectricianHardRequirements(resume: CandidateRes
       tenureEvidence,
       '简历未发现同一家公司连续工作至少24个月的明确记录',
     ),
+    shanghaiOriginCriterion,
   ];
   const rejectionReasons = criteria.filter((criterion) => !criterion.met).map((criterion) => criterion.reason);
+  const otherRequirementsMet = criteria
+    .filter((criterion) => criterion.key !== 'shanghai_origin')
+    .every((criterion) => criterion.met);
+  const clarification = !shanghaiOriginCriterion.met
+    && !explicitNonShanghaiOrigin
+    && shanghaiSchoolEvidence.length > 0
+    && otherRequirementsMet
+    ? {
+      criterionKey: 'shanghai_origin' as const,
+      question: shanghaiOriginQuestion,
+      evidence: shanghaiSchoolEvidence,
+      reason: shanghaiOriginCriterion.reason,
+    }
+    : undefined;
 
   return {
     allMet: rejectionReasons.length === 0,
     criteria,
     rejectionReasons,
+    clarification,
   };
 }

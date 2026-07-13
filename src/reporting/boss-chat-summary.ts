@@ -45,7 +45,9 @@ function renderItems(items: BossChatReviewItem[], emptyText: string, includeReas
   }
 
   return items.map((item) => {
-    const contact = item.matched
+    const contact = item.status === 'awaiting_clarification'
+      ? `，上海籍确认消息${item.clarificationQuestionSent ? '已发送，等待回复' : '未发送'}`
+      : item.matched
       ? `，符合常用语${item.chatMessageSent ? '已发送' : '未发送'}，换电话${item.phoneExchangeRequested ? '已请求' : '未请求'}`
       : item.matched === false
         ? `，不合适常用语${item.chatMessageSent ? '已发送' : '未发送'}${item.error ? `：${item.error}` : ''}`
@@ -69,6 +71,7 @@ export function buildBossChatSummarySubject(run: BossChatReviewRun): string {
 export function renderBossChatSummaryMarkdown(run: BossChatReviewRun): string {
   const matched = run.items.filter((item) => item.matched === true);
   const unmatched = run.items.filter((item) => item.matched !== true);
+  const awaitingClarification = run.items.filter((item) => item.status === 'awaiting_clarification').length;
 
   return [
     `# ${displayJobs(run)} Boss未读候选人审查总结`,
@@ -78,6 +81,7 @@ export function renderBossChatSummaryMarkdown(run: BossChatReviewRun): string {
     `- 未读会话: ${run.unreadConversations}`,
     `- 已审查: ${run.reviewedConversations}`,
     `- 符合要求: ${run.matchedCandidates}`,
+    `- 等待上海籍确认: ${awaitingClarification}`,
     `- 已发送聊天: ${run.chatMessagesSent}`,
     `- 已请求换电话: ${run.phoneExchangeRequests}`,
     `- 已转发: ${run.forwardedCandidates}`,
@@ -88,7 +92,7 @@ export function renderBossChatSummaryMarkdown(run: BossChatReviewRun): string {
     '',
     ...renderItems(matched, '无', false),
     '',
-    '## 不符合或无法确认的候选人',
+    '## 不符合或等待确认的候选人',
     '',
     ...renderItems(unmatched, '无', true),
   ].join('\n');

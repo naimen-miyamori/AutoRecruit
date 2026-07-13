@@ -2197,6 +2197,19 @@ function parseBossResumeFromApi(payload: BossResumeApiPayload, page: Page, candi
   const highestEduExp = readRecord(geekDetail, 'highestEduExp');
   const showExpectPosition = readRecord(geekDetail, 'showExpectPosition') ?? (isRecord(zpData.showExpectPosition) ? zpData.showExpectPosition : undefined);
   const expectList = readArray(geekDetail, 'geekExpectList').filter(isRecord);
+  const nativePlaceRecord = readRecord(baseInfo, 'hometown')
+    ?? readRecord(baseInfo, 'nativePlace')
+    ?? readRecord(baseInfo, 'householdRegistration');
+  const nativePlace = readString(baseInfo, 'hometownName')
+    ?? readString(baseInfo, 'hometown')
+    ?? readString(baseInfo, 'nativePlaceName')
+    ?? readString(baseInfo, 'nativePlace')
+    ?? readString(baseInfo, 'householdRegistration')
+    ?? readString(nativePlaceRecord, 'name')
+    ?? readString(nativePlaceRecord, 'cityName')
+    ?? readString(nativePlaceRecord, 'label')
+    ?? readString(geekDetail, 'hometownName')
+    ?? readString(geekDetail, 'nativePlace');
   const education = readString(baseInfo, 'degreeCategory')
     ?? readString(highestEduExp, 'degreeName')
     ?? candidate.cardText?.match(/博士|硕士|本科|大专|中专\/中技|中专|高中/)?.[0];
@@ -2206,6 +2219,7 @@ function parseBossResumeFromApi(payload: BossResumeApiPayload, page: Page, candi
     resumeUrl: candidate.resumeUrl ?? page.url(),
     name: readString(baseInfo, 'name') ?? candidate.name,
     age: parseBossAge(readString(baseInfo, 'ageDesc')),
+    nativePlace,
     education,
     regions: uniqueStrings([
       readString(showExpectPosition, 'locationName'),

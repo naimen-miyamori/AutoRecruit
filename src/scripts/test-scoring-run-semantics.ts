@@ -1202,6 +1202,38 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(await store.readSeenIds('liepin', jobKey), ['liepin-candidate']);
   });
 
+  it('deduplicates job email settings and does not rewrite an unchanged job record', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobRecord: import('../types/job.js').JobRecord = {
+      jobKey: 'deduplicated-job-config',
+      platform: '51job',
+      searchKeyword: 'deduplicated job config',
+      recipientEmail: ' ops@example.com ',
+      ccEmails: ['audit@example.com', ' audit@example.com ', ''],
+      searchSettings: {
+        source: 'saved',
+        conditions: [],
+      },
+      rawText: '测试 JD',
+      normalizedJob: buildNormalizedJob(),
+      createdAt: '2026-07-13T00:00:00.000Z',
+    };
+
+    await store.saveJobRecord('51job', jobRecord);
+    const jdPath = path.join(tempDir, '51job', 'jobs', jobRecord.jobKey, 'jd.json');
+    const firstStat = await fs.stat(jdPath);
+    const saved = await store.readJobRecord('51job', jobRecord.jobKey);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await store.saveJobRecord('51job', saved);
+    const secondStat = await fs.stat(jdPath);
+
+    assert.equal(saved.recipientEmail, 'ops@example.com');
+    assert.deepStrictEqual(saved.ccEmails, ['audit@example.com']);
+    assert.equal(secondStat.mtimeMs, firstStat.mtimeMs);
+  });
+
   it('persists run results with separate success and failure buckets', async () => {
     const JobStore = await makeIsolatedStore();
     const store = new JobStore();
@@ -5232,6 +5264,7 @@ describe('scoring run semantics', () => {
       includeViewedCandidates?: boolean;
       conditions: import('../types/job.js').SearchCondition[];
     }> = [];
+    const keyword = `direct-51job-${Date.now()}-${Math.random()}`;
 
     await fs.mkdir(path.dirname(applicationFilterOptionsPath), { recursive: true });
     await fs.writeFile(applicationFilterOptionsPath, JSON.stringify({
@@ -5283,7 +5316,7 @@ describe('scoring run semantics', () => {
         '--platform',
         '51job',
         '--keyword',
-        `direct-51job-${Date.now()}-${Math.random()}`,
+        keyword,
         '--jd',
         '职位名称：direct 51job',
         '--search-source',
@@ -5295,8 +5328,20 @@ describe('scoring run semantics', () => {
       ]);
     });
 
-    assert.equal(directCalls.length, 1);
+    await fs.rm(applicationFilterInputPath);
+    await fs.rm(applicationFilterOptionsPath);
+    await captureConsole(async () => {
+      await indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        keyword,
+      ]);
+    });
+
+    assert.equal(directCalls.length, 2);
     assert.equal(directCalls[0]?.includeViewedCandidates, true);
+    assert.equal(directCalls[1]?.includeViewedCandidates, false);
     assert.equal(directCalls[0]?.conditions.length, 1);
     assert.deepStrictEqual(directCalls[0]?.conditions[0], {
       kind: 'applicationFilter',
@@ -5305,6 +5350,17 @@ describe('scoring run semantics', () => {
       fieldKind: 'singleSelect',
       value: '本科',
       values: [{ value: '本科', pathLabels: undefined }],
+    });
+    assert.equal(
+      JSON.stringify(directCalls[1]?.conditions),
+      JSON.stringify(directCalls[0]?.conditions),
+    );
+
+    const storedJob = await new indexModule.JobStore().readJobRecord('51job', buildJobKey(keyword, ''));
+    assert.deepStrictEqual(storedJob.searchSettings, {
+      source: 'direct',
+      applicationFilterInput: { education: '本科' },
+      conditions: directCalls[1]?.conditions,
     });
   });
 
@@ -5454,16 +5510,6 @@ describe('scoring run semantics', () => {
         'boss',
         '--boss-auto-chat',
         'true',
-      ]),
-      /--boss-auto-chat requires --boss-forward-mode and --boss-forward-recipient/,
-    );
-
-    await assert.rejects(
-      () => indexModule.main([
-        '--platform',
-        'boss',
-        '--boss-auto-chat',
-        'true',
         '--boss-chat-score-threshold',
         '101',
         '--boss-forward-mode',
@@ -5488,7 +5534,7 @@ describe('scoring run semantics', () => {
       normalizedJob: {
         ...buildNormalizedJob(),
         title: '物业电工',
-        hardRequirements: ['年龄小于47岁', '高压电工证', '低压电工证', '物业电工经验', '一家公司工作2年以上'],
+        hardRequirements: ['年龄小于47岁', '高压电工证', '低压电工证', '物业电工经验', '一家公司工作2年以上', '上海人'],
       },
       createdAt: '2026-07-12T00:00:00.000Z',
     });
@@ -5617,6 +5663,248 @@ describe('scoring run semantics', () => {
     assert.equal(summary.items[1]?.chatMessageSent, true);
     assert.equal(summary.items[2]?.status, 'skipped_missing_jd');
     assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), ['conversation-matched', 'conversation-unmatched']);
+    assert.deepStrictEqual(await store.readBossAutomationSettings(), {
+      forwarding: {
+        mode: 'email',
+        recipient: 'recruiter@example.com',
+      },
+      summaryDelivery: {
+        recipientEmail: 'summary@qq.com',
+        ccEmails: ['audit@hotmail.com'],
+      },
+    });
+    assert.deepStrictEqual((await store.readJobRecord('boss', jobKey)).bossForwarding, {
+      mode: 'email',
+      recipient: 'recruiter@example.com',
+    });
+  });
+
+  it('asks for Shanghai-origin clarification without forwarding, rejecting, or marking the conversation reviewed', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = buildJobKey('物业电工', '');
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: '物业电工',
+      rawText: '物业电工，要求上海人',
+      normalizedJob: {
+        ...buildNormalizedJob(),
+        title: '物业电工',
+        hardRequirements: ['年龄小于47岁', '高压电工证', '低压电工证', '物业电工经验', '一家公司工作2年以上', '上海人'],
+      },
+      createdAt: '2026-07-13T00:00:00.000Z',
+    });
+
+    const chatPage = {} as Page;
+    let clarificationCalls = 0;
+    let forbiddenActionCalls = 0;
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => ({ page: chatPage, context: {} }) as never;
+    indexModule.closeBrowserSessionRef.fn = async () => undefined;
+    indexModule.openBossChatPageRef.fn = async () => chatPage;
+    indexModule.collectBossUnreadConversationsRef.fn = async () => [{
+      conversationId: 'conversation-shanghai-clarification',
+      candidateName: '候选人待确认',
+      jobName: '物业电工',
+      unreadCount: 1,
+    }];
+    indexModule.openBossUnreadConversationRef.fn = async (_page, conversation) => ({
+      conversation,
+      candidate: { candidateId: 'candidate-shanghai-clarification', name: '候选人待确认' },
+      resume: buildResume('candidate-shanghai-clarification'),
+    });
+    indexModule.openAndParseBossChatResumeRef.fn = async (_page, opened) => opened.resume;
+    indexModule.evaluateBossChatHardRequirementsRef.fn = () => ({
+      allMet: false,
+      criteria: [],
+      rejectionReasons: ['简历未明确是否为上海人，但发现上海就读线索，需要确认'],
+      clarification: {
+        criterionKey: 'shanghai_origin',
+        question: '是上海人吗？',
+        evidence: ['上海电机学院'],
+        reason: '简历未明确是否为上海人，但发现上海就读线索，需要确认',
+      },
+    });
+    indexModule.closeBossChatResumeRef.fn = async () => undefined;
+    indexModule.contactBossShanghaiOriginCandidateRef.fn = async () => {
+      clarificationCalls += 1;
+      return { messageSent: true, messageAlreadyPresent: false };
+    };
+    indexModule.forwardBossResumeRef.fn = async () => {
+      forbiddenActionCalls += 1;
+    };
+    indexModule.contactBossQualifiedCandidateRef.fn = async () => {
+      forbiddenActionCalls += 1;
+      throw new Error('qualified contact should not run');
+    };
+    indexModule.contactBossUnqualifiedCandidateRef.fn = async () => {
+      forbiddenActionCalls += 1;
+      return { messageSent: true, messageAlreadyPresent: false };
+    };
+
+    const result = await indexModule.main([
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+      '--boss-chat-require-all',
+      'true',
+      '--boss-forward-mode',
+      'email',
+      '--boss-forward-recipient',
+      'recruiter@example.com',
+    ]) as import('../index.js').BossAutoChatRunSummary;
+
+    assert.equal(clarificationCalls, 1);
+    assert.equal(forbiddenActionCalls, 0);
+    assert.equal(result.reviewedConversations, 1);
+    assert.equal(result.matchedCandidates, 0);
+    assert.equal(result.chatMessagesSent, 1);
+    assert.equal(result.forwardedCandidates, 0);
+    assert.equal(result.phoneExchangeRequests, 0);
+    assert.equal(result.items[0]?.status, 'awaiting_clarification');
+    assert.equal(result.items[0]?.matched, undefined);
+    assert.equal(result.items[0]?.clarificationQuestionSent, true);
+    assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), []);
+    assert.deepStrictEqual(await store.readBossChatRetryItems(), []);
+  });
+
+  it('reuses saved per-job forwarding and Boss summary email settings', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = buildJobKey('物业电工', '');
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: '物业电工',
+      bossForwarding: {
+        mode: 'email',
+        recipient: 'job-specific@example.com',
+      },
+      rawText: '负责物业电气维修',
+      normalizedJob: {
+        ...buildNormalizedJob(),
+        title: '物业电工',
+        hardRequirements: ['年龄小于47岁', '高压电工证', '低压电工证', '物业电工经验', '一家公司工作2年以上', '上海人'],
+      },
+      createdAt: '2026-07-12T00:00:00.000Z',
+    });
+    await store.saveBossAutomationSettings({
+      forwarding: {
+        mode: 'email',
+        recipient: 'platform-default@example.com',
+      },
+      summaryDelivery: {
+        recipientEmail: 'summary@qq.com',
+        ccEmails: ['audit@hotmail.com', 'audit@hotmail.com'],
+      },
+    });
+
+    const chatPage = {} as Page;
+    const forwardingCalls: Array<{ mode: string; recipient: string }> = [];
+    const summaryDeliveries: Array<{ recipient: string; ccEmails?: string[] }> = [];
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => ({ page: chatPage, context: {} }) as never;
+    indexModule.closeBrowserSessionRef.fn = async () => undefined;
+    indexModule.openBossChatPageRef.fn = async () => chatPage;
+    indexModule.collectBossUnreadConversationsRef.fn = async () => [{
+      conversationId: 'conversation-saved-settings',
+      candidateName: '候选人甲',
+      jobName: '物业电工',
+      unreadCount: 1,
+    }];
+    indexModule.openBossUnreadConversationRef.fn = async (_page, conversation) => ({
+      conversation,
+      candidate: { candidateId: 'candidate-saved-settings', name: '候选人甲' },
+      resume: buildResume('candidate-saved-settings'),
+    });
+    indexModule.openAndParseBossChatResumeRef.fn = async (_page, opened) => opened.resume;
+    indexModule.evaluateBossChatHardRequirementsRef.fn = () => ({
+      allMet: true,
+      criteria: [],
+      rejectionReasons: [],
+    });
+    indexModule.forwardBossResumeRef.fn = async (_page, _candidate, mode, recipient) => {
+      forwardingCalls.push({ mode, recipient });
+    };
+    indexModule.closeBossChatResumeRef.fn = async () => undefined;
+    indexModule.contactBossQualifiedCandidateRef.fn = async () => ({
+      messageSent: true,
+      messageAlreadyPresent: false,
+      phoneExchangeRequested: true,
+      phoneExchangeAlreadyRequested: false,
+    });
+    indexModule.sendBossChatSummaryRef.fn = async (_run, delivery) => {
+      summaryDeliveries.push(delivery);
+      return { recipient: delivery.recipient, subject: 'Boss summary' };
+    };
+
+    const result = await indexModule.main([
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+      '--boss-chat-require-all',
+      'true',
+    ]) as import('../index.js').BossAutoChatRunSummary;
+
+    assert.equal(result.forwardedCandidates, 1);
+    assert.equal(result.summaryEmailRecipient, 'summary@qq.com');
+    assert.deepStrictEqual(forwardingCalls, [{
+      mode: 'email',
+      recipient: 'job-specific@example.com',
+    }]);
+    assert.deepStrictEqual(summaryDeliveries, [{
+      recipient: 'summary@qq.com',
+      ccEmails: ['audit@hotmail.com'],
+    }]);
+  });
+
+  it('leaves a Boss unread conversation unopened when no forwarding configuration exists', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = buildJobKey('物业电工', '');
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: '物业电工',
+      rawText: '负责物业电气维修',
+      normalizedJob: {
+        ...buildNormalizedJob(),
+        title: '物业电工',
+      },
+      createdAt: '2026-07-12T00:00:00.000Z',
+    });
+
+    const chatPage = {} as Page;
+    let opened = false;
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => ({ page: chatPage, context: {} }) as never;
+    indexModule.closeBrowserSessionRef.fn = async () => undefined;
+    indexModule.openBossChatPageRef.fn = async () => chatPage;
+    indexModule.collectBossUnreadConversationsRef.fn = async () => [{
+      conversationId: 'conversation-without-forwarding',
+      candidateName: '候选人甲',
+      jobName: '物业电工',
+      unreadCount: 1,
+    }];
+    indexModule.openBossUnreadConversationRef.fn = async () => {
+      opened = true;
+      throw new Error('conversation should remain unopened');
+    };
+
+    const result = await indexModule.main([
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+    ]) as import('../index.js').BossAutoChatRunSummary;
+
+    assert.equal(opened, false);
+    assert.equal(result.skippedConversations, 1);
+    assert.equal(result.items[0]?.status, 'skipped_missing_forwarding_config');
+    assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), []);
   });
 
   it('preserves successful Boss forwarding when a later contact action fails', async () => {
@@ -5632,7 +5920,7 @@ describe('scoring run semantics', () => {
       normalizedJob: {
         ...buildNormalizedJob(),
         title: '物业电工',
-        hardRequirements: ['年龄小于47岁', '高压电工证', '低压电工证', '物业电工经验', '一家公司工作2年以上'],
+        hardRequirements: ['年龄小于47岁', '高压电工证', '低压电工证', '物业电工经验', '一家公司工作2年以上', '上海人'],
       },
       createdAt: '2026-07-12T00:00:00.000Z',
     });

@@ -1,11 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { config } from '../config.js';
 import type { SupportedPlatform } from '../platforms/types.js';
 import type { SearchFilterCatalog } from '../search/filter-catalog.js';
 import {
   CandidateListItem,
   CandidateResume,
+  BossAutomationSettings,
   BossChatReviewItem,
   BossChatReviewRun,
   CandidateScoreArtifact,
@@ -34,6 +36,7 @@ interface FilterCatalogPaths {
 interface BossChatReviewPaths {
   dir: string;
   runsDir: string;
+  automationSettingsPath: string;
   reviewedConversationIdsPath: string;
 }
 
@@ -69,6 +72,25 @@ async function writeJson(filePath: string, data: unknown): Promise<void> {
   await fs.writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
 }
 
+async function writeJsonIfChanged(filePath: string, data: unknown): Promise<boolean> {
+  const content = `${JSON.stringify(data, null, 2)}\n`;
+
+  try {
+    const existingContent = await fs.readFile(filePath, 'utf8');
+    if (existingContent === content
+      || isDeepStrictEqual(JSON.parse(existingContent), JSON.parse(content))) {
+      return false;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) {
+      throw error;
+    }
+  }
+
+  await fs.writeFile(filePath, content, 'utf8');
+  return true;
+}
+
 async function readJsonFile<T>(filePath: string, fallback?: T): Promise<T> {
   try {
     const content = await fs.readFile(filePath, 'utf8');
@@ -96,9 +118,29 @@ async function listJsonFiles(dirPath: string): Promise<string[]> {
 }
 
 function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
+  const {
+    recipientEmail,
+    ccEmails,
+    bossForwarding,
+    ...rest
+  } = jobRecord;
+  const normalizedRecipientEmail = recipientEmail?.trim();
+  const normalizedCcEmails = ccEmails
+    ? [...new Set(ccEmails.map((email) => email.trim()).filter(Boolean))]
+    : undefined;
+  const normalizedBossForwarding = bossForwarding?.recipient.trim()
+    ? {
+      mode: bossForwarding.mode,
+      recipient: bossForwarding.recipient.trim(),
+    }
+    : undefined;
+
   return {
-    ...jobRecord,
+    ...rest,
     platform: jobRecord.platform ?? '51job',
+    ...(normalizedRecipientEmail ? { recipientEmail: normalizedRecipientEmail } : {}),
+    ...(normalizedCcEmails ? { ccEmails: normalizedCcEmails } : {}),
+    ...(normalizedBossForwarding ? { bossForwarding: normalizedBossForwarding } : {}),
   };
 }
 
@@ -115,6 +157,7 @@ export class JobStore {
     return {
       dir,
       runsDir: path.join(dir, 'runs'),
+      automationSettingsPath: path.join(dir, 'automation-settings.json'),
       reviewedConversationIdsPath: path.join(dir, 'reviewed-conversation-ids.json'),
     };
   }
@@ -162,9 +205,19 @@ export class JobStore {
 
   async saveJobRecord(platform: SupportedPlatform, jobRecord: JobRecord): Promise<void> {
     const paths = await this.initializeJob(platform, jobRecord.jobKey);
-    await writeJson(paths.jdPath, {
+    await writeJsonIfChanged(paths.jdPath, {
       ...jobRecord,
       platform,
+      recipientEmail: jobRecord.recipientEmail?.trim() || undefined,
+      ccEmails: jobRecord.ccEmails
+        ? [...new Set(jobRecord.ccEmails.map((email) => email.trim()).filter(Boolean))]
+        : undefined,
+      bossForwarding: jobRecord.bossForwarding?.recipient.trim()
+        ? {
+          mode: jobRecord.bossForwarding.mode,
+          recipient: jobRecord.bossForwarding.recipient.trim(),
+        }
+        : undefined,
     });
   }
 
@@ -344,6 +397,32 @@ export class JobStore {
   async readBossChatReviewedConversationIds(): Promise<string[]> {
     const { reviewedConversationIdsPath } = this.getBossChatReviewPaths();
     return readJsonFile<string[]>(reviewedConversationIdsPath, []);
+  }
+
+  async readBossAutomationSettings(): Promise<BossAutomationSettings> {
+    const { automationSettingsPath } = this.getBossChatReviewPaths();
+    return readJsonFile<BossAutomationSettings>(automationSettingsPath, {});
+  }
+
+  async saveBossAutomationSettings(settings: BossAutomationSettings): Promise<void> {
+    const paths = this.getBossChatReviewPaths();
+    await ensureDir(paths.dir);
+    await writeJsonIfChanged(paths.automationSettingsPath, {
+      ...(settings.forwarding ? {
+        forwarding: {
+          mode: settings.forwarding.mode,
+          recipient: settings.forwarding.recipient.trim(),
+        },
+      } : {}),
+      ...(settings.summaryDelivery ? {
+        summaryDelivery: {
+          recipientEmail: settings.summaryDelivery.recipientEmail.trim(),
+          ccEmails: settings.summaryDelivery.ccEmails
+            ? [...new Set(settings.summaryDelivery.ccEmails.map((email) => email.trim()).filter(Boolean))]
+            : undefined,
+        },
+      } : {}),
+    });
   }
 
   async saveBossChatReviewedConversationIds(conversationIds: string[]): Promise<void> {

@@ -294,7 +294,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
       jdPreview: summarizeText(jd),
       jdFile,
       includeViewed: includeViewed ?? false,
-      searchSource: searchSource ?? 'saved',
+      searchSource: searchSource ?? 'stored-or-saved',
       applicationFilterInputFile,
       email,
       ccCount: cc?.length ?? 0,
@@ -356,7 +356,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
       platform,
       jobsFile,
       includeViewed: includeViewed ?? false,
-      searchSource: searchSource ?? 'saved',
+      searchSource: searchSource ?? 'stored-or-saved',
       applicationFilterInputFile,
       email,
       ccCount: cc?.length ?? 0,
@@ -436,9 +436,6 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
     throw new Error('boss-auto-chat summaryCc requires summaryEmail');
   }
   const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform);
-  if (!bossForwardMode || !bossForwardRecipient) {
-    throw new Error('boss-auto-chat task requires bossForwardMode and bossForwardRecipient');
-  }
 
   const input: BossAutoChatTaskInput = {
     platform: 'boss',

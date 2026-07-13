@@ -36,6 +36,21 @@ export interface ReportDeliveryOptions {
   ccEmails?: string[];
 }
 
+export type JobSearchSource = 'saved' | 'direct';
+
+export interface BossForwardingSettings {
+  mode: 'colleague' | 'email';
+  recipient: string;
+}
+
+export interface BossAutomationSettings {
+  forwarding?: BossForwardingSettings;
+  summaryDelivery?: {
+    recipientEmail: string;
+    ccEmails?: string[];
+  };
+}
+
 export type SearchCondition =
   | { kind: 'keyword'; value: string }
   | {
@@ -110,6 +125,12 @@ export interface JobRecord {
   searchKeyword: string;
   recipientEmail?: string;
   ccEmails?: string[];
+  searchSettings?: {
+    source: JobSearchSource;
+    applicationFilterInput?: Record<string, unknown>;
+    conditions: SearchCondition[];
+  };
+  bossForwarding?: BossForwardingSettings;
   rawText: string;
   normalizedJob: NormalizedJob;
   createdAt: string;
@@ -201,6 +222,7 @@ export interface CandidateResume {
   candidateShareUrl?: string;
   name?: string;
   age?: number;
+  nativePlace?: string;
   education?: string;
   regions: string[];
   pr: string[];
@@ -247,8 +269,10 @@ export interface CandidateScore {
 
 export type BossChatReviewStatus =
   | 'skipped_missing_jd'
+  | 'skipped_missing_forwarding_config'
   | 'skipped_unsupported_hard_requirements'
   | 'skipped_previously_reviewed'
+  | 'awaiting_clarification'
   | 'not_matched'
   | 'forwarded'
   | 'failed';
@@ -256,7 +280,7 @@ export type BossChatReviewStatus =
 export type BossChatMatchMode = 'score-threshold' | 'all-hard-requirements';
 
 export interface BossHardRequirementCriterion {
-  key: 'age' | 'high_voltage_certificate' | 'low_voltage_certificate' | 'property_electrician_experience' | 'company_tenure';
+  key: 'age' | 'high_voltage_certificate' | 'low_voltage_certificate' | 'property_electrician_experience' | 'company_tenure' | 'shanghai_origin';
   label: string;
   met: boolean;
   evidence: string[];
@@ -267,6 +291,12 @@ export interface BossHardRequirementEvaluation {
   allMet: boolean;
   criteria: BossHardRequirementCriterion[];
   rejectionReasons: string[];
+  clarification?: {
+    criterionKey: 'shanghai_origin';
+    question: string;
+    evidence: string[];
+    reason: string;
+  };
 }
 
 export interface BossChatReviewItem {
@@ -281,6 +311,7 @@ export interface BossChatReviewItem {
   hardRequirementEvaluation?: BossHardRequirementEvaluation;
   matched?: boolean;
   chatMessageSent?: boolean;
+  clarificationQuestionSent?: boolean;
   phoneExchangeRequested?: boolean;
   forwarded?: boolean;
   error?: string;

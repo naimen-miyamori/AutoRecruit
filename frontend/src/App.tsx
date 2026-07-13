@@ -2107,7 +2107,7 @@ function RunJobView() {
     jobsFile: '',
     searchSubscriptionFile: '',
     includeViewed: false,
-    searchSource: 'saved',
+    searchSource: '',
     applicationFilterInputFile: '',
     email: '',
     cc: '',
@@ -2124,8 +2124,8 @@ function RunJobView() {
   const [submitState, setSubmitState] = useState<AsyncState<TaskDetail>>({ loading: false });
   const bossChatThreshold = Number(form.bossChatScoreThreshold);
   const bossAutoChatInvalid = mode === 'boss-auto-chat' && (
-    !form.bossForwardMode
-    || !form.bossForwardRecipient.trim()
+    Boolean(form.bossForwardMode) !== Boolean(form.bossForwardRecipient.trim())
+    || (Boolean(form.bossChatSummaryCc.trim()) && !form.bossChatSummaryEmail.trim())
     || (!form.bossChatRequireAll && (
       !form.bossChatScoreThreshold.trim()
       || !Number.isFinite(bossChatThreshold)
@@ -2145,7 +2145,7 @@ function RunJobView() {
     const common = {
       platform: form.platform,
       includeViewed: form.includeViewed,
-      searchSource: form.searchSource,
+      searchSource: form.searchSource || undefined,
       applicationFilterInputFile: form.searchSource === 'direct' ? form.applicationFilterInputFile || undefined : undefined,
       email: form.email || undefined,
       cc: form.cc || undefined,
@@ -2283,6 +2283,7 @@ function RunJobView() {
                 <label>
                   <span>搜索来源</span>
                   <select value={form.searchSource} onChange={(event) => setField('searchSource', event.target.value)}>
+                    <option value="">复用岗位配置</option>
                     <option value="saved">{SEARCH_SOURCE_LABELS.saved}</option>
                     <option value="direct">{SEARCH_SOURCE_LABELS.direct}</option>
                   </select>
@@ -2332,7 +2333,7 @@ function RunJobView() {
           <section className="run-advanced">
             <div className="form-section-title">
               <span>通知与附加动作</span>
-              <strong>{mode === 'boss-auto-chat' ? '转发必填' : '可选'}</strong>
+              <strong>{mode === 'boss-auto-chat' ? '可复用' : '可选'}</strong>
             </div>
             <div className="run-advanced-grid">
               {mode !== 'boss-auto-chat' && (
@@ -2357,7 +2358,7 @@ function RunJobView() {
                 <label>
                   <span>Boss 转发方式</span>
                   <select value={form.bossForwardMode} onChange={(event) => setField('bossForwardMode', event.target.value)}>
-                    <option value="">{mode === 'boss-auto-chat' ? '请选择' : '不转发'}</option>
+                    <option value="">复用已保存配置</option>
                     <option value="colleague">站内同事</option>
                     <option value="email">邮件转发</option>
                   </select>
