@@ -893,16 +893,18 @@ PLAYWRIGHT_HEADLESS=false rtk npm run dev -- \
 - 对匹配规则判定为符合的候选人依次执行：
   1. 保持当前在线简历浮窗打开，先执行已有的简历转发。
   2. 转发成功后立即记录 `forwarded: true`，再关闭在线简历浮窗返回右侧聊天区域。
-  3. 在 `#boss-chat-editor-input[contenteditable="true"]` 填写固定文本：`方便发一份你的简历过来吗？`
-  4. 点击 `.conversation-editor .submit`，并等待消息出现在 `.chat-message-list .message-item .text-content` 且编辑器清空。
+  3. 点击 `.toolbar-icon.changyongyu` 打开 `.phrase-content` 常用语浮窗。
+  4. 在 `.phrase-content li` 中按 `title` 精确选择 `方便发一份你的简历过来吗？`，确认话术进入编辑器后点击 `.conversation-editor .submit`。
   5. 等待 `.operate-exchange-left` 中的“换电话”按钮移除 `disabled` 状态。
   6. 点击“换电话”，等待 `.exchange-tooltip` 出现，再点击其中 `.boss-btn-primary` 的“确定”。
   7. 确认 Vue `ExchangePhone` 会话状态中的 `requestPhone`、`phone` 或交换电话消息状态已更新。
+- 对不符合要求的候选人，关闭在线简历浮窗后打开同一常用语浮窗，选择页面完整话术 `对不起，看了你的简历以后觉得不太合适，希望你早日找到满意的工作机会`，再点击主发送按钮；不执行转发或换电话。
+- 两类消息都必须从常用语浮窗选择，禁止直接向 `contenteditable` 填写文本。点击话术条目后统一使用主发送按钮，避免误触条目右侧快捷发送。
 - 转发失败时不发送聊天消息或请求换电话，候选人结果记为 `failed`。
 - 转发成功后的聊天或换电话步骤失败时，候选人仍保留 `forwarded: true` 并记为 `failed`，总结邮件显示“已转发，但联系动作未完成”及错误原因。
 - 动作具有幂等保护：消息列表已有完全相同的固定文本时不重复发送；`requestPhone`、已交换电话或待交换电话状态已存在时不重复请求。
-- 不符合要求的候选人不发送消息、不点击换电话、不转发简历。
-- 运行结果增加 `chatMessageSent`、`phoneExchangeRequested`，汇总增加 `chatMessagesSent`、`phoneExchangeRequests`；总结邮件会显示每位符合候选人的聊天、换电话和转发状态。
+- 不符合要求的候选人只发送不合适常用语，不点击换电话、不转发简历。
+- 运行结果增加 `chatMessageSent`、`phoneExchangeRequested`，汇总增加 `chatMessagesSent`、`phoneExchangeRequests`；总结邮件会分别显示符合候选人的求简历常用语/换电话/转发状态，以及不符合候选人的不合适常用语状态。
 - 现场结构只做只读确认，没有在当前已读会话或红点候选人上发送消息、确认换电话或执行转发。
 
 阶段 9 首次真实运行修复与结果：

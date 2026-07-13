@@ -5496,6 +5496,7 @@ describe('scoring run semantics', () => {
     const chatPage = {} as Page;
     const forwardedCandidates: string[] = [];
     const contactedCandidates: string[] = [];
+    const rejectedCandidates: string[] = [];
     const qualifiedActionOrder: string[] = [];
     const summaryDeliveries: Array<{ recipient: string; ccEmails?: string[] }> = [];
     let scoreCalled = false;
@@ -5511,28 +5512,37 @@ describe('scoring run semantics', () => {
       jobName: '物业电工',
       unreadCount: 2,
     }, {
-      conversationId: 'conversation-without-jd',
+      conversationId: 'conversation-unmatched',
       candidateName: '候选人乙',
+      jobName: '物业电工',
+      unreadCount: 1,
+    }, {
+      conversationId: 'conversation-without-jd',
+      candidateName: '候选人丙',
       jobName: '未保存岗位',
       unreadCount: 1,
     }];
-    indexModule.openBossUnreadConversationRef.fn = async (_page, conversation) => ({
-      conversation,
-      candidate: {
-        candidateId: 'candidate-matched',
-        name: '候选人甲',
-      },
-      resume: buildResume('candidate-matched'),
-    });
+    indexModule.openBossUnreadConversationRef.fn = async (_page, conversation) => {
+      const matched = conversation.conversationId === 'conversation-matched';
+      const candidateId = matched ? 'candidate-matched' : 'candidate-unmatched';
+      return {
+        conversation,
+        candidate: {
+          candidateId,
+          name: matched ? '候选人甲' : '候选人乙',
+        },
+        resume: buildResume(candidateId),
+      };
+    };
     indexModule.openAndParseBossChatResumeRef.fn = async (_page, opened) => opened.resume;
     indexModule.scoreResumeAgainstJobRef.fn = async () => {
       scoreCalled = true;
       return buildScore();
     };
-    indexModule.evaluateBossChatHardRequirementsRef.fn = () => ({
-      allMet: true,
+    indexModule.evaluateBossChatHardRequirementsRef.fn = (resume) => ({
+      allMet: resume.candidateId === 'candidate-matched',
       criteria: [],
-      rejectionReasons: [],
+      rejectionReasons: resume.candidateId === 'candidate-matched' ? [] : ['缺少高压电工证'],
     });
     indexModule.forwardBossResumeRef.fn = async (_page, candidate) => {
       qualifiedActionOrder.push('forward');
@@ -5546,6 +5556,13 @@ describe('scoring run semantics', () => {
         messageAlreadyPresent: false,
         phoneExchangeRequested: true,
         phoneExchangeAlreadyRequested: false,
+      };
+    };
+    indexModule.contactBossUnqualifiedCandidateRef.fn = async () => {
+      rejectedCandidates.push('candidate-unmatched');
+      return {
+        messageSent: true,
+        messageAlreadyPresent: false,
       };
     };
     indexModule.closeBossChatResumeRef.fn = async () => undefined;
@@ -5578,11 +5595,11 @@ describe('scoring run semantics', () => {
 
     assert.equal(Array.isArray(result), false);
     const summary = result as import('../index.js').BossAutoChatRunSummary;
-    assert.equal(summary.unreadConversations, 2);
-    assert.equal(summary.reviewedConversations, 1);
+    assert.equal(summary.unreadConversations, 3);
+    assert.equal(summary.reviewedConversations, 2);
     assert.equal(summary.matchedCandidates, 1);
     assert.equal(summary.forwardedCandidates, 1);
-    assert.equal(summary.chatMessagesSent, 1);
+    assert.equal(summary.chatMessagesSent, 2);
     assert.equal(summary.phoneExchangeRequests, 1);
     assert.equal(summary.skippedConversations, 1);
     assert.equal(summary.matchMode, 'all-hard-requirements');
@@ -5590,13 +5607,16 @@ describe('scoring run semantics', () => {
     assert.equal(scoreCalled, false);
     assert.deepStrictEqual(forwardedCandidates, ['candidate-matched']);
     assert.deepStrictEqual(contactedCandidates, ['candidate-matched']);
+    assert.deepStrictEqual(rejectedCandidates, ['candidate-unmatched']);
     assert.deepStrictEqual(qualifiedActionOrder, ['forward', 'contact']);
     assert.deepStrictEqual(summaryDeliveries, [{
       recipient: 'summary@qq.com',
       ccEmails: ['audit@hotmail.com'],
     }]);
-    assert.equal(summary.items[1]?.status, 'skipped_missing_jd');
-    assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), ['conversation-matched']);
+    assert.equal(summary.items[1]?.status, 'not_matched');
+    assert.equal(summary.items[1]?.chatMessageSent, true);
+    assert.equal(summary.items[2]?.status, 'skipped_missing_jd');
+    assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), ['conversation-matched', 'conversation-unmatched']);
   });
 
   it('preserves successful Boss forwarding when a later contact action fails', async () => {

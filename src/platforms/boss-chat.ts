@@ -10,6 +10,7 @@ import {
 
 const bossChatUrl = 'https://www.zhipin.com/web/chat/index';
 export const bossQualifiedCandidateChatMessage = '方便发一份你的简历过来吗？';
+export const bossUnqualifiedCandidateChatMessage = '对不起，看了你的简历以后觉得不太合适，希望你早日找到满意的工作机会';
 
 export interface BossUnreadConversation {
   conversationId: string;
@@ -56,6 +57,11 @@ export interface BossQualifiedContactResult {
   messageAlreadyPresent: boolean;
   phoneExchangeRequested: boolean;
   phoneExchangeAlreadyRequested: boolean;
+}
+
+export interface BossChatMessageResult {
+  messageSent: boolean;
+  messageAlreadyPresent: boolean;
 }
 
 function normalizeText(value: string | undefined): string | undefined {
@@ -371,9 +377,52 @@ async function hasBossChatMessage(page: Page, message: string): Promise<boolean>
   ), message);
 }
 
-export async function sendBossQualifiedCandidateMessage(
+async function chooseBossCommonPhrase(page: Page, message: string): Promise<void> {
+  const editor = page.locator('#boss-chat-editor-input[contenteditable="true"]');
+  const currentEditorText = normalizeText(await editor.textContent() ?? '');
+  if (currentEditorText === message) {
+    return;
+  }
+  if (currentEditorText) {
+    throw new Error(`Boss chat editor contains unexpected text before choosing a common phrase: ${currentEditorText}`);
+  }
+
+  const trigger = page.locator('.toolbar-box-left .operate-icon-item').filter({
+    has: page.locator('.toolbar-icon.changyongyu'),
+  });
+  const triggerCount = await trigger.count();
+  if (triggerCount !== 1) {
+    throw new Error(`Expected one Boss common-phrase control, found ${triggerCount}.`);
+  }
+
+  const phraseContent = trigger.locator('.phrase-content');
+  if (!await phraseContent.isVisible().catch(() => false)) {
+    await trigger.click({ timeout: config.playwright.resumeDetailTimeoutMs });
+  }
+  await phraseContent.waitFor({ state: 'visible', timeout: config.playwright.resumeDetailTimeoutMs });
+  const phraseItems = phraseContent.locator('li');
+  const phraseEntries = await phraseItems.evaluateAll((elements) => elements.map((element, index) => ({
+    index,
+    title: (element.getAttribute('title') ?? '').replace(/\s+/g, ' ').trim(),
+  })));
+  const matches = phraseEntries.filter((entry) => entry.title === message);
+  if (matches.length !== 1) {
+    throw new Error(`Boss common phrase "${message}" matched ${matches.length} items. Available phrases: ${phraseEntries.map((entry) => entry.title).filter(Boolean).join(' | ') || '(none)'}`);
+  }
+
+  await phraseItems.nth(matches[0]!.index).click({
+    position: { x: 8, y: 8 },
+    timeout: config.playwright.resumeDetailTimeoutMs,
+  });
+  await page.waitForFunction((expectedMessage) => {
+    const editorElement = document.querySelector<HTMLElement>('#boss-chat-editor-input[contenteditable="true"]');
+    return (editorElement?.innerText ?? editorElement?.textContent ?? '').replace(/\s+/g, ' ').trim() === expectedMessage;
+  }, message, { timeout: config.playwright.resumeDetailTimeoutMs, polling: 100 });
+}
+
+export async function sendBossCommonPhraseMessage(
   page: Page,
-  message = bossQualifiedCandidateChatMessage,
+  message: string,
 ): Promise<{ sent: boolean; alreadyPresent: boolean }> {
   if (await hasBossChatMessage(page, message)) {
     return { sent: true, alreadyPresent: true };
@@ -387,13 +436,8 @@ export async function sendBossQualifiedCandidateMessage(
     throw new Error(`Expected one Boss chat editor and submit control, found editor=${editorCount}, submit=${submitCount}.`);
   }
 
-  await editor.fill(message, { timeout: config.playwright.resumeDetailTimeoutMs });
-  const editorText = normalizeText(await editor.textContent() ?? '');
-  if (editorText !== message) {
-    throw new Error('Boss chat editor did not retain the qualified-candidate message.');
-  }
-
-  await submit.evaluate((element) => (element as HTMLElement).click());
+  await chooseBossCommonPhrase(page, message);
+  await submit.click({ timeout: config.playwright.resumeDetailTimeoutMs });
   await page.waitForFunction((expectedMessage) => {
     const messageExists = Array.from(document.querySelectorAll('.chat-message-list .message-item .text-content'))
       .some((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim() === expectedMessage);
@@ -402,6 +446,18 @@ export async function sendBossQualifiedCandidateMessage(
   }, message, { timeout: config.playwright.resumeDetailTimeoutMs, polling: 200 });
 
   return { sent: true, alreadyPresent: false };
+}
+
+export async function sendBossQualifiedCandidateMessage(
+  page: Page,
+): Promise<{ sent: boolean; alreadyPresent: boolean }> {
+  return sendBossCommonPhraseMessage(page, bossQualifiedCandidateChatMessage);
+}
+
+export async function sendBossUnqualifiedCandidateMessage(
+  page: Page,
+): Promise<{ sent: boolean; alreadyPresent: boolean }> {
+  return sendBossCommonPhraseMessage(page, bossUnqualifiedCandidateChatMessage);
 }
 
 async function readBossPhoneExchangeState(page: Page): Promise<{
@@ -481,6 +537,14 @@ export async function contactBossQualifiedCandidate(page: Page): Promise<BossQua
     messageAlreadyPresent: message.alreadyPresent,
     phoneExchangeRequested: phone.requested,
     phoneExchangeAlreadyRequested: phone.alreadyRequested,
+  };
+}
+
+export async function contactBossUnqualifiedCandidate(page: Page): Promise<BossChatMessageResult> {
+  const message = await sendBossUnqualifiedCandidateMessage(page);
+  return {
+    messageSent: message.sent,
+    messageAlreadyPresent: message.alreadyPresent,
   };
 }
 

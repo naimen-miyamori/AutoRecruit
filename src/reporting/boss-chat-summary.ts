@@ -46,8 +46,10 @@ function renderItems(items: BossChatReviewItem[], emptyText: string, includeReas
 
   return items.map((item) => {
     const contact = item.matched
-      ? `，聊天${item.chatMessageSent ? '已发送' : '未发送'}，换电话${item.phoneExchangeRequested ? '已请求' : '未请求'}`
-      : '';
+      ? `，符合常用语${item.chatMessageSent ? '已发送' : '未发送'}，换电话${item.phoneExchangeRequested ? '已请求' : '未请求'}`
+      : item.matched === false
+        ? `，不合适常用语${item.chatMessageSent ? '已发送' : '未发送'}${item.error ? `：${item.error}` : ''}`
+        : '';
     const forwarding = item.forwarded
       ? item.error
         ? `，已转发，但联系动作未完成：${item.error}`

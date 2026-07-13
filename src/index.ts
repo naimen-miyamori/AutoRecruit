@@ -14,6 +14,7 @@ import {
   closeBossChatResume,
   collectBossUnreadConversations,
   contactBossQualifiedCandidate,
+  contactBossUnqualifiedCandidate,
   openAndParseBossChatResume,
   openBossChatPage,
   openBossUnreadConversation,
@@ -212,6 +213,7 @@ export const openAndParseBossChatResumeRef = { fn: openAndParseBossChatResume };
 export const forwardBossResumeRef = { fn: forwardBossResume };
 export const closeBossChatResumeRef = { fn: closeBossChatResume };
 export const contactBossQualifiedCandidateRef = { fn: contactBossQualifiedCandidate };
+export const contactBossUnqualifiedCandidateRef = { fn: contactBossUnqualifiedCandidate };
 export const evaluateBossChatHardRequirementsRef = { fn: evaluatePropertyElectricianHardRequirements };
 export const sendBossChatSummaryRef = { fn: sendBossChatSummary };
 export { JobStore };
@@ -992,6 +994,13 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
             ...item,
             chatMessageSent: contactResult.messageSent,
             phoneExchangeRequested: contactResult.phoneExchangeRequested,
+          };
+        } else {
+          await closeBossChatResumeRef.fn(chatPage);
+          const contactResult = await contactBossUnqualifiedCandidateRef.fn(chatPage);
+          item = {
+            ...item,
+            chatMessageSent: contactResult.messageSent,
           };
         }
       } catch (error) {

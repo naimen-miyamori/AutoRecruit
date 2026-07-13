@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { chromium } from 'playwright';
-import { collectBossUnreadConversations, contactBossQualifiedCandidate, parseBossChatResumeSnapshot } from '../platforms/boss-chat.js';
+import {
+  bossQualifiedCandidateChatMessage,
+  bossUnqualifiedCandidateChatMessage,
+  collectBossUnreadConversations,
+  contactBossQualifiedCandidate,
+  contactBossUnqualifiedCandidate,
+  parseBossChatResumeSnapshot,
+} from '../platforms/boss-chat.js';
 import { evaluatePropertyElectricianHardRequirements } from '../scoring/boss-chat-hard-requirements.js';
 import { renderBossChatSummaryMarkdown } from '../reporting/boss-chat-summary.js';
 import type { BossChatReviewRun, CandidateResume } from '../types/job.js';
@@ -109,14 +116,25 @@ describe('Boss auto-chat resume parsing', () => {
   });
 });
 
-describe('Boss qualified candidate contact actions', () => {
-  it('sends the fixed message and confirms phone exchange without duplicating retries', async () => {
+describe('Boss candidate contact actions', () => {
+  it('sends matched and unmatched common phrases and requests phone only for matched candidates', async () => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
 
     try {
       await page.setContent(`
         <div class="chat-message-list"></div>
+        <div class="toolbar-box-left">
+          <div class="operate-icon-item" id="phrase-trigger" style="width:32px;height:32px">
+            <div class="toolbar-icon changyongyu" style="width:24px;height:24px">常</div>
+            <div class="phrase-content" style="display:none;width:700px;height:80px">
+              <ul>
+                <li style="display:block;width:680px;height:30px" title="${bossQualifiedCandidateChatMessage}">${bossQualifiedCandidateChatMessage}<span class="phrase-send">发送</span></li>
+                <li style="display:block;width:680px;height:30px" title="${bossUnqualifiedCandidateChatMessage}">${bossUnqualifiedCandidateChatMessage}<span class="phrase-send">发送</span></li>
+              </ul>
+            </div>
+          </div>
+        </div>
         <div class="conversation-editor">
           <div id="boss-chat-editor-input" contenteditable="true"></div>
           <div class="submit">发送</div>
@@ -134,6 +152,8 @@ describe('Boss qualified candidate contact actions', () => {
         const messageList = document.querySelector('.chat-message-list')!;
         const editor = document.querySelector<HTMLElement>('#boss-chat-editor-input')!;
         const submit = document.querySelector<HTMLElement>('.submit')!;
+        const phraseTrigger = document.querySelector<HTMLElement>('#phrase-trigger')!;
+        const phraseContent = phraseTrigger.querySelector<HTMLElement>('.phrase-content')!;
         const phoneItem = document.querySelector<HTMLElement>('#phone-item')!;
         const phoneButton = phoneItem.querySelector<HTMLElement>('.operate-btn')!;
         const tooltip = phoneItem.querySelector<HTMLElement>('.exchange-tooltip')!;
@@ -144,6 +164,19 @@ describe('Boss qualified candidate contact actions', () => {
           conversation$: conversation,
           isExchangePhoneBlueMsg: false,
         };
+        phraseTrigger.addEventListener('click', (event) => {
+          if ((event.target as Element).closest('li')) {
+            return;
+          }
+          phraseContent.style.display = 'block';
+        });
+        phraseContent.querySelectorAll('li').forEach((item) => {
+          item.addEventListener('click', (event) => {
+            event.stopPropagation();
+            editor.innerText = item.getAttribute('title') ?? '';
+            phraseContent.style.display = 'none';
+          });
+        });
         submit.addEventListener('click', () => {
           const message = editor.innerText.trim();
           const item = document.createElement('div');
@@ -166,6 +199,8 @@ describe('Boss qualified candidate contact actions', () => {
 
       const first = await contactBossQualifiedCandidate(page);
       const second = await contactBossQualifiedCandidate(page);
+      const unmatchedFirst = await contactBossUnqualifiedCandidate(page);
+      const unmatchedSecond = await contactBossUnqualifiedCandidate(page);
 
       assert.deepStrictEqual(first, {
         messageSent: true,
@@ -179,7 +214,19 @@ describe('Boss qualified candidate contact actions', () => {
         phoneExchangeRequested: true,
         phoneExchangeAlreadyRequested: true,
       });
-      assert.equal(await page.locator('.chat-message-list .message-item').count(), 1);
+      assert.deepStrictEqual(unmatchedFirst, {
+        messageSent: true,
+        messageAlreadyPresent: false,
+      });
+      assert.deepStrictEqual(unmatchedSecond, {
+        messageSent: true,
+        messageAlreadyPresent: true,
+      });
+      assert.equal(await page.locator('.chat-message-list .message-item').count(), 2);
+      assert.deepStrictEqual(
+        await page.locator('.chat-message-list .message-item .text-content').allTextContents(),
+        [bossQualifiedCandidateChatMessage, bossUnqualifiedCandidateChatMessage],
+      );
     } finally {
       await browser.close();
     }
@@ -283,6 +330,7 @@ describe('Boss property electrician hard requirements', () => {
         unreadCount: 1,
         status: 'not_matched',
         matched: false,
+        chatMessageSent: true,
         forwarded: false,
         hardRequirementEvaluation: rejected,
       }],
@@ -293,6 +341,7 @@ describe('Boss property electrician hard requirements', () => {
     assert.match(markdown, /候选人乙（ID: candidate-rejected）/);
     assert.match(markdown, /年龄为48岁，不满足小于47岁/);
     assert.match(markdown, /简历未发现明确的高压电工证证据/);
+    assert.match(markdown, /不合适常用语已发送/);
   });
 
   it('renders a contact failure without hiding successful forwarding', () => {

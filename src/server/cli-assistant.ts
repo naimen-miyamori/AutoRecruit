@@ -282,7 +282,7 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
   }
 
   if (kind === 'boss-auto-chat') {
-    warnings.push('风险：Boss 自动沟通审查会打开未读会话；对符合规则的候选人发送固定聊天消息、发起换电话请求，并把简历转发给指定站内同事或邮箱。');
+    warnings.push('风险：Boss 自动沟通审查会打开未读会话；对符合规则的候选人通过常用语发送求简历消息、发起换电话请求并转发简历，对不符合规则的候选人通过常用语发送不合适消息。');
     if (input.requireAllHardRequirements === true) {
       warnings.push('风险：只有所有硬性要求都有明确简历证据时才会转发；缺失信息按不符合处理。');
     }
