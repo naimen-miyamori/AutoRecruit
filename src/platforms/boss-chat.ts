@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { waitPlatformActionPace } from '../browser/pacing.js';
 import { config } from '../config.js';
 import type {
   BossCandidateReply,
@@ -20,6 +21,11 @@ const bossChatUrl = 'https://www.zhipin.com/web/chat/index';
 export const bossQualifiedCandidateChatMessage = '方便发一份你的简历过来吗？';
 export const bossUnqualifiedCandidateChatMessage = '对不起，看了你的简历以后觉得不太合适，希望你早日找到满意的工作机会';
 export const bossShanghaiOriginQuestionMessage = '是上海人吗？';
+
+async function runBossChatAction<T>(page: Page, action: () => Promise<T>): Promise<T> {
+  await waitPlatformActionPace(page, 'boss');
+  return action();
+}
 
 export interface BossUnreadConversation {
   conversationId: string;
@@ -241,24 +247,24 @@ function isBossChatPage(url: string): boolean {
 
 export async function openBossChatPage(page: Page): Promise<Page> {
   if (!isBossChatPage(page.url())) {
-    await page.locator('a[ka="menu-im"], a[href^="/web/chat/index"]').first().click({
+    await runBossChatAction(page, () => page.locator('a[ka="menu-im"], a[href^="/web/chat/index"]').first().click({
       timeout: config.playwright.searchPageTimeoutMs,
-    });
+    }));
     await page.waitForURL((url) => isBossChatPage(url.toString()), {
       timeout: config.playwright.searchPageTimeoutMs,
     });
   }
 
-  await page.reload({
+  await runBossChatAction(page, () => page.reload({
     waitUntil: 'domcontentloaded',
     timeout: config.playwright.searchPageTimeoutMs,
-  });
+  }));
 
   const unreadTab = page.locator('.chat-message-filter-left span').filter({ hasText: '未读' }).first();
   await unreadTab.waitFor({ state: 'visible', timeout: config.playwright.searchPageTimeoutMs });
   const className = await unreadTab.getAttribute('class') ?? '';
   if (!className.split(/\s+/).includes('active')) {
-    await unreadTab.click({ timeout: config.playwright.searchPageTimeoutMs });
+    await runBossChatAction(page, () => unreadTab.click({ timeout: config.playwright.searchPageTimeoutMs }));
   }
 
   await page.locator('.user-list').first().waitFor({ state: 'visible', timeout: config.playwright.searchPageTimeoutMs });
@@ -647,7 +653,7 @@ export async function openBossUnreadConversation(
     expectedName: conversation.candidateName,
   });
 
-  await items.nth(itemIndex).click({ timeout: Math.max(1, deadline - Date.now()) });
+  await runBossChatAction(page, () => items.nth(itemIndex).click({ timeout: Math.max(1, deadline - Date.now()) }));
   await page.waitForFunction(({ expectedConversationId, expectedName, wasAlreadyCurrent, previousMessageSignature }) => {
     type VueElement = HTMLElement & {
       __vue__?: {
@@ -743,8 +749,8 @@ export async function openAndParseBossChatResume(page: Page, opened: BossOpenedC
     throw new Error(`Expected one Boss chat resume introduction control, found ${onlineResumeCount}.`);
   }
 
-  await page.keyboard.press('Escape').catch(() => undefined);
-  await onlineResume.click({ timeout: config.playwright.resumeDetailTimeoutMs });
+  await runBossChatAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  await runBossChatAction(page, () => onlineResume.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
   if (!isBossChatPage(page.url())) {
     throw new Error(`Boss resume introduction click left the chat page unexpectedly: ${page.url()}`);
   }
@@ -792,7 +798,7 @@ async function chooseBossCommonPhrase(page: Page, message: string): Promise<void
 
   const phraseContent = trigger.locator('.phrase-content');
   if (!await phraseContent.isVisible().catch(() => false)) {
-    await trigger.click({ timeout: config.playwright.resumeDetailTimeoutMs });
+    await runBossChatAction(page, () => trigger.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
   }
   await phraseContent.waitFor({ state: 'visible', timeout: config.playwright.resumeDetailTimeoutMs });
   const phraseItems = phraseContent.locator('li');
@@ -805,10 +811,10 @@ async function chooseBossCommonPhrase(page: Page, message: string): Promise<void
     throw new Error(`Boss common phrase "${message}" matched ${matches.length} items. Available phrases: ${phraseEntries.map((entry) => entry.title).filter(Boolean).join(' | ') || '(none)'}`);
   }
 
-  await phraseItems.nth(matches[0]!.index).click({
+  await runBossChatAction(page, () => phraseItems.nth(matches[0]!.index).click({
     position: { x: 8, y: 8 },
     timeout: config.playwright.resumeDetailTimeoutMs,
-  });
+  }));
   await page.waitForFunction((expectedMessage) => {
     const editorElement = document.querySelector<HTMLElement>('#boss-chat-editor-input[contenteditable="true"]');
     return (editorElement?.innerText ?? editorElement?.textContent ?? '').replace(/\s+/g, ' ').trim() === expectedMessage;
@@ -832,7 +838,7 @@ export async function sendBossCommonPhraseMessage(
   }
 
   await chooseBossCommonPhrase(page, message);
-  await submit.click({ timeout: config.playwright.resumeDetailTimeoutMs });
+  await runBossChatAction(page, () => submit.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
   await page.waitForFunction((expectedMessage) => {
     const messageExists = Array.from(document.querySelectorAll('.chat-message-list .message-item .text-content'))
       .some((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim() === expectedMessage);
@@ -864,14 +870,14 @@ async function sendBossEditorMessage(
     throw new Error(`Boss chat editor contains unexpected text before typing a message: ${currentEditorText}`);
   }
   if (currentEditorText !== message) {
-    await editor.fill(message, { timeout: config.playwright.resumeDetailTimeoutMs });
+    await runBossChatAction(page, () => editor.fill(message, { timeout: config.playwright.resumeDetailTimeoutMs }));
   }
   await page.waitForFunction((expectedMessage) => {
     const editorElement = document.querySelector<HTMLElement>('#boss-chat-editor-input[contenteditable="true"]');
     return (editorElement?.innerText ?? editorElement?.textContent ?? '').replace(/\s+/g, ' ').trim() === expectedMessage;
   }, message, { timeout: config.playwright.resumeDetailTimeoutMs, polling: 100 });
 
-  await submit.click({ timeout: config.playwright.resumeDetailTimeoutMs });
+  await runBossChatAction(page, () => submit.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
   await page.waitForFunction((expectedMessage) => {
     const messageExists = Array.from(document.querySelectorAll('.chat-message-list .message-item .text-content'))
       .some((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim() === expectedMessage);
@@ -942,7 +948,7 @@ export async function requestBossPhoneExchange(page: Page): Promise<{ requested:
   }
 
   const phoneButton = phoneItem.locator('.operate-btn');
-  await phoneButton.evaluate((element) => (element as HTMLElement).click());
+  await runBossChatAction(page, () => phoneButton.evaluate((element) => (element as HTMLElement).click()));
   const confirmation = phoneItem.locator('.exchange-tooltip');
   await confirmation.waitFor({ state: 'visible', timeout: config.playwright.resumeDetailTimeoutMs });
   const confirmButton = confirmation.locator('.boss-btn-primary').filter({ hasText: '确定' });
@@ -951,7 +957,7 @@ export async function requestBossPhoneExchange(page: Page): Promise<{ requested:
     throw new Error(`Expected one Boss phone-exchange confirmation control, found ${confirmButtonCount}.`);
   }
 
-  await confirmButton.evaluate((element) => (element as HTMLElement).click());
+  await runBossChatAction(page, () => confirmButton.evaluate((element) => (element as HTMLElement).click()));
   await page.waitForFunction(() => {
     type ExchangePhoneViewModel = {
       $options?: { name?: string };

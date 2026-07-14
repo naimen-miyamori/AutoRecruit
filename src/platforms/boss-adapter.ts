@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { BrowserContext, Frame, Locator, Page } from 'playwright';
+import { waitPlatformActionPace } from '../browser/pacing.js';
 import { config } from '../config.js';
 import {
   buildSearchFilterDiscoveryStats,
@@ -28,6 +29,15 @@ const bossLoginUrl = 'https://www.zhipin.com/web/user/?ka=header-login';
 const bossAuthenticatedHomeUrl = 'https://www.zhipin.com/web/user/';
 const bossChatSearchUrl = 'https://www.zhipin.com/web/chat/search';
 const bossUnrestrictedJobName = '不限职位';
+
+async function runBossPageAction<T>(page: Page, action: () => Promise<T>): Promise<T> {
+  await waitPlatformActionPace(page, 'boss');
+  return action();
+}
+
+async function runBossFrameAction<T>(frame: Frame, action: () => Promise<T>): Promise<T> {
+  return runBossPageAction(frame.page(), action);
+}
 
 type BossCandidateCardSnapshot = {
   text: string;
@@ -180,7 +190,7 @@ async function openBossAuthenticatedHome(page: Page): Promise<Page> {
   }
 
   if (!/^https:\/\/(?:www\.)?zhipin\.com\/web\//i.test(currentUrl)) {
-    await page.goto(bossAuthenticatedHomeUrl, { waitUntil: 'domcontentloaded' });
+    await runBossPageAction(page, () => page.goto(bossAuthenticatedHomeUrl, { waitUntil: 'domcontentloaded' }));
   }
 
   await assertBossAuthenticated(page);
@@ -213,9 +223,9 @@ async function openBossSearchMenu(page: Page, deadline: number): Promise<void> {
     return;
   }
 
-  await page.locator('a[ka="menu-geek-search"], .menu-geeksearch a, .menu-geeksearch').first().click({
+  await runBossPageAction(page, () => page.locator('a[ka="menu-geek-search"], .menu-geeksearch a, .menu-geeksearch').first().click({
     timeout: remainingTime(deadline),
-  });
+  }));
   await page.waitForURL((url) => isBossChatSearchUrl(url.toString()), { timeout: remainingTime(deadline) });
 }
 
@@ -256,12 +266,12 @@ async function selectBossUnrestrictedJob(page: Page, deadline: number): Promise<
     return;
   }
 
-  await frame.locator('.search-job-list-C .ui-dropmenu-label, .search-job-list-C .search-current-job').first().click({
+  await runBossFrameAction(frame, () => frame.locator('.search-job-list-C .ui-dropmenu-label, .search-job-list-C .search-current-job').first().click({
     timeout: remainingTime(deadline),
-  });
-  await frame.locator('.search-job-list-C .ui-dropmenu-list >> text=不限职位').first().click({
+  }));
+  await runBossFrameAction(frame, () => frame.locator('.search-job-list-C .ui-dropmenu-list >> text=不限职位').first().click({
     timeout: remainingTime(deadline),
-  });
+  }));
   await frame.locator('.search-job-list-C .search-current-job, .search-job-list-C .ui-dropmenu-label').first().waitFor({
     timeout: remainingTime(deadline),
   });
@@ -300,9 +310,9 @@ async function applyBossSearchKeyword(page: Page, keyword: string, deadline: num
   }
 
   const keywordInput = frame.locator('input.search-input, .search-input').first();
-  await keywordInput.fill(normalizedKeyword, { timeout: remainingTime(deadline) });
-  await keywordInput.press('Enter', { timeout: remainingTime(deadline) }).catch(async () => {
-    await frame.locator('.icon-search').first().click({ timeout: remainingTime(deadline) });
+  await runBossFrameAction(frame, () => keywordInput.fill(normalizedKeyword, { timeout: remainingTime(deadline) }));
+  await runBossFrameAction(frame, () => keywordInput.press('Enter', { timeout: remainingTime(deadline) })).catch(async () => {
+    await runBossFrameAction(frame, () => frame.locator('.icon-search').first().click({ timeout: remainingTime(deadline) }));
   });
 
   await frame.waitForFunction(
@@ -713,12 +723,12 @@ async function collectBossExpandedMoreFilterSnapshot(
   configItem: BossStaticFilterConfig,
   deadline: number,
 ): Promise<BossStaticFilterSnapshot | undefined> {
-  await page.keyboard.press('Escape').catch(() => undefined);
-  await frame.press('body', 'Escape').catch(() => undefined);
+  await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  await runBossFrameAction(frame, () => frame.press('body', 'Escape')).catch(() => undefined);
 
   const filterItem = bossMoreFilterItemLocator(frame, configItem.label);
   await filterItem.scrollIntoViewIfNeeded({ timeout: Math.min(remainingTime(deadline), 3000) });
-  await filterItem.click({ timeout: Math.min(remainingTime(deadline), 3000) });
+  await runBossFrameAction(frame, () => filterItem.click({ timeout: Math.min(remainingTime(deadline), 3000) }));
 
   const targetIndex = bossMoreApplicationFilterIndexByLabel.get(configItem.label);
   await frame.waitForFunction(
@@ -825,8 +835,8 @@ async function collectBossExpandedMoreFilterSnapshot(
     index: targetIndex,
   });
 
-  await page.keyboard.press('Escape').catch(() => undefined);
-  await frame.press('body', 'Escape').catch(() => undefined);
+  await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  await runBossFrameAction(frame, () => frame.press('body', 'Escape')).catch(() => undefined);
   await frame.waitForTimeout(100).catch(() => undefined);
 
   return snapshot && snapshot.options.length > 0 ? snapshot : undefined;
@@ -1032,8 +1042,8 @@ async function waitForBossFilterSettle(frame: Frame, deadline: number): Promise<
   }
 
   const keywordInput = frame.locator('input.search-input, .search-input').first();
-  await keywordInput.press('Enter', { timeout: Math.min(remainingTime(deadline), 2000) }).catch(async () => {
-    await frame.locator('.icon-search').first().click({ timeout: Math.min(remainingTime(deadline), 2000) }).catch(() => undefined);
+  await runBossFrameAction(frame, () => keywordInput.press('Enter', { timeout: Math.min(remainingTime(deadline), 2000) })).catch(async () => {
+    await runBossFrameAction(frame, () => frame.locator('.icon-search').first().click({ timeout: Math.min(remainingTime(deadline), 2000) })).catch(() => undefined);
   });
   await frame.waitForFunction(
     () => document.querySelectorAll('.geek-info-card').length > 0
@@ -1059,6 +1069,7 @@ async function clickBossInlineApplicationFilter(
     timeout: Math.min(remainingTime(deadline), 5000),
   });
 
+  await waitPlatformActionPace(frame.page(), 'boss');
   const result = await frame.evaluate(({ rootSelector, optionSelector, targetValue }) => {
     const normalize = (text: string | null | undefined): string => (text ?? '').replace(/\s+/g, ' ').trim();
     const root = document.querySelector(rootSelector);
@@ -1104,8 +1115,8 @@ async function clickBossMoreApplicationFilter(
     throw new Error(`Unsupported Boss dropdown application filter: ${fieldId}`);
   }
 
-  await page.keyboard.press('Escape').catch(() => undefined);
-  await frame.press('body', 'Escape').catch(() => undefined);
+  await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  await runBossFrameAction(frame, () => frame.press('body', 'Escape')).catch(() => undefined);
 
   const filterItem = bossMoreFilterItemLocator(frame, label);
   await filterItem.scrollIntoViewIfNeeded({ timeout: Math.min(remainingTime(deadline), 3000) });
@@ -1125,7 +1136,7 @@ async function clickBossMoreApplicationFilter(
     }
   }
 
-  await filterItem.click({ timeout: Math.min(remainingTime(deadline), 5000) });
+  await runBossFrameAction(frame, () => filterItem.click({ timeout: Math.min(remainingTime(deadline), 5000) }));
   const targetIndex = bossMoreApplicationFilterIndexByLabel.get(label);
   await frame.waitForFunction(
     ({ targetLabel, index }) => {
@@ -1163,6 +1174,7 @@ async function clickBossMoreApplicationFilter(
     { timeout: Math.min(remainingTime(deadline), 5000), polling: 100 },
   );
 
+  await waitPlatformActionPace(frame.page(), 'boss');
   const result = await frame.evaluate(({ targetLabel, targetValue, index }) => {
     const normalize = (text: string | null | undefined): string => (text ?? '').replace(/\s+/g, ' ').trim();
     const isVisible = (element: Element | null): element is HTMLElement => {
@@ -1215,8 +1227,8 @@ async function clickBossMoreApplicationFilter(
     index: targetIndex,
   });
 
-  await page.keyboard.press('Escape').catch(() => undefined);
-  await frame.press('body', 'Escape').catch(() => undefined);
+  await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  await runBossFrameAction(frame, () => frame.press('body', 'Escape')).catch(() => undefined);
 
   if (result === 'clicked') {
     await waitForBossFilterSettle(frame, deadline);
@@ -1229,12 +1241,12 @@ async function openBossMoreFilterDropdown(
   label: string,
   deadline: number,
 ): Promise<void> {
-  await page.keyboard.press('Escape').catch(() => undefined);
-  await frame.press('body', 'Escape').catch(() => undefined);
+  await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  await runBossFrameAction(frame, () => frame.press('body', 'Escape')).catch(() => undefined);
 
   const filterItem = bossMoreFilterItemLocator(frame, label);
   await filterItem.scrollIntoViewIfNeeded({ timeout: Math.min(remainingTime(deadline), 3000) });
-  await filterItem.click({ timeout: Math.min(remainingTime(deadline), 5000) });
+  await runBossFrameAction(frame, () => filterItem.click({ timeout: Math.min(remainingTime(deadline), 5000) }));
   const targetIndex = bossMoreApplicationFilterIndexByLabel.get(label);
   await frame.waitForFunction(
     ({ targetLabel, index }) => {
@@ -1280,6 +1292,7 @@ async function clickBossExpectedSalaryBoundary(
   boundaryIndex: 0 | 1,
 ): Promise<void> {
   const targetIndex = bossMoreApplicationFilterIndexByLabel.get(label);
+  await waitPlatformActionPace(frame.page(), 'boss');
   const clicked = await frame.evaluate(({ targetLabel, targetValue, targetBoundaryIndex, index }) => {
     const normalize = (text: string | null | undefined): string => (text ?? '').replace(/\s+/g, ' ').trim();
     const isVisible = (element: Element | null): element is HTMLElement => {
@@ -1368,12 +1381,13 @@ async function applyBossExpectedSalaryApplicationFilter(
   await frame.waitForTimeout(Math.min(150, remainingTime(deadline))).catch(() => undefined);
   await openBossMoreFilterDropdown(page, frame, label, deadline);
   await clickBossExpectedSalaryBoundary(frame, label, input.max, 1);
-  await page.keyboard.press('Escape').catch(() => undefined);
-  await frame.press('body', 'Escape').catch(() => undefined);
+  await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  await runBossFrameAction(frame, () => frame.press('body', 'Escape')).catch(() => undefined);
   await waitForBossFilterSettle(frame, deadline);
 }
 
 async function clickBossAgePreset(frame: Frame, value: string): Promise<boolean> {
+  await waitPlatformActionPace(frame.page(), 'boss');
   return frame.evaluate((targetValue) => {
     const normalize = (text: string | null | undefined): string => (text ?? '').replace(/\s+/g, ' ').trim();
     const isVisible = (element: Element | null): element is HTMLElement => {
@@ -1447,7 +1461,7 @@ async function clickBossAgeCustomBoundary(
   deadline: number,
 ): Promise<void> {
   const dropdown = frame.locator('.age-custom .dropdown-wrap').nth(boundaryIndex);
-  await dropdown.click({ timeout: Math.min(remainingTime(deadline), 3000) });
+  await runBossFrameAction(frame, () => dropdown.click({ timeout: Math.min(remainingTime(deadline), 3000) }));
   await frame.waitForFunction(
     (targetBoundaryIndex) => {
       const isVisible = (element: Element | null): element is HTMLElement => {
@@ -1469,6 +1483,7 @@ async function clickBossAgeCustomBoundary(
     { timeout: Math.min(remainingTime(deadline), 3000), polling: 100 },
   );
 
+  await waitPlatformActionPace(frame.page(), 'boss');
   const clicked = await frame.evaluate(({ targetBoundaryIndex, targetValue }) => {
     const normalize = (text: string | null | undefined): string => (text ?? '').replace(/\s+/g, ' ').trim();
     const isVisible = (element: Element | null): element is HTMLElement => {
@@ -1544,8 +1559,8 @@ async function applyBossAgeApplicationFilter(
   await clickBossAgeCustomBoundary(frame, min, 0, deadline);
   await frame.waitForTimeout(Math.min(150, remainingTime(deadline))).catch(() => undefined);
   await clickBossAgeCustomBoundary(frame, max, 1, deadline);
-  await page.keyboard.press('Escape').catch(() => undefined);
-  await frame.press('body', 'Escape').catch(() => undefined);
+  await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  await runBossFrameAction(frame, () => frame.press('body', 'Escape')).catch(() => undefined);
   await waitForBossFilterSettle(frame, deadline);
 }
 
@@ -1596,7 +1611,7 @@ async function applyBossApplicationFilter(
       status: 'applied',
     };
   } catch (error) {
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
     return {
       platform: 'boss',
       condition,
@@ -1781,8 +1796,8 @@ export async function closeExistingBossResumeDialog(page: Page, deadline: number
   }
 
   const closeButton = activeDialog.locator('.boss-popup__close, .close-btn, [ka="dialog_close"], .boss-dialog__close').first();
-  await closeButton.click({ timeout: Math.min(remainingTime(deadline), 3000) }).catch(async () => {
-    await page.keyboard.press('Escape').catch(() => undefined);
+  await runBossPageAction(page, () => closeButton.click({ timeout: Math.min(remainingTime(deadline), 3000) })).catch(async () => {
+    await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
   });
   await activeDialog.waitFor({ state: 'hidden', timeout: Math.min(remainingTime(deadline), 5000) }).catch(() => undefined);
 }
@@ -1859,10 +1874,10 @@ async function openBossResumeDetail(_context: BrowserContext, searchPage: Page, 
   const safeClickTarget = candidateAnchor.locator('.geek-info-detail, .search-geek-info, .card-inner').first();
   const clickable = await safeClickTarget.count().catch(() => 0) > 0 ? safeClickTarget : candidateAnchor;
 
-  await clickable.click({
+  await runBossFrameAction(frame, () => clickable.click({
     timeout: remainingTime(deadline),
     position: { x: 24, y: 24 },
-  });
+  }));
   await waitForBossResumeDetailReady(searchPage, deadline);
   return searchPage;
 }
@@ -1920,7 +1935,7 @@ async function openBossForwardDialog(page: Page, deadline: number): Promise<Loca
     throw new Error(`Expected one visible Boss resume forward action, found ${actionCount}.`);
   }
 
-  await action.click({ timeout: remainingTime(deadline) });
+  await runBossPageAction(page, () => action.click({ timeout: remainingTime(deadline) }));
   return waitForBossForwardDialog(page, deadline);
 }
 
@@ -1937,7 +1952,7 @@ async function selectBossForwardMode(dialog: Locator, mode: BossForwardMode, dea
   }
 
   if (!normalizeText(await tab.getAttribute('class') ?? '').split(' ').includes('cur')) {
-    await tab.click({ timeout: remainingTime(deadline) });
+    await runBossPageAction(dialog.page(), () => tab.click({ timeout: remainingTime(deadline) }));
   }
 
   const placeholder = mode === 'colleague' ? '姓名、职位、邮箱' : '请输入收件人邮箱';
@@ -1947,7 +1962,7 @@ async function selectBossForwardMode(dialog: Locator, mode: BossForwardMode, dea
 }
 
 async function selectBossForwardColleague(dialog: Locator, input: Locator, recipient: string, deadline: number): Promise<void> {
-  await input.fill(recipient, { timeout: remainingTime(deadline) });
+  await runBossPageAction(dialog.page(), () => input.fill(recipient, { timeout: remainingTime(deadline) }));
   const options = dialog.locator('.check-list li, .selector [class*="option"], .selector [class*="result-item"]');
   await options.first().waitFor({ state: 'visible', timeout: remainingTime(deadline) });
 
@@ -1971,7 +1986,7 @@ async function selectBossForwardColleague(dialog: Locator, input: Locator, recip
     throw new Error(`Boss colleague forward recipient "${recipient}" matched ${matches.length} options. Visible options: ${optionTexts.slice(0, 10).join(' | ') || '(none)'}`);
   }
 
-  await options.nth(matches[0]!.index).click({ timeout: remainingTime(deadline) });
+  await runBossPageAction(dialog.page(), () => options.nth(matches[0]!.index).click({ timeout: remainingTime(deadline) }));
 }
 
 async function fillBossForwardForm(
@@ -1985,11 +2000,11 @@ async function fillBossForwardForm(
   if (mode === 'colleague') {
     await selectBossForwardColleague(dialog, input, recipient, deadline);
   } else {
-    await input.fill(recipient, { timeout: remainingTime(deadline) });
+    await runBossPageAction(dialog.page(), () => input.fill(recipient, { timeout: remainingTime(deadline) }));
   }
 
   const message = dialog.locator('textarea[placeholder="请输入留言"]');
-  await message.fill(candidateId, { timeout: remainingTime(deadline) });
+  await runBossPageAction(dialog.page(), () => message.fill(candidateId, { timeout: remainingTime(deadline) }));
   const actualMessage = await message.inputValue();
   if (actualMessage !== candidateId) {
     throw new Error(`Boss forward message did not retain candidate ID ${candidateId}.`);
@@ -2003,7 +2018,7 @@ async function confirmBossForward(dialog: Locator, candidateId: string, deadline
     throw new Error(`Expected one Boss forward confirmation button for candidate ${candidateId}, found ${buttonCount}.`);
   }
 
-  await forwardButton.click({ timeout: remainingTime(deadline) });
+  await runBossPageAction(dialog.page(), () => forwardButton.click({ timeout: remainingTime(deadline) }));
   await dialog.waitFor({ state: 'hidden', timeout: remainingTime(deadline) }).catch(async () => {
     const dialogText = await dialog.innerText().catch(() => '');
     throw new Error(`Boss resume forward did not complete for candidate ${candidateId}. Dialog text: ${normalizeText(dialogText).slice(0, 500)}`);
@@ -2268,7 +2283,7 @@ export const bossAdapter: PlatformAdapter = {
   loginUrl: bossLoginUrl,
   storageStateFileName: 'storage-state.boss.json',
   openLoginPage: async (page) => {
-    await page.goto(bossLoginUrl, { waitUntil: 'domcontentloaded' });
+    await runBossPageAction(page, () => page.goto(bossLoginUrl, { waitUntil: 'domcontentloaded' }));
   },
   openAuthenticatedHome: openBossAuthenticatedHome,
   assertAuthenticated: assertBossAuthenticated,

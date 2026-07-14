@@ -118,13 +118,13 @@ const actionDelayMinMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MIN_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MIN_MS', 2000),
   zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MIN_MS', 0),
-  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MIN_MS', 0),
+  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MIN_MS', 1000),
 };
 const actionDelayMaxMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MAX_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MAX_MS', 3000),
   zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MAX_MS', 0),
-  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MAX_MS', 0),
+  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MAX_MS', 2000),
 };
 const candidateDelayMinMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'CANDIDATE_DELAY_MIN_MS', 0),

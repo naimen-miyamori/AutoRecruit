@@ -97,13 +97,13 @@ test('browser pacing and reuse defaults are platform-specific', () => {
     '51job': 0,
     liepin: 2000,
     zhilian: 0,
-    boss: 0,
+    boss: 1000,
   });
   assert.deepEqual(config.playwright.actionDelayMaxMsByPlatform, {
     '51job': 0,
     liepin: 3000,
     zhilian: 0,
-    boss: 0,
+    boss: 2000,
   });
   assert.deepEqual(config.playwright.candidateDelayMinMsByPlatform, {
     '51job': 0,
