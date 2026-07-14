@@ -20,8 +20,9 @@ import { renderBossChatSummaryMarkdown } from '../reporting/boss-chat-summary.js
 import type { BossChatReviewRun, CandidateResume } from '../types/job.js';
 
 describe('Boss auto-chat resume parsing', () => {
-  it('reloads the Boss chat page before reading unread conversations', async () => {
+  it('uses the current Boss chat page without reloading it', async () => {
     const events: string[] = [];
+    let reloadCalls = 0;
     const unreadTab = {
       waitFor: async () => { events.push('unread-tab-ready'); },
       getAttribute: async () => 'active',
@@ -29,7 +30,7 @@ describe('Boss auto-chat resume parsing', () => {
     };
     const page = {
       url: () => 'https://www.zhipin.com/web/chat/index',
-      reload: async () => { events.push('reload'); },
+      reload: async () => { reloadCalls += 1; },
       locator: (selector: string) => {
         if (selector === '.chat-message-filter-left span') {
           return {
@@ -48,7 +49,8 @@ describe('Boss auto-chat resume parsing', () => {
     } as unknown as Page;
 
     assert.equal(await openBossChatPage(page), page);
-    assert.deepStrictEqual(events, ['reload', 'unread-tab-ready', 'user-list-ready']);
+    assert.equal(reloadCalls, 0);
+    assert.deepStrictEqual(events, ['unread-tab-ready', 'user-list-ready']);
   });
 
   it('classifies prior chat from Boss state and visible message history', () => {
@@ -149,6 +151,88 @@ describe('Boss auto-chat resume parsing', () => {
         type: 'text',
         content: '本次未读消息',
       }]);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('ignores Boss conversation chrome when assessing a first-contact conversation', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+
+    try {
+      await page.setContent(`
+        <div class="user-list">
+          <div class="geek-item" data-id="conversation-first-contact">
+            <span class="geek-name">候选人甲</span>
+            <span class="source-job">物业电工</span>
+          </div>
+        </div>
+        <div class="chat-conversation"></div>
+        <div class="base-info-single-container"></div>
+        <div class="chat-message-list">
+          <div id="position-card" class="message-item"><span class="text-content">08:40 7月14日 沟通的职位-物业电工</span></div>
+          <div id="candidate-greeting" class="message-item"><span class="text-content">我对物业电工很感兴趣，希望可以深聊，谢谢！</span></div>
+          <div id="quick-reply" class="message-item"><span class="text-content">快速回复 你好，可以交换信息，进一步聊下。</span></div>
+          <div id="recontact-tip" class="message-item"><span class="text-content">该牛人近30天内未与您沟通过，首次回聊该牛人消息需消耗回聊次数。选择不合适时不消耗次数</span></div>
+        </div>
+      `);
+      await page.evaluate(() => {
+        type VueElement = HTMLElement & { __vue__?: unknown };
+        (document.querySelector('.chat-conversation') as VueElement).__vue__ = {
+          currentData$: {
+            uniqueId: 'conversation-first-contact',
+            expectId: 'candidate-first-contact',
+            name: '候选人甲',
+            jobName: '物业电工',
+            bothTalked: false,
+          },
+        };
+        (document.querySelector('.base-info-single-container') as VueElement).__vue__ = {
+          conversation$: {
+            uniqueId: 'conversation-first-contact',
+            expectId: 'candidate-first-contact',
+            name: '候选人甲',
+            toPosition: '物业电工',
+            ageDesc: '46岁',
+            bothTalked: false,
+            workExpList: [],
+            eduExpList: [],
+          },
+        };
+        (document.querySelector('#position-card') as VueElement).__vue__ = {
+          message$: { messageId: 'position-card', messageType: 3, type: 'resume', isSelf: false, templateId: 3 },
+        };
+        (document.querySelector('#candidate-greeting') as VueElement).__vue__ = {
+          message$: { messageId: 'candidate-greeting', messageType: 3, type: 'text', isSelf: false, templateId: 1 },
+        };
+        (document.querySelector('#quick-reply') as VueElement).__vue__ = {
+          message$: { messageId: 'quick-reply', messageType: 4, type: 'listCard', isSelf: false, templateId: 6 },
+        };
+        (document.querySelector('#recontact-tip') as VueElement).__vue__ = {
+          message$: { messageId: 'recontact-tip', messageType: 4, type: 'text', isSelf: false, templateId: 3 },
+        };
+      });
+
+      const opened = await openBossUnreadConversation(page, {
+        conversationId: 'conversation-first-contact',
+        candidateName: '候选人甲',
+        jobName: '物业电工',
+        unreadCount: 1,
+      });
+
+      assert.deepStrictEqual(opened.previousChat, {
+        previouslyChatted: false,
+        basis: 'none',
+        visibleMessageCount: 1,
+        unreadCountAtOpen: 1,
+      });
+      assert.deepStrictEqual(opened.newCandidateReplies, [{
+        messageId: 'candidate-greeting',
+        type: 'text',
+        content: '我对物业电工很感兴趣，希望可以深聊，谢谢！',
+      }]);
+      assert.equal(opened.newCandidateRepliesError, undefined);
     } finally {
       await browser.close();
     }

@@ -249,11 +249,6 @@ export async function openBossChatPage(page: Page): Promise<Page> {
     });
   }
 
-  await page.reload({
-    waitUntil: 'domcontentloaded',
-    timeout: config.playwright.searchPageTimeoutMs,
-  });
-
   const unreadTab = page.locator('.chat-message-filter-left span').filter({ hasText: '未读' }).first();
   await unreadTab.waitFor({ state: 'visible', timeout: config.playwright.searchPageTimeoutMs });
   const className = await unreadTab.getAttribute('class') ?? '';
@@ -387,18 +382,33 @@ async function readOpenedBossConversation(page: Page, conversation: BossUnreadCo
       const value = readRecordValue(records, keys);
       return value === true || value === 1 || value === '1' || value === 'true';
     };
+    const normalizeVisible = (value: string | null | undefined) => readString(value?.replace(/\s+/g, ' '));
+    const isBossNonConversationMessage = (
+      message: HTMLElement,
+      records: readonly Record<string, unknown>[],
+    ): boolean => {
+      const text = normalizeVisible(message.textContent) ?? '';
+      const semanticType = readRecordString(records, ['type', 'contentType', 'bodyType', 'msgType'])?.toLowerCase();
+      const templateId = readRecordString(records, ['templateId', 'templateID', 'tplId']);
+      return Boolean(
+        (semanticType === 'resume' && templateId === '3' && /沟通的职位\s*[-—]/.test(text))
+        || (semanticType === 'listcard' && templateId === '6' && /快速回复/.test(text))
+        || /该牛人近30天内未与您沟通过.*首次回聊该牛人消息需消耗回聊次数/.test(text),
+      );
+    };
     const classifySender = (
       message: HTMLElement,
       records: readonly Record<string, unknown>[],
     ): BossChatMessageSnapshot['sender'] => {
       const classNames = [...message.classList];
-      const typeValue = readRecordString(records, ['messageType', 'msgType', 'type', 'contentType'])?.toLowerCase();
+      const typeValue = readRecordString(records, ['type', 'contentType', 'bodyType', 'msgType', 'messageType'])?.toLowerCase();
       const domSenderValue = readString(
         message.getAttribute('data-sender')
           ?? message.getAttribute('data-from')
           ?? message.getAttribute('data-side'),
       )?.toLowerCase();
-      if (classNames.some((className) => systemClassPattern.test(className))
+      if (isBossNonConversationMessage(message, records)
+        || classNames.some((className) => systemClassPattern.test(className))
         || Boolean(typeValue && /(system|notice|time|divider|recall|tip)/i.test(typeValue))
         || Boolean(domSenderValue && /(system|notice|time|divider|recall|tip)/i.test(domSenderValue))) {
         return 'system';
@@ -464,12 +474,11 @@ async function readOpenedBossConversation(page: Page, conversation: BossUnreadCo
       // Boss candidate messages use the base message-item class; recruiter messages add an explicit self marker.
       return 'candidate';
     };
-    const normalizeVisible = (value: string | null | undefined) => readString(value?.replace(/\s+/g, ' '));
     const classifyMessageType = (
       message: HTMLElement,
       records: readonly Record<string, unknown>[],
     ): BossCandidateReplyType => {
-      const typeValue = readRecordString(records, ['messageType', 'msgType', 'type', 'contentType', 'bodyType'])?.toLowerCase() ?? '';
+      const typeValue = readRecordString(records, ['type', 'contentType', 'bodyType', 'msgType', 'messageType'])?.toLowerCase() ?? '';
       const classValue = [...message.classList].join(' ').toLowerCase();
       const matches = (pattern: RegExp) => pattern.test(typeValue) || pattern.test(classValue);
       if (matches(/resume|简历/i) || Boolean(message.querySelector('[class*="resume"]'))) {
