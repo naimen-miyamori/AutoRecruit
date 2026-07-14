@@ -108,12 +108,17 @@ export function evaluatePropertyElectricianHardRequirements(resume: CandidateRes
     ...workEvidence,
   ]);
   const allText = resumeEvidence.join('；');
-  const highVoltageEvidence = resumeEvidence.filter((value) => (
-    /(?:高压|高低压).{0,10}(?:证|操作证)|(?:证|操作证).{0,10}(?:高压|高低压)/.test(value)
+  const combinedVoltageCertificateEvidence = resumeEvidence.filter((value) => (
+    /(?:高\s*(?:[、/／和及与]\s*)?低压|高压\s*(?:[、/／和及与]\s*)?低压).{0,10}(?:证|操作证)|(?:证|操作证).{0,10}(?:高\s*(?:[、/／和及与]\s*)?低压|高压\s*(?:[、/／和及与]\s*)?低压)/.test(value)
   ));
-  const lowVoltageEvidence = resumeEvidence.filter((value) => (
-    /(?:低压|高低压).{0,10}(?:证|操作证)|(?:证|操作证).{0,10}(?:低压|高低压)/.test(value)
-  ));
+  const highVoltageEvidence = unique([
+    ...combinedVoltageCertificateEvidence,
+    ...resumeEvidence.filter((value) => /高压.{0,10}(?:证|操作证)|(?:证|操作证).{0,10}高压/.test(value)),
+  ]);
+  const lowVoltageEvidence = unique([
+    ...combinedVoltageCertificateEvidence,
+    ...resumeEvidence.filter((value) => /低压.{0,10}(?:证|操作证)|(?:证|操作证).{0,10}低压/.test(value)),
+  ]);
   const propertyTerms = allText.match(/物业(?:管理|工程|维修)?|商业地产|住宅物业|写字楼|楼宇/g) ?? [];
   const electricianTerms = allText.match(/电工|电气|强电|弱电|配电|综合维修|工程维修/g) ?? [];
   const propertyElectricianEvidence = propertyTerms.length > 0 && electricianTerms.length > 0

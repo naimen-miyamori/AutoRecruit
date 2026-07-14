@@ -249,6 +249,11 @@ export async function openBossChatPage(page: Page): Promise<Page> {
     });
   }
 
+  await page.reload({
+    waitUntil: 'domcontentloaded',
+    timeout: config.playwright.searchPageTimeoutMs,
+  });
+
   const unreadTab = page.locator('.chat-message-filter-left span').filter({ hasText: '未读' }).first();
   await unreadTab.waitFor({ state: 'visible', timeout: config.playwright.searchPageTimeoutMs });
   const className = await unreadTab.getAttribute('class') ?? '';

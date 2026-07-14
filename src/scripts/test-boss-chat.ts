@@ -10,6 +10,7 @@ import {
   contactBossQualifiedCandidate,
   contactBossShanghaiOriginCandidate,
   contactBossUnqualifiedCandidate,
+  openBossChatPage,
   openBossUnreadConversation,
   parseBossChatResumeSnapshot,
 } from '../platforms/boss-chat.js';
@@ -19,6 +20,37 @@ import { renderBossChatSummaryMarkdown } from '../reporting/boss-chat-summary.js
 import type { BossChatReviewRun, CandidateResume } from '../types/job.js';
 
 describe('Boss auto-chat resume parsing', () => {
+  it('reloads the Boss chat page before reading unread conversations', async () => {
+    const events: string[] = [];
+    const unreadTab = {
+      waitFor: async () => { events.push('unread-tab-ready'); },
+      getAttribute: async () => 'active',
+      click: async () => { events.push('unread-tab-clicked'); },
+    };
+    const page = {
+      url: () => 'https://www.zhipin.com/web/chat/index',
+      reload: async () => { events.push('reload'); },
+      locator: (selector: string) => {
+        if (selector === '.chat-message-filter-left span') {
+          return {
+            filter: () => ({ first: () => unreadTab }),
+          };
+        }
+        if (selector === '.user-list') {
+          return {
+            first: () => ({
+              waitFor: async () => { events.push('user-list-ready'); },
+            }),
+          };
+        }
+        throw new Error(`Unexpected selector: ${selector}`);
+      },
+    } as unknown as Page;
+
+    assert.equal(await openBossChatPage(page), page);
+    assert.deepStrictEqual(events, ['reload', 'unread-tab-ready', 'user-list-ready']);
+  });
+
   it('classifies prior chat from Boss state and visible message history', () => {
     assert.deepStrictEqual(assessBossPreviousChat({
       bothTalked: true,
@@ -553,6 +585,28 @@ describe('Boss property electrician hard requirements', () => {
     assert.equal(evaluation.criteria.length, 6);
     assert.ok(evaluation.criteria.every((criterion) => criterion.met));
     assert.deepStrictEqual(evaluation.rejectionReasons, []);
+  });
+
+  it('accepts one combined high-low voltage electrician certificate for both voltage requirements', () => {
+    const evaluation = evaluatePropertyElectricianHardRequirements(buildResume({
+      certificates: ['高低压电工证'],
+    }));
+
+    assert.equal(evaluation.allMet, true);
+    assert.deepStrictEqual(
+      evaluation.criteria
+        .filter((criterion) => criterion.key === 'high_voltage_certificate' || criterion.key === 'low_voltage_certificate')
+        .map((criterion) => ({ key: criterion.key, met: criterion.met, evidence: criterion.evidence })),
+      [{
+        key: 'high_voltage_certificate',
+        met: true,
+        evidence: ['高低压电工证'],
+      }, {
+        key: 'low_voltage_certificate',
+        met: true,
+        evidence: ['高低压电工证'],
+      }],
+    );
   });
 
   it('requests Shanghai-origin clarification only from an otherwise qualified Shanghai-school candidate', () => {
