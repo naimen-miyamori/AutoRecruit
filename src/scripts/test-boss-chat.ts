@@ -20,7 +20,7 @@ import { renderBossChatSummaryMarkdown } from '../reporting/boss-chat-summary.js
 import type { BossChatReviewRun, CandidateResume } from '../types/job.js';
 
 describe('Boss auto-chat resume parsing', () => {
-  it('uses the current Boss chat page without reloading it', async () => {
+  it('reloads the Boss chat page before reading unread conversations', async () => {
     const events: string[] = [];
     let reloadCalls = 0;
     const unreadTab = {
@@ -49,7 +49,7 @@ describe('Boss auto-chat resume parsing', () => {
     } as unknown as Page;
 
     assert.equal(await openBossChatPage(page), page);
-    assert.equal(reloadCalls, 0);
+    assert.equal(reloadCalls, 1);
     assert.deepStrictEqual(events, ['unread-tab-ready', 'user-list-ready']);
   });
 
