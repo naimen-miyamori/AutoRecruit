@@ -272,12 +272,42 @@ export type BossChatReviewStatus =
   | 'skipped_missing_forwarding_config'
   | 'skipped_unsupported_hard_requirements'
   | 'skipped_previously_reviewed'
+  | 'follow_up_reply'
   | 'awaiting_clarification'
   | 'not_matched'
   | 'forwarded'
   | 'failed';
 
 export type BossChatMatchMode = 'score-threshold' | 'all-hard-requirements';
+
+export type BossPreviousChatBasis =
+  | 'boss-both-talked'
+  | 'visible-recruiter-message'
+  | 'visible-message-history'
+  | 'none';
+
+export interface BossPreviousChatAssessment {
+  previouslyChatted: boolean;
+  basis: BossPreviousChatBasis;
+  visibleMessageCount: number;
+  unreadCountAtOpen: number;
+}
+
+export type BossCandidateReplyType =
+  | 'text'
+  | 'image'
+  | 'resume'
+  | 'attachment'
+  | 'voice'
+  | 'video'
+  | 'other';
+
+export interface BossCandidateReply {
+  messageId?: string;
+  sentAt?: string;
+  type: BossCandidateReplyType;
+  content: string;
+}
 
 export interface BossHardRequirementCriterion {
   key: 'age' | 'high_voltage_certificate' | 'low_voltage_certificate' | 'property_electrician_experience' | 'company_tenure' | 'shanghai_origin';
@@ -309,6 +339,8 @@ export interface BossChatReviewItem {
   status: BossChatReviewStatus;
   score?: CandidateScore;
   hardRequirementEvaluation?: BossHardRequirementEvaluation;
+  previousChat?: BossPreviousChatAssessment;
+  newCandidateReplies?: BossCandidateReply[];
   matched?: boolean;
   chatMessageSent?: boolean;
   clarificationQuestionSent?: boolean;
@@ -330,6 +362,10 @@ export interface BossChatReviewRun {
   forwardedCandidates: number;
   skippedConversations: number;
   failedConversations: number;
+  previouslyChattedConversations?: number;
+  firstContactConversations?: number;
+  followUpConversations?: number;
+  newReplyMessages?: number;
   items: BossChatReviewItem[];
 }
 

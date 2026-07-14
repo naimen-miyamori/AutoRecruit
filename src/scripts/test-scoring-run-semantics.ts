@@ -5578,6 +5578,12 @@ describe('scoring run semantics', () => {
           name: matched ? '候选人甲' : '候选人乙',
         },
         resume: buildResume(candidateId),
+        previousChat: {
+          previouslyChatted: false,
+          basis: 'none',
+          visibleMessageCount: conversation.unreadCount,
+          unreadCountAtOpen: conversation.unreadCount,
+        },
       };
     };
     indexModule.openAndParseBossChatResumeRef.fn = async (_page, opened) => opened.resume;
@@ -5642,12 +5648,17 @@ describe('scoring run semantics', () => {
     assert.equal(Array.isArray(result), false);
     const summary = result as import('../index.js').BossAutoChatRunSummary;
     assert.equal(summary.unreadConversations, 3);
-    assert.equal(summary.reviewedConversations, 2);
+    assert.equal(summary.reviewedConversations, 3);
     assert.equal(summary.matchedCandidates, 1);
+    assert.equal(summary.previouslyChattedConversations, 0);
+    assert.equal(summary.firstContactConversations, 3);
+    assert.equal(summary.followUpConversations, 0);
+    assert.equal(summary.newReplyMessages, 0);
     assert.equal(summary.forwardedCandidates, 1);
     assert.equal(summary.chatMessagesSent, 2);
     assert.equal(summary.phoneExchangeRequests, 1);
-    assert.equal(summary.skippedConversations, 1);
+    assert.equal(summary.skippedConversations, 0);
+    assert.equal(summary.failedConversations, 1);
     assert.equal(summary.matchMode, 'all-hard-requirements');
     assert.equal(summary.summaryEmailRecipient, 'summary@qq.com');
     assert.equal(scoreCalled, false);
@@ -5660,9 +5671,13 @@ describe('scoring run semantics', () => {
       ccEmails: ['audit@hotmail.com'],
     }]);
     assert.equal(summary.items[1]?.status, 'not_matched');
+    assert.equal(summary.items[0]?.previousChat?.previouslyChatted, false);
+    assert.equal(summary.items[1]?.previousChat?.previouslyChatted, false);
     assert.equal(summary.items[1]?.chatMessageSent, true);
-    assert.equal(summary.items[2]?.status, 'skipped_missing_jd');
+    assert.equal(summary.items[2]?.status, 'failed');
+    assert.match(summary.items[2]?.error ?? '', /Missing stored Boss JD/);
     assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), ['conversation-matched', 'conversation-unmatched']);
+    assert.deepStrictEqual((await store.readBossChatRetryItems()).map((item) => item.conversationId), ['conversation-without-jd']);
     assert.deepStrictEqual(await store.readBossAutomationSettings(), {
       forwarding: {
         mode: 'email',
@@ -5677,6 +5692,113 @@ describe('scoring run semantics', () => {
       mode: 'email',
       recipient: 'recruiter@example.com',
     });
+  });
+
+  it('records follow-up replies without JD actions and processes a new red dot for a reviewed conversation', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    await store.saveBossChatReviewedConversationIds(['conversation-follow-up']);
+
+    const chatPage = {} as Page;
+    let collection = 0;
+    let opened = 0;
+    let forbiddenActions = 0;
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => ({ page: chatPage, context: {} }) as never;
+    indexModule.closeBrowserSessionRef.fn = async () => undefined;
+    indexModule.openBossChatPageRef.fn = async () => chatPage;
+    indexModule.collectBossUnreadConversationsRef.fn = async () => {
+      collection += 1;
+      return [{
+        conversationId: 'conversation-follow-up',
+        candidateName: '候选人跟进',
+        jobName: '未保存岗位',
+        unreadCount: 2,
+        hasUnreadBadge: collection === 1,
+      }];
+    };
+    indexModule.openBossUnreadConversationRef.fn = async (_page, conversation) => {
+      opened += 1;
+      return {
+        conversation,
+        candidate: { candidateId: 'candidate-follow-up', name: '候选人跟进' },
+        resume: buildResume('candidate-follow-up'),
+        previousChat: {
+          previouslyChatted: true,
+          basis: 'boss-both-talked',
+          visibleMessageCount: 5,
+          unreadCountAtOpen: 2,
+        },
+        newCandidateReplies: [{
+          messageId: 'reply-1',
+          type: 'text' as const,
+          content: '周三可以面试',
+        }, {
+          messageId: 'reply-2',
+          type: 'image' as const,
+          content: '[图片]',
+        }],
+      };
+    };
+    indexModule.openAndParseBossChatResumeRef.fn = async () => {
+      forbiddenActions += 1;
+      throw new Error('resume should not open for a follow-up reply');
+    };
+    indexModule.scoreResumeAgainstJobRef.fn = async () => {
+      forbiddenActions += 1;
+      return buildScore();
+    };
+    indexModule.evaluateBossChatHardRequirementsRef.fn = () => {
+      forbiddenActions += 1;
+      return { allMet: false, criteria: [], rejectionReasons: [] };
+    };
+    indexModule.forwardBossResumeRef.fn = async () => {
+      forbiddenActions += 1;
+    };
+    indexModule.contactBossQualifiedCandidateRef.fn = async () => {
+      forbiddenActions += 1;
+      throw new Error('qualified contact should not run for a follow-up reply');
+    };
+    indexModule.contactBossUnqualifiedCandidateRef.fn = async () => {
+      forbiddenActions += 1;
+      return { messageSent: false, messageAlreadyPresent: false };
+    };
+    indexModule.contactBossShanghaiOriginCandidateRef.fn = async () => {
+      forbiddenActions += 1;
+      return { messageSent: false, messageAlreadyPresent: false };
+    };
+    indexModule.closeBossChatResumeRef.fn = async () => {
+      forbiddenActions += 1;
+    };
+
+    const firstResult = await indexModule.main([
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+    ]) as import('../index.js').BossAutoChatRunSummary;
+
+    assert.equal(opened, 1);
+    assert.equal(forbiddenActions, 0);
+    assert.equal(firstResult.items[0]?.status, 'follow_up_reply');
+    assert.equal(firstResult.followUpConversations, 1);
+    assert.equal(firstResult.newReplyMessages, 2);
+    assert.deepStrictEqual(firstResult.items[0]?.newCandidateReplies?.map((reply) => reply.content), [
+      '周三可以面试',
+      '[图片]',
+    ]);
+    assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), ['conversation-follow-up']);
+
+    const recoveryResult = await indexModule.main([
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+    ]) as import('../index.js').BossAutoChatRunSummary;
+
+    assert.equal(opened, 1);
+    assert.equal(forbiddenActions, 0);
+    assert.equal(recoveryResult.items[0]?.status, 'skipped_previously_reviewed');
   });
 
   it('asks for Shanghai-origin clarification without forwarding, rejecting, or marking the conversation reviewed', async () => {
@@ -5713,6 +5835,12 @@ describe('scoring run semantics', () => {
       conversation,
       candidate: { candidateId: 'candidate-shanghai-clarification', name: '候选人待确认' },
       resume: buildResume('candidate-shanghai-clarification'),
+      previousChat: {
+        previouslyChatted: false,
+        basis: 'none',
+        visibleMessageCount: 1,
+        unreadCountAtOpen: 1,
+      },
     });
     indexModule.openAndParseBossChatResumeRef.fn = async (_page, opened) => opened.resume;
     indexModule.evaluateBossChatHardRequirementsRef.fn = () => ({
@@ -5760,6 +5888,8 @@ describe('scoring run semantics', () => {
     assert.equal(forbiddenActionCalls, 0);
     assert.equal(result.reviewedConversations, 1);
     assert.equal(result.matchedCandidates, 0);
+    assert.equal(result.previouslyChattedConversations, 0);
+    assert.equal(result.firstContactConversations, 1);
     assert.equal(result.chatMessagesSent, 1);
     assert.equal(result.forwardedCandidates, 0);
     assert.equal(result.phoneExchangeRequests, 0);
@@ -5818,6 +5948,12 @@ describe('scoring run semantics', () => {
       conversation,
       candidate: { candidateId: 'candidate-saved-settings', name: '候选人甲' },
       resume: buildResume('candidate-saved-settings'),
+      previousChat: {
+        previouslyChatted: false,
+        basis: 'none',
+        visibleMessageCount: 1,
+        unreadCountAtOpen: 1,
+      },
     });
     indexModule.openAndParseBossChatResumeRef.fn = async (_page, opened) => opened.resume;
     indexModule.evaluateBossChatHardRequirementsRef.fn = () => ({
@@ -5861,7 +5997,7 @@ describe('scoring run semantics', () => {
     }]);
   });
 
-  it('leaves a Boss unread conversation unopened when no forwarding configuration exists', async () => {
+  it('opens a first-contact conversation without forwarding config and retries it after config is supplied', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
     const store = new indexModule.JobStore();
@@ -5874,37 +6010,86 @@ describe('scoring run semantics', () => {
       normalizedJob: {
         ...buildNormalizedJob(),
         title: '物业电工',
+        hardRequirements: ['年龄小于47岁', '高压电工证', '低压电工证', '物业电工经验', '一家公司工作2年以上', '上海人'],
       },
       createdAt: '2026-07-12T00:00:00.000Z',
     });
 
     const chatPage = {} as Page;
-    let opened = false;
+    let opened = 0;
+    let collection = 0;
     indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => ({ page: chatPage, context: {} }) as never;
     indexModule.closeBrowserSessionRef.fn = async () => undefined;
     indexModule.openBossChatPageRef.fn = async () => chatPage;
-    indexModule.collectBossUnreadConversationsRef.fn = async () => [{
-      conversationId: 'conversation-without-forwarding',
-      candidateName: '候选人甲',
-      jobName: '物业电工',
-      unreadCount: 1,
-    }];
-    indexModule.openBossUnreadConversationRef.fn = async () => {
-      opened = true;
-      throw new Error('conversation should remain unopened');
+    indexModule.collectBossUnreadConversationsRef.fn = async () => {
+      collection += 1;
+      return [{
+        conversationId: 'conversation-without-forwarding',
+        candidateName: '候选人甲',
+        jobName: '物业电工',
+        unreadCount: 1,
+        hasUnreadBadge: collection === 1,
+      }];
     };
+    indexModule.openBossUnreadConversationRef.fn = async (_page, conversation) => {
+      opened += 1;
+      return {
+        conversation,
+        candidate: { candidateId: 'candidate-without-forwarding', name: '候选人甲' },
+        resume: buildResume('candidate-without-forwarding'),
+        previousChat: {
+          previouslyChatted: false,
+          basis: 'none',
+          visibleMessageCount: 1,
+          unreadCountAtOpen: 1,
+        },
+      };
+    };
+    indexModule.openAndParseBossChatResumeRef.fn = async (_page, openedConversation) => openedConversation.resume;
+    indexModule.evaluateBossChatHardRequirementsRef.fn = () => ({
+      allMet: false,
+      criteria: [],
+      rejectionReasons: ['缺少高压电工证'],
+    });
+    indexModule.closeBossChatResumeRef.fn = async () => undefined;
+    indexModule.contactBossUnqualifiedCandidateRef.fn = async () => ({
+      messageSent: true,
+      messageAlreadyPresent: false,
+    });
 
-    const result = await indexModule.main([
+    const firstResult = await indexModule.main([
       '--platform',
       'boss',
       '--boss-auto-chat',
       'true',
     ]) as import('../index.js').BossAutoChatRunSummary;
 
-    assert.equal(opened, false);
-    assert.equal(result.skippedConversations, 1);
-    assert.equal(result.items[0]?.status, 'skipped_missing_forwarding_config');
+    assert.equal(opened, 1);
+    assert.equal(firstResult.skippedConversations, 0);
+    assert.equal(firstResult.failedConversations, 1);
+    assert.equal(firstResult.items[0]?.status, 'failed');
+    assert.match(firstResult.items[0]?.error ?? '', /Missing stored Boss forwarding configuration/);
     assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), []);
+    assert.deepStrictEqual((await store.readBossChatRetryItems()).map((item) => item.conversationId), ['conversation-without-forwarding']);
+
+    const secondResult = await indexModule.main([
+      '--platform',
+      'boss',
+      '--boss-auto-chat',
+      'true',
+      '--boss-chat-require-all',
+      'true',
+      '--boss-forward-mode',
+      'email',
+      '--boss-forward-recipient',
+      'recruiter@example.com',
+    ]) as import('../index.js').BossAutoChatRunSummary;
+
+    assert.equal(opened, 2);
+    assert.equal(secondResult.failedConversations, 0);
+    assert.equal(secondResult.items[0]?.status, 'not_matched');
+    assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), ['conversation-without-forwarding']);
+    assert.deepStrictEqual(await store.readBossChatRetryItems(), []);
   });
 
   it('preserves successful Boss forwarding when a later contact action fails', async () => {
@@ -5945,6 +6130,12 @@ describe('scoring run semantics', () => {
         name: '候选人甲',
       },
       resume: buildResume('candidate-contact-failure'),
+      previousChat: {
+        previouslyChatted: false,
+        basis: 'none',
+        visibleMessageCount: 1,
+        unreadCountAtOpen: 1,
+      },
     });
     indexModule.openAndParseBossChatResumeRef.fn = async (_page, opened) => opened.resume;
     indexModule.evaluateBossChatHardRequirementsRef.fn = () => ({

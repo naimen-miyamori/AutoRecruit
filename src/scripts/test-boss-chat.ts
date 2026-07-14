@@ -5,10 +5,12 @@ import {
   bossQualifiedCandidateChatMessage,
   bossShanghaiOriginQuestionMessage,
   bossUnqualifiedCandidateChatMessage,
+  assessBossPreviousChat,
   collectBossUnreadConversations,
   contactBossQualifiedCandidate,
   contactBossShanghaiOriginCandidate,
   contactBossUnqualifiedCandidate,
+  openBossUnreadConversation,
   parseBossChatResumeSnapshot,
 } from '../platforms/boss-chat.js';
 import { parseBossResumeData } from '../platforms/boss-adapter.js';
@@ -17,6 +19,217 @@ import { renderBossChatSummaryMarkdown } from '../reporting/boss-chat-summary.js
 import type { BossChatReviewRun, CandidateResume } from '../types/job.js';
 
 describe('Boss auto-chat resume parsing', () => {
+  it('classifies prior chat from Boss state and visible message history', () => {
+    assert.deepStrictEqual(assessBossPreviousChat({
+      bothTalked: true,
+      hasVisibleRecruiterMessage: false,
+      visibleMessageCount: 1,
+      unreadCount: 1,
+    }), {
+      previouslyChatted: true,
+      basis: 'boss-both-talked',
+      visibleMessageCount: 1,
+      unreadCountAtOpen: 1,
+    });
+    assert.equal(assessBossPreviousChat({
+      bothTalked: false,
+      hasVisibleRecruiterMessage: true,
+      visibleMessageCount: 1,
+      unreadCount: 1,
+    }).basis, 'visible-recruiter-message');
+    assert.equal(assessBossPreviousChat({
+      bothTalked: false,
+      hasVisibleRecruiterMessage: false,
+      visibleMessageCount: 3,
+      unreadCount: 2,
+    }).basis, 'visible-message-history');
+    assert.deepStrictEqual(assessBossPreviousChat({
+      bothTalked: false,
+      hasVisibleRecruiterMessage: false,
+      visibleMessageCount: 2,
+      unreadCount: 2,
+    }), {
+      previouslyChatted: false,
+      basis: 'none',
+      visibleMessageCount: 2,
+      unreadCountAtOpen: 2,
+    });
+  });
+
+  it('assesses prior chat after opening a red-dot conversation', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+
+    try {
+      await page.setContent(`
+        <div class="user-list">
+          <div class="geek-item" data-id="conversation-history">
+            <span class="geek-name">候选人甲</span>
+            <span class="source-job">物业电工</span>
+          </div>
+        </div>
+        <div class="chat-conversation"></div>
+        <div class="base-info-single-container"></div>
+        <div class="chat-message-list">
+          <div class="message-item item-myself"><span class="text-content">之前发送的消息</span></div>
+          <div class="message-item"><span class="text-content">本次未读消息</span></div>
+        </div>
+      `);
+      await page.evaluate(() => {
+        type VueElement = HTMLElement & { __vue__?: unknown };
+        (document.querySelector('.chat-conversation') as VueElement).__vue__ = {
+          currentData$: {
+            uniqueId: 'conversation-history',
+            expectId: 'candidate-history',
+            name: '候选人甲',
+            jobName: '物业电工',
+            bothTalked: false,
+          },
+        };
+        (document.querySelector('.base-info-single-container') as VueElement).__vue__ = {
+          conversation$: {
+            uniqueId: 'conversation-history',
+            expectId: 'candidate-history',
+            name: '候选人甲',
+            toPosition: '物业电工',
+            ageDesc: '46岁',
+            bothTalked: false,
+            workExpList: [],
+            eduExpList: [],
+          },
+        };
+      });
+
+      const opened = await openBossUnreadConversation(page, {
+        conversationId: 'conversation-history',
+        candidateName: '候选人甲',
+        jobName: '物业电工',
+        unreadCount: 1,
+      });
+
+      assert.deepStrictEqual(opened.previousChat, {
+        previouslyChatted: true,
+        basis: 'visible-recruiter-message',
+        visibleMessageCount: 2,
+        unreadCountAtOpen: 1,
+      });
+      assert.deepStrictEqual(opened.newCandidateReplies, [{
+        type: 'text',
+        content: '本次未读消息',
+      }]);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('extracts only the latest unread candidate messages with Vue sender priority and non-text placeholders', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+
+    try {
+      await page.setContent(`
+        <div class="user-list">
+          <div class="geek-item" data-id="conversation-replies">
+            <span class="geek-name">候选人甲</span>
+            <span class="source-job">物业电工</span>
+          </div>
+        </div>
+        <div class="chat-conversation"></div>
+        <div class="base-info-single-container"></div>
+        <div class="chat-message-list">
+          <div class="message-item item-friend"><span class="text-content">较早的候选人消息</span></div>
+          <div class="message-item item-myself"><span class="text-content">招聘方历史话术</span></div>
+          <div class="message-item system-notice"><span class="text-content">昨天 10:30</span></div>
+          <div id="new-text" class="message-item item-myself"><span class="text-content"> 可以\n 今天   下午面试 </span></div>
+          <div id="new-image" class="message-item"><img alt="证书照片" /></div>
+          <div id="new-attachment" class="message-item attachment-message"><span class="file-name">电工证.pdf</span></div>
+        </div>
+      `);
+      await page.evaluate(() => {
+        type VueElement = HTMLElement & { __vue__?: unknown };
+        (document.querySelector('.chat-conversation') as VueElement).__vue__ = {
+          currentData$: {
+            uniqueId: 'conversation-replies',
+            expectId: 'candidate-replies',
+            name: '候选人甲',
+            jobName: '物业电工',
+            bothTalked: true,
+          },
+        };
+        (document.querySelector('.base-info-single-container') as VueElement).__vue__ = {
+          conversation$: {
+            uniqueId: 'conversation-replies',
+            expectId: 'candidate-replies',
+            name: '候选人甲',
+            toPosition: '物业电工',
+            ageDesc: '46岁',
+            workExpList: [],
+            eduExpList: [],
+          },
+        };
+        (document.querySelector('#new-text') as VueElement).__vue__ = {
+          message$: {
+            senderType: 'candidate',
+            messageId: 'message-text',
+            sendTime: '2026-07-14 15:01',
+            messageType: 'text',
+          },
+        };
+        (document.querySelector('#new-image') as VueElement).__vue__ = {
+          message$: {
+            fromGeek: true,
+            msgId: 'message-image',
+            messageType: 'image',
+          },
+        };
+        (document.querySelector('#new-attachment') as VueElement).__vue__ = {
+          message$: {
+            senderRole: 'geek',
+            mid: 'message-attachment',
+            contentType: 'attachment',
+          },
+        };
+      });
+
+      const opened = await openBossUnreadConversation(page, {
+        conversationId: 'conversation-replies',
+        candidateName: '候选人甲',
+        jobName: '物业电工',
+        unreadCount: 3,
+        hasUnreadBadge: true,
+      });
+
+      assert.equal(opened.previousChat.previouslyChatted, true);
+      assert.deepStrictEqual(opened.newCandidateReplies, [{
+        messageId: 'message-text',
+        sentAt: '2026-07-14 15:01',
+        type: 'text',
+        content: '可以 今天 下午面试',
+      }, {
+        messageId: 'message-image',
+        type: 'image',
+        content: '[图片] 证书照片',
+      }, {
+        messageId: 'message-attachment',
+        type: 'attachment',
+        content: '[附件] 电工证.pdf',
+      }]);
+      assert.equal(opened.newCandidateRepliesError, undefined);
+
+      const unreliable = await openBossUnreadConversation(page, {
+        conversationId: 'conversation-replies',
+        candidateName: '候选人甲',
+        jobName: '物业电工',
+        unreadCount: 5,
+        hasUnreadBadge: true,
+      });
+      assert.equal(unreliable.newCandidateReplies, undefined);
+      assert.match(unreliable.newCandidateRepliesError ?? '', /extract 5 unread Boss candidate message\(s\): found 4/);
+    } finally {
+      await browser.close();
+    }
+  });
+
   it('recovers a failed visible conversation after its unread badge disappears', async () => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
@@ -49,6 +262,7 @@ describe('Boss auto-chat resume parsing', () => {
         candidateName: '候选人甲',
         jobName: '物业电工',
         unreadCount: 2,
+        hasUnreadBadge: false,
       }]);
     } finally {
       await browser.close();
@@ -447,6 +661,8 @@ describe('Boss property electrician hard requirements', () => {
       forwardedCandidates: 1,
       skippedConversations: 0,
       failedConversations: 0,
+      previouslyChattedConversations: 0,
+      firstContactConversations: 2,
       items: [{
         conversationId: 'conversation-qualified',
         candidateId: 'candidate-qualified',
@@ -459,6 +675,12 @@ describe('Boss property electrician hard requirements', () => {
         chatMessageSent: true,
         phoneExchangeRequested: true,
         forwarded: true,
+        previousChat: {
+          previouslyChatted: false,
+          basis: 'none',
+          visibleMessageCount: 1,
+          unreadCountAtOpen: 1,
+        },
         hardRequirementEvaluation: qualified,
       }, {
         conversationId: 'conversation-rejected',
@@ -471,6 +693,12 @@ describe('Boss property electrician hard requirements', () => {
         matched: false,
         chatMessageSent: true,
         forwarded: false,
+        previousChat: {
+          previouslyChatted: false,
+          basis: 'none',
+          visibleMessageCount: 1,
+          unreadCountAtOpen: 1,
+        },
         hardRequirementEvaluation: rejected,
       }],
     };
@@ -481,6 +709,10 @@ describe('Boss property electrician hard requirements', () => {
     assert.match(markdown, /年龄为48岁，不满足小于47岁/);
     assert.match(markdown, /简历未发现明确的高压电工证证据/);
     assert.match(markdown, /不合适常用语已发送/);
+    assert.match(markdown, /此前已聊过: 0/);
+    assert.match(markdown, /此前未聊过: 2/);
+    assert.match(markdown, /候选人甲（ID: candidate-qualified），此前未聊过/);
+    assert.match(markdown, /候选人乙（ID: candidate-rejected），此前未聊过/);
   });
 
   it('renders Shanghai-origin clarification separately from rejection contact', () => {
@@ -512,6 +744,12 @@ describe('Boss property electrician hard requirements', () => {
         clarificationQuestionSent: true,
         chatMessageSent: true,
         forwarded: false,
+        previousChat: {
+          previouslyChatted: false,
+          basis: 'none',
+          visibleMessageCount: 1,
+          unreadCountAtOpen: 1,
+        },
         hardRequirementEvaluation: evaluation,
       }],
     };
@@ -554,5 +792,54 @@ describe('Boss property electrician hard requirements', () => {
       renderBossChatSummaryMarkdown(run),
       /已转发，但联系动作未完成：换电话确认失败/,
     );
+  });
+
+  it('renders follow-up replies safely and supports historical runs without new counters', () => {
+    const run: BossChatReviewRun = {
+      platform: 'boss',
+      reviewedAt: '2026-07-14T00:00:00.000Z',
+      scoreThreshold: 70,
+      matchMode: 'all-hard-requirements',
+      unreadConversations: 1,
+      reviewedConversations: 1,
+      matchedCandidates: 0,
+      chatMessagesSent: 0,
+      phoneExchangeRequests: 0,
+      forwardedCandidates: 0,
+      skippedConversations: 0,
+      failedConversations: 0,
+      items: [{
+        conversationId: 'conversation-follow-up',
+        candidateId: 'candidate-follow-up',
+        candidateName: '候选人*甲*',
+        jobName: '物业电工',
+        jobKey: '物业电工',
+        unreadCount: 2,
+        status: 'follow_up_reply',
+        previousChat: {
+          previouslyChatted: true,
+          basis: 'boss-both-talked',
+          visibleMessageCount: 4,
+          unreadCountAtOpen: 2,
+        },
+        newCandidateReplies: [{
+          messageId: 'message-1',
+          type: 'text',
+          content: '可以\n*周三*面试',
+        }, {
+          type: 'image',
+          content: '[图片]',
+        }],
+      }],
+    };
+
+    const markdown = renderBossChatSummaryMarkdown(run);
+    assert.match(markdown, /跟进回复会话: 1/);
+    assert.match(markdown, /新回复消息: 2/);
+    assert.match(markdown, /已聊过候选人的新回复/);
+    assert.match(markdown, /候选人\\\*甲\\\*/);
+    assert.match(markdown, /可以 \\\*周三\\\*面试/);
+    assert.match(markdown, /\[图片\]/);
+    assert.doesNotMatch(markdown, /## 不符合或等待确认的候选人[\s\S]*candidate-follow-up/);
   });
 });

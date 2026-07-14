@@ -1,6 +1,14 @@
 import type { Page } from 'playwright';
 import { config } from '../config.js';
-import type { CandidateListItem, CandidateResume, EducationExperience, WorkExperience } from '../types/job.js';
+import type {
+  BossCandidateReply,
+  BossCandidateReplyType,
+  BossPreviousChatAssessment,
+  CandidateListItem,
+  CandidateResume,
+  EducationExperience,
+  WorkExperience,
+} from '../types/job.js';
 import {
   closeExistingBossResumeDialog,
   parseBossResumeData,
@@ -18,6 +26,7 @@ export interface BossUnreadConversation {
   candidateName?: string;
   jobName: string;
   unreadCount: number;
+  hasUnreadBadge?: boolean;
 }
 
 interface BossChatWorkSnapshot {
@@ -46,12 +55,29 @@ export interface BossOpenedConversationSnapshot {
   currentTitle?: string;
   workExperiences: BossChatWorkSnapshot[];
   educationExperiences: BossChatEducationSnapshot[];
+  previousChat?: BossPreviousChatAssessment;
+  newCandidateReplies?: BossCandidateReply[];
+  newCandidateRepliesError?: string;
 }
 
 export interface BossOpenedConversation {
   conversation: BossUnreadConversation;
   candidate: CandidateListItem;
   resume: CandidateResume;
+  previousChat: BossPreviousChatAssessment;
+  newCandidateReplies?: BossCandidateReply[];
+  newCandidateRepliesError?: string;
+}
+
+export interface BossPreviousChatSignals {
+  bothTalked: boolean;
+  hasVisibleRecruiterMessage: boolean;
+  visibleMessageCount: number;
+  unreadCount: number;
+}
+
+interface BossChatMessageSnapshot extends BossCandidateReply {
+  sender: 'candidate' | 'recruiter' | 'system' | 'unknown';
 }
 
 export interface BossQualifiedContactResult {
@@ -74,6 +100,65 @@ function normalizeText(value: string | undefined): string | undefined {
 function parseAge(value: string | undefined): number | undefined {
   const match = value?.match(/(\d{1,3})/);
   return match ? Number.parseInt(match[1]!, 10) : undefined;
+}
+
+export function assessBossPreviousChat(signals: BossPreviousChatSignals): BossPreviousChatAssessment {
+  const visibleMessageCount = Number.isFinite(signals.visibleMessageCount)
+    ? Math.max(0, Math.trunc(signals.visibleMessageCount))
+    : 0;
+  const unreadCountAtOpen = Number.isFinite(signals.unreadCount)
+    ? Math.max(1, Math.trunc(signals.unreadCount))
+    : 1;
+
+  if (signals.bothTalked) {
+    return {
+      previouslyChatted: true,
+      basis: 'boss-both-talked',
+      visibleMessageCount,
+      unreadCountAtOpen,
+    };
+  }
+  if (signals.hasVisibleRecruiterMessage) {
+    return {
+      previouslyChatted: true,
+      basis: 'visible-recruiter-message',
+      visibleMessageCount,
+      unreadCountAtOpen,
+    };
+  }
+  if (visibleMessageCount > unreadCountAtOpen) {
+    return {
+      previouslyChatted: true,
+      basis: 'visible-message-history',
+      visibleMessageCount,
+      unreadCountAtOpen,
+    };
+  }
+
+  return {
+    previouslyChatted: false,
+    basis: 'none',
+    visibleMessageCount,
+    unreadCountAtOpen,
+  };
+}
+
+function selectBossNewCandidateReplies(
+  messages: readonly BossChatMessageSnapshot[],
+  unreadCount: number,
+): { replies?: BossCandidateReply[]; error?: string } {
+  const expectedCount = Number.isFinite(unreadCount) ? Math.max(1, Math.trunc(unreadCount)) : 1;
+  const candidateMessages = messages.filter((message) => message.sender === 'candidate');
+  if (candidateMessages.length < expectedCount) {
+    const unknownMessages = messages.filter((message) => message.sender === 'unknown').length;
+    return {
+      error: `Unable to reliably extract ${expectedCount} unread Boss candidate message(s): found ${candidateMessages.length} candidate message(s) and ${unknownMessages} message(s) with unknown sender.`,
+    };
+  }
+
+  return {
+    replies: candidateMessages.slice(-expectedCount).map(({ sender: _sender, ...reply }) => reply),
+  };
 }
 
 function parseTimeRange(value: string | undefined): { start?: string; end?: string } {
@@ -182,37 +267,40 @@ export async function collectBossUnreadConversations(
   return page.locator('.user-list .geek-item').evaluateAll((items, retries) => {
     const retryById = new Map(retries.map((retry) => [retry.conversationId, retry]));
     return items.flatMap((item) => {
-    const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
-    const conversationId = normalize(item.getAttribute('data-id')) || normalize(item.id).replace(/^_/, '');
-    const badge = item.querySelector<HTMLElement>('.figure .badge-count');
-    const retry = retryById.get(conversationId);
-    if (!badge && !retry) {
-      return [];
-    }
+      const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+      const conversationId = normalize(item.getAttribute('data-id')) || normalize(item.id).replace(/^_/, '');
+      const badge = item.querySelector<HTMLElement>('.figure .badge-count');
+      const retry = retryById.get(conversationId);
+      if (!badge && !retry) {
+        return [];
+      }
 
-    const jobName = normalize(item.querySelector('.source-job')?.textContent) || retry?.jobName;
-    if (!conversationId || !jobName) {
-      return [];
-    }
+      const jobName = normalize(item.querySelector('.source-job')?.textContent) || retry?.jobName;
+      if (!conversationId || !jobName) {
+        return [];
+      }
 
-    const unreadCount = badge ? Number.parseInt(normalize(badge.textContent), 10) : retry!.unreadCount;
-    return [{
-      conversationId,
-      candidateName: normalize(item.querySelector('.geek-name')?.textContent) || retry?.candidateName,
-      jobName,
-      unreadCount: Number.isFinite(unreadCount) ? unreadCount : 1,
-    }];
+      const unreadCount = badge ? Number.parseInt(normalize(badge.textContent), 10) : retry!.unreadCount;
+      return [{
+        conversationId,
+        candidateName: normalize(item.querySelector('.geek-name')?.textContent) || retry?.candidateName,
+        jobName,
+        unreadCount: Number.isFinite(unreadCount) ? unreadCount : 1,
+        hasUnreadBadge: Boolean(badge),
+      }];
     });
   }, retryConversations);
 }
 
 async function readOpenedBossConversation(page: Page, conversation: BossUnreadConversation): Promise<BossOpenedConversationSnapshot> {
-  return page.evaluate(({ fallbackConversationId, fallbackName, fallbackJobName }) => {
-    type VueElement = HTMLElement & {
-      __vue__?: {
+  const snapshot = await page.evaluate(({ fallbackConversationId, fallbackName, fallbackJobName }) => {
+    type VueViewModel = Record<string, unknown> & {
+        $options?: { name?: string };
         currentData$?: Record<string, unknown>;
         conversation$?: Record<string, unknown>;
-      };
+    };
+    type VueElement = HTMLElement & {
+      __vue__?: VueViewModel;
     };
     const readString = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : undefined;
     const readPlace = (value: unknown) => {
@@ -231,6 +319,217 @@ async function readOpenedBossConversation(page: Page, conversation: BossUnreadCo
       : undefined;
     const currentData = (document.querySelector('.chat-conversation') as VueElement | null)?.__vue__?.currentData$ ?? {};
     const conversationData = (document.querySelector('.base-info-single-container') as VueElement | null)?.__vue__?.conversation$ ?? {};
+    const exchangeConversation = Array.from(document.querySelectorAll<VueElement>('.operate-exchange-left .operate-icon-item'))
+      .map((element) => element.__vue__)
+      .find((viewModel) => viewModel?.$options?.name === 'ExchangePhone')
+      ?.conversation$ ?? {};
+    const isTrueFlag = (value: unknown) => value === true || value === 1 || value === '1';
+    const bothTalked = [currentData, conversationData, exchangeConversation]
+      .some((record) => isTrueFlag(record.bothTalked));
+    const visibleMessages = Array.from(document.querySelectorAll<HTMLElement>('.chat-message-list .message-item'));
+    const recruiterSelector = [
+        '.item-myself',
+        '.message-myself',
+        '.is-self',
+        '.self',
+        '.mine',
+        '[data-from="self"]',
+        '[data-sender="self"]',
+        '[data-side="right"]',
+      ].join(',');
+    const recruiterClassPattern = /(^|[-_])(myself|self|mine|outgoing|sent|right)([-_]|$)/i;
+    const candidateClassPattern = /(^|[-_])(friend|other|incoming|received|left|candidate|geek)([-_]|$)/i;
+    const systemClassPattern = /(^|[-_])(system|notice|time|divider|recall|tip)([-_]|$)/i;
+    const isRecord = (value: unknown): value is Record<string, unknown> => (
+      Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    );
+    const collectVueRecords = (message: HTMLElement): Record<string, unknown>[] => {
+      const viewModel = (message as VueElement).__vue__;
+      if (!viewModel) {
+        return [];
+      }
+
+      const records: Record<string, unknown>[] = [viewModel];
+      const nestedKeys = [
+        'message', 'message$', 'msg', 'msg$', 'item', 'item$', 'data', 'data$',
+        'content', 'content$', '$props', 'messageData', 'messageData$',
+      ];
+      for (const key of nestedKeys) {
+        const nested = viewModel[key];
+        if (isRecord(nested)) {
+          records.push(nested);
+        }
+      }
+      return records;
+    };
+    const readRecordValue = (records: readonly Record<string, unknown>[], keys: readonly string[]): unknown => {
+      for (const record of records) {
+        for (const key of keys) {
+          if (record[key] !== undefined && record[key] !== null) {
+            return record[key];
+          }
+        }
+      }
+      return undefined;
+    };
+    const readRecordString = (records: readonly Record<string, unknown>[], keys: readonly string[]): string | undefined => {
+      const value = readRecordValue(records, keys);
+      return typeof value === 'string' || typeof value === 'number'
+        ? readString(String(value))
+        : undefined;
+    };
+    const readTrueFlag = (records: readonly Record<string, unknown>[], keys: readonly string[]): boolean => {
+      const value = readRecordValue(records, keys);
+      return value === true || value === 1 || value === '1' || value === 'true';
+    };
+    const classifySender = (
+      message: HTMLElement,
+      records: readonly Record<string, unknown>[],
+    ): BossChatMessageSnapshot['sender'] => {
+      const classNames = [...message.classList];
+      const typeValue = readRecordString(records, ['messageType', 'msgType', 'type', 'contentType'])?.toLowerCase();
+      const domSenderValue = readString(
+        message.getAttribute('data-sender')
+          ?? message.getAttribute('data-from')
+          ?? message.getAttribute('data-side'),
+      )?.toLowerCase();
+      if (classNames.some((className) => systemClassPattern.test(className))
+        || Boolean(typeValue && /(system|notice|time|divider|recall|tip)/i.test(typeValue))
+        || Boolean(domSenderValue && /(system|notice|time|divider|recall|tip)/i.test(domSenderValue))) {
+        return 'system';
+      }
+
+      const senderValue = readRecordString(records, [
+        'senderType', 'senderRole', 'fromType', 'fromRole', 'userType', 'role', 'side', 'direction',
+      ])?.toLowerCase();
+      if (senderValue && /(geek|candidate|jobseeker|friend|other|incoming|received|left)/i.test(senderValue)) {
+        return 'candidate';
+      }
+      if (senderValue && /(boss|recruiter|hr|self|myself|mine|outgoing|sent|right)/i.test(senderValue)) {
+        return 'recruiter';
+      }
+      if (readTrueFlag(records, ['isFromGeek', 'fromGeek', 'isGeek', 'isCandidate', 'fromCandidate'])) {
+        return 'candidate';
+      }
+      if (readTrueFlag(records, [
+        'isSelf', 'isMine', 'fromSelf', 'senderIsSelf', 'sendBySelf', 'isFromBoss', 'fromBoss', 'isRecruiter',
+      ])) {
+        return 'recruiter';
+      }
+
+      const senderId = readRecordString(records, ['fromUid', 'senderUid', 'sendUserId', 'senderId', 'fromId']);
+      const candidateSenderIds = [
+        conversationData.expectId,
+        conversationData.encryptExpectId,
+        conversationData.geekUid,
+        conversationData.uid,
+        currentData.expectId,
+        currentData.geekUid,
+      ].map((value) => readNumberString(value)).filter((value): value is string => Boolean(value));
+      if (senderId && candidateSenderIds.includes(senderId)) {
+        return 'candidate';
+      }
+      const recruiterSenderIds = [
+        conversationData.bossUid,
+        conversationData.bossId,
+        conversationData.recruiterId,
+        currentData.bossUid,
+        currentData.bossId,
+      ].map((value) => readNumberString(value)).filter((value): value is string => Boolean(value));
+      if (senderId && recruiterSenderIds.includes(senderId)) {
+        return 'recruiter';
+      }
+
+      if (message.matches(recruiterSelector) || classNames.some((className) => recruiterClassPattern.test(className))) {
+        return 'recruiter';
+      }
+      if (classNames.some((className) => candidateClassPattern.test(className))) {
+        return 'candidate';
+      }
+      if (domSenderValue && /(geek|candidate|jobseeker|friend|other|incoming|received|left)/i.test(domSenderValue)) {
+        return 'candidate';
+      }
+      if (domSenderValue && /(boss|recruiter|hr|self|myself|mine|outgoing|sent|right)/i.test(domSenderValue)) {
+        return 'recruiter';
+      }
+      if (domSenderValue) {
+        return 'unknown';
+      }
+
+      // Boss candidate messages use the base message-item class; recruiter messages add an explicit self marker.
+      return 'candidate';
+    };
+    const normalizeVisible = (value: string | null | undefined) => readString(value?.replace(/\s+/g, ' '));
+    const classifyMessageType = (
+      message: HTMLElement,
+      records: readonly Record<string, unknown>[],
+    ): BossCandidateReplyType => {
+      const typeValue = readRecordString(records, ['messageType', 'msgType', 'type', 'contentType', 'bodyType'])?.toLowerCase() ?? '';
+      const classValue = [...message.classList].join(' ').toLowerCase();
+      const matches = (pattern: RegExp) => pattern.test(typeValue) || pattern.test(classValue);
+      if (matches(/resume|简历/i) || Boolean(message.querySelector('[class*="resume"]'))) {
+        return 'resume';
+      }
+      if (matches(/attachment|\bfile\b|附件|文件/i) || Boolean(message.querySelector('a[download], [class*="file"], [class*="attachment"]'))) {
+        return 'attachment';
+      }
+      if (matches(/voice|audio|语音/i) || Boolean(message.querySelector('audio, [class*="voice"]'))) {
+        return 'voice';
+      }
+      if (matches(/video|视频/i) || Boolean(message.querySelector('video, [class*="video"]'))) {
+        return 'video';
+      }
+      if (matches(/image|photo|picture|\bpic\b|图片/i) || Boolean(message.querySelector(
+        ':scope > img, .image-content img, [class*="message-image"] img, [class*="image-message"] img, .img-content img',
+      ))) {
+        return 'image';
+      }
+      const text = normalizeVisible(message.querySelector('.text-content')?.textContent)
+        ?? readRecordString(records, ['text', 'contentText', 'messageText']);
+      return text ? 'text' : 'other';
+    };
+    const placeholderByType: Record<BossCandidateReplyType, string> = {
+      text: '[文本]',
+      image: '[图片]',
+      resume: '[简历]',
+      attachment: '[附件]',
+      voice: '[语音]',
+      video: '[视频]',
+      other: '[无法识别的消息]',
+    };
+    const messageSnapshots: BossChatMessageSnapshot[] = visibleMessages.map((message) => {
+      const records = collectVueRecords(message);
+      const sender = classifySender(message, records);
+      const type = classifyMessageType(message, records);
+      const textContent = normalizeVisible(message.querySelector('.text-content')?.textContent)
+        ?? readRecordString(records, ['text', 'contentText', 'messageText']);
+      const visibleDescription = normalizeVisible(
+        message.querySelector<HTMLElement>('[class*="file-name"], [class*="resume"], [class*="voice"], [class*="video"]')?.textContent,
+      ) ?? normalizeVisible(message.querySelector<HTMLImageElement>('img')?.alt)
+        ?? readRecordString(records, ['fileName', 'filename', 'description', 'title']);
+      const placeholder = placeholderByType[type];
+      const content = type === 'text' && textContent
+        ? textContent
+        : visibleDescription && visibleDescription !== placeholder.slice(1, -1)
+          ? `${placeholder} ${visibleDescription}`
+          : placeholder;
+      const messageId = readRecordString(records, ['messageId', 'msgId', 'mid', 'uniqueId', 'id'])
+        ?? readString(message.dataset.messageId)
+        ?? readString(message.dataset.msgId)
+        ?? readString(message.dataset.id);
+      const sentAt = readRecordString(records, ['sendTime', 'sentAt', 'createTime', 'timestamp', 'time'])
+        ?? readString(message.dataset.time)
+        ?? readString(message.querySelector('time')?.getAttribute('datetime'))
+        ?? normalizeVisible(message.querySelector('.message-time, [class*="send-time"]')?.textContent);
+      return {
+        sender,
+        type,
+        content,
+        ...(messageId ? { messageId } : {}),
+        ...(sentAt ? { sentAt } : {}),
+      };
+    }).filter((message) => message.sender !== 'system');
+    const hasVisibleRecruiterMessage = messageSnapshots.some((message) => message.sender === 'recruiter');
     const workExperiences = Array.isArray(conversationData.workExpList)
       ? conversationData.workExpList.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
       : [];
@@ -270,18 +569,37 @@ async function readOpenedBossConversation(page: Page, conversation: BossUnreadCo
         major: readString(item.major),
         degree: readString(item.degree),
       })),
+      previousChatSignals: {
+        bothTalked,
+        hasVisibleRecruiterMessage,
+        visibleMessageCount: messageSnapshots.length,
+      },
+      messageSnapshots,
     };
   }, {
     fallbackConversationId: conversation.conversationId,
     fallbackName: conversation.candidateName,
     fallbackJobName: conversation.jobName,
   });
+
+  const { previousChatSignals, messageSnapshots, ...resumeSnapshot } = snapshot;
+  const newReplies = selectBossNewCandidateReplies(messageSnapshots, conversation.unreadCount);
+  return {
+    ...resumeSnapshot,
+    previousChat: assessBossPreviousChat({
+      ...previousChatSignals,
+      unreadCount: conversation.unreadCount,
+    }),
+    ...(newReplies.replies ? { newCandidateReplies: newReplies.replies } : {}),
+    ...(newReplies.error ? { newCandidateRepliesError: newReplies.error } : {}),
+  };
 }
 
 export async function openBossUnreadConversation(
   page: Page,
   conversation: BossUnreadConversation,
 ): Promise<BossOpenedConversation> {
+  const deadline = Date.now() + Math.max(config.playwright.resumeDetailTimeoutMs, 1);
   const items = page.locator('.user-list .geek-item');
   const itemIndex = await items.evaluateAll((elements, conversationId) => elements.findIndex((element) => (
     element.getAttribute('data-id') === conversationId || element.id === `_${conversationId}`
@@ -290,8 +608,28 @@ export async function openBossUnreadConversation(
     throw new Error(`Boss unread conversation ${conversation.conversationId} is no longer visible.`);
   }
 
-  await items.nth(itemIndex).click({ timeout: config.playwright.resumeDetailTimeoutMs });
-  await page.waitForFunction(({ expectedConversationId, expectedName }) => {
+  const beforeClick = await page.evaluate(({ expectedConversationId, expectedName }) => {
+    type VueElement = HTMLElement & { __vue__?: { currentData$?: Record<string, unknown> } };
+    const currentData = (document.querySelector('.chat-conversation') as VueElement | null)?.__vue__?.currentData$;
+    const wasAlreadyCurrent = Boolean(currentData && (
+      String(currentData.uniqueId ?? '') === expectedConversationId
+      || (expectedName && currentData.name === expectedName)
+    ));
+    const messageSignature = Array.from(document.querySelectorAll<HTMLElement>('.chat-message-list .message-item'))
+      .map((message) => [
+        message.dataset.messageId ?? message.dataset.msgId ?? message.dataset.id ?? '',
+        message.className,
+        (message.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      ].join('|'))
+      .join('\n');
+    return { wasAlreadyCurrent, messageSignature };
+  }, {
+    expectedConversationId: conversation.conversationId,
+    expectedName: conversation.candidateName,
+  });
+
+  await items.nth(itemIndex).click({ timeout: Math.max(1, deadline - Date.now()) });
+  await page.waitForFunction(({ expectedConversationId, expectedName, wasAlreadyCurrent, previousMessageSignature }) => {
     type VueElement = HTMLElement & {
       __vue__?: {
         currentData$?: Record<string, unknown>;
@@ -314,11 +652,21 @@ export async function openBossUnreadConversation(
       );
     const detailHydrated = typeof conversationData.ageDesc === 'string'
       && conversationData.ageDesc.trim().length > 0;
-    return currentMatches && detailMatches && detailHydrated;
+    const visibleMessages = Array.from(document.querySelectorAll<HTMLElement>('.chat-message-list .message-item'));
+    const messageSignature = visibleMessages.map((message) => [
+      message.dataset.messageId ?? message.dataset.msgId ?? message.dataset.id ?? '',
+      message.className,
+      (message.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+    ].join('|')).join('\n');
+    const messagesHydrated = visibleMessages.length > 0
+      && (wasAlreadyCurrent || messageSignature !== previousMessageSignature);
+    return currentMatches && detailMatches && detailHydrated && messagesHydrated;
   }, {
     expectedConversationId: conversation.conversationId,
     expectedName: conversation.candidateName,
-  }, { timeout: config.playwright.resumeDetailTimeoutMs, polling: 200 });
+    wasAlreadyCurrent: beforeClick.wasAlreadyCurrent,
+    previousMessageSignature: beforeClick.messageSignature,
+  }, { timeout: Math.max(1, deadline - Date.now()), polling: 200 });
 
   const snapshot = await readOpenedBossConversation(page, conversation);
   const candidate: CandidateListItem = {
@@ -334,6 +682,14 @@ export async function openBossUnreadConversation(
     conversation,
     candidate,
     resume: parseBossChatResumeSnapshot(snapshot, bossChatUrl),
+    previousChat: snapshot.previousChat ?? assessBossPreviousChat({
+      bothTalked: false,
+      hasVisibleRecruiterMessage: false,
+      visibleMessageCount: 0,
+      unreadCount: conversation.unreadCount,
+    }),
+    ...(snapshot.newCandidateReplies ? { newCandidateReplies: snapshot.newCandidateReplies } : {}),
+    ...(snapshot.newCandidateRepliesError ? { newCandidateRepliesError: snapshot.newCandidateRepliesError } : {}),
   };
 }
 

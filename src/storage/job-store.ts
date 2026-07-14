@@ -439,7 +439,9 @@ export class JobStore {
 
     for (const run of runs.sort((left, right) => left.reviewedAt.localeCompare(right.reviewedAt))) {
       for (const item of run.items) {
-        if (item.status === 'failed' && item.forwarded !== true) {
+        const retryableLegacyConfigSkip = item.status === 'skipped_missing_jd'
+          || item.status === 'skipped_missing_forwarding_config';
+        if ((item.status === 'failed' && item.forwarded !== true) || retryableLegacyConfigSkip) {
           retryItems.set(item.conversationId, item);
         } else {
           retryItems.delete(item.conversationId);

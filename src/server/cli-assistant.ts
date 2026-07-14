@@ -279,7 +279,7 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
   }
 
   if (kind === 'boss-auto-chat') {
-    warnings.push('风险：Boss 自动沟通审查会打开未读会话；对符合规则的候选人通过常用语发送求简历消息、发起换电话请求并转发简历，对不符合规则的候选人通过常用语发送不合适消息。');
+    warnings.push('风险：Boss 自动沟通审查会打开未读会话；已聊过候选人只汇总本次新回复，首次沟通候选人才会继续匹配，并按结果转发简历、发送常用语或发起换电话请求。');
     if (!isPresent(input.bossForwardMode) && !isPresent(input.bossForwardRecipient)) {
       warnings.push('配置提示：未提供 Boss 转发目标时会复用岗位或平台已保存配置；没有可用配置的会话保持未打开。');
     }

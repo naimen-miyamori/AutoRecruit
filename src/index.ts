@@ -892,24 +892,18 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
     const chatPage = await openBossChatPageRef.fn(session.page);
     session.page = chatPage;
     const retryItems = await store.readBossChatRetryItems();
-    const retryConversationIds = new Set(retryItems.map((item) => item.conversationId));
     const conversations = await collectBossUnreadConversationsRef.fn(chatPage, retryItems.map((item) => ({
       conversationId: item.conversationId,
       candidateName: item.candidateName,
       jobName: item.jobName,
       unreadCount: item.unreadCount,
     })));
-    const reviewedConversationIds = await store.readBossChatReviewedConversationIds();
-    const reviewedConversationIdSet = new Set(
-      reviewedConversationIds.filter((conversationId) => !retryConversationIds.has(conversationId)),
-    );
-    if (reviewedConversationIdSet.size !== reviewedConversationIds.length) {
-      await store.saveBossChatReviewedConversationIds([...reviewedConversationIdSet]);
-    }
+    const reviewedConversationIdSet = new Set(await store.readBossChatReviewedConversationIds());
 
     for (const conversation of conversations) {
       const jobKey = buildJobKey(conversation.jobName, '');
-      if (reviewedConversationIdSet.has(conversation.conversationId)) {
+      const isUnreadEvent = conversation.hasUnreadBadge !== false;
+      if (!isUnreadEvent && reviewedConversationIdSet.has(conversation.conversationId)) {
         items.push({
           conversationId: conversation.conversationId,
           candidateName: conversation.candidateName,
@@ -921,61 +915,6 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
         continue;
       }
 
-      const jobRecord = await store.readJobRecordIfExists('boss', jobKey);
-      if (!jobRecord) {
-        items.push({
-          conversationId: conversation.conversationId,
-          candidateName: conversation.candidateName,
-          jobName: conversation.jobName,
-          jobKey,
-          unreadCount: conversation.unreadCount,
-          status: 'skipped_missing_jd',
-          error: `Missing stored Boss JD for job ${conversation.jobName}`,
-        });
-        continue;
-      }
-
-      const forwarding = input.bossForwardMode && input.bossForwardRecipient
-        ? {
-          mode: input.bossForwardMode,
-          recipient: input.bossForwardRecipient,
-        }
-        : jobRecord.bossForwarding ?? automationSettings.forwarding;
-      if (!forwarding) {
-        items.push({
-          conversationId: conversation.conversationId,
-          candidateName: conversation.candidateName,
-          jobName: conversation.jobName,
-          jobKey,
-          unreadCount: conversation.unreadCount,
-          status: 'skipped_missing_forwarding_config',
-          error: `Missing stored Boss forwarding configuration for job ${conversation.jobName}`,
-        });
-        continue;
-      }
-
-      if (jobRecord.bossForwarding?.mode !== forwarding.mode
-        || jobRecord.bossForwarding?.recipient !== forwarding.recipient) {
-        await store.saveJobRecord('boss', {
-          ...jobRecord,
-          bossForwarding: forwarding,
-        });
-      }
-
-      if (input.requireAllHardRequirements && !supportsPropertyElectricianHardRequirements(jobKey, jobRecord.normalizedJob)) {
-        items.push({
-          conversationId: conversation.conversationId,
-          candidateName: conversation.candidateName,
-          jobName: conversation.jobName,
-          jobKey,
-          unreadCount: conversation.unreadCount,
-          status: 'skipped_unsupported_hard_requirements',
-          error: `All-hard-requirements evaluation is not configured for Boss job ${conversation.jobName}`,
-        });
-        continue;
-      }
-
-      let opened: Awaited<ReturnType<typeof openBossUnreadConversation>> | undefined;
       let item: BossChatReviewItem = {
         conversationId: conversation.conversationId,
         candidateName: conversation.candidateName,
@@ -984,102 +923,165 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
         unreadCount: conversation.unreadCount,
         status: 'failed',
       };
+      let resumeOpened = false;
+      let shouldMarkReviewed = false;
 
       try {
-        opened = await openBossUnreadConversationRef.fn(chatPage, conversation);
-        const resume = await openAndParseBossChatResumeRef.fn(chatPage, opened);
+        const opened = await openBossUnreadConversationRef.fn(chatPage, conversation);
         item = {
           ...item,
-          candidateId: resume.candidateId,
-          candidateName: resume.name ?? conversation.candidateName,
+          candidateId: opened.candidate.candidateId,
+          candidateName: opened.candidate.name ?? opened.resume.name ?? conversation.candidateName,
+          previousChat: opened.previousChat,
+          ...(opened.newCandidateReplies ? { newCandidateReplies: opened.newCandidateReplies } : {}),
         };
-        await store.saveCandidateResume('boss', jobKey, resume, formatResumeSnapshot(resume));
 
-        let matched: boolean;
-        let clarificationRequired = false;
-        if (input.requireAllHardRequirements) {
-          const hardRequirementEvaluation = evaluateBossChatHardRequirementsRef.fn(resume);
-          matched = hardRequirementEvaluation.allMet;
-          clarificationRequired = Boolean(hardRequirementEvaluation.clarification);
+        if (opened.previousChat.previouslyChatted) {
+          if (opened.newCandidateRepliesError) {
+            throw new Error(opened.newCandidateRepliesError);
+          }
+          if (!opened.newCandidateReplies || opened.newCandidateReplies.length === 0) {
+            throw new Error(`Unable to reliably extract unread Boss candidate replies for conversation ${conversation.conversationId}.`);
+          }
+
           item = {
             ...item,
-            hardRequirementEvaluation,
-            matched: clarificationRequired ? undefined : matched,
-            forwarded: false,
-            status: clarificationRequired
-              ? 'awaiting_clarification'
-              : matched
-                ? 'failed'
-                : 'not_matched',
+            status: 'follow_up_reply',
           };
+          shouldMarkReviewed = true;
         } else {
-          const scoredAt = new Date().toISOString();
-          try {
-            const score = await scoreResumeAgainstJobRef.fn(jobRecord.normalizedJob, resume);
-            await store.saveCandidateScoreArtifact('boss', jobKey, {
-              candidateId: resume.candidateId,
-              candidateShareUrl: resume.candidateShareUrl,
-              model: config.scoring.model,
-              scoredAt,
-              status: 'success',
-              score,
+          const jobRecord = await store.readJobRecordIfExists('boss', jobKey);
+          if (!jobRecord) {
+            throw new Error(`Missing stored Boss JD for job ${conversation.jobName}`);
+          }
+
+          const forwarding = input.bossForwardMode && input.bossForwardRecipient
+            ? {
+              mode: input.bossForwardMode,
+              recipient: input.bossForwardRecipient,
+            }
+            : jobRecord.bossForwarding ?? automationSettings.forwarding;
+          if (!forwarding) {
+            throw new Error(`Missing stored Boss forwarding configuration for job ${conversation.jobName}`);
+          }
+
+          if (jobRecord.bossForwarding?.mode !== forwarding.mode
+            || jobRecord.bossForwarding?.recipient !== forwarding.recipient) {
+            await store.saveJobRecord('boss', {
+              ...jobRecord,
+              bossForwarding: forwarding,
             });
-            matched = score.totalScore >= input.scoreThreshold;
+          }
+
+          if (input.requireAllHardRequirements && !supportsPropertyElectricianHardRequirements(jobKey, jobRecord.normalizedJob)) {
             item = {
               ...item,
-              score,
-              matched,
-              forwarded: false,
-              status: matched ? 'failed' : 'not_matched',
+              status: 'skipped_unsupported_hard_requirements',
+              error: `All-hard-requirements evaluation is not configured for Boss job ${conversation.jobName}`,
             };
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            await store.saveCandidateScoreArtifact('boss', jobKey, {
+            shouldMarkReviewed = true;
+          } else {
+            resumeOpened = true;
+            const resume = await openAndParseBossChatResumeRef.fn(chatPage, opened);
+            item = {
+              ...item,
               candidateId: resume.candidateId,
-              candidateShareUrl: resume.candidateShareUrl,
-              model: config.scoring.model,
-              scoredAt,
-              status: 'failed',
-              error: message,
-            });
-            throw error;
-          }
-        }
+              candidateName: resume.name ?? conversation.candidateName,
+            };
+            await store.saveCandidateResume('boss', jobKey, resume, formatResumeSnapshot(resume));
 
-        if (clarificationRequired) {
-          await closeBossChatResumeRef.fn(chatPage);
-          const contactResult = await contactBossShanghaiOriginCandidateRef.fn(chatPage);
-          item = {
-            ...item,
-            chatMessageSent: contactResult.messageSent,
-            clarificationQuestionSent: contactResult.messageSent,
-          };
-        } else if (matched) {
-          await forwardBossResumeRef.fn(
-            chatPage,
-            opened.candidate,
-            forwarding.mode,
-            forwarding.recipient,
-          );
-          item = {
-            ...item,
-            forwarded: true,
-            status: 'forwarded',
-          };
-          await closeBossChatResumeRef.fn(chatPage);
-          const contactResult = await contactBossQualifiedCandidateRef.fn(chatPage);
-          item = {
-            ...item,
-            chatMessageSent: contactResult.messageSent,
-            phoneExchangeRequested: contactResult.phoneExchangeRequested,
-          };
-        } else {
-          await closeBossChatResumeRef.fn(chatPage);
-          const contactResult = await contactBossUnqualifiedCandidateRef.fn(chatPage);
-          item = {
-            ...item,
-            chatMessageSent: contactResult.messageSent,
-          };
+            let matched: boolean;
+            let clarificationRequired = false;
+            if (input.requireAllHardRequirements) {
+              const hardRequirementEvaluation = evaluateBossChatHardRequirementsRef.fn(resume);
+              matched = hardRequirementEvaluation.allMet;
+              clarificationRequired = Boolean(hardRequirementEvaluation.clarification);
+              item = {
+                ...item,
+                hardRequirementEvaluation,
+                matched: clarificationRequired ? undefined : matched,
+                forwarded: false,
+                status: clarificationRequired
+                  ? 'awaiting_clarification'
+                  : matched
+                    ? 'failed'
+                    : 'not_matched',
+              };
+            } else {
+              const scoredAt = new Date().toISOString();
+              try {
+                const score = await scoreResumeAgainstJobRef.fn(jobRecord.normalizedJob, resume);
+                await store.saveCandidateScoreArtifact('boss', jobKey, {
+                  candidateId: resume.candidateId,
+                  candidateShareUrl: resume.candidateShareUrl,
+                  model: config.scoring.model,
+                  scoredAt,
+                  status: 'success',
+                  score,
+                });
+                matched = score.totalScore >= input.scoreThreshold;
+                item = {
+                  ...item,
+                  score,
+                  matched,
+                  forwarded: false,
+                  status: matched ? 'failed' : 'not_matched',
+                };
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                await store.saveCandidateScoreArtifact('boss', jobKey, {
+                  candidateId: resume.candidateId,
+                  candidateShareUrl: resume.candidateShareUrl,
+                  model: config.scoring.model,
+                  scoredAt,
+                  status: 'failed',
+                  error: message,
+                });
+                throw error;
+              }
+            }
+
+            if (clarificationRequired) {
+              await closeBossChatResumeRef.fn(chatPage);
+              resumeOpened = false;
+              const contactResult = await contactBossShanghaiOriginCandidateRef.fn(chatPage);
+              item = {
+                ...item,
+                chatMessageSent: contactResult.messageSent,
+                clarificationQuestionSent: contactResult.messageSent,
+              };
+            } else if (matched) {
+              await forwardBossResumeRef.fn(
+                chatPage,
+                opened.candidate,
+                forwarding.mode,
+                forwarding.recipient,
+              );
+              item = {
+                ...item,
+                forwarded: true,
+                status: 'forwarded',
+              };
+              shouldMarkReviewed = true;
+              await closeBossChatResumeRef.fn(chatPage);
+              resumeOpened = false;
+              const contactResult = await contactBossQualifiedCandidateRef.fn(chatPage);
+              item = {
+                ...item,
+                chatMessageSent: contactResult.messageSent,
+                phoneExchangeRequested: contactResult.phoneExchangeRequested,
+              };
+            } else {
+              await closeBossChatResumeRef.fn(chatPage);
+              resumeOpened = false;
+              const contactResult = await contactBossUnqualifiedCandidateRef.fn(chatPage);
+              item = {
+                ...item,
+                chatMessageSent: contactResult.messageSent,
+              };
+              shouldMarkReviewed = true;
+            }
+          }
         }
       } catch (error) {
         item = {
@@ -1088,10 +1090,10 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
           error: error instanceof Error ? error.message : String(error),
         };
       } finally {
-        await closeBossChatResumeRef.fn(chatPage).catch(() => undefined);
-        if (opened
-          && item.status !== 'awaiting_clarification'
-          && (item.status !== 'failed' || item.forwarded === true)) {
+        if (resumeOpened) {
+          await closeBossChatResumeRef.fn(chatPage).catch(() => undefined);
+        }
+        if (shouldMarkReviewed) {
           reviewedConversationIdSet.add(conversation.conversationId);
           await store.saveBossChatReviewedConversationIds([...reviewedConversationIdSet]);
         }
@@ -1113,6 +1115,12 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
       forwardedCandidates: items.filter((item) => item.forwarded).length,
       skippedConversations: items.filter((item) => item.status.startsWith('skipped_')).length,
       failedConversations: items.filter((item) => item.status === 'failed').length,
+      previouslyChattedConversations: items.filter((item) => item.previousChat?.previouslyChatted === true).length,
+      firstContactConversations: items.filter((item) => item.previousChat?.previouslyChatted === false).length,
+      followUpConversations: items.filter((item) => item.status === 'follow_up_reply').length,
+      newReplyMessages: items
+        .filter((item) => item.status === 'follow_up_reply')
+        .reduce((total, item) => total + (item.newCandidateReplies?.length ?? 0), 0),
       items,
     };
     const resultPath = await store.saveBossChatReviewRun(run);

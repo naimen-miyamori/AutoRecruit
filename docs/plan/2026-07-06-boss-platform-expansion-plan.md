@@ -934,3 +934,14 @@ PLAYWRIGHT_HEADLESS=false rtk npm run dev -- \
 - 确认分支关闭简历后，在 `#boss-chat-editor-input[contenteditable="true"]` 中直接输入 `是上海人吗？`，再点击主发送按钮；该问题是唯一允许直接填写聊天编辑器的例外。
 - 发送后记录 `awaiting_clarification` 和 `clarificationQuestionSent: true`，不转发、不发拒绝话术、不换电话，也不写入 reviewed conversation IDs。候选人后续回复产生新红点后可再次审查。
 - 输入前检查编辑器内容；若已有其他文本则不覆盖并安全失败，保持会话可重试。发送前后继续校验精确文本和消息落盘状态。
+
+阶段 11 历史沟通分流：
+
+- 点击每个有红点的候选人并等待 `.chat-conversation`、`.base-info-single-container` 对应当前会话且数据完成 hydration 后，再判断此前是否聊过。
+- 判断证据按优先级使用：Boss 会话或换电话组件的 `bothTalked` 状态；当前可见的招聘方已发送消息；当前可见消息数是否大于点击前快照中的未读数。
+- 每个已打开的审查项保存 `previousChat.previouslyChatted`、`basis`、`visibleMessageCount` 和 `unreadCountAtOpen`。未打开的跳过项不伪造判断。
+- 已聊过候选人按点击前 `unreadCount` 提取最后若干条候选人新消息，状态记为 `follow_up_reply`；文本规范空白，非文本消息保存明确类型占位符，无法可靠提取时记录可重试失败。
+- 已聊过分支不打开简历、不读取或判断 JD、不评分、不转发、不发送话术、不申请换电话；首次沟通分支继续原有严格匹配或评分流程。
+- 缺少 JD 或转发配置不再阻止打开会话；若判断为首次沟通，则记录未审查的可重试失败。已聊过分支不要求这些配置。
+- 真实新红点始终处理，即使会话 ID 历史上已审查；`reviewedConversationIds` 只抑制没有新红点的失败恢复项。
+- 每次运行及总结邮件增加“此前已聊过”“此前未聊过”“跟进回复会话”和“新回复消息”计数，并为跟进回复提供独立章节。
