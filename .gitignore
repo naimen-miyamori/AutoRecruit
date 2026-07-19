@@ -1,5 +1,6 @@
 .env
 .env.local
+docs/
 .venv/
 node_modules/
 dist/
