@@ -97,6 +97,7 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'platform',
     'scoreThreshold',
     'requireAllHardRequirements',
+    'replyToUnqualifiedCandidates',
     'bossForwardMode',
     'bossForwardRecipient',
     'summaryEmail',
@@ -143,7 +144,7 @@ function coerceScalar(field: string, value: unknown): unknown {
     return undefined;
   }
 
-  if ((field === 'includeViewed' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements') && typeof value === 'string') {
+  if ((field === 'includeViewed' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates') && typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
     if (normalized === 'true') {
       return true;
@@ -286,6 +287,9 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
     if (input.requireAllHardRequirements === true) {
       warnings.push('风险：只有所有硬性要求都有明确简历证据时才会转发；物业电工仅在其他条件均满足且有上海就读线索时，在聊天框输入并发送上海籍确认问题，其他缺失信息按不符合处理。');
     }
+    if (input.replyToUnqualifiedCandidates === true) {
+      warnings.push('风险：已开启不合适候选人回复，任务会从 Boss 常用语面板发送固定拒绝消息；默认关闭。');
+    }
     if (isPresent(input.summaryEmail)) {
       warnings.push('风险：任务结束后会把候选人姓名、ID和判断理由发送到总结邮箱。');
     }
@@ -379,6 +383,7 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
     const argv = ['--platform', String(input.platform ?? ''), '--boss-auto-chat', 'true'];
     pushPreview(argv, '--boss-chat-score-threshold', input.scoreThreshold);
     pushBooleanPreview(argv, '--boss-chat-require-all', input.requireAllHardRequirements);
+    pushBooleanPreview(argv, '--boss-chat-reply-unqualified', input.replyToUnqualifiedCandidates);
     pushPreview(argv, '--boss-forward-mode', input.bossForwardMode);
     pushPreview(argv, '--boss-forward-recipient', input.bossForwardRecipient);
     pushPreview(argv, '--boss-chat-summary-email', input.summaryEmail);
@@ -503,7 +508,7 @@ function buildSystemPrompt(): string {
     'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。',
     'batch 字段：platform, jobsFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
     'Boss 转发只允许 platform=boss；bossForwardMode 只能是 colleague 或 email，出现时必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',
-    'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, bossForwardMode, bossForwardRecipient, summaryEmail, summaryCc；platform 必须是 boss。转发和总结邮件参数可省略以复用已保存配置；requireAllHardRequirements=true 时所有硬性条件都必须有明确证据。物业电工仅在其他五项满足、籍贯未知且有上海就读线索时，在聊天框输入“是上海人吗？”并发送后等待回复，不直接判定符合；summaryEmail 配置后任务结束发送总结，summaryCc 需要 summaryEmail。',
+    'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, replyToUnqualifiedCandidates, bossForwardMode, bossForwardRecipient, summaryEmail, summaryCc；platform 必须是 boss。replyToUnqualifiedCandidates 默认 false，仅显式设为 true 时才向不合适候选人发送固定拒绝常用语。转发和总结邮件参数可省略以复用已保存配置；requireAllHardRequirements=true 时所有硬性条件都必须有明确证据。物业电工仅在其他五项满足、籍贯未知且有上海就读线索时，在聊天框输入“是上海人吗？”并发送后等待回复，不直接判定符合；summaryEmail 配置后任务结束发送总结，summaryCc 需要 summaryEmail。',
     'search-subscription 字段：platform, searchSubscriptionFile, keyword, applicationFilterInputFile, saveSearchSubscription, searchSubscriptionName；不要包含 jd、email、includeViewed、searchSource。',
     'login-refresh 字段：platform，只允许 51job、liepin、zhilian、boss。',
     'rag-ops 字段：action, platform, jobKey, keyword, question, file, policyFile, reviewer, limit, includeReviewed, failOnIssue；action 只能是 doctor、review、metrics、ops、rebuild。',

@@ -236,6 +236,7 @@ describe('console API routes', () => {
         platform: 'boss',
         scoreThreshold: 75,
         requireAllHardRequirements: true,
+        replyToUnqualifiedCandidates: true,
         bossForwardMode: 'email',
         bossForwardRecipient: 'resume@qq.com',
         summaryEmail: 'summary@qq.com',
@@ -256,6 +257,8 @@ describe('console API routes', () => {
       '75',
       '--boss-chat-require-all',
       'true',
+      '--boss-chat-reply-unqualified',
+      'true',
       '--boss-forward-mode',
       'email',
       '--boss-forward-recipient',
@@ -269,6 +272,7 @@ describe('console API routes', () => {
     assert.equal(completed.outputSummary?.chatMessagesSent, 1);
     assert.equal(completed.outputSummary?.phoneExchangeRequests, 1);
     assert.equal(completed.outputSummary?.summaryEmailRecipient, 'summary@qq.com');
+    assert.equal(completed.inputSummary.replyToUnqualifiedCandidates, true);
   });
 
   it('queues Boss auto-chat review without repeated forwarding arguments', async () => {
@@ -303,6 +307,7 @@ describe('console API routes', () => {
       '--boss-chat-score-threshold',
       '70',
     ]);
+    assert.equal(completed.inputSummary.replyToUnqualifiedCandidates, false);
   });
 
   it('rejects Boss auto-chat summary cc without a summary recipient', async () => {

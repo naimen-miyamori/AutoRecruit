@@ -1642,6 +1642,7 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
     { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(['boss']) },
     { key: 'scoreThreshold', label: '符合分数线', kind: 'number' },
     { key: 'requireAllHardRequirements', label: '所有硬性要求必须满足', kind: 'checkbox' },
+    { key: 'replyToUnqualifiedCandidates', label: '回复不合适候选人', kind: 'checkbox' },
     { key: 'bossForwardMode', label: 'Boss 转发方式', kind: 'select', options: [{ value: 'colleague', label: '站内同事' }, { value: 'email', label: '邮件转发' }] },
     { key: 'bossForwardRecipient', label: 'Boss 转发收件人' },
     { key: 'summaryEmail', label: '总结邮件收件人' },
@@ -2116,6 +2117,7 @@ function RunJobView() {
     bossForwardRecipient: '',
     bossChatScoreThreshold: '70',
     bossChatRequireAll: true,
+    bossChatReplyUnqualified: false,
     bossChatSummaryEmail: '',
     bossChatSummaryCc: '',
     saveSearchSubscription: false,
@@ -2158,6 +2160,7 @@ function RunJobView() {
         platform: 'boss',
         scoreThreshold: Number(form.bossChatScoreThreshold),
         requireAllHardRequirements: form.bossChatRequireAll,
+        replyToUnqualifiedCandidates: form.bossChatReplyUnqualified,
         bossForwardMode: form.bossForwardMode || undefined,
         bossForwardRecipient: form.bossForwardRecipient || undefined,
         summaryEmail: form.bossChatSummaryEmail || undefined,
@@ -2312,6 +2315,14 @@ function RunJobView() {
                   />
                   <span>所有硬性要求必须同时满足</span>
                 </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={form.bossChatReplyUnqualified}
+                    onChange={(event) => setField('bossChatReplyUnqualified', event.target.checked)}
+                  />
+                  <span>回复不合适候选人</span>
+                </label>
                 {!form.bossChatRequireAll && (
                   <label>
                     <span>符合分数线</span>
@@ -2407,8 +2418,8 @@ function RunJobView() {
         <div className="run-submit-row">
           <span>{mode === 'boss-auto-chat'
             ? form.bossChatRequireAll
-              ? '任务会向严格符合要求的候选人发送固定消息、请求换电话并转发简历，结束后可发送总结。'
-              : '任务会审查未读会话，并转发达到分数线的简历。'
+              ? `任务会向严格符合要求的候选人发送固定消息、请求换电话并转发简历；不合适候选人${form.bossChatReplyUnqualified ? '会收到固定拒绝消息' : '仅记录，不回复'}。`
+              : `任务会审查未读会话并转发达到分数线的简历；不合适候选人${form.bossChatReplyUnqualified ? '会收到固定拒绝消息' : '仅记录，不回复'}。`
             : form.searchSource === 'direct' && mode !== 'search-subscription'
             ? '直接搜索会使用下方筛选条件文件。'
             : mode === 'search-subscription' && form.applicationFilterInputFile

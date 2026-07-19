@@ -103,6 +103,7 @@ interface BossAutoChatCliInput {
   platform: 'boss';
   scoreThreshold: number;
   requireAllHardRequirements: boolean;
+  replyToUnqualifiedCandidates: boolean;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
   summaryEmail?: string;
@@ -450,6 +451,9 @@ function parseArgs(argv: readonly string[]): CliInput {
   const bossChatRequireAll = flagPresence.has('boss-chat-require-all')
     ? parseOptionalBoolean(values.get('boss-chat-require-all'), '--boss-chat-require-all')
     : false;
+  const bossChatReplyUnqualified = flagPresence.has('boss-chat-reply-unqualified')
+    ? parseOptionalBoolean(values.get('boss-chat-reply-unqualified'), '--boss-chat-reply-unqualified')
+    : false;
   const bossChatSummaryEmail = values.get('boss-chat-summary-email')?.trim();
   const bossChatSummaryCcEmails = flagPresence.has('boss-chat-summary-cc')
     ? parseEmailList(values.get('boss-chat-summary-cc'))
@@ -525,6 +529,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       platform: 'boss',
       scoreThreshold: bossChatScoreThreshold,
       requireAllHardRequirements: bossChatRequireAll,
+      replyToUnqualifiedCandidates: bossChatReplyUnqualified,
       bossForwardMode,
       bossForwardRecipient,
       summaryEmail: bossChatSummaryEmail,
@@ -535,6 +540,7 @@ function parseArgs(argv: readonly string[]): CliInput {
   const bossChatOnlyFlags = [
     'boss-chat-score-threshold',
     'boss-chat-require-all',
+    'boss-chat-reply-unqualified',
     'boss-chat-summary-email',
     'boss-chat-summary-cc',
   ].filter((flag) => flagPresence.has(flag));
@@ -1074,11 +1080,13 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
             } else {
               await closeBossChatResumeRef.fn(chatPage);
               resumeOpened = false;
-              const contactResult = await contactBossUnqualifiedCandidateRef.fn(chatPage);
-              item = {
-                ...item,
-                chatMessageSent: contactResult.messageSent,
-              };
+              if (input.replyToUnqualifiedCandidates) {
+                const contactResult = await contactBossUnqualifiedCandidateRef.fn(chatPage);
+                item = {
+                  ...item,
+                  chatMessageSent: contactResult.messageSent,
+                };
+              }
               shouldMarkReviewed = true;
             }
           }
@@ -1107,6 +1115,7 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
       reviewedAt,
       scoreThreshold: input.scoreThreshold,
       matchMode: input.requireAllHardRequirements ? 'all-hard-requirements' : 'score-threshold',
+      replyToUnqualifiedCandidates: input.replyToUnqualifiedCandidates,
       unreadConversations: conversations.length,
       reviewedConversations: items.filter((item) => !item.status.startsWith('skipped_')).length,
       matchedCandidates: items.filter((item) => item.matched).length,

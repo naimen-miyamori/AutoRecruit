@@ -49,7 +49,12 @@ function displayReasons(item: BossChatReviewItem): string {
   return item.matched ? '符合要求' : '未取得足够证据确认符合要求';
 }
 
-function renderItems(items: BossChatReviewItem[], emptyText: string, includeReasons: boolean): string[] {
+function renderItems(
+  items: BossChatReviewItem[],
+  emptyText: string,
+  includeReasons: boolean,
+  replyToUnqualifiedCandidates = true,
+): string[] {
   if (items.length === 0) {
     return [emptyText];
   }
@@ -65,7 +70,9 @@ function renderItems(items: BossChatReviewItem[], emptyText: string, includeReas
       : item.matched
       ? `，符合常用语${item.chatMessageSent ? '已发送' : '未发送'}，换电话${item.phoneExchangeRequested ? '已请求' : '未请求'}`
       : item.matched === false
-        ? `，不合适常用语${item.chatMessageSent ? '已发送' : '未发送'}${item.error ? `：${sanitizeMarkdownInline(item.error)}` : ''}`
+        ? replyToUnqualifiedCandidates
+          ? `，不合适常用语${item.chatMessageSent ? '已发送' : '未发送'}${item.error ? `：${sanitizeMarkdownInline(item.error)}` : ''}`
+          : '，不合适候选人回复已关闭'
         : '';
     const forwarding = item.forwarded
       ? item.error
@@ -132,12 +139,14 @@ export function renderBossChatSummaryMarkdown(run: BossChatReviewRun): string {
   const followUpConversations = run.followUpConversations ?? followUps.length;
   const newReplyMessages = run.newReplyMessages
     ?? followUps.reduce((total, item) => total + (item.newCandidateReplies?.length ?? 0), 0);
+  const replyToUnqualifiedCandidates = run.replyToUnqualifiedCandidates !== false;
 
   return [
     `# ${sanitizeMarkdownInline(displayJobs(run))} Boss未读候选人审查总结`,
     '',
     `- 处理时间: ${run.reviewedAt}`,
     `- 匹配模式: ${run.matchMode === 'all-hard-requirements' ? '所有硬性要求必须同时满足' : `总分阈值 ${run.scoreThreshold}`}`,
+    `- 不合适候选人回复: ${replyToUnqualifiedCandidates ? '开启' : '关闭'}`,
     `- 未读会话: ${run.unreadConversations}`,
     `- 已审查: ${run.reviewedConversations}`,
     `- 符合要求: ${run.matchedCandidates}`,
@@ -162,7 +171,7 @@ export function renderBossChatSummaryMarkdown(run: BossChatReviewRun): string {
     '',
     '## 不符合或等待确认的候选人',
     '',
-    ...renderItems(unmatched, '无', true),
+    ...renderItems(unmatched, '无', true, replyToUnqualifiedCandidates),
     '',
     '## 未完成的会话',
     '',

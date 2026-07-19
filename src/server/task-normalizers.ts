@@ -430,6 +430,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
 
   const scoreThreshold = getOptionalNumberInRange(item, 'scoreThreshold', 0, 100);
   const requireAllHardRequirements = getOptionalBoolean(item, 'requireAllHardRequirements');
+  const replyToUnqualifiedCandidates = getOptionalBoolean(item, 'replyToUnqualifiedCandidates');
   const summaryEmail = getOptionalString(item, 'summaryEmail');
   const summaryCc = normalizeCc(item.summaryCc);
   if (summaryCc && !summaryEmail) {
@@ -441,6 +442,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
     platform: 'boss',
     scoreThreshold,
     requireAllHardRequirements,
+    replyToUnqualifiedCandidates,
     bossForwardMode,
     bossForwardRecipient,
     summaryEmail,
@@ -451,6 +453,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
     argv.push('--boss-chat-score-threshold', String(scoreThreshold));
   }
   pushOptionalBoolean(argv, '--boss-chat-require-all', requireAllHardRequirements);
+  pushOptionalBoolean(argv, '--boss-chat-reply-unqualified', replyToUnqualifiedCandidates);
   pushOptional(argv, '--boss-forward-mode', bossForwardMode);
   pushOptional(argv, '--boss-forward-recipient', bossForwardRecipient);
   pushOptional(argv, '--boss-chat-summary-email', summaryEmail);
@@ -463,6 +466,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
       platform: 'boss',
       scoreThreshold: scoreThreshold ?? 70,
       requireAllHardRequirements: requireAllHardRequirements ?? false,
+      replyToUnqualifiedCandidates: replyToUnqualifiedCandidates ?? false,
       bossForwardMode,
       bossForwardRecipient,
       summaryEmail,

@@ -5635,6 +5635,8 @@ describe('scoring run semantics', () => {
       '80',
       '--boss-chat-require-all',
       'true',
+      '--boss-chat-reply-unqualified',
+      'true',
       '--boss-forward-mode',
       'email',
       '--boss-forward-recipient',
@@ -5660,6 +5662,7 @@ describe('scoring run semantics', () => {
     assert.equal(summary.skippedConversations, 0);
     assert.equal(summary.failedConversations, 1);
     assert.equal(summary.matchMode, 'all-hard-requirements');
+    assert.equal(summary.replyToUnqualifiedCandidates, true);
     assert.equal(summary.summaryEmailRecipient, 'summary@qq.com');
     assert.equal(scoreCalled, false);
     assert.deepStrictEqual(forwardedCandidates, ['candidate-matched']);
@@ -6018,6 +6021,7 @@ describe('scoring run semantics', () => {
     const chatPage = {} as Page;
     let opened = 0;
     let collection = 0;
+    let unqualifiedContactCalls = 0;
     indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => ({ page: chatPage, context: {} }) as never;
     indexModule.closeBrowserSessionRef.fn = async () => undefined;
     indexModule.openBossChatPageRef.fn = async () => chatPage;
@@ -6052,10 +6056,13 @@ describe('scoring run semantics', () => {
       rejectionReasons: ['缺少高压电工证'],
     });
     indexModule.closeBossChatResumeRef.fn = async () => undefined;
-    indexModule.contactBossUnqualifiedCandidateRef.fn = async () => ({
-      messageSent: true,
-      messageAlreadyPresent: false,
-    });
+    indexModule.contactBossUnqualifiedCandidateRef.fn = async () => {
+      unqualifiedContactCalls += 1;
+      return {
+        messageSent: true,
+        messageAlreadyPresent: false,
+      };
+    };
 
     const firstResult = await indexModule.main([
       '--platform',
@@ -6088,6 +6095,9 @@ describe('scoring run semantics', () => {
     assert.equal(opened, 2);
     assert.equal(secondResult.failedConversations, 0);
     assert.equal(secondResult.items[0]?.status, 'not_matched');
+    assert.equal(secondResult.items[0]?.chatMessageSent, undefined);
+    assert.equal(secondResult.replyToUnqualifiedCandidates, false);
+    assert.equal(unqualifiedContactCalls, 0);
     assert.deepStrictEqual(await store.readBossChatReviewedConversationIds(), ['conversation-without-forwarding']);
     assert.deepStrictEqual(await store.readBossChatRetryItems(), []);
   });

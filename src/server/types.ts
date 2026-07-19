@@ -66,6 +66,7 @@ export interface BossAutoChatTaskInput {
   platform: 'boss';
   scoreThreshold?: number;
   requireAllHardRequirements?: boolean;
+  replyToUnqualifiedCandidates?: boolean;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
   summaryEmail?: string;

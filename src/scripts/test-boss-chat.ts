@@ -851,6 +851,18 @@ describe('Boss property electrician hard requirements', () => {
     assert.match(markdown, /此前未聊过: 2/);
     assert.match(markdown, /候选人甲（ID: candidate-qualified），此前未聊过/);
     assert.match(markdown, /候选人乙（ID: candidate-rejected），此前未聊过/);
+
+    const replyDisabledMarkdown = renderBossChatSummaryMarkdown({
+      ...run,
+      replyToUnqualifiedCandidates: false,
+      chatMessagesSent: 1,
+      items: run.items.map((item) => item.matched === false
+        ? { ...item, chatMessageSent: undefined }
+        : item),
+    });
+    assert.match(replyDisabledMarkdown, /不合适候选人回复: 关闭/);
+    assert.match(replyDisabledMarkdown, /不合适候选人回复已关闭/);
+    assert.doesNotMatch(replyDisabledMarkdown, /不合适常用语未发送/);
   });
 
   it('renders Shanghai-origin clarification separately from rejection contact', () => {

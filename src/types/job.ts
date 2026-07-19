@@ -354,6 +354,7 @@ export interface BossChatReviewRun {
   reviewedAt: string;
   scoreThreshold: number;
   matchMode: BossChatMatchMode;
+  replyToUnqualifiedCandidates?: boolean;
   unreadConversations: number;
   reviewedConversations: number;
   matchedCandidates: number;
