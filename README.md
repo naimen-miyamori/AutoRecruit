@@ -229,6 +229,21 @@ npm run web:dev
 
 Vite 默认地址为 `http://127.0.0.1:5173`，并将 `/api` 代理到本地 API。控制台支持任务队列、职位和候选人查看、搜索订阅、Boss 自动聊天、RAG 运维和结构化助手草稿确认。
 
+### 循环自动运行
+
+控制台“自动运行”页可以创建由多个搜索或 Boss 自动聊天任务组成的串行计划。计划按每日时间窗口启动新一轮，并从上一轮全部任务完成后开始计算下一轮间隔；间隔为 `0` 时立即尝试重跑。所有轮次与手工任务共享一个全局队列，不会并发控制浏览器。
+
+停止计划时使用“当前任务结束后停止”：正在运行的单个任务完成后，系统取消本轮余下任务并停止后续循环。`--platform all`、batch 和一次 Boss 自动聊天各自都视为一个单个任务，不会在内部被强制中断。
+
+本机控制命令：
+
+```bash
+rtk npm run schedule:stop -- --schedule-id <scheduleId>
+rtk npm run schedule:control -- pause --schedule-id <scheduleId>
+rtk npm run schedule:control -- start --schedule-id <scheduleId>
+rtk npm run schedule:control -- run-now --schedule-id <scheduleId>
+```
+
 ## 配置参考
 
 完整配置模板见 [.env.example](./.env.example)。常用配置包括：

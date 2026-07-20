@@ -1,5 +1,5 @@
 import { mockApplicationFilterOptions, mockCandidateDetail, mockCandidates, mockCatalogs, mockDashboardHealth, mockJobDetail, mockJobs, mockTaskDetail, mockTasks } from './mock-data';
-import type { ApplicationFilterOptions, AssistantChatRequest, AssistantChatResponse, AssistantConfirmResponse, AssistantDraft, CandidateDetail, CandidateSummary, DashboardHealth, FilterCatalog, JobDetail, JobSummary, RagAnswer, SavedFilterInput, TaskDetail, TaskSummary } from './types';
+import type { ApplicationFilterOptions, AssistantChatRequest, AssistantChatResponse, AssistantConfirmResponse, AssistantDraft, CandidateDetail, CandidateSummary, DashboardHealth, FilterCatalog, JobDetail, JobSummary, RagAnswer, SavedFilterInput, ScheduleDefinition, ScheduleRunRecord, ScheduleSummary, TaskDetail, TaskSummary } from './types';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api';
 
@@ -79,6 +79,33 @@ export const api = {
       ...mockTaskDetail,
       taskId,
     });
+  },
+  async listSchedules() {
+    return withFallback(requestJson<{ schedules: ScheduleSummary[] }>('/schedules'), { schedules: [] });
+  },
+  async getSchedule(scheduleId: string) {
+    return requestJson<ScheduleDefinition>(`/schedules/${encodeURIComponent(scheduleId)}`);
+  },
+  async listScheduleRuns(scheduleId: string) {
+    return requestJson<{ runs: ScheduleRunRecord[] }>(`/schedules/${encodeURIComponent(scheduleId)}/runs`);
+  },
+  async createSchedule(body: Record<string, unknown>) {
+    return requestJson<ScheduleDefinition>('/schedules', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+  async updateSchedule(scheduleId: string, body: Record<string, unknown>) {
+    return requestJson<ScheduleDefinition>(`/schedules/${encodeURIComponent(scheduleId)}/update`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+  async controlSchedule(scheduleId: string, action: 'start' | 'pause' | 'stop' | 'run-now') {
+    return requestJson<ScheduleDefinition>(`/schedules/${encodeURIComponent(scheduleId)}/${action}`, { method: 'POST' });
+  },
+  async stopAllSchedules() {
+    return requestJson<{ schedules: ScheduleSummary[] }>('/schedules/stop-all', { method: 'POST' });
   },
   async listJobs(platform?: string) {
     const query = platform && platform !== 'all' ? `?platform=${encodeURIComponent(platform)}` : '';

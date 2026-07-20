@@ -24,13 +24,32 @@ import type {
   TaskLogLevel,
   TaskOutput,
   TaskRecord,
+  ScheduledTaskMetadata,
   TaskSummary,
   TaskInput,
+  WorkflowFailurePolicy,
 } from './types.js';
 
 export type TaskRunner = (argv: readonly string[], task: TaskRecord) => Promise<MainResult>;
 export type LoginRefreshRunner = (input: LoginRefreshTaskInput, task: TaskRecord) => Promise<LoginRefreshTaskOutput>;
 export type RagOpsRunner = (input: RagOpsTaskInput, task: TaskRecord) => Promise<TaskOutput>;
+
+export interface QueueTaskDefinition {
+  kind: TaskKind;
+  input: TaskInput;
+  inputSummary: Record<string, unknown>;
+  argv: string[];
+  schedule: ScheduledTaskMetadata;
+}
+
+interface QueuedTaskGroup {
+  groupId: string;
+  taskIds: string[];
+  failurePolicy: WorkflowFailurePolicy;
+  stopRequested: boolean;
+}
+
+export type TaskTerminalListener = (task: TaskDetail) => void;
 
 interface TaskQueueOptions {
   taskDir?: string;
@@ -73,6 +92,7 @@ function toTaskDetail(task: TaskRecord): TaskDetail {
     input: task.input,
     output: task.output,
     logs: task.logs,
+    schedule: task.schedule,
   };
 }
 
@@ -183,6 +203,8 @@ export class TaskQueue {
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly pendingTaskIds: string[] = [];
   private readonly persistChains = new Map<string, Promise<void>>();
+  private readonly groups = new Map<string, QueuedTaskGroup>();
+  private readonly taskTerminalListeners = new Set<TaskTerminalListener>();
   private loading: Promise<void>;
   private drainPromise?: Promise<void>;
   private runningTaskId?: string;
@@ -217,28 +239,69 @@ export class TaskQueue {
   }): Promise<TaskDetail> {
     await this.loading;
 
-    const now = new Date().toISOString();
-    const task: TaskRecord = {
-      taskId: crypto.randomUUID(),
-      kind: options.kind,
-      status: 'queued',
-      createdAt: now,
-      updatedAt: now,
-      input: options.input,
-      inputSummary: options.inputSummary,
-      argv: options.argv,
-      logs: [{
-        at: now,
-        level: 'info',
-        message: 'Task queued',
-      }],
-    };
+    const task = this.createQueuedTask(options);
 
     this.tasks.set(task.taskId, task);
     this.pendingTaskIds.push(task.taskId);
     await this.persistTask(task);
     this.scheduleDrain();
     return toTaskDetail(task);
+  }
+
+  async enqueueGroupIfIdle(options: {
+    groupId: string;
+    tasks: QueueTaskDefinition[];
+    failurePolicy: WorkflowFailurePolicy;
+  }): Promise<{ accepted: true; taskIds: string[] } | { accepted: false; reason: 'busy' | 'empty' }> {
+    await this.loading;
+    if (options.tasks.length === 0) {
+      return { accepted: false, reason: 'empty' };
+    }
+    if (this.runningTaskId || this.pendingTaskIds.length > 0) {
+      return { accepted: false, reason: 'busy' };
+    }
+
+    const tasks = options.tasks.map((definition) => this.createQueuedTask(definition));
+    const group: QueuedTaskGroup = {
+      groupId: options.groupId,
+      taskIds: tasks.map((task) => task.taskId),
+      failurePolicy: options.failurePolicy,
+      stopRequested: false,
+    };
+    this.groups.set(options.groupId, group);
+    for (const task of tasks) {
+      this.tasks.set(task.taskId, task);
+      this.pendingTaskIds.push(task.taskId);
+    }
+    await Promise.all(tasks.map((task) => this.persistTask(task)));
+    this.scheduleDrain();
+    return { accepted: true, taskIds: group.taskIds };
+  }
+
+  async requestGroupStopAfterCurrentTask(groupId: string): Promise<{ runningTaskId?: string; cancelledTaskIds: string[] }> {
+    await this.loading;
+    const group = this.getOrCreateGroup(groupId);
+    if (!group) {
+      return { cancelledTaskIds: [] };
+    }
+    group.stopRequested = true;
+    const runningTaskId = group.taskIds.find((taskId) => this.tasks.get(taskId)?.status === 'running');
+    if (runningTaskId) {
+      return { runningTaskId, cancelledTaskIds: [] };
+    }
+    return {
+      cancelledTaskIds: await this.cancelQueuedGroupTasks(group, 'Schedule stop requested before task start'),
+    };
+  }
+
+  onTaskTerminal(listener: TaskTerminalListener): () => void {
+    this.taskTerminalListeners.add(listener);
+    return () => this.taskTerminalListeners.delete(listener);
+  }
+
+  async isIdle(): Promise<boolean> {
+    await this.loading;
+    return !this.runningTaskId && this.pendingTaskIds.length === 0;
   }
 
   async listTasks(): Promise<TaskSummary[]> {
@@ -319,6 +382,7 @@ export class TaskQueue {
 
       this.runningTaskId = taskId;
       await this.runTask(task);
+      await this.afterTaskTerminal(task);
       this.runningTaskId = undefined;
     }
 
@@ -345,6 +409,7 @@ export class TaskQueue {
       task.updatedAt = finishedAt;
       this.appendLog(task, 'info', 'Task succeeded');
       await this.persistTask(task);
+      this.notifyTaskTerminal(task);
     } catch (error) {
       const finishedAt = new Date().toISOString();
       task.status = 'failed';
@@ -353,6 +418,108 @@ export class TaskQueue {
       task.updatedAt = finishedAt;
       this.appendLog(task, 'error', task.error);
       await this.persistTask(task);
+      this.notifyTaskTerminal(task);
+    }
+  }
+
+  private createQueuedTask(options: {
+    kind: TaskKind;
+    input: TaskInput;
+    inputSummary: Record<string, unknown>;
+    argv: string[];
+    schedule?: ScheduledTaskMetadata;
+  }): TaskRecord {
+    const now = new Date().toISOString();
+    return {
+      taskId: crypto.randomUUID(),
+      kind: options.kind,
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now,
+      input: options.input,
+      inputSummary: options.inputSummary,
+      argv: options.argv,
+      logs: [{
+        at: now,
+        level: 'info',
+        message: 'Task queued',
+      }],
+      schedule: options.schedule,
+    };
+  }
+
+  private getOrCreateGroup(groupId: string): QueuedTaskGroup | undefined {
+    const existing = this.groups.get(groupId);
+    if (existing) {
+      return existing;
+    }
+    const matchingTasks = [...this.tasks.values()].filter((task) => task.schedule?.scheduleRunId === groupId);
+    if (matchingTasks.length === 0) {
+      return undefined;
+    }
+    const group: QueuedTaskGroup = {
+      groupId,
+      taskIds: matchingTasks.map((task) => task.taskId),
+      failurePolicy: 'stop-round',
+      stopRequested: false,
+    };
+    this.groups.set(groupId, group);
+    return group;
+  }
+
+  private async afterTaskTerminal(task: TaskRecord): Promise<void> {
+    const groupId = task.schedule?.scheduleRunId;
+    if (!groupId) {
+      return;
+    }
+    const group = this.getOrCreateGroup(groupId);
+    if (!group) {
+      return;
+    }
+    if (group.stopRequested) {
+      await this.cancelQueuedGroupTasks(group, 'Schedule stop requested after current task');
+      return;
+    }
+    if (task.status === 'failed' && group.failurePolicy === 'stop-round') {
+      await this.cancelQueuedGroupTasks(group, 'Previous task failed; stopping scheduled round');
+    }
+  }
+
+  private async cancelQueuedGroupTasks(group: QueuedTaskGroup, reason: string): Promise<string[]> {
+    const queuedTaskIds = group.taskIds.filter((taskId) => this.tasks.get(taskId)?.status === 'queued');
+    if (queuedTaskIds.length === 0) {
+      return [];
+    }
+    const now = new Date().toISOString();
+    for (const taskId of queuedTaskIds) {
+      const task = this.tasks.get(taskId);
+      if (!task || task.status !== 'queued') {
+        continue;
+      }
+      task.status = 'cancelled';
+      task.finishedAt = now;
+      task.updatedAt = now;
+      this.appendLog(task, 'warn', reason);
+      await this.persistTask(task);
+      this.notifyTaskTerminal(task);
+    }
+    const cancelled = new Set(queuedTaskIds);
+    for (let index = this.pendingTaskIds.length - 1; index >= 0; index -= 1) {
+      if (cancelled.has(this.pendingTaskIds[index]!)) {
+        this.pendingTaskIds.splice(index, 1);
+      }
+    }
+    return queuedTaskIds;
+  }
+
+  private notifyTaskTerminal(task: TaskRecord): void {
+    const detail = toTaskDetail(task);
+    for (const listener of this.taskTerminalListeners) {
+      try {
+        listener(detail);
+      } catch {
+        // A status listener must not interfere with task completion.
+      }
     }
   }
 

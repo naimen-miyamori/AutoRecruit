@@ -26,6 +26,7 @@ import {
   type AssistantCompletion,
 } from './cli-assistant.js';
 import { JobReadModel } from './job-read-model.js';
+import { TaskScheduler } from './task-scheduler.js';
 import { TaskQueue } from './task-queue.js';
 import {
   normalizeApplicationFilterInputRequest,
@@ -59,6 +60,7 @@ export interface ApiResponse<T = unknown> {
 
 interface RouteDependencies {
   taskQueue?: TaskQueue;
+  taskScheduler?: TaskScheduler;
   jobReadModel?: JobReadModel;
   dataDir?: string;
   answerQuestion?: (options: AskRagQuestionOptions) => Promise<RagAnswer>;
@@ -262,6 +264,11 @@ async function confirmAssistantDraft(
 export async function handleApiRequest(request: RouteRequest): Promise<ApiResponse> {
   const dataDir = request.dataDir ?? config.dataDir;
   const taskQueue = request.taskQueue ?? new TaskQueue();
+  let taskScheduler = request.taskScheduler;
+  const getTaskScheduler = () => {
+    taskScheduler ??= new TaskScheduler({ taskQueue, dataDir });
+    return taskScheduler;
+  };
   const jobReadModel = request.jobReadModel ?? new JobReadModel({ dataDir });
   const searchParams = request.searchParams ?? new URLSearchParams();
   const method = request.method.toUpperCase();
@@ -294,6 +301,58 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
     if (method === 'GET' && pathname === '/api/tasks') {
       return jsonResponse(200, {
         tasks: await taskQueue.listTasks(),
+      });
+    }
+
+    if (method === 'GET' && pathname === '/api/schedules') {
+      return jsonResponse(200, {
+        schedules: await getTaskScheduler().listSchedules(),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/schedules') {
+      return jsonResponse(201, await getTaskScheduler().createSchedule(request.body));
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'schedules' && segments[2] && segments.length === 3) {
+      const schedule = await getTaskScheduler().getSchedule(segments[2]);
+      return schedule ? jsonResponse(200, schedule) : notFound(`Schedule not found: ${segments[2]}`);
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'schedules' && segments[2] && segments[3] === 'runs') {
+      const scheduler = getTaskScheduler();
+      const schedule = await scheduler.getSchedule(segments[2]);
+      return schedule ? jsonResponse(200, { runs: await scheduler.listRuns(segments[2]) }) : notFound(`Schedule not found: ${segments[2]}`);
+    }
+
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'schedules' && segments[2] && segments[3] === 'update') {
+      const schedule = await getTaskScheduler().updateSchedule(segments[2], request.body);
+      return schedule ? jsonResponse(200, schedule) : notFound(`Schedule not found: ${segments[2]}`);
+    }
+
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'schedules' && segments[2] && segments[3] === 'start') {
+      const schedule = await getTaskScheduler().startSchedule(segments[2]);
+      return schedule ? jsonResponse(200, schedule) : notFound(`Schedule not found: ${segments[2]}`);
+    }
+
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'schedules' && segments[2] && segments[3] === 'pause') {
+      const schedule = await getTaskScheduler().pauseSchedule(segments[2]);
+      return schedule ? jsonResponse(200, schedule) : notFound(`Schedule not found: ${segments[2]}`);
+    }
+
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'schedules' && segments[2] && segments[3] === 'stop') {
+      const schedule = await getTaskScheduler().stopScheduleAfterCurrentTask(segments[2]);
+      return schedule ? jsonResponse(200, schedule) : notFound(`Schedule not found: ${segments[2]}`);
+    }
+
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'schedules' && segments[2] && segments[3] === 'run-now') {
+      const schedule = await getTaskScheduler().runScheduleNow(segments[2]);
+      return schedule ? jsonResponse(200, schedule) : notFound(`Schedule not found: ${segments[2]}`);
+    }
+
+    if (method === 'POST' && pathname === '/api/schedules/stop-all') {
+      return jsonResponse(200, {
+        schedules: await getTaskScheduler().stopAllAfterCurrentTask(),
       });
     }
 

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { handleApiRequest, type ApiResponse } from './routes.js';
 import { JobReadModel } from './job-read-model.js';
+import { TaskScheduler } from './task-scheduler.js';
 import { TaskQueue } from './task-queue.js';
 
 export interface ConsoleApiConfig {
@@ -153,9 +154,10 @@ async function serveStaticFile(
 
 export function createConsoleApiServer(config: ConsoleApiConfig): http.Server {
   const taskQueue = new TaskQueue();
+  const taskScheduler = new TaskScheduler({ taskQueue });
   const jobReadModel = new JobReadModel();
 
-  return http.createServer(async (request, response) => {
+  const server = http.createServer(async (request, response) => {
     response.on('error', () => undefined);
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? `${config.host}:${config.port}`}`);
 
@@ -189,6 +191,7 @@ export function createConsoleApiServer(config: ConsoleApiConfig): http.Server {
           searchParams: url.searchParams,
           body,
           taskQueue,
+          taskScheduler,
           jobReadModel,
         }));
         return;
@@ -219,6 +222,8 @@ export function createConsoleApiServer(config: ConsoleApiConfig): http.Server {
       });
     }
   });
+  server.once('close', () => taskScheduler.close());
+  return server;
 }
 
 async function main(): Promise<void> {
@@ -237,6 +242,8 @@ async function main(): Promise<void> {
     endpoints: [
       'GET /api/health',
       'GET /api/tasks',
+      'GET /api/schedules',
+      'POST /api/schedules',
       'POST /api/assistant/chat',
       'POST /api/assistant/validate',
       'POST /api/assistant/confirm',

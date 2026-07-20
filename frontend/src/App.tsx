@@ -4,7 +4,10 @@ import {
   BarChart3,
   BriefcaseBusiness,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   ClipboardList,
+  Clock3,
   Database,
   ExternalLink,
   FileQuestion,
@@ -14,19 +17,24 @@ import {
   MessageSquareText,
   MessageCircleQuestion,
   Play,
+  Plus,
+  Pause,
   RefreshCw,
   Search,
   Save,
   Settings2,
   Sparkles,
   UserRound,
+  RotateCcw,
+  Square,
+  Trash2,
   X,
   XCircle,
 } from 'lucide-react';
 import { api } from './api';
-import type { ApplicationFilterField, ApplicationFilterOptions, AssistantActionKind, AssistantConfirmResponse, AssistantDraft, AssistantMessage, CandidateDetail, CandidateSummary, FilterCatalog, JobDetail, JobSummary, ModelConfig, Platform, RagAnswer, SavedFilterInput, TaskDetail, TaskKind, TaskStatus, TaskSummary } from './types';
+import type { ApplicationFilterField, ApplicationFilterOptions, AssistantActionKind, AssistantConfirmResponse, AssistantDraft, AssistantMessage, CandidateDetail, CandidateSummary, FilterCatalog, JobDetail, JobSummary, ModelConfig, Platform, RagAnswer, SavedFilterInput, ScheduleDefinition, ScheduleRunRecord, ScheduleStatus, ScheduleSummary, SchedulableTaskKind, ScheduledTaskTemplate, TaskDetail, TaskKind, TaskStatus, TaskSummary } from './types';
 
-type PageKey = 'dashboard' | 'tasks' | 'jobs' | 'assistant' | 'run' | 'rag' | 'ops' | 'settings' | 'guide' | 'job-detail' | 'candidate-detail';
+type PageKey = 'dashboard' | 'tasks' | 'schedules' | 'jobs' | 'assistant' | 'run' | 'rag' | 'ops' | 'settings' | 'guide' | 'job-detail' | 'candidate-detail';
 
 interface RouteState {
   page: PageKey;
@@ -45,6 +53,7 @@ interface AsyncState<T> {
 const NAV_ITEMS: Array<{ page: PageKey; label: string; icon: ReactNode; hash: string }> = [
   { page: 'dashboard', label: '总览', icon: <LayoutDashboard size={18} />, hash: '#/' },
   { page: 'tasks', label: '任务', icon: <ListChecks size={18} />, hash: '#/tasks' },
+  { page: 'schedules', label: '自动运行', icon: <Clock3 size={18} />, hash: '#/schedules' },
   { page: 'jobs', label: '岗位', icon: <BriefcaseBusiness size={18} />, hash: '#/jobs' },
   { page: 'assistant', label: '智能助手', icon: <Sparkles size={18} />, hash: '#/assistant' },
   { page: 'run', label: '执行搜索', icon: <Play size={18} />, hash: '#/run' },
@@ -77,6 +86,13 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   succeeded: '成功',
   failed: '失败',
   cancelled: '已取消',
+};
+
+const SCHEDULE_STATUS_LABELS: Record<ScheduleStatus, string> = {
+  enabled: '已启用',
+  paused: '已暂停',
+  stop_requested: '等待当前任务结束',
+  stopped: '已停止',
 };
 
 const TASK_KIND_LABELS: Record<TaskKind, string> = {
@@ -131,7 +147,7 @@ function parseRoute(): RouteState {
     };
   }
 
-  if (['tasks', 'jobs', 'assistant', 'run', 'rag', 'ops', 'settings', 'guide'].includes(parts[0])) {
+  if (['tasks', 'schedules', 'jobs', 'assistant', 'run', 'rag', 'ops', 'settings', 'guide'].includes(parts[0])) {
     return { page: parts[0] as PageKey };
   }
 
@@ -348,6 +364,7 @@ export function App() {
         <TopBar route={route} />
         {route.page === 'dashboard' && <DashboardView />}
         {route.page === 'tasks' && <TasksView />}
+        {route.page === 'schedules' && <SchedulesView />}
         {route.page === 'jobs' && <JobsView navigate={navigate} />}
         {route.page === 'job-detail' && route.platform && route.jobKey && (
           <JobDetailView platform={route.platform} jobKey={route.jobKey} navigate={navigate} />
@@ -1255,6 +1272,301 @@ function FilterBuilder({
         </>
       )}
     </section>
+  );
+}
+
+type ScheduleTaskDraft = Omit<ScheduledTaskTemplate, 'input'> & { inputText: string };
+
+interface ScheduleDraft {
+  name: string;
+  timeZone: string;
+  start: string;
+  end: string;
+  delaySeconds: string;
+  failureDelaySeconds: string;
+  failurePolicy: 'stop-round' | 'continue';
+  pauseAfterConsecutiveFailures: string;
+  tasks: ScheduleTaskDraft[];
+}
+
+function defaultScheduledTaskInput(kind: SchedulableTaskKind): Record<string, unknown> {
+  switch (kind) {
+    case 'resume-capture':
+      return { platform: '51job', keyword: '' };
+    case 'batch':
+      return { platform: '51job', jobsFile: '' };
+    case 'search-subscription':
+      return { platform: '51job', searchSubscriptionFile: '' };
+    case 'boss-auto-chat':
+      return { platform: 'boss', scoreThreshold: 70, requireAllHardRequirements: true };
+  }
+}
+
+function createScheduleTaskDraft(kind: SchedulableTaskKind = 'resume-capture'): ScheduleTaskDraft {
+  return {
+    taskKey: crypto.randomUUID(),
+    name: TASK_KIND_LABELS[kind],
+    enabled: true,
+    kind,
+    inputText: JSON.stringify(defaultScheduledTaskInput(kind), null, 2),
+  };
+}
+
+function createScheduleDraft(): ScheduleDraft {
+  return {
+    name: '',
+    timeZone: 'Asia/Shanghai',
+    start: '09:00',
+    end: '18:00',
+    delaySeconds: '1800',
+    failureDelaySeconds: '300',
+    failurePolicy: 'stop-round',
+    pauseAfterConsecutiveFailures: '3',
+    tasks: [createScheduleTaskDraft()],
+  };
+}
+
+function scheduleDraftFromDefinition(schedule: ScheduleDefinition): ScheduleDraft {
+  return {
+    name: schedule.name,
+    timeZone: schedule.timeZone,
+    start: schedule.dailyWindow.start,
+    end: schedule.dailyWindow.end,
+    delaySeconds: String(schedule.repeat.delaySeconds),
+    failureDelaySeconds: String(schedule.repeat.failureDelaySeconds),
+    failurePolicy: schedule.failurePolicy,
+    pauseAfterConsecutiveFailures: String(schedule.pauseAfterConsecutiveFailures),
+    tasks: schedule.tasks.map((task) => ({
+      ...task,
+      inputText: JSON.stringify(task.input, null, 2),
+    })),
+  };
+}
+
+function scheduleRunStatusLabel(status: ScheduleRunRecord['status']): string {
+  const labels: Record<ScheduleRunRecord['status'], string> = {
+    queued: '排队中',
+    running: '运行中',
+    stopping: '停止中',
+    succeeded: '成功',
+    failed: '失败',
+    stopped: '已停止',
+    interrupted: '已中断',
+    skipped: '已跳过',
+  };
+  return labels[status];
+}
+
+function SchedulesView() {
+  const [schedulesState, setSchedulesState] = useState<AsyncState<{ schedules: ScheduleSummary[] }>>({ loading: true });
+  const [selectedSchedule, setSelectedSchedule] = useState<ScheduleDefinition>();
+  const [runs, setRuns] = useState<ScheduleRunRecord[]>([]);
+  const [draft, setDraft] = useState<ScheduleDraft>(() => createScheduleDraft());
+  const [saveState, setSaveState] = useState<AsyncState<ScheduleDefinition>>({ loading: false });
+  const [actionState, setActionState] = useState<AsyncState<ScheduleDefinition>>({ loading: false });
+
+  const loadSchedules = async () => {
+    setSchedulesState((current) => ({ ...current, loading: true, error: undefined }));
+    try {
+      const result = await api.listSchedules();
+      setSchedulesState({ data: result.data, mocked: result.mocked, loading: false });
+    } catch (error) {
+      setSchedulesState({ loading: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  const selectSchedule = async (scheduleId: string) => {
+    try {
+      const [schedule, runResponse] = await Promise.all([
+        api.getSchedule(scheduleId),
+        api.listScheduleRuns(scheduleId),
+      ]);
+      setSelectedSchedule(schedule);
+      setRuns(runResponse.runs);
+      setDraft(scheduleDraftFromDefinition(schedule));
+      setSaveState({ loading: false });
+      setActionState({ loading: false });
+    } catch (error) {
+      setActionState({ loading: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  useEffect(() => {
+    void loadSchedules();
+  }, []);
+
+  const updateTask = (index: number, update: Partial<ScheduleTaskDraft>) => {
+    setDraft((current) => ({
+      ...current,
+      tasks: current.tasks.map((task, taskIndex) => taskIndex === index ? { ...task, ...update } : task),
+    }));
+  };
+
+  const moveTask = (index: number, offset: number) => {
+    setDraft((current) => {
+      const target = index + offset;
+      if (target < 0 || target >= current.tasks.length) {
+        return current;
+      }
+      const tasks = [...current.tasks];
+      const [task] = tasks.splice(index, 1);
+      tasks.splice(target, 0, task!);
+      return { ...current, tasks };
+    });
+  };
+
+  const saveSchedule = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaveState({ loading: true });
+    try {
+      const payload = {
+        name: draft.name,
+        timeZone: draft.timeZone,
+        dailyWindow: { start: draft.start, end: draft.end },
+        repeat: {
+          mode: 'after-completion',
+          delaySeconds: Number(draft.delaySeconds),
+          failureDelaySeconds: Number(draft.failureDelaySeconds),
+        },
+        failurePolicy: draft.failurePolicy,
+        pauseAfterConsecutiveFailures: Number(draft.pauseAfterConsecutiveFailures),
+        tasks: draft.tasks.map((task) => ({
+          taskKey: task.taskKey,
+          name: task.name,
+          enabled: task.enabled,
+          kind: task.kind,
+          input: JSON.parse(task.inputText) as Record<string, unknown>,
+        })),
+      };
+      const saved = selectedSchedule
+        ? await api.updateSchedule(selectedSchedule.scheduleId, payload)
+        : await api.createSchedule(payload);
+      setSaveState({ data: saved, loading: false });
+      await loadSchedules();
+      await selectSchedule(saved.scheduleId);
+    } catch (error) {
+      setSaveState({ loading: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  const control = async (action: 'start' | 'pause' | 'stop' | 'run-now') => {
+    if (!selectedSchedule) {
+      return;
+    }
+    setActionState({ loading: true });
+    try {
+      const updated = await api.controlSchedule(selectedSchedule.scheduleId, action);
+      setActionState({ data: updated, loading: false });
+      await loadSchedules();
+      await selectSchedule(updated.scheduleId);
+    } catch (error) {
+      setActionState({ loading: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+
+  const schedules = schedulesState.data?.schedules ?? [];
+  return (
+    <div className="schedules-page">
+      <section className="schedule-overview">
+        <SectionHeader
+          title="自动运行"
+          action={(
+            <div className="schedule-header-actions">
+              <IconButton title="刷新计划" onClick={loadSchedules}><RefreshCw size={18} /></IconButton>
+              <button className="secondary-button" type="button" onClick={() => {
+                setSelectedSchedule(undefined);
+                setRuns([]);
+                setDraft(createScheduleDraft());
+                setSaveState({ loading: false });
+              }}><Plus size={16} />新建计划</button>
+            </div>
+          )}
+        />
+        <MockNotice mocked={schedulesState.mocked} />
+        <ErrorBlock message={schedulesState.error} />
+      </section>
+
+      <div className="schedules-layout">
+        <section className="panel schedule-list-panel">
+          <SectionHeader title="计划列表" />
+          {schedulesState.loading && <LoadingBlock label="读取计划" />}
+          {!schedulesState.loading && schedules.length === 0 && <div className="empty-state"><Clock3 size={18} /><span>没有自动运行计划</span></div>}
+          <div className="schedule-list">
+            {schedules.map((schedule) => (
+              <button
+                className={selectedSchedule?.scheduleId === schedule.scheduleId ? 'schedule-row selected' : 'schedule-row'}
+                type="button"
+                key={schedule.scheduleId}
+                onClick={() => void selectSchedule(schedule.scheduleId)}
+              >
+                <div className="schedule-row-main"><strong>{schedule.name}</strong><span className={`schedule-status ${schedule.status}`}>{SCHEDULE_STATUS_LABELS[schedule.status]}</span></div>
+                <div className="schedule-row-meta"><span>{schedule.dailyWindow.start}-{schedule.dailyWindow.end}</span><span>{schedule.taskCount} 个任务</span></div>
+                <small>下次：{formatDate(schedule.nextRunAt)}</small>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="panel schedule-editor-panel">
+          <SectionHeader title={selectedSchedule ? '编辑计划' : '新建计划'} />
+          <form className="schedule-editor" onSubmit={saveSchedule}>
+            <div className="schedule-form-grid">
+              <label><span>计划名称</span><input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} /></label>
+              <label><span>时区</span><input value={draft.timeZone} onChange={(event) => setDraft((current) => ({ ...current, timeZone: event.target.value }))} /></label>
+              <label><span>每日开始</span><input type="time" value={draft.start} onChange={(event) => setDraft((current) => ({ ...current, start: event.target.value }))} /></label>
+              <label><span>每日结束</span><input type="time" value={draft.end} onChange={(event) => setDraft((current) => ({ ...current, end: event.target.value }))} /></label>
+              <label><span>完成后间隔（秒，0 为立即重跑）</span><input type="number" min="0" value={draft.delaySeconds} onChange={(event) => setDraft((current) => ({ ...current, delaySeconds: event.target.value }))} /></label>
+              <label><span>失败后延迟（秒）</span><input type="number" min="1" value={draft.failureDelaySeconds} onChange={(event) => setDraft((current) => ({ ...current, failureDelaySeconds: event.target.value }))} /></label>
+              <label><span>任务失败时</span><select value={draft.failurePolicy} onChange={(event) => setDraft((current) => ({ ...current, failurePolicy: event.target.value as ScheduleDraft['failurePolicy'] }))}><option value="stop-round">停止本轮</option><option value="continue">继续后续任务</option></select></label>
+              <label><span>连续失败后暂停</span><input type="number" min="1" value={draft.pauseAfterConsecutiveFailures} onChange={(event) => setDraft((current) => ({ ...current, pauseAfterConsecutiveFailures: event.target.value }))} /></label>
+            </div>
+
+            <div className="schedule-task-header"><strong>本轮任务</strong><button type="button" className="secondary-button" onClick={() => setDraft((current) => ({ ...current, tasks: [...current.tasks, createScheduleTaskDraft()] }))}><Plus size={16} />添加任务</button></div>
+            <div className="schedule-task-list">
+              {draft.tasks.map((task, index) => (
+                <div className="schedule-task" key={task.taskKey}>
+                  <div className="schedule-task-title">
+                    <label className="checkbox-row"><input type="checkbox" checked={task.enabled} onChange={(event) => updateTask(index, { enabled: event.target.checked })} /><span>启用</span></label>
+                    <label><span>名称</span><input value={task.name} onChange={(event) => updateTask(index, { name: event.target.value })} /></label>
+                    <label><span>类型</span><select value={task.kind} onChange={(event) => {
+                      const kind = event.target.value as SchedulableTaskKind;
+                      updateTask(index, { kind, inputText: JSON.stringify(defaultScheduledTaskInput(kind), null, 2), name: TASK_KIND_LABELS[kind] });
+                    }}>
+                      <option value="resume-capture">简历抓取</option><option value="batch">批量任务</option><option value="search-subscription">搜索订阅</option><option value="boss-auto-chat">Boss 自动沟通</option>
+                    </select></label>
+                    <div className="schedule-task-tools">
+                      <IconButton title="上移" onClick={() => moveTask(index, -1)}><ChevronUp size={16} /></IconButton>
+                      <IconButton title="下移" onClick={() => moveTask(index, 1)}><ChevronDown size={16} /></IconButton>
+                      <IconButton title="删除任务" onClick={() => setDraft((current) => ({ ...current, tasks: current.tasks.filter((_, taskIndex) => taskIndex !== index) }))}><Trash2 size={16} /></IconButton>
+                    </div>
+                  </div>
+                  <label className="wide"><span>任务输入</span><textarea value={task.inputText} onChange={(event) => updateTask(index, { inputText: event.target.value })} rows={6} /></label>
+                </div>
+              ))}
+            </div>
+            <ErrorBlock message={saveState.error} />
+            <div className="schedule-editor-actions"><button className="primary-button" type="submit" disabled={saveState.loading}>{saveState.loading ? '保存中' : '保存计划'}</button></div>
+          </form>
+
+          {selectedSchedule && (
+            <div className="schedule-runtime">
+              <div className="schedule-runtime-head"><strong>当前状态</strong><span className={`schedule-status ${selectedSchedule.status}`}>{SCHEDULE_STATUS_LABELS[selectedSchedule.status]}</span></div>
+              <div className="schedule-runtime-grid"><span>下次运行：{formatDate(selectedSchedule.nextRunAt)}</span><span>当前轮次：{selectedSchedule.activeRunId ?? '-'}</span><span>连续失败：{selectedSchedule.consecutiveFailures}</span></div>
+              <div className="schedule-control-bar">
+                <button type="button" className="secondary-button" disabled={actionState.loading} onClick={() => void control('run-now')}><Play size={16} />立即运行</button>
+                <button type="button" className="secondary-button" disabled={actionState.loading} onClick={() => void control('pause')}><Pause size={16} />暂停</button>
+                <button type="button" className="secondary-button" disabled={actionState.loading} onClick={() => void control('start')}><RotateCcw size={16} />启动</button>
+                <button type="button" className="danger-button" disabled={actionState.loading} onClick={() => void control('stop')}><Square size={16} />当前任务结束后停止</button>
+              </div>
+              <ErrorBlock message={actionState.error} />
+              <div className="schedule-run-list">
+                {runs.slice(0, 8).map((run) => <div className="schedule-run-row" key={run.runId}><span>{scheduleRunStatusLabel(run.status)}</span><span>第 {run.cycleNumber} 轮</span><span>{formatDate(run.startedAt ?? run.scheduledAt)}</span><span>{run.cancelledTaskIds.length > 0 ? `已取消 ${run.cancelledTaskIds.length}` : `已完成 ${run.completedTaskIds.length}`}</span></div>)}
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+    </div>
   );
 }
 

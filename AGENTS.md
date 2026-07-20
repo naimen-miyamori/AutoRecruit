@@ -228,6 +228,8 @@ Platform-specific regression command names keep `experimental` for compatibility
 - `src/server/task-normalizers.ts` - shared HTTP and assistant request normalization, CLI argv previews, and mode-isolation validation.
 - `src/server/cli-assistant.ts` - model-backed console assistant that produces structured drafts, warnings, missing-field prompts, and confirmable previews only.
 - `src/server/task-queue.ts` - single in-process task queue used by HTTP and assistant-confirmed task runs.
+- `src/server/task-scheduler.ts` - persistent, completion-driven scheduler for ordered search and Boss auto-chat task groups; it shares `TaskQueue` and supports stop-after-current-task control.
+- `src/server/schedule-store.ts` / `src/server/schedule-normalizers.ts` - JSON-backed schedule/round persistence and shared schedule request validation.
 - `frontend/src/App.tsx` - web console UI, including the `智能助手` page and draft confirmation flow.
 - `src/reporting/resume-docx.ts` - DOCX resume rendering from `/Users/Admin/Downloads/简历模板.docx`, including template photo-slot handling.
 - `src/reporting/boss-chat-summary.ts` - Boss chat-review summary rendering and SMTP delivery.

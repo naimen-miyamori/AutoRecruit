@@ -13,8 +13,10 @@ import type {
   RagOpsAction,
   RagOpsTaskInput,
   ResumeCaptureTaskInput,
+  SchedulableTaskKind,
   SearchSource,
   SearchSubscriptionTaskInput,
+  TaskInput,
 } from './types.js';
 import type { AskRagQuestionOptions, IngestConversationOptions } from '../rag/service.js';
 import type { RagConversationTurn, RagSpeaker } from '../rag/types.js';
@@ -25,6 +27,10 @@ export type NormalizedTask<TInput> = {
   input: TInput;
   argv: string[];
   inputSummary: Record<string, unknown>;
+};
+
+export type NormalizedSchedulableTask = NormalizedTask<TaskInput> & {
+  kind: SchedulableTaskKind;
 };
 
 export type NormalizedRagAnswerRequest =
@@ -510,6 +516,31 @@ export async function prepareSearchSubscriptionTask(
     value === '--search-subscription-file' ? [value, normalized.input.searchSubscriptionFile] : index > 0 && argv[index - 1] === '--search-subscription-file' ? [] : [value]
   ));
   return normalized;
+}
+
+export async function normalizeSchedulableTask(
+  kind: SchedulableTaskKind,
+  input: Record<string, unknown>,
+  dataDir: string,
+): Promise<NormalizedSchedulableTask> {
+  switch (kind) {
+    case 'resume-capture': {
+      const normalized = normalizeResumeCaptureTask(input);
+      return { kind, ...normalized };
+    }
+    case 'batch': {
+      const normalized = normalizeBatchTask(input);
+      return { kind, ...normalized };
+    }
+    case 'search-subscription': {
+      const normalized = await prepareSearchSubscriptionTask(input, dataDir);
+      return { kind, ...normalized };
+    }
+    case 'boss-auto-chat': {
+      const normalized = normalizeBossAutoChatTask(input);
+      return { kind, ...normalized };
+    }
+  }
 }
 
 export function normalizeLoginRefreshTask(payload: unknown): NormalizedTask<LoginRefreshTaskInput> {

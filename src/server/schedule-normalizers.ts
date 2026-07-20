@@ -1,0 +1,157 @@
+import crypto from 'node:crypto';
+
+import { normalizeJsonObject } from './task-normalizers.js';
+import { assertTimeZone, validateDailyWindow } from './schedule-time.js';
+import type {
+  ScheduleDefinition,
+  SchedulableTaskKind,
+  ScheduledTaskTemplate,
+  WorkflowFailurePolicy,
+} from './types.js';
+
+function optionalString(value: unknown, fieldName: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`${fieldName} must be a non-empty string when provided`);
+  }
+  return value.trim();
+}
+
+function requiredString(value: unknown, fieldName: string): string {
+  const result = optionalString(value, fieldName);
+  if (!result) {
+    throw new Error(`${fieldName} is required`);
+  }
+  return result;
+}
+
+function nonNegativeInteger(value: unknown, fieldName: string, fallback?: number): number {
+  if (value === undefined && fallback !== undefined) {
+    return fallback;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(`${fieldName} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function positiveInteger(value: unknown, fieldName: string, fallback?: number): number {
+  if (value === undefined && fallback !== undefined) {
+    return fallback;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${fieldName} must be a positive integer`);
+  }
+  return value;
+}
+
+function normalizeKind(value: unknown): SchedulableTaskKind {
+  if (value === 'resume-capture' || value === 'batch' || value === 'search-subscription' || value === 'boss-auto-chat') {
+    return value;
+  }
+  throw new Error('scheduled task kind must be resume-capture, batch, search-subscription, or boss-auto-chat');
+}
+
+function normalizeFailurePolicy(value: unknown): WorkflowFailurePolicy {
+  if (value === undefined) {
+    return 'stop-round';
+  }
+  if (value === 'stop-round' || value === 'continue') {
+    return value;
+  }
+  throw new Error('failurePolicy must be stop-round or continue');
+}
+
+function normalizeTaskTemplates(value: unknown): ScheduledTaskTemplate[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('tasks must be a non-empty array');
+  }
+
+  const taskKeys = new Set<string>();
+  return value.map((item, index) => {
+    const task = normalizeJsonObject(item, `tasks[${index}]`);
+    const taskKey = optionalString(task.taskKey, `tasks[${index}].taskKey`) ?? crypto.randomUUID();
+    if (taskKeys.has(taskKey)) {
+      throw new Error(`tasks[${index}].taskKey must be unique`);
+    }
+    taskKeys.add(taskKey);
+    const input = task.input;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new Error(`tasks[${index}].input must be an object`);
+    }
+    if (task.enabled !== undefined && typeof task.enabled !== 'boolean') {
+      throw new Error(`tasks[${index}].enabled must be a boolean`);
+    }
+    return {
+      taskKey,
+      name: optionalString(task.name, `tasks[${index}].name`) ?? `任务 ${index + 1}`,
+      enabled: task.enabled !== false,
+      kind: normalizeKind(task.kind),
+      input: input as Record<string, unknown>,
+    };
+  });
+}
+
+export function normalizeScheduleCreate(payload: unknown, now = new Date()): ScheduleDefinition {
+  const item = normalizeJsonObject(payload, 'request body');
+  const dailyWindow = normalizeJsonObject(item.dailyWindow, 'dailyWindow');
+  const repeat = normalizeJsonObject(item.repeat, 'repeat');
+  const timeZone = optionalString(item.timeZone, 'timeZone') ?? 'Asia/Shanghai';
+  const start = requiredString(dailyWindow.start, 'dailyWindow.start');
+  const end = requiredString(dailyWindow.end, 'dailyWindow.end');
+  assertTimeZone(timeZone);
+  validateDailyWindow({ start, end });
+  if (repeat.mode !== undefined && repeat.mode !== 'after-completion') {
+    throw new Error('repeat.mode must be after-completion');
+  }
+
+  const timestamp = now.toISOString();
+  return {
+    scheduleId: optionalString(item.scheduleId, 'scheduleId') ?? crypto.randomUUID(),
+    name: requiredString(item.name, 'name'),
+    status: item.enabled === false ? 'paused' : 'enabled',
+    timeZone,
+    dailyWindow: { start, end },
+    repeat: {
+      mode: 'after-completion',
+      delaySeconds: nonNegativeInteger(repeat.delaySeconds, 'repeat.delaySeconds', 0),
+      failureDelaySeconds: positiveInteger(repeat.failureDelaySeconds, 'repeat.failureDelaySeconds', 300),
+    },
+    failurePolicy: normalizeFailurePolicy(item.failurePolicy),
+    pauseAfterConsecutiveFailures: positiveInteger(item.pauseAfterConsecutiveFailures, 'pauseAfterConsecutiveFailures', 3),
+    tasks: normalizeTaskTemplates(item.tasks),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    nextRunAt: item.enabled === false ? undefined : timestamp,
+    consecutiveFailures: 0,
+  };
+}
+
+export function normalizeScheduleUpdate(current: ScheduleDefinition, payload: unknown, now = new Date()): ScheduleDefinition {
+  const item = normalizeJsonObject(payload, 'request body');
+  const merged = {
+    name: item.name ?? current.name,
+    timeZone: item.timeZone ?? current.timeZone,
+    dailyWindow: item.dailyWindow ?? current.dailyWindow,
+    repeat: item.repeat ?? current.repeat,
+    failurePolicy: item.failurePolicy ?? current.failurePolicy,
+    pauseAfterConsecutiveFailures: item.pauseAfterConsecutiveFailures ?? current.pauseAfterConsecutiveFailures,
+    tasks: item.tasks ?? current.tasks,
+    enabled: current.status === 'enabled',
+  };
+  const normalized = normalizeScheduleCreate(merged, now);
+  return {
+    ...normalized,
+    scheduleId: current.scheduleId,
+    status: current.status,
+    createdAt: current.createdAt,
+    updatedAt: now.toISOString(),
+    stopRequestedAt: current.stopRequestedAt,
+    activeRunId: current.activeRunId,
+    nextRunAt: current.nextRunAt,
+    lastRunAt: current.lastRunAt,
+    consecutiveFailures: current.consecutiveFailures,
+  };
+}

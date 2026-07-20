@@ -14,6 +14,10 @@ export type TaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'bos
 export type AssistantActionKind = TaskKind | 'rag-answer';
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type TaskLogLevel = 'info' | 'warn' | 'error';
+export type SchedulableTaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat';
+export type ScheduleStatus = 'enabled' | 'paused' | 'stop_requested' | 'stopped';
+export type ScheduleRunStatus = 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'stopped' | 'interrupted' | 'skipped';
+export type WorkflowFailurePolicy = 'stop-round' | 'continue';
 
 export interface TaskLogEntry {
   at: string;
@@ -121,6 +125,63 @@ export interface RagOpsTaskOutput {
 export type TaskInput = ResumeCaptureTaskInput | BatchTaskInput | SearchSubscriptionTaskInput | BossAutoChatTaskInput | LoginRefreshTaskInput | RagOpsTaskInput;
 export type TaskOutput = MainResult | LoginRefreshTaskOutput | RagOpsTaskOutput;
 
+export interface ScheduledTaskTemplate {
+  taskKey: string;
+  name: string;
+  enabled: boolean;
+  kind: SchedulableTaskKind;
+  input: Record<string, unknown>;
+}
+
+export interface ScheduleDefinition {
+  scheduleId: string;
+  name: string;
+  status: ScheduleStatus;
+  timeZone: string;
+  dailyWindow: {
+    start: string;
+    end: string;
+  };
+  repeat: {
+    mode: 'after-completion';
+    delaySeconds: number;
+    failureDelaySeconds: number;
+  };
+  failurePolicy: WorkflowFailurePolicy;
+  pauseAfterConsecutiveFailures: number;
+  tasks: ScheduledTaskTemplate[];
+  createdAt: string;
+  updatedAt: string;
+  stopRequestedAt?: string;
+  activeRunId?: string;
+  nextRunAt?: string;
+  lastRunAt?: string;
+  consecutiveFailures: number;
+}
+
+export interface ScheduleRunRecord {
+  runId: string;
+  scheduleId: string;
+  cycleNumber: number;
+  status: ScheduleRunStatus;
+  scheduledAt: string;
+  startedAt?: string;
+  stopRequestedAt?: string;
+  finishedAt?: string;
+  taskIds: string[];
+  currentTaskId?: string;
+  completedTaskIds: string[];
+  cancelledTaskIds: string[];
+  error?: string;
+}
+
+export interface ScheduledTaskMetadata {
+  scheduleId: string;
+  scheduleRunId: string;
+  scheduleTaskKey: string;
+  scheduleTaskIndex: number;
+}
+
 export interface AssistantMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -226,6 +287,7 @@ export interface TaskRecord {
   error?: string;
   argv: string[];
   logs: TaskLogEntry[];
+  schedule?: ScheduledTaskMetadata;
 }
 
 export interface TaskSummary {
@@ -245,6 +307,22 @@ export interface TaskDetail extends TaskSummary {
   input: TaskInput;
   output?: TaskOutput;
   logs: TaskLogEntry[];
+  schedule?: ScheduledTaskMetadata;
+}
+
+export interface ScheduleSummary {
+  scheduleId: string;
+  name: string;
+  status: ScheduleStatus;
+  timeZone: string;
+  dailyWindow: ScheduleDefinition['dailyWindow'];
+  repeat: ScheduleDefinition['repeat'];
+  taskCount: number;
+  activeRunId?: string;
+  nextRunAt?: string;
+  lastRunAt?: string;
+  consecutiveFailures: number;
+  updatedAt: string;
 }
 
 export interface RunResultView extends RunResult {

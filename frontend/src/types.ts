@@ -3,6 +3,9 @@ export type PlatformSelection = Platform | 'all';
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type TaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'login-refresh' | 'rag-ops';
 export type AssistantActionKind = TaskKind | 'rag-answer';
+export type SchedulableTaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat';
+export type ScheduleStatus = 'enabled' | 'paused' | 'stop_requested' | 'stopped';
+export type ScheduleRunStatus = 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'stopped' | 'interrupted' | 'skipped';
 
 export interface TaskLogEntry {
   at: string;
@@ -27,6 +30,53 @@ export interface TaskDetail extends TaskSummary {
   input: Record<string, unknown>;
   output?: unknown;
   logs: TaskLogEntry[];
+}
+
+export interface ScheduledTaskTemplate {
+  taskKey: string;
+  name: string;
+  enabled: boolean;
+  kind: SchedulableTaskKind;
+  input: Record<string, unknown>;
+}
+
+export interface ScheduleSummary {
+  scheduleId: string;
+  name: string;
+  status: ScheduleStatus;
+  timeZone: string;
+  dailyWindow: { start: string; end: string };
+  repeat: { mode: 'after-completion'; delaySeconds: number; failureDelaySeconds: number };
+  taskCount: number;
+  activeRunId?: string;
+  nextRunAt?: string;
+  lastRunAt?: string;
+  consecutiveFailures: number;
+  updatedAt: string;
+}
+
+export interface ScheduleDefinition extends Omit<ScheduleSummary, 'taskCount'> {
+  failurePolicy: 'stop-round' | 'continue';
+  pauseAfterConsecutiveFailures: number;
+  tasks: ScheduledTaskTemplate[];
+  createdAt: string;
+  stopRequestedAt?: string;
+}
+
+export interface ScheduleRunRecord {
+  runId: string;
+  scheduleId: string;
+  cycleNumber: number;
+  status: ScheduleRunStatus;
+  scheduledAt: string;
+  startedAt?: string;
+  stopRequestedAt?: string;
+  finishedAt?: string;
+  taskIds: string[];
+  currentTaskId?: string;
+  completedTaskIds: string[];
+  cancelledTaskIds: string[];
+  error?: string;
 }
 
 export interface RunResultView {

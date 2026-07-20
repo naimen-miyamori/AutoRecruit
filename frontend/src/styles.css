@@ -1950,6 +1950,219 @@ input:disabled {
   gap: 12px;
 }
 
+.secondary-button,
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.danger-button {
+  border-color: #e5a09a;
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.schedules-page,
+.schedule-overview,
+.schedule-editor,
+.schedule-runtime {
+  display: grid;
+  gap: 14px;
+}
+
+.schedule-header-actions,
+.schedule-control-bar,
+.schedule-editor-actions,
+.schedule-task-header,
+.schedule-runtime-head,
+.schedule-row-main,
+.schedule-task-title,
+.schedule-task-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-header-actions,
+.schedule-control-bar,
+.schedule-editor-actions,
+.schedule-task-header,
+.schedule-runtime-head {
+  flex-wrap: wrap;
+}
+
+.schedules-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.72fr) minmax(0, 1.5fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.schedule-list-panel,
+.schedule-editor-panel {
+  min-width: 0;
+}
+
+.schedule-list,
+.schedule-task-list,
+.schedule-run-list {
+  display: grid;
+  gap: 8px;
+}
+
+.schedule-row {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+}
+
+.schedule-row:hover,
+.schedule-row.selected {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+}
+
+.schedule-row-main {
+  justify-content: space-between;
+}
+
+.schedule-row-meta,
+.schedule-runtime-grid,
+.schedule-run-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.schedule-row small {
+  color: var(--muted);
+}
+
+.schedule-status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.schedule-status.enabled {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.schedule-status.stop_requested {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.schedule-status.stopped {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+.schedule-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.schedule-form-grid label,
+.schedule-task label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.schedule-form-grid input,
+.schedule-form-grid select,
+.schedule-task input,
+.schedule-task select,
+.schedule-task textarea {
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.schedule-task textarea {
+  min-height: 116px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.schedule-task-header {
+  justify-content: space-between;
+}
+
+.schedule-task {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.schedule-task-title {
+  align-items: end;
+}
+
+.schedule-task-title > label:not(.checkbox-row) {
+  flex: 1 1 180px;
+}
+
+.schedule-task-tools {
+  margin-left: auto;
+}
+
+.schedule-runtime {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.schedule-runtime-head {
+  justify-content: space-between;
+}
+
+.schedule-runtime-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.schedule-run-row {
+  grid-template-columns: 92px 76px minmax(110px, 1fr) minmax(84px, 0.8fr);
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
 @media (max-width: 980px) {
   .app-shell {
     grid-template-columns: 1fr;

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { handleApiRequest } from '../server/routes.js';
 import { TaskQueue } from '../server/task-queue.js';
+import { TaskScheduler } from '../server/task-scheduler.js';
 import { JobReadModel } from '../server/job-read-model.js';
 import type { TaskDetail } from '../server/types.js';
 import type { MainRunSummary } from '../index.js';
@@ -61,6 +62,63 @@ describe('console API routes', () => {
       status: 'ok',
       service: 'autorecruit-console-api',
     });
+  });
+
+  it('creates, lists, and stops a persisted schedule through the API', async () => {
+    const dataDir = await makeTempDir();
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async () => buildRunSummary(),
+    });
+    const scheduler = new TaskScheduler({ taskQueue: queue, dataDir });
+
+    try {
+      const created = await handleApiRequest({
+        method: 'POST',
+        pathname: '/api/schedules',
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+        body: {
+          name: '夜间 Boss 审查',
+          enabled: false,
+          dailyWindow: { start: '09:00', end: '18:00' },
+          repeat: { mode: 'after-completion', delaySeconds: 0, failureDelaySeconds: 300 },
+          tasks: [{
+            taskKey: 'boss-review',
+            name: 'Boss 审查',
+            kind: 'boss-auto-chat',
+            input: { platform: 'boss', scoreThreshold: 70 },
+          }],
+        },
+      });
+
+      assert.equal(created.statusCode, 201);
+      const schedule = created.body as { scheduleId: string; status: string };
+      assert.equal(schedule.status, 'paused');
+
+      const listed = await handleApiRequest({
+        method: 'GET',
+        pathname: '/api/schedules',
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+      });
+      assert.equal(listed.statusCode, 200);
+      assert.equal((listed.body as { schedules: unknown[] }).schedules.length, 1);
+
+      const stopped = await handleApiRequest({
+        method: 'POST',
+        pathname: `/api/schedules/${schedule.scheduleId}/stop`,
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+      });
+      assert.equal(stopped.statusCode, 200);
+      assert.equal((stopped.body as { status?: string }).status, 'stopped');
+    } finally {
+      scheduler.close();
+    }
   });
 
   it('queues resume-capture tasks and builds CLI-compatible argv', async () => {
