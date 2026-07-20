@@ -457,6 +457,22 @@ export async function openAuthenticatedHome(page: Page, platform: SupportedPlatf
   return getPlatformAdapter(platform).openAuthenticatedHome(page);
 }
 
+export async function bringAuthenticatedSessionPageToFront(
+  session: BrowserSession,
+  platform: SupportedPlatform,
+  headless = resolveBrowserHeadless(platform),
+): Promise<void> {
+  if (platform !== 'zhilian' || headless) {
+    return;
+  }
+
+  try {
+    await session.page.bringToFront();
+  } catch (error) {
+    console.warn(`Could not bring Zhilian browser page to front; continuing without changing the run: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 export async function ensureAuthenticatedBrowserSession(platform: SupportedPlatform): Promise<BrowserSession> {
   const session = await createBrowserSessionRef.fn(platform);
   const adapter = getPlatformAdapter(platform);
@@ -464,6 +480,7 @@ export async function ensureAuthenticatedBrowserSession(platform: SupportedPlatf
 
   try {
     await openAuthenticatedSubscribePageRef.fn(session.page, platform);
+    await bringAuthenticatedSessionPageToFront(session, platform, headless);
     return session;
   } catch (error) {
     const diagnostics = shouldAppendExperimentalPlatformDiagnostics(platform)

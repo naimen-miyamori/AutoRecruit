@@ -3964,6 +3964,150 @@ describe('scoring run semantics', () => {
     }
   });
 
+  it('brings only authenticated headed Zhilian sessions to the front', async () => {
+    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
+    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
+    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
+    const originalHeadless = config.playwright.headless;
+    const bringToFrontCalls: string[] = [];
+
+    (config.playwright as { headless: boolean }).headless = false;
+    sessionModule.createBrowserSessionRef.fn = (async (platform: string) => ({
+      page: {
+        bringToFront: async () => {
+          bringToFrontCalls.push(platform);
+        },
+      },
+      context: {},
+      browser: {},
+    } as unknown as BrowserSession)) as typeof sessionModule.createBrowserSessionRef.fn;
+    sessionModule.openAuthenticatedSubscribePageRef.fn = (async (page: Page) => page) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
+
+    try {
+      await sessionModule.ensureAuthenticatedBrowserSession('zhilian');
+      await sessionModule.ensureAuthenticatedBrowserSession('51job');
+      await sessionModule.ensureAuthenticatedBrowserSession('liepin');
+    } finally {
+      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
+      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      (config.playwright as { headless: boolean }).headless = originalHeadless;
+    }
+
+    assert.deepStrictEqual(bringToFrontCalls, ['zhilian']);
+  });
+
+  it('skips Zhilian page foregrounding in headless mode', async () => {
+    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
+    let bringToFrontCalls = 0;
+    const session = {
+      page: {
+        bringToFront: async () => {
+          bringToFrontCalls += 1;
+        },
+      },
+      context: {},
+      browser: {},
+    } as unknown as BrowserSession;
+
+    await sessionModule.bringAuthenticatedSessionPageToFront(session, 'zhilian', true);
+    await sessionModule.bringAuthenticatedSessionPageToFront(session, '51job', false);
+    await sessionModule.bringAuthenticatedSessionPageToFront(session, 'liepin', false);
+
+    assert.equal(bringToFrontCalls, 0);
+  });
+
+  it('continues an authenticated Zhilian run when page foregrounding fails', async () => {
+    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    const session = {
+      page: {
+        bringToFront: async () => {
+          throw new Error('window manager denied focus');
+        },
+      },
+      context: {},
+      browser: {},
+    } as unknown as BrowserSession;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    };
+
+    try {
+      await assert.doesNotReject(() => sessionModule.bringAuthenticatedSessionPageToFront(session, 'zhilian', false));
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /Could not bring Zhilian browser page to front.*window manager denied focus/);
+  });
+
+  it('brings the newly authenticated Zhilian session to the front after login refresh', async () => {
+    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
+    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
+    const originalCloseBrowserSession = sessionModule.closeBrowserSessionRef.fn;
+    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
+    const originalRefreshExpiredLoginSession = sessionModule.refreshExpiredLoginSessionRef.fn;
+    const originalHeadless = config.playwright.headless;
+    const staleSession = {
+      page: {
+        title: async () => '登录',
+        locator: () => ({ innerText: async () => '企业登录' }),
+        url: () => 'https://passport.zhaopin.com/org/login',
+      },
+      context: {},
+      browser: {},
+    } as unknown as BrowserSession;
+    let bringToFrontCalls = 0;
+    const refreshedSession = {
+      page: {
+        bringToFront: async () => {
+          bringToFrontCalls += 1;
+        },
+      },
+      context: {},
+      browser: {},
+    } as unknown as BrowserSession;
+    const createCalls: string[] = [];
+    const closeCalls: BrowserSession[] = [];
+    const refreshCalls: string[] = [];
+
+    (config.playwright as { headless: boolean }).headless = false;
+    sessionModule.createBrowserSessionRef.fn = (async (platform: string) => {
+      createCalls.push(platform);
+      return createCalls.length === 1 ? staleSession : refreshedSession;
+    }) as typeof sessionModule.createBrowserSessionRef.fn;
+    sessionModule.closeBrowserSessionRef.fn = (async (session: BrowserSession) => {
+      closeCalls.push(session);
+    }) as typeof sessionModule.closeBrowserSessionRef.fn;
+    sessionModule.openAuthenticatedSubscribePageRef.fn = (async (page: Page) => {
+      if (page === staleSession.page) {
+        throw new Error('Zhilian login state is invalid');
+      }
+      return page;
+    }) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
+    sessionModule.refreshExpiredLoginSessionRef.fn = async (platform: string) => {
+      refreshCalls.push(platform);
+    };
+
+    try {
+      const session = await sessionModule.ensureAuthenticatedBrowserSession('zhilian');
+      assert.equal(session, refreshedSession);
+    } finally {
+      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
+      sessionModule.closeBrowserSessionRef.fn = originalCloseBrowserSession;
+      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      sessionModule.refreshExpiredLoginSessionRef.fn = originalRefreshExpiredLoginSession;
+      (config.playwright as { headless: boolean }).headless = originalHeadless;
+    }
+
+    assert.deepStrictEqual(createCalls, ['zhilian', 'zhilian']);
+    assert.deepStrictEqual(closeCalls, [staleSession]);
+    assert.deepStrictEqual(refreshCalls, ['zhilian']);
+    assert.equal(bringToFrontCalls, 1);
+  });
+
   it('verifies a persisted Liepin session from fresh auth state by requiring recruiter search readiness', async () => {
     const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
     const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
