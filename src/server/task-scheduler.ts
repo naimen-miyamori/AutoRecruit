@@ -74,6 +74,9 @@ export class TaskScheduler {
       await this.ready;
       const schedule = normalizeScheduleCreate(payload, this.now());
       schedule.tasks = await this.normalizeTemplates(schedule);
+      if (await this.store.readSchedule(schedule.scheduleId)) {
+        throw new Error(`Schedule already exists: ${schedule.scheduleId}`);
+      }
       await this.store.saveSchedule(schedule);
       this.requestProcess(0);
       return schedule;

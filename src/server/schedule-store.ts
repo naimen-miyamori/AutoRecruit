@@ -3,6 +3,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { config } from '../config.js';
+import {
+  assertScheduleId,
+  assertScheduleRunId,
+  isScheduleId,
+  isScheduleRunId,
+} from './schedule-identifiers.js';
 import type { ScheduleDefinition, ScheduleRunRecord, ScheduleSummary } from './types.js';
 
 async function ensureDir(dirPath: string): Promise<void> {
@@ -18,6 +24,15 @@ async function writeJsonAtomically(filePath: string, value: unknown): Promise<vo
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`;
   await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
   await fs.rename(tempPath, filePath);
+}
+
+function resolveContainedPath(rootDir: string, ...segments: string[]): string {
+  const root = path.resolve(rootDir);
+  const resolved = path.resolve(root, ...segments);
+  if (resolved === root || !resolved.startsWith(`${root}${path.sep}`)) {
+    throw new Error('Schedule storage path must remain inside its configured directory');
+  }
+  return resolved;
 }
 
 function toSummary(schedule: ScheduleDefinition): ScheduleSummary {
@@ -51,9 +66,9 @@ export class ScheduleStore {
     await ensureDir(this.schedulesDir);
     const entries = await fs.readdir(this.schedulesDir);
     const schedules = await Promise.all(entries
-      .filter((entry) => entry.endsWith('.json'))
+      .filter((entry) => entry.endsWith('.json') && isScheduleId(entry.slice(0, -'.json'.length)))
       .sort()
-      .map((entry) => readJsonFile<ScheduleDefinition>(path.join(this.schedulesDir, entry))));
+      .map((entry) => readJsonFile<ScheduleDefinition>(resolveContainedPath(this.schedulesDir, entry))));
     return schedules.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
@@ -62,8 +77,9 @@ export class ScheduleStore {
   }
 
   async readSchedule(scheduleId: string): Promise<ScheduleDefinition | undefined> {
+    assertScheduleId(scheduleId);
     try {
-      return await readJsonFile<ScheduleDefinition>(path.join(this.schedulesDir, `${scheduleId}.json`));
+      return await readJsonFile<ScheduleDefinition>(resolveContainedPath(this.schedulesDir, `${scheduleId}.json`));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return undefined;
@@ -73,12 +89,15 @@ export class ScheduleStore {
   }
 
   async saveSchedule(schedule: ScheduleDefinition): Promise<void> {
-    await writeJsonAtomically(path.join(this.schedulesDir, `${schedule.scheduleId}.json`), schedule);
+    assertScheduleId(schedule.scheduleId);
+    await writeJsonAtomically(resolveContainedPath(this.schedulesDir, `${schedule.scheduleId}.json`), schedule);
   }
 
   async readRun(scheduleId: string, runId: string): Promise<ScheduleRunRecord | undefined> {
+    assertScheduleId(scheduleId);
+    assertScheduleRunId(runId);
     try {
-      return await readJsonFile<ScheduleRunRecord>(path.join(this.runsDir, scheduleId, `${runId}.json`));
+      return await readJsonFile<ScheduleRunRecord>(resolveContainedPath(this.runsDir, scheduleId, `${runId}.json`));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return undefined;
@@ -88,13 +107,14 @@ export class ScheduleStore {
   }
 
   async listRuns(scheduleId: string): Promise<ScheduleRunRecord[]> {
-    const dir = path.join(this.runsDir, scheduleId);
+    assertScheduleId(scheduleId);
+    const dir = resolveContainedPath(this.runsDir, scheduleId);
     try {
       const entries = await fs.readdir(dir);
       const runs = await Promise.all(entries
-        .filter((entry) => entry.endsWith('.json'))
+        .filter((entry) => entry.endsWith('.json') && isScheduleRunId(entry.slice(0, -'.json'.length)))
         .sort()
-        .map((entry) => readJsonFile<ScheduleRunRecord>(path.join(dir, entry))));
+        .map((entry) => readJsonFile<ScheduleRunRecord>(resolveContainedPath(dir, entry))));
       return runs.sort((left, right) => right.scheduledAt.localeCompare(left.scheduledAt));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -105,6 +125,8 @@ export class ScheduleStore {
   }
 
   async saveRun(run: ScheduleRunRecord): Promise<void> {
-    await writeJsonAtomically(path.join(this.runsDir, run.scheduleId, `${run.runId}.json`), run);
+    assertScheduleId(run.scheduleId);
+    assertScheduleRunId(run.runId);
+    await writeJsonAtomically(resolveContainedPath(this.runsDir, run.scheduleId, `${run.runId}.json`), run);
   }
 }

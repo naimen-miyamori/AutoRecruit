@@ -12,6 +12,13 @@ interface LocalDateTime {
   second: number;
 }
 
+interface WindowInterval {
+  start: Date;
+  end: Date;
+}
+
+type BoundaryDisambiguation = 'earlier' | 'later';
+
 export interface WindowState {
   within: boolean;
   nextStartAt: Date;
@@ -60,7 +67,7 @@ export function validateDailyWindow(window: DailyWindow): void {
 }
 
 function localParts(date: Date, timeZone: string): LocalDateTime {
-  const parts = new Intl.DateTimeFormat('en-CA', {
+  const formatter = localFormatters.get(timeZone) ?? new Intl.DateTimeFormat('en-CA', {
     timeZone,
     year: 'numeric',
     month: '2-digit',
@@ -69,7 +76,9 @@ function localParts(date: Date, timeZone: string): LocalDateTime {
     minute: '2-digit',
     second: '2-digit',
     hourCycle: 'h23',
-  }).formatToParts(date);
+  });
+  localFormatters.set(timeZone, formatter);
+  const parts = formatter.formatToParts(date);
   const values = Object.fromEntries(parts
     .filter((part) => part.type !== 'literal')
     .map((part) => [part.type, Number(part.value)]));
@@ -83,6 +92,66 @@ function localParts(date: Date, timeZone: string): LocalDateTime {
   };
 }
 
+const localFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function wallEpoch(value: LocalDateTime): number {
+  return Date.UTC(value.year, value.month - 1, value.day, value.hour, value.minute, value.second);
+}
+
+function sameLocalTime(left: LocalDateTime, right: LocalDateTime): boolean {
+  return left.year === right.year
+    && left.month === right.month
+    && left.day === right.day
+    && left.hour === right.hour
+    && left.minute === right.minute
+    && left.second === right.second;
+}
+
+function localDateTimeToEpoch(
+  value: LocalDateTime,
+  timeZone: string,
+  disambiguation: BoundaryDisambiguation,
+): number | undefined {
+  const desired = wallEpoch(value);
+  const offsets = new Set<number>();
+
+  // Sampling the surrounding wall-clock range finds both offsets on a fall-back transition.
+  for (let hours = -48; hours <= 48; hours += 6) {
+    const reference = desired + hours * 60 * 60 * 1000;
+    const observed = localParts(new Date(reference), timeZone);
+    offsets.add(wallEpoch(observed) - reference);
+  }
+
+  const candidates = [...offsets]
+    .map((offset) => desired - offset)
+    .filter((candidate, index, values) => values.indexOf(candidate) === index)
+    .filter((candidate) => sameLocalTime(localParts(new Date(candidate), timeZone), value))
+    .sort((left, right) => left - right);
+
+  if (candidates.length > 0) {
+    return disambiguation === 'earlier' ? candidates[0] : candidates[candidates.length - 1];
+  }
+
+  // A spring-forward gap has no exact instant. Roll the boundary to the first valid
+  // minute on the same local date so it cannot produce a past wake-up time.
+  const searchStart = desired - 18 * 60 * 60 * 1000;
+  const searchEnd = desired + 42 * 60 * 60 * 1000;
+  for (let candidate = searchStart; candidate <= searchEnd; candidate += 60 * 1000) {
+    const observed = localParts(new Date(candidate), timeZone);
+    if (
+      observed.year === value.year
+      && observed.month === value.month
+      && observed.day === value.day
+      && observed.second === 0
+      && wallEpoch(observed) >= desired
+    ) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
 function addLocalDays(value: Pick<LocalDateTime, 'year' | 'month' | 'day'>, days: number): Pick<LocalDateTime, 'year' | 'month' | 'day'> {
   const date = new Date(Date.UTC(value.year, value.month - 1, value.day + days));
   return {
@@ -92,35 +161,22 @@ function addLocalDays(value: Pick<LocalDateTime, 'year' | 'month' | 'day'>, days
   };
 }
 
-function localDateTimeToEpoch(value: LocalDateTime, timeZone: string): number {
-  let candidate = Date.UTC(value.year, value.month - 1, value.day, value.hour, value.minute, value.second);
-  const desired = Date.UTC(value.year, value.month - 1, value.day, value.hour, value.minute, value.second);
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const observed = localParts(new Date(candidate), timeZone);
-    const observedEpoch = Date.UTC(observed.year, observed.month - 1, observed.day, observed.hour, observed.minute, observed.second);
-    const adjustment = desired - observedEpoch;
-    if (adjustment === 0) {
-      return candidate;
-    }
-    candidate += adjustment;
-  }
-  return candidate;
-}
-
 function localDateAtMinute(
   date: Pick<LocalDateTime, 'year' | 'month' | 'day'>,
   minuteOfDay: number,
   timeZone: string,
-): Date {
+  disambiguation: BoundaryDisambiguation,
+): Date | undefined {
   const dayOffset = Math.floor(minuteOfDay / 1440);
   const localDate = addLocalDays(date, dayOffset);
   const minute = minuteOfDay % 1440;
-  return new Date(localDateTimeToEpoch({
+  const epoch = localDateTimeToEpoch({
     ...localDate,
     hour: Math.floor(minute / 60),
     minute: minute % 60,
     second: 0,
-  }, timeZone));
+  }, timeZone, disambiguation);
+  return epoch === undefined ? undefined : new Date(epoch);
 }
 
 export function getWindowState(now: Date, window: DailyWindow, timeZone: string): WindowState {
@@ -130,43 +186,32 @@ export function getWindowState(now: Date, window: DailyWindow, timeZone: string)
   const end = parseDailyTime(window.end, 'dailyWindow.end', true);
   const local = localParts(now, timeZone);
   const date = { year: local.year, month: local.month, day: local.day };
-  const minute = local.hour * 60 + local.minute;
   const crossesMidnight = start > end;
 
-  if (!crossesMidnight) {
-    if (minute >= start && minute < end) {
-      return {
-        within: true,
-        nextStartAt: localDateAtMinute(addLocalDays(date, 1), start, timeZone),
-        endAt: localDateAtMinute(date, end, timeZone),
-      };
+  const intervals: WindowInterval[] = [];
+  for (let dayOffset = -2; dayOffset <= 8; dayOffset += 1) {
+    const startDate = addLocalDays(date, dayOffset);
+    const endDate = addLocalDays(startDate, crossesMidnight ? 1 : 0);
+    const startAt = localDateAtMinute(startDate, start, timeZone, 'earlier');
+    const endAt = localDateAtMinute(endDate, end, timeZone, 'later');
+    if (startAt && endAt && endAt.getTime() > startAt.getTime()) {
+      intervals.push({ start: startAt, end: endAt });
     }
-    return {
-      within: false,
-      nextStartAt: minute < start
-        ? localDateAtMinute(date, start, timeZone)
-        : localDateAtMinute(addLocalDays(date, 1), start, timeZone),
-    };
   }
 
-  if (minute >= start) {
-    return {
-      within: true,
-      nextStartAt: localDateAtMinute(addLocalDays(date, 1), start, timeZone),
-      endAt: localDateAtMinute(addLocalDays(date, 1), end, timeZone),
-    };
+  intervals.sort((left, right) => left.start.getTime() - right.start.getTime());
+  const nowTime = now.getTime();
+  const current = intervals.find((interval) => nowTime >= interval.start.getTime() && nowTime < interval.end.getTime());
+  const next = intervals.find((interval) => interval.start.getTime() > nowTime);
+
+  if (current && next) {
+    return { within: true, nextStartAt: next.start, endAt: current.end };
   }
-  if (minute < end) {
-    return {
-      within: true,
-      nextStartAt: localDateAtMinute(date, start, timeZone),
-      endAt: localDateAtMinute(date, end, timeZone),
-    };
+  if (!current && next) {
+    return { within: false, nextStartAt: next.start };
   }
-  return {
-    within: false,
-    nextStartAt: localDateAtMinute(date, start, timeZone),
-  };
+
+  throw new Error('Could not resolve the next daily window boundary');
 }
 
 export function resolveNextEligibleStart(
