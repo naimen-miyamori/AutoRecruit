@@ -118,25 +118,25 @@ const actionDelayMinMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MIN_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MIN_MS', 2000),
   zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MIN_MS', 0),
-  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MIN_MS', 1000),
+  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MIN_MS', 2000),
 };
 const actionDelayMaxMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MAX_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MAX_MS', 3000),
   zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MAX_MS', 0),
-  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MAX_MS', 2000),
+  boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MAX_MS', 4000),
 };
 const candidateDelayMinMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'CANDIDATE_DELAY_MIN_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'CANDIDATE_DELAY_MIN_MS', 2000),
   zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MIN_MS', 0),
-  boss: getPlatformNumberEnv('boss', 'CANDIDATE_DELAY_MIN_MS', 0),
+  boss: getPlatformNumberEnv('boss', 'CANDIDATE_DELAY_MIN_MS', 2000),
 };
 const candidateDelayMaxMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'CANDIDATE_DELAY_MAX_MS', 0),
   liepin: getPlatformNumberEnv('liepin', 'CANDIDATE_DELAY_MAX_MS', 3000),
   zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MAX_MS', 0),
-  boss: getPlatformNumberEnv('boss', 'CANDIDATE_DELAY_MAX_MS', 0),
+  boss: getPlatformNumberEnv('boss', 'CANDIDATE_DELAY_MAX_MS', 4000),
 };
 const reuseBrowserByPlatform: Record<SupportedPlatform, boolean> = {
   '51job': getPlatformBooleanEnv('51job', 'REUSE_BROWSER', true),

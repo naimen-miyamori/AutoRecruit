@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { getPlatformActionPaceDelayMs, getPlatformCandidatePaceDelayMs } from '../browser/pacing.js';
 import { config, resolveStorageStatePath } from '../config.js';
 import { normalize51jobFilterDefinition } from '../platforms/51job-filter-normalization.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from '../platforms/registry.js';
@@ -97,25 +98,25 @@ test('browser pacing and reuse defaults are platform-specific', () => {
     '51job': 0,
     liepin: 2000,
     zhilian: 0,
-    boss: 1000,
+    boss: 2000,
   });
   assert.deepEqual(config.playwright.actionDelayMaxMsByPlatform, {
     '51job': 0,
     liepin: 3000,
     zhilian: 0,
-    boss: 2000,
+    boss: 4000,
   });
   assert.deepEqual(config.playwright.candidateDelayMinMsByPlatform, {
     '51job': 0,
     liepin: 2000,
     zhilian: 0,
-    boss: 0,
+    boss: 2000,
   });
   assert.deepEqual(config.playwright.candidateDelayMaxMsByPlatform, {
     '51job': 0,
     liepin: 3000,
     zhilian: 0,
-    boss: 0,
+    boss: 4000,
   });
   assert.deepEqual(config.playwright.reuseBrowserByPlatform, {
     '51job': true,
@@ -129,6 +130,15 @@ test('browser pacing and reuse defaults are platform-specific', () => {
     zhilian: 19329,
     boss: 19331,
   });
+});
+
+test('Boss action and candidate pacing always use a non-zero 2-4 second default delay', () => {
+  for (let index = 0; index < 100; index += 1) {
+    const actionDelayMs = getPlatformActionPaceDelayMs('boss');
+    const candidateDelayMs = getPlatformCandidatePaceDelayMs('boss');
+    assert.ok(actionDelayMs >= 2000 && actionDelayMs <= 4000);
+    assert.ok(candidateDelayMs >= 2000 && candidateDelayMs <= 4000);
+  }
 });
 
 test('parseSearchResultTotalFromText accepts capped and comma-separated totals', () => {
