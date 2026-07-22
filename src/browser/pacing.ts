@@ -8,18 +8,34 @@ export function randomIntBetween(min: number, max: number): number {
   return lower + Math.floor(Math.random() * (upper - lower + 1));
 }
 
+function getBossWeightedPaceDelayMs(min: number, max: number): number {
+  const lower = Math.max(0, Math.floor(Math.min(min, max)));
+  const upper = Math.max(lower, Math.floor(Math.max(min, max)));
+  if (lower === upper) {
+    return lower;
+  }
+
+  const lowerRangeMax = lower + Math.floor((upper - lower) / 2);
+  const useLowerRange = Math.random() < 0.8;
+  return useLowerRange
+    ? randomIntBetween(lower, lowerRangeMax)
+    : randomIntBetween(Math.min(lowerRangeMax + 1, upper), upper);
+}
+
 export function getPlatformActionPaceDelayMs(platform: SupportedPlatform): number {
-  return randomIntBetween(
-    config.playwright.actionDelayMinMsByPlatform[platform],
-    config.playwright.actionDelayMaxMsByPlatform[platform],
-  );
+  const min = config.playwright.actionDelayMinMsByPlatform[platform];
+  const max = config.playwright.actionDelayMaxMsByPlatform[platform];
+  return platform === 'boss'
+    ? getBossWeightedPaceDelayMs(min, max)
+    : randomIntBetween(min, max);
 }
 
 export function getPlatformCandidatePaceDelayMs(platform: SupportedPlatform): number {
-  return randomIntBetween(
-    config.playwright.candidateDelayMinMsByPlatform[platform],
-    config.playwright.candidateDelayMaxMsByPlatform[platform],
-  );
+  const min = config.playwright.candidateDelayMinMsByPlatform[platform];
+  const max = config.playwright.candidateDelayMaxMsByPlatform[platform];
+  return platform === 'boss'
+    ? getBossWeightedPaceDelayMs(min, max)
+    : randomIntBetween(min, max);
 }
 
 export async function waitOnPageOrTimer(page: Page, timeoutMs: number): Promise<void> {

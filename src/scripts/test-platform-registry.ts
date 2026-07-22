@@ -141,6 +141,24 @@ test('Boss action and candidate pacing always use a non-zero 2-4 second default 
   }
 });
 
+test('Boss pacing favors 2-3 second delays over 3-4 second delays', () => {
+  const sampleCount = 20_000;
+  let lowerActionDelays = 0;
+  let lowerCandidateDelays = 0;
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    if (getPlatformActionPaceDelayMs('boss') <= 3000) {
+      lowerActionDelays += 1;
+    }
+    if (getPlatformCandidatePaceDelayMs('boss') <= 3000) {
+      lowerCandidateDelays += 1;
+    }
+  }
+
+  assert.ok(lowerActionDelays >= sampleCount * 0.75 && lowerActionDelays <= sampleCount * 0.85);
+  assert.ok(lowerCandidateDelays >= sampleCount * 0.75 && lowerCandidateDelays <= sampleCount * 0.85);
+});
+
 test('parseSearchResultTotalFromText accepts capped and comma-separated totals', () => {
   assert.equal(parseSearchResultTotalFromText('猎聘 搜索条件 共500+位人选'), 500);
   assert.equal(parseSearchResultTotalFromText('共搜出 1,234 个结果'), 1234);

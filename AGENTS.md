@@ -115,6 +115,7 @@ Key browser timing env vars:
 - `PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS` default `20000`
 - `PLAYWRIGHT_ACTION_DELAY_MIN_MS` / `PLAYWRIGHT_ACTION_DELAY_MAX_MS` default `0-0` outside Liepin and Boss; Boss defaults to `2000-4000ms`
 - `PLAYWRIGHT_CANDIDATE_DELAY_MIN_MS` / `PLAYWRIGHT_CANDIDATE_DELAY_MAX_MS` default `0-0` outside Liepin and Boss; Boss defaults to `2000-4000ms`
+- Boss action and candidate pacing use a weighted range: approximately 80% of waits are `2000-3000ms` and 20% are `3001-4000ms`.
 - `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN|BOSS>_ACTION_DELAY_MIN_MS` / `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN|BOSS>_ACTION_DELAY_MAX_MS`
 - `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN|BOSS>_CANDIDATE_DELAY_MIN_MS` / `PLAYWRIGHT_<51JOB|LIEPIN|ZHILIAN|BOSS>_CANDIDATE_DELAY_MAX_MS`
 - `PLAYWRIGHT_REUSE_BROWSER` default `false` outside platforms with their own defaults
