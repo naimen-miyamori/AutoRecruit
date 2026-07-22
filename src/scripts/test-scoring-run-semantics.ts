@@ -5035,15 +5035,19 @@ describe('scoring run semantics', () => {
     } as unknown as BrowserSession;
     let detailClosed = false;
     let searchFocused = false;
+    const callOrder: string[] = [];
+    const originalWaitPlatformActionPace = indexModule.waitPlatformActionPaceRef.fn;
 
     const detailPage = {
       locator: () => ({ innerText: async () => 'raw resume text' }),
       close: async () => {
         detailClosed = true;
+        callOrder.push('close');
       },
     } as never;
     searchPage.bringToFront = async () => {
       searchFocused = true;
+      callOrder.push('focus-search');
     };
 
     const adapter = {
@@ -5053,24 +5057,37 @@ describe('scoring run semantics', () => {
         candidates: [{ candidateId: 'cand-new' }],
       }),
       openResumeDetail: async () => detailPage,
-      parseResumeDetail: async () => buildResume('cand-new'),
+      parseResumeDetail: async () => {
+        callOrder.push('parse');
+        return buildResume('cand-new');
+      },
     } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.waitPlatformActionPaceRef.fn = async (page, platform) => {
+      assert.equal(page, detailPage);
+      assert.equal(platform, 'liepin');
+      callOrder.push('pace-before-close');
+    };
     indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
 
-    await indexModule.runResumeCaptureFlow(
-      'liepin',
-      jobKey,
-      buildNormalizedJob(),
-      'search keyword',
-      store,
-      session,
-      fetchedAt,
-      adapter,
-    );
+    try {
+      await indexModule.runResumeCaptureFlow(
+        'liepin',
+        jobKey,
+        buildNormalizedJob(),
+        'search keyword',
+        store,
+        session,
+        fetchedAt,
+        adapter,
+      );
+    } finally {
+      indexModule.waitPlatformActionPaceRef.fn = originalWaitPlatformActionPace;
+    }
 
     assert.equal(detailClosed, true);
     assert.equal(searchFocused, true);
     assert.equal(session.page, searchPage);
+    assert.deepStrictEqual(callOrder, ['parse', 'pace-before-close', 'close', 'focus-search']);
   });
 
   it('keeps upstream extraction failures retryable by not marking them as seen', async () => {

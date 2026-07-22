@@ -4,7 +4,7 @@ import { buildJobKey, parseJobDescription } from './parsers/jd-parser.js';
 import { config } from './config.js';
 import { JobStore } from './storage/job-store.js';
 import { BrowserSession, closeBrowserSession, ensureAuthenticatedBrowserSession } from './browser/session.js';
-import { waitPlatformCandidatePace } from './browser/pacing.js';
+import { waitPlatformActionPace, waitPlatformCandidatePace } from './browser/pacing.js';
 import { createProductionExtractionBoundary } from './extraction/production-extractor.js';
 import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
@@ -208,6 +208,7 @@ export const sendJobReportRef = { fn: sendJobReport };
 export const ensureAuthenticatedBrowserSessionRef = { fn: ensureAuthenticatedBrowserSession };
 export const closeBrowserSessionRef = { fn: closeBrowserSession };
 export const runSearchSubscriptionWorkflowRef = { fn: runSearchSubscriptionWorkflow };
+export const waitPlatformActionPaceRef = { fn: waitPlatformActionPace };
 export const waitPlatformCandidatePaceRef = { fn: waitPlatformCandidatePace };
 export const answerCandidateQuestionFromJdRef = { fn: answerCandidateQuestionFromJd };
 export const answerQuestionWithRagRef = { fn: answerQuestionWithRag };
@@ -775,6 +776,9 @@ async function captureCandidateResume(
     };
   } finally {
     if (!preserveDetailPageForInspection && detailPage !== session.page && detailPage !== searchPage) {
+      if (platform === 'liepin') {
+        await waitPlatformActionPaceRef.fn(detailPage, platform);
+      }
       await detailPage.close().catch(() => undefined);
       await (searchPage as Partial<Pick<typeof searchPage, 'bringToFront'>>).bringToFront?.call(searchPage).catch(() => undefined);
       session.page = searchPage;
