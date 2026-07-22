@@ -2,14 +2,16 @@
 
 Auto Recruit 是一个基于 TypeScript、Playwright 和 OpenAI 兼容模型的招聘自动化 CLI，同时提供一个本地运营控制台。它可以在招聘平台上按职位搜索候选人、抓取简历、解析和评分、导出结果，并通过 SMTP 发送报告。
 
-支持的平台：
+平台差异：
 
-- `51job`
-- `liepin`
-- `zhilian`
-- `boss`（仅支持单平台运行）
+| 平台 | `--platform all` | 浏览器 | 搜索与默认已查看筛选 | 特殊行为 |
+| --- | --- | --- | --- | --- |
+| `51job` | 是，第 1 个 | 默认有头、可复用 | 保存的订阅或直接搜索；默认勾选 `我已看` | 详情使用候选卡片入口 |
+| `liepin` | 是，第 2 个 | 强制有头、可复用 | 招聘端找人或直接搜索；默认勾选 `隐藏已查看` | 可配置常用联系人转发 |
+| `zhilian` | 是，第 3 个 | 默认有头、可复用 | `/app/search` 快捷搜索或直接搜索；默认勾选 `未看过` | 报告邮件使用当前运行复制的分享链接 |
+| `boss` | 否，仅单平台 | 默认有头、可复用 | 复用当前人才搜索页 | 普通抓取和未读聊天支持配置式简历转发 |
 
-`--platform all` 只按 `51job`、`liepin`、`zhilian` 的顺序运行，不包含 Boss。
+`--platform all` 严格按 `51job`、`liepin`、`zhilian` 的顺序串行运行，任一平台失败会立即停止，不包含 Boss。
 
 ## 环境要求
 
@@ -89,22 +91,44 @@ npm run dev -- --platform 51job --keyword "店长"
 # 包含已经看过的候选人
 npm run dev -- --platform 51job --keyword "店长" --include-viewed true
 
-# 使用直接搜索和筛选输入文件
+# 首次使用直接搜索；已有岗位可省略 --jd-file
 npm run dev -- \
   --platform zhilian \
   --keyword "前端工程师" \
+  --jd-file ./jd.txt \
   --search-source direct \
   --application-filter-input-file ./filter-input.json
 
-# 导出后发送报告
+# 首次抓取并在导出后发送报告；已有岗位可省略 --jd-file
 npm run dev -- \
   --platform liepin \
   --keyword "前端工程师" \
+  --jd-file ./jd.txt \
   --email recruiter@example.com \
   --cc audit@example.com
 ```
 
-`--search-source saved` 是默认模式；`--application-filter-input-file` 只能和显式的 `--search-source direct` 一起使用。抓取、评分和导出结果会写入职位目录，最新运行摘要保存在 `runs/` 下。
+`--search-source saved` 是默认模式；`--application-filter-input-file` 只能和显式的 `--search-source direct` 一起使用。抓取、评分和导出结果会写入职位目录，最新运行摘要保存在 `results/` 下。
+
+主要输出位置：
+
+| 内容 | 路径 |
+| --- | --- |
+| 岗位配置和复用输入 | `data/<platform>/jobs/<jobKey>/jd.json` |
+| 已成功抓取的候选人 ID | `data/<platform>/jobs/<jobKey>/seen-ids.json` |
+| 结构化简历 | `data/<platform>/jobs/<jobKey>/resumes/<candidateId>.json` |
+| 评分结果 | `data/<platform>/jobs/<jobKey>/scores/<candidateId>.json` |
+| 运行摘要 | `data/<platform>/jobs/<jobKey>/results/<timestamp>.json` |
+| 最新 Markdown 报告 | `data/<platform>/jobs/<jobKey>/exports/latest.md` |
+| RAG 本地事实和索引数据 | `data/<platform>/jobs/<jobKey>/rag/` |
+
+### 浏览器操作间隔
+
+- Liepin 的站内操作和候选人间隔默认随机等待 `2–3 秒`。成功提取并保存简历后，流程还会等待 `2–3 秒`再关闭详情页；提取或转发失败时保留详情页供检查。
+- Boss 的网页操作和候选人间隔默认随机等待 `2–4 秒`，其中约 80% 落在 `2–3 秒`、约 20% 落在 `3–4 秒`。导航、点击、输入、按键和简历转发都使用该节奏，普通搜索和自动聊天均生效。
+- 页面状态读取、简历解析、模型评分、文件写入和 SMTP 邮件不属于网页交互，不额外加入上述固定等待。
+
+可通过 `PLAYWRIGHT_<PLATFORM>_ACTION_DELAY_MIN_MS`、`PLAYWRIGHT_<PLATFORM>_ACTION_DELAY_MAX_MS`、`PLAYWRIGHT_<PLATFORM>_CANDIDATE_DELAY_MIN_MS` 和 `PLAYWRIGHT_<PLATFORM>_CANDIDATE_DELAY_MAX_MS` 覆盖平台配置，其中 `<PLATFORM>` 可为 `51JOB`、`LIEPIN`、`ZHILIAN` 或 `BOSS`。
 
 ### 多平台和批量运行
 
@@ -166,6 +190,8 @@ npm run dev -- \
   --boss-forward-recipient resume@example.com
 ```
 
+Boss 普通抓取的顺序是：打开详情、如已配置则完成简历转发、提取并保存简历；全部新候选人抓取完成后再统一评分、导出和发送报告。普通抓取的转发发生在评分之前，因此不是只转发评分合适的候选人。
+
 Boss 未读聊天审核是独立模式：
 
 ```bash
@@ -177,7 +203,7 @@ PLAYWRIGHT_HEADLESS=false npm run dev -- \
   --boss-chat-summary-email recruiter@example.com
 ```
 
-自动聊天不能与普通抓取、批量、搜索订阅或 JD/RAG 问答参数混用。回复未匹配候选人默认关闭，只有显式设置 `--boss-chat-reply-unqualified true` 才会发送拒绝短语。
+自动聊天会先读取和判断首次沟通候选人的简历，只有匹配候选人才转发。物业电工需要严格检查全部硬性要求时增加 `--boss-chat-require-all true`。自动聊天不能与普通抓取、批量、搜索订阅或 JD/RAG 问答参数混用。回复未匹配候选人默认关闭，只有显式设置 `--boss-chat-reply-unqualified true` 才会发送拒绝短语。
 
 ## RAG
 
@@ -238,10 +264,10 @@ Vite 默认地址为 `http://127.0.0.1:5173`，并将 `/api` 代理到本地 API
 本机控制命令：
 
 ```bash
-rtk npm run schedule:stop -- --schedule-id <scheduleId>
-rtk npm run schedule:control -- pause --schedule-id <scheduleId>
-rtk npm run schedule:control -- start --schedule-id <scheduleId>
-rtk npm run schedule:control -- run-now --schedule-id <scheduleId>
+npm run schedule:stop -- --schedule-id <scheduleId>
+npm run schedule:control -- pause --schedule-id <scheduleId>
+npm run schedule:control -- start --schedule-id <scheduleId>
+npm run schedule:control -- run-now --schedule-id <scheduleId>
 ```
 
 ## 配置参考
@@ -253,10 +279,12 @@ rtk npm run schedule:control -- run-now --schedule-id <scheduleId>
 - `PLAYWRIGHT_SEARCH_PAGE_TIMEOUT_MS`：搜索页面总超时，默认 `20000`
 - `PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS`：简历详情总超时，默认 `20000`
 - `PLAYWRIGHT_<PLATFORM>_REUSE_BROWSER`：平台级浏览器复用开关
+- `PLAYWRIGHT_<PLATFORM>_ACTION_DELAY_MIN_MS` / `PLAYWRIGHT_<PLATFORM>_ACTION_DELAY_MAX_MS`：平台网页动作间隔
+- `PLAYWRIGHT_<PLATFORM>_CANDIDATE_DELAY_MIN_MS` / `PLAYWRIGHT_<PLATFORM>_CANDIDATE_DELAY_MAX_MS`：平台候选人间隔
 - `QDRANT_URL`、`QDRANT_API_KEY`：Qdrant 配置
 - `SMTP_HOST`、`SMTP_PORT`、`SMTP_USER`、`SMTP_PASS`、`SMTP_FROM`：邮件配置
 
-正常多平台运行时建议不要设置 `STORAGE_STATE_PATH`，让程序自动选择平台对应的登录态文件。
+Liepin 默认动作、成功详情关闭和候选人间隔为 `2–3 秒`；Boss 默认为加权 `2–4 秒`。完整节奏说明见[浏览器操作间隔](#浏览器操作间隔)。正常多平台运行时建议不要设置 `STORAGE_STATE_PATH`，让程序自动选择平台对应的登录态文件。
 
 ## 开发和验证
 
@@ -275,3 +303,7 @@ npm run web:build
 - 登录态文件和 `.env` 可能包含高敏感凭据，已被 Git 忽略。
 - 候选人简历属于个人信息，生产环境应限制 `data/` 访问并做好备份和删除策略。
 - RAG API 和控制台 API 只适合作为内部服务；`RAG_API_KEY` 或 `AUTORECRUIT_CONSOLE_API_KEY` 是轻量保护，不替代上游网关的认证、权限、限流和审计。
+
+## 进一步阅读
+
+完整的平台流程、筛选能力、持久化结构、RAG、控制台和运维说明见[项目说明文档](./项目说明文档.md)。面向代码代理的约束按目录拆分在根目录及 `src/*/AGENTS.md`。
