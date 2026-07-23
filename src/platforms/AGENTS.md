@@ -149,7 +149,7 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
 ### Shared session and pacing
 
 - Boss runs only as `--platform boss`. Reuse the platform-scoped headed browser, profile, CDP port
-  `19331`, and current authenticated search/chat tab whenever possible.
+  `19331`, and current authenticated search/chat/talent/job-management tab whenever possible.
 - Do not repeatedly open the login URL, create extra Boss tabs, or replace the current authenticated
   page.
 - All navigation, click, input, key, forwarding, chat, phone, and candidate-transition actions use
@@ -167,6 +167,52 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
   dropdown match; email mode fills the recipient address.
 - Forward after opening a new detail and before parsing or seen marking. A failure before successful
   capture keeps the candidate retryable.
+
+### Talent discovery, deep search, and greet
+
+- Recommendation and native deep-search modes are standalone and read-only by default. They must
+  not enter normal capture, batch, search subscription, auto-chat, or `--platform all`.
+- Candidate results must expose a stable Boss candidate ID. Visible card order is diagnostic only;
+  never use a name or list index as the execution identifier.
+- Deep-search requirements are separated into core and bonus groups. Synchronize them exactly and
+  verify the resulting form before any match. Matching requires at least one core requirement,
+  positive remaining quota, an enabled match control, and explicit confirmation.
+- A match result returns at most the latest 20 candidates. Reading the current form or cards must
+  never consume match quota.
+- Single-candidate greet requires exact candidate ID plus expected candidate name and job name.
+  Revalidate them immediately before the click, include Boss job ID when available, and treat an
+  existing continue-chat state as already contacted rather than greeting again.
+
+### Atomic chat operations
+
+- Keep read-only conversation listing/opening/message-history/resume-preview distinct from chat
+  mutations. All operations target an exact conversation ID and revalidate hydrated candidate/job
+  identity when expectations are supplied.
+- A mutation requires `confirmed: true` and a non-empty intent ID. Persist a successful receipt and
+  return it on retry; an intent ID already bound to another operation or conversation is an error.
+- Generic text sending must fail when the editor contains any existing draft. Never clear or
+  overwrite user-authored text.
+- Remark, not-fit, attachment-resume, phone, and WeChat actions must locate one unambiguous visible
+  control, apply Boss pacing, and confirm dialogs where the platform requires confirmation.
+- Atomic chat mutations are never schedulable. Do not weaken the fixed-common-phrase behavior of
+  auto-chat when implementing generic atomic operations.
+
+### Position/JD synchronization
+
+- Read Boss position management as a source of open, pending, and closed positions. Closed positions
+  stay included by default because existing unread conversations may reference them.
+- Position identity is the stable Boss job ID. Build a distinct job key for each ID; same-name jobs
+  must not merge, and detail hydration must match both expected ID and name before persistence.
+- Hash normalized raw JD text before parsing. If the hash matches the stored position metadata,
+  skip model parsing and do not rewrite `jd.json`.
+- Parse a changed JD before saving. A parsing/detail failure records a failed sync item and must not
+  overwrite the last valid job record. Preserve prior creation time, forwarding, delivery, and
+  search settings on a successful update.
+- Persist a latest position snapshot and timestamped sync run, while the normal Boss job record
+  remains the authoritative JD copy.
+- Auto-chat resolves a conversation by Boss job ID first. Name fallback is allowed only when the
+  normalized job name maps to exactly one stored record; ambiguity is a retryable failure. Optional
+  pre-review sync defaults off and aborts review when any requested position fails to sync.
 
 ### Auto-chat isolation and settings
 
@@ -240,6 +286,10 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
 - Platform registry/defaults: `src/scripts/test-platform-registry.ts`
 - Shared capture/run semantics: `src/scripts/test-scoring-run-semantics.ts`
 - Boss chat and strict matching: `src/scripts/test-boss-chat.ts`
+- Boss talent discovery and guarded CLI modes: `src/scripts/test-boss-talent.ts`,
+  `src/scripts/test-boss-cli-modes.ts`
+- Boss atomic chat operations: `src/scripts/test-boss-chat-operations.ts`
+- Boss position/JD sync: `src/scripts/test-boss-job-sync.ts`
 - Liepin adapter/filter behavior: `src/scripts/test-liepin-adapter.ts`
 - Zhilian adapter/filter behavior: `src/scripts/test-zhilian-adapter.ts`
 - Filter option export: `src/scripts/test-export-application-filter-options.ts`

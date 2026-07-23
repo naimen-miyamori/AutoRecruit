@@ -27,7 +27,8 @@ resume parsing under `src/browser/`.
 - Browser engine defaults to CloakBrowser. `BROWSER_ENGINE=playwright` is the supported fallback.
 - A reusable run should leave the browser on the useful authenticated search/chat page. Close only
   detail pages or stale tabs that the platform contract says to close.
-- Boss search and chat share the Boss-scoped browser/profile and should reuse the current Boss tab.
+- Boss search, recommendation/deep-search, chat, and job-management flows share the Boss-scoped
+  browser/profile and should reuse the current useful Boss tab.
 
 ## Deadlines and Readiness
 
@@ -60,8 +61,8 @@ Default timing configuration:
   `2000-3000ms`.
 - Boss action and candidate pacing defaults to `2000-4000ms`, weighted about 80% in
   `2000-3000ms` and 20% in `3001-4000ms`.
-- Boss navigation, clicks, inputs, key presses, forwarding, chat/contact actions, and candidate
-  transitions must not bypass the shared pacing helper.
+- Boss navigation, clicks, inputs, key presses, forwarding, talent matching/greet, job-detail sync,
+  chat/contact actions, and candidate transitions must not bypass the shared pacing helper.
 - Platform-specific overrides use
   `PLAYWRIGHT_<PLATFORM>_{ACTION|CANDIDATE}_DELAY_{MIN|MAX}_MS`.
 - Existing `PLAYWRIGHT_LIEPIN_*ACTION_DELAY*`, `PLAYWRIGHT_LIEPIN_*CANDIDATE_DELAY*`, and

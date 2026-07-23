@@ -12,7 +12,10 @@ must preserve the same contracts.
   queueing, platform isolation, or CLI semantics.
 - Preview argv is explanatory only and is never the execution source of truth.
 - Preserve the CLI's mode isolation and platform constraints for normal capture, batch,
-  search-subscription, login refresh, Boss auto-chat, RAG operations, and standalone RAG answers.
+  search-subscription, login refresh, Boss auto-chat, Boss talent/greet/chat-operation/job-sync
+  modes, RAG operations, and standalone RAG answers.
+- Routes must not call Boss browser modules directly. HTTP and assistant-confirmed Boss operations
+  normalize a task and enter the shared queue before live browser work starts.
 
 ## Console Assistant Safety
 
@@ -24,6 +27,9 @@ must preserve the same contracts.
   through shared normalizers and fail there when the final request is invalid.
 - `/api/assistant/confirm` finalizes the draft and submits through the shared queue; it must not trust
   preview argv.
+- Boss immediate match, greet, and chat mutations require both a mode-specific `confirmed: true`
+  field and final assistant risk acceptance. Read-only talent/chat drafts do not acquire mutation
+  authority merely because they share a task kind or page.
 
 ## Request-Scoped Model Settings
 
@@ -60,12 +66,21 @@ must preserve the same contracts.
   behavior and do not infer scheduler state solely from UI previews.
 - A scheduler or assistant feature may compose existing task modes but must not broaden what those
   modes are allowed to do.
+- Boss position/JD sync is schedulable and may precede Boss auto-chat in one ordered round. Talent
+  matching, greet, and atomic chat mutation kinds are intentionally not schedulable.
+- Preserve intent IDs in task input and summaries where useful for audit, but do not derive external
+  execution from task argv previews. Mutation retry idempotency is enforced by the platform receipt,
+  not by assuming queue delivery is exactly once.
 
 ## Focused Verification
 
 - HTTP routes and assistant behavior: `src/scripts/test-server-api.ts`
 - Scheduler persistence/time/order behavior: `src/scripts/test-task-scheduler.ts`
 - Shared execution and CLI isolation: `src/scripts/test-scoring-run-semantics.ts`
+- Boss task normalization/API paths: `src/scripts/test-server-api.ts`,
+  `src/scripts/test-boss-cli-modes.ts`
+- Boss operation and sync semantics: `src/scripts/test-boss-chat-operations.ts`,
+  `src/scripts/test-boss-job-sync.ts`
 - RAG API behavior: matching `src/scripts/test-rag-api.ts` and other `test-rag-*.ts` files
 
 Run `rtk npm run typecheck` after server contract changes and expand to the full test suite according

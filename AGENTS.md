@@ -6,7 +6,8 @@ Repository-wide guidance for coding agents working on Auto Recruit.
 
 This repository is a TypeScript CLI and local operations console for recruitment automation.
 The core production browser platforms are `51job`, `liepin`, and `zhilian`. Boss (`boss`) is a
-single-platform extension for search/capture, configured forwarding, and unread-chat review.
+single-platform extension for search/capture, talent discovery, configured forwarding, atomic chat
+operations, unread-chat review, and position/JD synchronization.
 
 Keep ownership boundaries intact:
 
@@ -71,6 +72,11 @@ the inner loop.
   create job records, capture or score resumes, export reports, send email, or alter seen state.
 - Boss auto-chat is standalone and must preserve the platform and flag isolation defined in
   `src/platforms/AGENTS.md`.
+- Boss talent discovery, single-candidate greet, atomic chat operations, and position/JD sync are
+  standalone and require `--platform boss`. Recommendation and deep-search reads default to
+  read-only; immediate match, greet, and chat mutations require explicit confirmation.
+- Of the new Boss modes, only position/JD sync is schedulable. Do not schedule quota-consuming
+  matching, candidate contact, or arbitrary chat mutations.
 
 ### Batch and normal capture
 
@@ -103,6 +109,11 @@ the inner loop.
 - Exported markdown and email bodies must visibly identify the source platform.
 - Zhilian delivery and Boss chat-review persistence have additional platform rules in
   `src/platforms/AGENTS.md`.
+- Boss-synced job records are keyed by stable Boss position ID as well as name. Same-name positions
+  with different IDs must never merge. An unchanged JD hash must not trigger reparsing or a job
+  record rewrite, and a parse failure must not replace the last valid JD.
+- Boss chat mutations use an explicit intent ID and persist a receipt. Retrying the same intent must
+  return the existing result rather than repeat the external action.
 - Local JSON/JSONL files are the source of truth for persisted product data. Rebuildable external
   indexes must never become the only copy.
 
@@ -143,6 +154,9 @@ scoped instructions.
   Never persist or log the API key, include it in model input, or let it alter confirmed execution.
 - `/api/assistant/confirm` must reuse shared normalizers and the existing `TaskQueue`; preview argv
   is not an execution source of truth.
+- HTTP and assistant-confirmed Boss browser operations must execute through `TaskQueue`. Read-only
+  operations must remain distinguishable from quota-consuming/contact mutations, and risk
+  acceptance does not replace the mode-specific `confirmed` and identity checks.
 
 See `src/rag/AGENTS.md` and `src/server/AGENTS.md` before changing those flows.
 
@@ -171,6 +185,9 @@ Run verification in proportion to the change. The critical mappings are:
 | CLI modes, persistence, seen/scoring semantics | `src/scripts/test-scoring-run-semantics.ts` |
 | Platform registry, default pacing, reuse defaults | `src/scripts/test-platform-registry.ts` |
 | Boss chat and property-electrician rules | `src/scripts/test-boss-chat.ts` |
+| Boss talent discovery, deep search, and greet | `src/scripts/test-boss-talent.ts`, `src/scripts/test-boss-cli-modes.ts` |
+| Boss atomic chat operations and receipts | `src/scripts/test-boss-chat-operations.ts` |
+| Boss position/JD sync and ID mapping | `src/scripts/test-boss-job-sync.ts` |
 | Liepin adapter/search/filter behavior | `src/scripts/test-liepin-adapter.ts` |
 | Zhilian adapter/search/filter behavior | `src/scripts/test-zhilian-adapter.ts` |
 | Search subscription | `src/scripts/test-search-subscription.ts` |
