@@ -48,10 +48,10 @@ function positiveInteger(value: unknown, fieldName: string, fallback?: number): 
 }
 
 function normalizeKind(value: unknown): SchedulableTaskKind {
-  if (value === 'resume-capture' || value === 'batch' || value === 'search-subscription' || value === 'boss-auto-chat') {
+  if (value === 'resume-capture' || value === 'batch' || value === 'search-subscription' || value === 'boss-auto-chat' || value === 'boss-job-sync') {
     return value;
   }
-  throw new Error('scheduled task kind must be resume-capture, batch, search-subscription, or boss-auto-chat');
+  throw new Error('scheduled task kind must be resume-capture, batch, search-subscription, boss-auto-chat, or boss-job-sync');
 }
 
 function normalizeFailurePolicy(value: unknown): WorkflowFailurePolicy {

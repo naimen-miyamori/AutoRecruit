@@ -31,6 +31,7 @@ export interface BossUnreadConversation {
   conversationId: string;
   candidateName?: string;
   jobName: string;
+  bossJobId?: string;
   unreadCount: number;
   hasUnreadBadge?: boolean;
 }
@@ -53,6 +54,7 @@ export interface BossOpenedConversationSnapshot {
   candidateId: string;
   candidateName?: string;
   jobName: string;
+  bossJobId?: string;
   ageDesc?: string;
   nativePlace?: string;
   education?: string;
@@ -291,11 +293,29 @@ export async function collectBossUnreadConversations(
         return [];
       }
 
+      type VueElement = HTMLElement & { __vue__?: Record<string, unknown> };
+      const vue = (item as VueElement).__vue__ ?? {};
+      const nested = [vue.item, vue.data, vue.conversation].find((value) => (
+        Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+      )) as Record<string, unknown> | undefined;
+      const readJobId = (record: Record<string, unknown> | undefined) => {
+        if (!record) return '';
+        for (const key of ['jobId', 'positionId', 'toJobId', 'encryptJobId']) {
+          const value = record[key];
+          if (typeof value === 'string' || typeof value === 'number') return normalize(String(value));
+        }
+        return '';
+      };
+      const bossJobId = normalize(item.getAttribute('data-job-id'))
+        || readJobId(vue)
+        || readJobId(nested)
+        || retry?.bossJobId;
       const unreadCount = badge ? Number.parseInt(normalize(badge.textContent), 10) : retry!.unreadCount;
       return [{
         conversationId,
         candidateName: normalize(item.querySelector('.geek-name')?.textContent) || retry?.candidateName,
         jobName,
+        ...(bossJobId ? { bossJobId } : {}),
         unreadCount: Number.isFinite(unreadCount) ? unreadCount : 1,
         hasUnreadBadge: Boolean(badge),
       }];
@@ -565,12 +585,19 @@ async function readOpenedBossConversation(page: Page, conversation: BossUnreadCo
       ?? readNumberString(currentData.expectId)
       ?? readString(conversationData.encryptExpectId)
       ?? fallbackConversationId;
+    const bossJobId = readNumberString(currentData.jobId)
+      ?? readNumberString(currentData.positionId)
+      ?? readNumberString(conversationData.jobId)
+      ?? readNumberString(conversationData.positionId)
+      ?? readString(currentData.encryptJobId)
+      ?? readString(conversationData.encryptJobId);
 
     return {
       conversationId: readString(currentData.uniqueId) ?? fallbackConversationId,
       candidateId,
       candidateName: readString(conversationData.name) ?? readString(currentData.name) ?? fallbackName,
       jobName: readString(currentData.jobName) ?? readString(conversationData.toPosition) ?? fallbackJobName,
+      bossJobId,
       ageDesc: readString(conversationData.ageDesc),
       nativePlace: readString(conversationData.hometownName)
         ?? readPlace(conversationData.hometown)

@@ -408,6 +408,60 @@ describe('console API routes', () => {
     assert.equal(completed.inputSummary.replyToUnqualifiedCandidates, false);
   });
 
+  it('queues Boss talent, greet, atomic chat, and JD-sync tasks with guarded argv', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+    const requests = [
+      {
+        pathname: '/api/tasks/boss-talent-search',
+        body: { platform: 'boss', source: 'deep-search', expectedJobName: '物业电工', triggerMatch: false },
+      },
+      {
+        pathname: '/api/tasks/boss-greet',
+        body: {
+          platform: 'boss', source: 'recommend', candidateId: 'candidate-1',
+          expectedCandidateName: '候选人甲', expectedJobName: '物业电工', confirmed: true,
+        },
+      },
+      {
+        pathname: '/api/tasks/boss-chat-operation',
+        body: { platform: 'boss', action: 'list-conversations', unreadOnly: true },
+      },
+      {
+        pathname: '/api/tasks/boss-job-sync',
+        body: { platform: 'boss', bossJobIds: ['job-1'], includeClosed: true },
+      },
+    ];
+    for (const request of requests) {
+      const response = await handleApiRequest({ method: 'POST', taskQueue: queue, ...request });
+      assert.equal(response.statusCode, 202);
+      const queued = response.body as TaskDetail;
+      assert.equal((await waitForTask(queue, queued.taskId)).status, 'succeeded');
+    }
+    assert.deepStrictEqual(calls, [
+      ['--platform', 'boss', '--boss-talent-source', 'deep-search', '--boss-expected-job-name', '物业电工', '--boss-trigger-match', 'false'],
+      ['--platform', 'boss', '--boss-greet-source', 'recommend', '--boss-greet-candidate-id', 'candidate-1', '--boss-expected-candidate-name', '候选人甲', '--boss-expected-job-name', '物业电工', '--boss-confirmed', 'true'],
+      ['--platform', 'boss', '--boss-chat-operation', 'list-conversations', '--boss-unread-only', 'true'],
+      ['--platform', 'boss', '--boss-job-sync', 'true', '--boss-job-ids', 'job-1', '--boss-include-closed-jobs', 'true'],
+    ]);
+
+    const rejected = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/boss-chat-operation',
+      taskQueue: queue,
+      body: { platform: 'boss', action: 'send-text', conversationId: 'conversation-1', text: '你好' },
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.match((rejected.body as { error: { message: string } }).error.message, /confirmed=true and intentId/);
+  });
+
   it('rejects Boss auto-chat summary cc without a summary recipient', async () => {
     const response = await handleApiRequest({
       method: 'POST',
@@ -624,6 +678,31 @@ describe('console API routes', () => {
     ]);
     assert.equal(body.draft?.input?.platform, 'boss');
     assert.match(body.draft?.warnings?.join('\n') ?? '', /Boss 会把简历转发/);
+  });
+
+  it('generates and validates a read-only Boss atomic-operation assistant draft', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/chat',
+      body: { messages: [{ role: 'user', content: '只读列出 Boss 未读会话' }] },
+      assistantCompleteJsonText: async () => JSON.stringify({
+        reply: '已生成只读会话草稿。',
+        draft: {
+          kind: 'boss-chat-operation',
+          input: { platform: 'boss', action: 'list-conversations', unreadOnly: true },
+          missingFields: [],
+          warnings: [],
+        },
+        clarificationQuestions: [],
+      }),
+    });
+    assert.equal(response.statusCode, 200);
+    const body = response.body as { draft?: { kind?: string; argvPreview?: string[]; warnings?: string[] } };
+    assert.equal(body.draft?.kind, 'boss-chat-operation');
+    assert.deepStrictEqual(body.draft?.argvPreview, [
+      '--platform', 'boss', '--boss-chat-operation', 'list-conversations', '--boss-unread-only', 'true',
+    ]);
+    assert.equal(body.draft?.warnings?.some((warning) => warning.startsWith('风险：')), false);
   });
 
   it('returns assistant clarification questions when JD is missing', async () => {

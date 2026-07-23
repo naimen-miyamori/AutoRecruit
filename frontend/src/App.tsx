@@ -100,6 +100,10 @@ const TASK_KIND_LABELS: Record<TaskKind, string> = {
   batch: '批量任务',
   'search-subscription': '搜索订阅',
   'boss-auto-chat': 'Boss 自动沟通',
+  'boss-talent-search': 'Boss 人才发现',
+  'boss-greet': 'Boss 单人打招呼',
+  'boss-chat-operation': 'Boss 会话操作',
+  'boss-job-sync': 'Boss 职位同步',
   'login-refresh': '登录刷新',
   'rag-ops': '问答运维',
 };
@@ -1299,6 +1303,8 @@ function defaultScheduledTaskInput(kind: SchedulableTaskKind): Record<string, un
       return { platform: '51job', searchSubscriptionFile: '' };
     case 'boss-auto-chat':
       return { platform: 'boss', scoreThreshold: 70, requireAllHardRequirements: true };
+    case 'boss-job-sync':
+      return { platform: 'boss', includeClosed: true };
   }
 }
 
@@ -1867,6 +1873,9 @@ const ASSISTANT_QUICK_ACTIONS = [
   '用这个岗位 JD 执行全部平台搜索',
   '刷新智联登录',
   '跑一下 51job 的搜索订阅',
+  '只读列出 Boss 未读会话',
+  '同步 Boss 全部职位和 JD',
+  '查看 Boss 深度搜索条件，不要立即匹配',
   '检查 RAG 运维指标',
   '问一下这个岗位是否接受远程办公',
 ];
@@ -1959,6 +1968,57 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
     { key: 'bossForwardRecipient', label: 'Boss 转发收件人' },
     { key: 'summaryEmail', label: '总结邮件收件人' },
     { key: 'summaryCc', label: '总结邮件抄送' },
+    { key: 'syncJobsBeforeReview', label: '审查前同步职位/JD', kind: 'checkbox' },
+  ],
+  'boss-talent-search': [
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(['boss']) },
+    { key: 'source', label: '人才来源', kind: 'select', options: [{ value: 'recommend', label: '推荐牛人' }, { value: 'deep-search', label: '深度搜索' }] },
+    { key: 'bossJobId', label: 'Boss 职位 ID' },
+    { key: 'expectedJobName', label: '预期职位名' },
+    { key: 'coreRequirements', label: '核心要求（逗号分隔）' },
+    { key: 'bonusRequirements', label: '加分项（逗号分隔）' },
+    { key: 'triggerMatch', label: '执行立即匹配', kind: 'checkbox' },
+    { key: 'confirmed', label: '确认消耗匹配次数', kind: 'checkbox' },
+  ],
+  'boss-greet': [
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(['boss']) },
+    { key: 'source', label: '人才来源', kind: 'select', options: [{ value: 'recommend', label: '推荐牛人' }, { value: 'deep-search', label: '深度搜索' }] },
+    { key: 'candidateId', label: '候选人 ID' },
+    { key: 'expectedCandidateName', label: '预期候选人姓名' },
+    { key: 'expectedJobName', label: '预期职位名' },
+    { key: 'bossJobId', label: 'Boss 职位 ID' },
+    { key: 'intentId', label: '操作意图 ID' },
+    { key: 'confirmed', label: '确认打招呼', kind: 'checkbox' },
+  ],
+  'boss-chat-operation': [
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(['boss']) },
+    { key: 'action', label: '会话操作', kind: 'select', options: [
+      { value: 'list-conversations', label: '列出会话' },
+      { value: 'open-conversation', label: '打开会话' },
+      { value: 'read-conversation', label: '读取当前会话' },
+      { value: 'read-history', label: '读取历史' },
+      { value: 'preview-resume', label: '预览简历' },
+      { value: 'send-text', label: '发送文本' },
+      { value: 'remark', label: '设置备注' },
+      { value: 'mark-not-fit', label: '标记不合适' },
+      { value: 'request-attachment-resume', label: '索要附件简历' },
+      { value: 'accept-attachment-resume', label: '接收附件简历' },
+      { value: 'exchange-phone', label: '交换电话' },
+      { value: 'exchange-wechat', label: '交换微信' },
+    ] },
+    { key: 'conversationId', label: '会话 ID' },
+    { key: 'expectedCandidateName', label: '预期候选人姓名' },
+    { key: 'expectedJobName', label: '预期职位名' },
+    { key: 'text', label: '发送文本', kind: 'textarea' },
+    { key: 'remark', label: '备注内容' },
+    { key: 'intentId', label: '操作意图 ID' },
+    { key: 'unreadOnly', label: '仅未读会话', kind: 'checkbox' },
+    { key: 'confirmed', label: '确认变更操作', kind: 'checkbox' },
+  ],
+  'boss-job-sync': [
+    { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(['boss']) },
+    { key: 'bossJobIds', label: 'Boss 职位 ID（逗号分隔）' },
+    { key: 'includeClosed', label: '包含已关闭职位', kind: 'checkbox' },
   ],
   'login-refresh': [
     { key: 'platform', label: '平台', kind: 'select', options: platformSelectOptions(SINGLE_PLATFORM_OPTIONS) },
@@ -1990,7 +2050,7 @@ const ASSISTANT_DRAFT_FIELDS: Record<AssistantActionKind, Array<{ key: string; l
 };
 
 function assistantDraftCanConfirm(draft?: AssistantDraft): boolean {
-  if (!draft || !draft.input.platform) {
+  if (!draft || !draft.input.platform || draft.missingFields.length > 0) {
     return false;
   }
 
@@ -2369,7 +2429,7 @@ function AssistantDraftEditor({ draft, onChange }: { draft: AssistantDraft; onCh
               inputMode={field.kind === 'number' ? 'numeric' : undefined}
               onChange={(event) => {
                 const raw = event.target.value;
-                if (field.key === 'cc') {
+                if (['cc', 'summaryCc', 'coreRequirements', 'bonusRequirements', 'bossJobIds'].includes(field.key)) {
                   onChange(field.key, raw.split(',').map((item) => item.trim()).filter(Boolean));
                   return;
                 }

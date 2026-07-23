@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { config } from '../config.js';
 import type { SupportedPlatform } from '../platforms/types.js';
 import type { SearchFilterCatalog } from '../search/filter-catalog.js';
+import type { BossJobSyncRun, BossPositionSummary } from '../types/boss.js';
 import {
   CandidateListItem,
   CandidateResume,
@@ -38,6 +39,12 @@ interface BossChatReviewPaths {
   runsDir: string;
   automationSettingsPath: string;
   reviewedConversationIdsPath: string;
+}
+
+interface BossJobSyncPaths {
+  dir: string;
+  runsDir: string;
+  latestPositionsPath: string;
 }
 
 interface LegacyResumeSnapshotSource {
@@ -152,6 +159,15 @@ function normalizeRunResult(runResult: LegacyRunResult): RunResult {
 }
 
 export class JobStore {
+  private getBossJobSyncPaths(): BossJobSyncPaths {
+    const dir = path.join(config.dataDir, 'boss', 'job-sync');
+    return {
+      dir,
+      runsDir: path.join(dir, 'runs'),
+      latestPositionsPath: path.join(dir, 'positions.latest.json'),
+    };
+  }
+
   private getBossChatReviewPaths(): BossChatReviewPaths {
     const dir = path.join(config.dataDir, 'boss', 'chat-review');
     return {
@@ -235,6 +251,51 @@ export class JobStore {
     const { jdPath } = this.getJobPaths(platform, jobKey);
     const jobRecord = await readJsonFile<LegacyJobRecord | undefined>(jdPath, undefined);
     return jobRecord ? normalizeJobRecord(jobRecord) : undefined;
+  }
+
+  async listJobRecords(platform: SupportedPlatform): Promise<JobRecord[]> {
+    const jobsDir = path.join(config.dataDir, platform, 'jobs');
+    let jobDirs: string[];
+    try {
+      jobDirs = await fs.readdir(jobsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+
+    const records = await Promise.all(jobDirs.map(async (jobKey) => {
+      try {
+        return await this.readJobRecordIfExists(platform, jobKey);
+      } catch {
+        return undefined;
+      }
+    }));
+    return records.filter((record): record is JobRecord => Boolean(record));
+  }
+
+  async findBossJobRecordByPositionId(bossJobId: string): Promise<JobRecord | undefined> {
+    const records = await this.listJobRecords('boss');
+    return records.find((record) => record.bossPosition?.bossJobId === bossJobId);
+  }
+
+  async findBossJobRecordsByName(jobName: string): Promise<JobRecord[]> {
+    const normalizedName = jobName.replace(/\s+/g, ' ').trim().toLocaleLowerCase('zh-CN');
+    const records = await this.listJobRecords('boss');
+    return records.filter((record) => [record.searchKeyword, record.normalizedJob.title]
+      .some((value) => value.replace(/\s+/g, ' ').trim().toLocaleLowerCase('zh-CN') === normalizedName));
+  }
+
+  async resolveBossConversationJobRecord(input: { bossJobId?: string; jobName: string }): Promise<JobRecord> {
+    if (input.bossJobId) {
+      const byId = await this.findBossJobRecordByPositionId(input.bossJobId);
+      if (byId) return byId;
+    }
+    const byName = await this.findBossJobRecordsByName(input.jobName);
+    if (byName.length === 1) return byName[0]!;
+    if (byName.length > 1) {
+      throw new Error(`Ambiguous stored Boss JD for job ${input.jobName}; capture the Boss job ID or synchronize positions first.`);
+    }
+    throw new Error(`Missing stored Boss JD for job ${input.jobName}${input.bossJobId ? ` (Boss ID ${input.bossJobId})` : ''}`);
   }
 
   async readSeenIds(platform: SupportedPlatform, jobKey: string): Promise<string[]> {
@@ -456,6 +517,26 @@ export class JobStore {
     const paths = this.getBossChatReviewPaths();
     await ensureDir(paths.runsDir);
     const timestamp = run.reviewedAt.replace(/[:.]/g, '-');
+    const filePath = path.join(paths.runsDir, `${timestamp}.json`);
+    await writeJson(filePath, run);
+    return filePath;
+  }
+
+  async saveBossPositionSnapshot(positions: readonly BossPositionSummary[]): Promise<string> {
+    const paths = this.getBossJobSyncPaths();
+    await ensureDir(paths.dir);
+    await writeJson(paths.latestPositionsPath, positions);
+    return paths.latestPositionsPath;
+  }
+
+  async readLatestBossPositionSnapshot(): Promise<BossPositionSummary[]> {
+    return readJsonFile<BossPositionSummary[]>(this.getBossJobSyncPaths().latestPositionsPath, []);
+  }
+
+  async saveBossJobSyncRun(run: BossJobSyncRun): Promise<string> {
+    const paths = this.getBossJobSyncPaths();
+    await ensureDir(paths.runsDir);
+    const timestamp = run.syncedAt.replace(/[:.]/g, '-');
     const filePath = path.join(paths.runsDir, `${timestamp}.json`);
     await writeJson(filePath, run);
     return filePath;

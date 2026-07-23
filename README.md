@@ -205,6 +205,51 @@ PLAYWRIGHT_HEADLESS=false npm run dev -- \
 
 自动聊天会先读取和判断首次沟通候选人的简历，只有匹配候选人才转发。物业电工需要严格检查全部硬性要求时增加 `--boss-chat-require-all true`。自动聊天不能与普通抓取、批量、搜索订阅或 JD/RAG 问答参数混用。回复未匹配候选人默认关闭，只有显式设置 `--boss-chat-reply-unqualified true` 才会发送拒绝短语。
 
+Boss 推荐牛人和原生深度搜索是独立、默认只读的模式：
+
+```bash
+# 推荐牛人，只读取候选人卡片
+npm run dev -- --platform boss --boss-talent-source recommend
+
+# 读取/同步深度搜索条件，但不消耗“立即匹配”次数
+npm run dev -- \
+  --platform boss \
+  --boss-talent-source deep-search \
+  --boss-job-id job-123 \
+  --boss-expected-job-name "物业电工" \
+  --boss-core-requirements-json '["持高低压电工证","2年以上物业经验"]' \
+  --boss-bonus-requirements-json '["上海本地经验"]'
+```
+
+只有同时设置 `--boss-trigger-match true --boss-confirmed true` 才会点击“立即匹配”。单人打招呼必须提供精确候选人 ID、预期姓名和职位，并显式确认：
+
+```bash
+npm run dev -- \
+  --platform boss \
+  --boss-greet-source deep-search \
+  --boss-greet-candidate-id candidate-123 \
+  --boss-expected-candidate-name "候选人甲" \
+  --boss-expected-job-name "物业电工" \
+  --boss-job-id job-123 \
+  --boss-confirmed true
+```
+
+Boss 职位/JD 同步会读取职位管理中的开放、审核中和已关闭职位，并按 Boss 职位 ID 创建独立岗位记录：
+
+```bash
+npm run dev -- --platform boss --boss-job-sync true --boss-include-closed-jobs true
+```
+
+JD 原文哈希未变化时不会再次调用模型解析或重写 `jd.json`。自动聊天可增加 `--boss-sync-jobs-before-review true`，在读取未读会话前先同步职位；会话优先按 Boss 职位 ID 找 JD，缺少 ID 时只允许使用唯一同名岗位。
+
+控制台/API 提交的原子会话操作统一通过任务队列执行；CLI 也提供对应独立模式。只读示例：
+
+```bash
+npm run dev -- --platform boss --boss-chat-operation list-conversations --boss-unread-only true
+```
+
+`send-text`、`remark`、`mark-not-fit`、索要/接收附件简历、交换电话或微信属于变更操作，必须提供会话 ID、唯一 `intentId` 和 `--boss-confirmed true`。执行回执保存在 `data/boss/chat-operations/runs/`，重试同一 `intentId` 不会重复执行。
+
 ## RAG
 
 推荐使用本地 embedding 服务：
@@ -253,11 +298,11 @@ npm run api
 npm run web:dev
 ```
 
-Vite 默认地址为 `http://127.0.0.1:5173`，并将 `/api` 代理到本地 API。控制台支持任务队列、职位和候选人查看、搜索订阅、Boss 自动聊天、RAG 运维和结构化助手草稿确认。
+Vite 默认地址为 `http://127.0.0.1:5173`，并将 `/api` 代理到本地 API。控制台支持任务队列、职位和候选人查看、搜索订阅、Boss 人才发现/单人打招呼/原子会话操作/职位同步、Boss 自动聊天、RAG 运维和结构化助手草稿确认。
 
 ### 循环自动运行
 
-控制台“自动运行”页可以创建由多个搜索或 Boss 自动聊天任务组成的串行计划。计划按每日时间窗口启动新一轮，并从上一轮全部任务完成后开始计算下一轮间隔；间隔为 `0` 时立即尝试重跑。所有轮次与手工任务共享一个全局队列，不会并发控制浏览器。
+控制台“自动运行”页可以创建由多个搜索、Boss 职位同步或 Boss 自动聊天任务组成的串行计划。职位同步可排在自动聊天之前；计划按每日时间窗口启动新一轮，并从上一轮全部任务完成后开始计算下一轮间隔；间隔为 `0` 时立即尝试重跑。所有轮次与手工任务共享一个全局队列，不会并发控制浏览器。
 
 停止计划时使用“当前任务结束后停止”：正在运行的单个任务完成后，系统取消本轮余下任务并停止后续循环。`--platform all`、batch 和一次 Boss 自动聊天各自都视为一个单个任务，不会在内部被强制中断。
 

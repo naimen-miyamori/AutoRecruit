@@ -7,14 +7,33 @@ import type {
   NormalizedJob,
   RunResult,
 } from '../types/job.js';
+import type {
+  BossChatOperationInput,
+  BossChatOperationResult,
+  BossGreetInput,
+  BossGreetResult,
+  BossJobSyncInput,
+  BossJobSyncRun,
+  BossTalentSearchInput,
+  BossTalentSearchResult,
+} from '../types/boss.js';
 
 export type ConsolePlatformSelection = SupportedPlatform | 'all';
 export type SearchSource = 'saved' | 'direct';
-export type TaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'login-refresh' | 'rag-ops';
+export type TaskKind = 'resume-capture'
+  | 'batch'
+  | 'search-subscription'
+  | 'boss-auto-chat'
+  | 'boss-talent-search'
+  | 'boss-greet'
+  | 'boss-chat-operation'
+  | 'boss-job-sync'
+  | 'login-refresh'
+  | 'rag-ops';
 export type AssistantActionKind = TaskKind | 'rag-answer';
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type TaskLogLevel = 'info' | 'warn' | 'error';
-export type SchedulableTaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat';
+export type SchedulableTaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'boss-job-sync';
 export type ScheduleStatus = 'enabled' | 'paused' | 'stop_requested' | 'stopped';
 export type ScheduleRunStatus = 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'stopped' | 'interrupted' | 'skipped';
 export type WorkflowFailurePolicy = 'stop-round' | 'continue';
@@ -75,7 +94,13 @@ export interface BossAutoChatTaskInput {
   bossForwardRecipient?: string;
   summaryEmail?: string;
   summaryCc?: string[];
+  syncJobsBeforeReview?: boolean;
 }
+
+export type BossTalentSearchTaskInput = BossTalentSearchInput;
+export type BossGreetTaskInput = BossGreetInput;
+export type BossChatOperationTaskInput = BossChatOperationInput;
+export type BossJobSyncTaskInput = BossJobSyncInput;
 
 export interface LoginRefreshTaskOutput {
   platform: SupportedPlatform;
@@ -122,8 +147,23 @@ export interface RagOpsTaskOutput {
   summary: Record<string, unknown>;
 }
 
-export type TaskInput = ResumeCaptureTaskInput | BatchTaskInput | SearchSubscriptionTaskInput | BossAutoChatTaskInput | LoginRefreshTaskInput | RagOpsTaskInput;
-export type TaskOutput = MainResult | LoginRefreshTaskOutput | RagOpsTaskOutput;
+export type TaskInput = ResumeCaptureTaskInput
+  | BatchTaskInput
+  | SearchSubscriptionTaskInput
+  | BossAutoChatTaskInput
+  | BossTalentSearchTaskInput
+  | BossGreetTaskInput
+  | BossChatOperationTaskInput
+  | BossJobSyncTaskInput
+  | LoginRefreshTaskInput
+  | RagOpsTaskInput;
+export type TaskOutput = MainResult
+  | LoginRefreshTaskOutput
+  | RagOpsTaskOutput
+  | BossTalentSearchResult
+  | BossGreetResult
+  | BossChatOperationResult
+  | BossJobSyncRun;
 
 export interface ScheduledTaskTemplate {
   taskKey: string;
@@ -226,6 +266,34 @@ export type AssistantDraft =
   | {
     kind: 'boss-auto-chat';
     input: Partial<BossAutoChatTaskInput> & Record<string, unknown>;
+    missingFields: string[];
+    warnings: string[];
+    argvPreview: string[];
+  }
+  | {
+    kind: 'boss-talent-search';
+    input: Partial<BossTalentSearchTaskInput> & Record<string, unknown>;
+    missingFields: string[];
+    warnings: string[];
+    argvPreview: string[];
+  }
+  | {
+    kind: 'boss-greet';
+    input: Partial<BossGreetTaskInput> & Record<string, unknown>;
+    missingFields: string[];
+    warnings: string[];
+    argvPreview: string[];
+  }
+  | {
+    kind: 'boss-chat-operation';
+    input: Partial<BossChatOperationTaskInput> & Record<string, unknown>;
+    missingFields: string[];
+    warnings: string[];
+    argvPreview: string[];
+  }
+  | {
+    kind: 'boss-job-sync';
+    input: Partial<BossJobSyncTaskInput> & Record<string, unknown>;
     missingFields: string[];
     warnings: string[];
     argvPreview: string[];

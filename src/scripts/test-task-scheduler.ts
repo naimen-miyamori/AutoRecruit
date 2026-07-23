@@ -65,6 +65,15 @@ function bossTask(taskKey: string, scoreThreshold: number) {
   };
 }
 
+function bossJobSyncTask(taskKey: string) {
+  return {
+    taskKey,
+    name: 'Boss 职位同步',
+    kind: 'boss-job-sync',
+    input: { platform: 'boss', includeClosed: true },
+  };
+}
+
 describe('TaskScheduler', () => {
   it('rejects unsafe schedule and run identifiers in the storage layer', async () => {
     const dataDir = await makeTempDir();
@@ -116,6 +125,36 @@ describe('TaskScheduler', () => {
       assert.equal(run.taskIds.length, 2);
       assert.equal(updated?.activeRunId, undefined);
       assert.equal(updated?.nextRunAt, '2026-07-20T03:00:00.000Z');
+    } finally {
+      scheduler.close();
+    }
+  });
+
+  it('chains scheduled Boss job sync before auto-chat review', async () => {
+    const dataDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return output();
+      },
+    });
+    const now = new Date('2026-07-20T02:00:00.000Z');
+    const scheduler = new TaskScheduler({ taskQueue: queue, dataDir, now: () => now });
+    try {
+      const schedule = await scheduler.createSchedule(baseSchedule([
+        bossJobSyncTask('sync-jobs'),
+        bossTask('review-chat', 70),
+      ]));
+      await waitFor(async () => {
+        const runs = await scheduler.listRuns(schedule.scheduleId);
+        return runs.find((item) => item.status === 'succeeded');
+      }, 'Boss sync and review round');
+      assert.deepStrictEqual(calls, [
+        ['--platform', 'boss', '--boss-job-sync', 'true', '--boss-include-closed-jobs', 'true'],
+        ['--platform', 'boss', '--boss-auto-chat', 'true', '--boss-chat-score-threshold', '70'],
+      ]);
     } finally {
       scheduler.close();
     }

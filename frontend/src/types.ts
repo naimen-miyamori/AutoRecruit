@@ -1,9 +1,9 @@
 export type Platform = '51job' | 'liepin' | 'zhilian' | 'boss';
 export type PlatformSelection = Platform | 'all';
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
-export type TaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'login-refresh' | 'rag-ops';
+export type TaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'boss-talent-search' | 'boss-greet' | 'boss-chat-operation' | 'boss-job-sync' | 'login-refresh' | 'rag-ops';
 export type AssistantActionKind = TaskKind | 'rag-answer';
-export type SchedulableTaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat';
+export type SchedulableTaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'boss-job-sync';
 export type ScheduleStatus = 'enabled' | 'paused' | 'stop_requested' | 'stopped';
 export type ScheduleRunStatus = 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'stopped' | 'interrupted' | 'skipped';
 

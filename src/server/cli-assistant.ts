@@ -3,6 +3,10 @@ import { completeJsonTextFromOpenAI, type OpenAISettingsOverride, type OpenAITex
 import {
   normalizeBatchTask,
   normalizeBossAutoChatTask,
+  normalizeBossChatOperationTask,
+  normalizeBossGreetTask,
+  normalizeBossJobSyncTask,
+  normalizeBossTalentSearchTask,
   normalizeLoginRefreshTask,
   normalizeRagAnswerInput,
   normalizeRagOpsTask,
@@ -16,6 +20,10 @@ import type {
   AssistantMessage,
   BatchTaskInput,
   BossAutoChatTaskInput,
+  BossChatOperationTaskInput,
+  BossGreetTaskInput,
+  BossJobSyncTaskInput,
+  BossTalentSearchTaskInput,
   LoginRefreshTaskInput,
   ModelConfig,
   RagAnswerInput,
@@ -32,6 +40,10 @@ const assistantKindSchema = z.enum([
   'batch',
   'search-subscription',
   'boss-auto-chat',
+  'boss-talent-search',
+  'boss-greet',
+  'boss-chat-operation',
+  'boss-job-sync',
   'login-refresh',
   'rag-ops',
   'rag-answer',
@@ -102,7 +114,21 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'bossForwardRecipient',
     'summaryEmail',
     'summaryCc',
+    'syncJobsBeforeReview',
   ],
+  'boss-talent-search': [
+    'platform', 'source', 'bossJobId', 'expectedJobName', 'coreRequirements',
+    'bonusRequirements', 'triggerMatch', 'confirmed',
+  ],
+  'boss-greet': [
+    'platform', 'source', 'candidateId', 'expectedCandidateName', 'expectedJobName',
+    'bossJobId', 'intentId', 'confirmed',
+  ],
+  'boss-chat-operation': [
+    'platform', 'action', 'conversationId', 'expectedCandidateName', 'expectedJobName',
+    'text', 'remark', 'intentId', 'unreadOnly', 'confirmed',
+  ],
+  'boss-job-sync': ['platform', 'bossJobIds', 'includeClosed'],
   'login-refresh': ['platform'],
   'rag-ops': [
     'action',
@@ -144,7 +170,7 @@ function coerceScalar(field: string, value: unknown): unknown {
     return undefined;
   }
 
-  if ((field === 'includeViewed' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates') && typeof value === 'string') {
+  if ((field === 'includeViewed' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates' || field === 'syncJobsBeforeReview' || field === 'triggerMatch' || field === 'confirmed' || field === 'unreadOnly' || field === 'includeClosed') && typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
     if (normalized === 'true') {
       return true;
@@ -159,7 +185,7 @@ function coerceScalar(field: string, value: unknown): unknown {
     return Number.isInteger(parsed) ? parsed : value;
   }
 
-  if (Array.isArray(value) && (field === 'cc' || field === 'summaryCc')) {
+  if (Array.isArray(value) && (field === 'cc' || field === 'summaryCc' || field === 'coreRequirements' || field === 'bonusRequirements' || field === 'bossJobIds')) {
     return value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim());
   }
 
@@ -216,6 +242,30 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
     }
     if (isPresent(input.summaryCc) && !isPresent(input.summaryEmail)) {
       missing.push('summaryEmail');
+    }
+  }
+
+  if (kind === 'boss-talent-search') {
+    if (!isPresent(input.source)) missing.push('source');
+    if (input.triggerMatch === true && input.confirmed !== true) missing.push('confirmed');
+  }
+
+  if (kind === 'boss-greet') {
+    for (const field of ['source', 'candidateId', 'expectedCandidateName', 'expectedJobName'] as const) {
+      if (!isPresent(input[field])) missing.push(field);
+    }
+    if (input.confirmed !== true) missing.push('confirmed');
+  }
+
+  if (kind === 'boss-chat-operation') {
+    if (!isPresent(input.action)) missing.push('action');
+    if (input.action !== 'list-conversations' && !isPresent(input.conversationId)) missing.push('conversationId');
+    if (input.action === 'send-text' && !isPresent(input.text)) missing.push('text');
+    if (input.action === 'remark' && !isPresent(input.remark)) missing.push('remark');
+    const mutations = ['send-text', 'remark', 'mark-not-fit', 'request-attachment-resume', 'accept-attachment-resume', 'exchange-phone', 'exchange-wechat'];
+    if (mutations.includes(String(input.action))) {
+      if (!isPresent(input.intentId)) missing.push('intentId');
+      if (input.confirmed !== true) missing.push('confirmed');
     }
   }
 
@@ -293,6 +343,19 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
     if (isPresent(input.summaryEmail)) {
       warnings.push('风险：任务结束后会把候选人姓名、ID和判断理由发送到总结邮箱。');
     }
+    if (input.syncJobsBeforeReview === true) {
+      warnings.push('执行提示：审查未读会话前会先同步 Boss 职位和 JD；任一职位同步失败会中止本轮自动沟通。');
+    }
+  }
+
+  if (kind === 'boss-talent-search' && input.triggerMatch === true) {
+    warnings.push('风险：立即匹配会消耗 Boss 深度搜索匹配次数。');
+  }
+  if (kind === 'boss-greet') {
+    warnings.push('风险：会向精确 Boss 候选人发起一次打招呼，执行前会重新校验候选人和职位。');
+  }
+  if (kind === 'boss-chat-operation' && ['send-text', 'remark', 'mark-not-fit', 'request-attachment-resume', 'accept-attachment-resume', 'exchange-phone', 'exchange-wechat'].includes(String(input.action))) {
+    warnings.push('风险：该 Boss 原子操作会修改会话状态或联系候选人，必须提供 intentId 并显式确认。');
   }
 
   if ((kind === 'resume-capture' || kind === 'batch') && isPresent(input.applicationFilterInputFile) && input.searchSource !== 'direct') {
@@ -329,6 +392,14 @@ function previewArgv(kind: AssistantDraft['kind'], input: Record<string, unknown
         return normalizeSearchSubscriptionTask(input).argv;
       case 'boss-auto-chat':
         return normalizeBossAutoChatTask(input).argv;
+      case 'boss-talent-search':
+        return normalizeBossTalentSearchTask(input).argv;
+      case 'boss-greet':
+        return normalizeBossGreetTask(input).argv;
+      case 'boss-chat-operation':
+        return normalizeBossChatOperationTask(input).argv;
+      case 'boss-job-sync':
+        return normalizeBossJobSyncTask(input).argv;
       case 'login-refresh':
         return normalizeLoginRefreshTask(input).argv;
       case 'rag-ops':
@@ -388,6 +459,51 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
     pushPreview(argv, '--boss-forward-recipient', input.bossForwardRecipient);
     pushPreview(argv, '--boss-chat-summary-email', input.summaryEmail);
     pushPreview(argv, '--boss-chat-summary-cc', Array.isArray(input.summaryCc) ? input.summaryCc.join(',') : input.summaryCc);
+    pushBooleanPreview(argv, '--boss-sync-jobs-before-review', input.syncJobsBeforeReview);
+    return argv;
+  }
+
+  if (kind === 'boss-talent-search') {
+    const argv = ['--platform', String(input.platform ?? ''), '--boss-talent-source', String(input.source ?? '')];
+    pushPreview(argv, '--boss-job-id', input.bossJobId);
+    pushPreview(argv, '--boss-expected-job-name', input.expectedJobName);
+    pushPreview(argv, '--boss-core-requirements-json', Array.isArray(input.coreRequirements) ? JSON.stringify(input.coreRequirements) : undefined);
+    pushPreview(argv, '--boss-bonus-requirements-json', Array.isArray(input.bonusRequirements) ? JSON.stringify(input.bonusRequirements) : undefined);
+    pushBooleanPreview(argv, '--boss-trigger-match', input.triggerMatch);
+    pushBooleanPreview(argv, '--boss-confirmed', input.confirmed);
+    return argv;
+  }
+
+  if (kind === 'boss-greet') {
+    const argv = ['--platform', String(input.platform ?? '')];
+    pushPreview(argv, '--boss-greet-source', input.source);
+    pushPreview(argv, '--boss-greet-candidate-id', input.candidateId);
+    pushPreview(argv, '--boss-expected-candidate-name', input.expectedCandidateName);
+    pushPreview(argv, '--boss-expected-job-name', input.expectedJobName);
+    pushPreview(argv, '--boss-job-id', input.bossJobId);
+    pushPreview(argv, '--boss-intent-id', input.intentId);
+    pushBooleanPreview(argv, '--boss-confirmed', input.confirmed);
+    return argv;
+  }
+
+  if (kind === 'boss-chat-operation') {
+    const argv = ['--platform', String(input.platform ?? '')];
+    pushPreview(argv, '--boss-chat-operation', input.action);
+    pushPreview(argv, '--boss-conversation-id', input.conversationId);
+    pushPreview(argv, '--boss-expected-candidate-name', input.expectedCandidateName);
+    pushPreview(argv, '--boss-expected-job-name', input.expectedJobName);
+    pushPreview(argv, '--boss-chat-text', input.text);
+    pushPreview(argv, '--boss-chat-remark', input.remark);
+    pushPreview(argv, '--boss-intent-id', input.intentId);
+    pushBooleanPreview(argv, '--boss-unread-only', input.unreadOnly);
+    pushBooleanPreview(argv, '--boss-confirmed', input.confirmed);
+    return argv;
+  }
+
+  if (kind === 'boss-job-sync') {
+    const argv = ['--platform', String(input.platform ?? ''), '--boss-job-sync', 'true'];
+    pushPreview(argv, '--boss-job-ids', Array.isArray(input.bossJobIds) ? input.bossJobIds.join(',') : input.bossJobIds);
+    pushBooleanPreview(argv, '--boss-include-closed-jobs', input.includeClosed);
     return argv;
   }
 
@@ -441,7 +557,7 @@ export function finalizeAssistantDraft(rawDraft: Pick<AssistantDraft, 'kind' | '
 
   return {
     kind: rawDraft.kind,
-    input: input as Partial<ResumeCaptureTaskInput | BatchTaskInput | SearchSubscriptionTaskInput | BossAutoChatTaskInput | LoginRefreshTaskInput | RagOpsTaskInput> & Record<string, unknown>,
+    input: input as Partial<ResumeCaptureTaskInput | BatchTaskInput | SearchSubscriptionTaskInput | BossAutoChatTaskInput | BossTalentSearchTaskInput | BossGreetTaskInput | BossChatOperationTaskInput | BossJobSyncTaskInput | LoginRefreshTaskInput | RagOpsTaskInput> & Record<string, unknown>,
     missingFields,
     warnings,
     argvPreview: previewArgv(rawDraft.kind, input),
@@ -502,13 +618,17 @@ function buildSystemPrompt(): string {
   return [
     '你是招聘自动化 CLI 助手，只能把中文需求转换成受控任务草稿 JSON。',
     '绝对禁止输出 shell 命令、npm script、文件写入动作、破坏性命令或任何绕过后端 normalizer 的参数。',
-    '允许的 kind 只有：resume-capture、batch、search-subscription、boss-auto-chat、login-refresh、rag-ops、rag-answer。',
+    '允许的 kind 只有：resume-capture、batch、search-subscription、boss-auto-chat、boss-talent-search、boss-greet、boss-chat-operation、boss-job-sync、login-refresh、rag-ops、rag-answer。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
     'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
     'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。',
     'batch 字段：platform, jobsFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
     'Boss 转发只允许 platform=boss；bossForwardMode 只能是 colleague 或 email，出现时必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',
-    'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, replyToUnqualifiedCandidates, bossForwardMode, bossForwardRecipient, summaryEmail, summaryCc；platform 必须是 boss。replyToUnqualifiedCandidates 默认 false，仅显式设为 true 时才向不合适候选人发送固定拒绝常用语。转发和总结邮件参数可省略以复用已保存配置；requireAllHardRequirements=true 时所有硬性条件都必须有明确证据。物业电工仅在其他五项满足、籍贯未知且有上海就读线索时，在聊天框输入“是上海人吗？”并发送后等待回复，不直接判定符合；summaryEmail 配置后任务结束发送总结，summaryCc 需要 summaryEmail。',
+    'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, replyToUnqualifiedCandidates, bossForwardMode, bossForwardRecipient, summaryEmail, summaryCc, syncJobsBeforeReview；platform 必须是 boss。replyToUnqualifiedCandidates 默认 false，仅显式设为 true 时才向不合适候选人发送固定拒绝常用语。转发和总结邮件参数可省略以复用已保存配置；syncJobsBeforeReview 默认 false。',
+    'boss-talent-search 字段：platform, source, bossJobId, expectedJobName, coreRequirements, bonusRequirements, triggerMatch, confirmed；source 只能 recommend 或 deep-search。triggerMatch 默认 false，设为 true 时 confirmed 必须为 true。',
+    'boss-greet 字段：platform, source, candidateId, expectedCandidateName, expectedJobName, bossJobId, intentId, confirmed；必须提供精确候选人 ID、预期姓名、预期职位，confirmed 必须为 true。',
+    'boss-chat-operation 字段：platform, action, conversationId, expectedCandidateName, expectedJobName, text, remark, intentId, unreadOnly, confirmed。只读 action 为 list-conversations、open-conversation、read-conversation、read-history、preview-resume；变更 action 为 send-text、remark、mark-not-fit、request-attachment-resume、accept-attachment-resume、exchange-phone、exchange-wechat，变更操作必须提供 intentId 且 confirmed=true。',
+    'boss-job-sync 字段：platform, bossJobIds, includeClosed；默认同步全部职位并包含已关闭职位。',
     'search-subscription 字段：platform, searchSubscriptionFile, keyword, applicationFilterInputFile, saveSearchSubscription, searchSubscriptionName；不要包含 jd、email、includeViewed、searchSource。',
     'login-refresh 字段：platform，只允许 51job、liepin、zhilian、boss。',
     'rag-ops 字段：action, platform, jobKey, keyword, question, file, policyFile, reviewer, limit, includeReviewed, failOnIssue；action 只能是 doctor、review、metrics、ops、rebuild。',

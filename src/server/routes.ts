@@ -32,6 +32,10 @@ import {
   normalizeApplicationFilterInputRequest,
   normalizeBatchTask,
   normalizeBossAutoChatTask,
+  normalizeBossChatOperationTask,
+  normalizeBossGreetTask,
+  normalizeBossJobSyncTask,
+  normalizeBossTalentSearchTask,
   normalizeConversationRequest,
   normalizeLoginRefreshTask,
   normalizePlatform,
@@ -243,6 +247,26 @@ async function confirmAssistantDraft(
         kind: draft.kind,
         task: await enqueueTask(taskQueue, draft.kind, normalizeBossAutoChatTask(draft.input)),
       };
+    case 'boss-talent-search':
+      return {
+        kind: draft.kind,
+        task: await enqueueTask(taskQueue, draft.kind, normalizeBossTalentSearchTask(draft.input)),
+      };
+    case 'boss-greet':
+      return {
+        kind: draft.kind,
+        task: await enqueueTask(taskQueue, draft.kind, normalizeBossGreetTask(draft.input)),
+      };
+    case 'boss-chat-operation':
+      return {
+        kind: draft.kind,
+        task: await enqueueTask(taskQueue, draft.kind, normalizeBossChatOperationTask(draft.input)),
+      };
+    case 'boss-job-sync':
+      return {
+        kind: draft.kind,
+        task: await enqueueTask(taskQueue, draft.kind, normalizeBossJobSyncTask(draft.input)),
+      };
     case 'login-refresh':
       return {
         kind: draft.kind,
@@ -396,6 +420,26 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
 
     if (method === 'POST' && pathname === '/api/tasks/boss-auto-chat') {
       const task = await enqueueTask(taskQueue, 'boss-auto-chat', normalizeBossAutoChatTask(request.body));
+      return jsonResponse(202, task);
+    }
+
+    if (method === 'POST' && pathname === '/api/tasks/boss-talent-search') {
+      const task = await enqueueTask(taskQueue, 'boss-talent-search', normalizeBossTalentSearchTask(request.body));
+      return jsonResponse(202, task);
+    }
+
+    if (method === 'POST' && pathname === '/api/tasks/boss-greet') {
+      const task = await enqueueTask(taskQueue, 'boss-greet', normalizeBossGreetTask(request.body));
+      return jsonResponse(202, task);
+    }
+
+    if (method === 'POST' && pathname === '/api/tasks/boss-chat-operation') {
+      const task = await enqueueTask(taskQueue, 'boss-chat-operation', normalizeBossChatOperationTask(request.body));
+      return jsonResponse(202, task);
+    }
+
+    if (method === 'POST' && pathname === '/api/tasks/boss-job-sync') {
+      const task = await enqueueTask(taskQueue, 'boss-job-sync', normalizeBossJobSyncTask(request.body));
       return jsonResponse(202, task);
     }
 

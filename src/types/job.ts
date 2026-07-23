@@ -131,6 +131,12 @@ export interface JobRecord {
     conditions: SearchCondition[];
   };
   bossForwarding?: BossForwardingSettings;
+  bossPosition?: {
+    bossJobId: string;
+    status: 'open' | 'pending' | 'closed' | 'unknown';
+    syncedAt: string;
+    sourceHash: string;
+  };
   rawText: string;
   normalizedJob: NormalizedJob;
   createdAt: string;
@@ -334,6 +340,7 @@ export interface BossChatReviewItem {
   candidateId?: string;
   candidateName?: string;
   jobName: string;
+  bossJobId?: string;
   jobKey: string;
   unreadCount: number;
   status: BossChatReviewStatus;

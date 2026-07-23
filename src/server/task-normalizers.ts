@@ -7,6 +7,10 @@ import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
 import type {
   BatchTaskInput,
   BossAutoChatTaskInput,
+  BossChatOperationTaskInput,
+  BossGreetTaskInput,
+  BossJobSyncTaskInput,
+  BossTalentSearchTaskInput,
   ConsolePlatformSelection,
   LoginRefreshTaskInput,
   RagAnswerInput,
@@ -18,6 +22,7 @@ import type {
   SearchSubscriptionTaskInput,
   TaskInput,
 } from './types.js';
+import type { BossChatOperation, BossTalentSource } from '../types/boss.js';
 import type { AskRagQuestionOptions, IngestConversationOptions } from '../rag/service.js';
 import type { RagConversationTurn, RagSpeaker } from '../rag/types.js';
 
@@ -209,6 +214,14 @@ function normalizeCc(value: unknown): string[] | undefined {
   }
 
   throw new Error('cc must be a string or string array');
+}
+
+function normalizeStringArray(value: unknown, fieldName: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string' && item.trim())) {
+    throw new Error(`${fieldName} must be an array of non-empty strings`);
+  }
+  return [...new Set(value.map((item) => item.trim()))];
 }
 
 function pushOptional(argv: string[], flagName: string, value: string | undefined): void {
@@ -437,6 +450,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
   const scoreThreshold = getOptionalNumberInRange(item, 'scoreThreshold', 0, 100);
   const requireAllHardRequirements = getOptionalBoolean(item, 'requireAllHardRequirements');
   const replyToUnqualifiedCandidates = getOptionalBoolean(item, 'replyToUnqualifiedCandidates');
+  const syncJobsBeforeReview = getOptionalBoolean(item, 'syncJobsBeforeReview');
   const summaryEmail = getOptionalString(item, 'summaryEmail');
   const summaryCc = normalizeCc(item.summaryCc);
   if (summaryCc && !summaryEmail) {
@@ -453,6 +467,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
     bossForwardRecipient,
     summaryEmail,
     summaryCc,
+    syncJobsBeforeReview,
   };
   const argv = ['--platform', 'boss', '--boss-auto-chat', 'true'];
   if (scoreThreshold !== undefined) {
@@ -464,6 +479,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
   pushOptional(argv, '--boss-forward-recipient', bossForwardRecipient);
   pushOptional(argv, '--boss-chat-summary-email', summaryEmail);
   pushOptional(argv, '--boss-chat-summary-cc', summaryCc?.join(','));
+  pushOptionalBoolean(argv, '--boss-sync-jobs-before-review', syncJobsBeforeReview);
 
   return {
     input,
@@ -477,7 +493,165 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
       bossForwardRecipient,
       summaryEmail,
       summaryCcCount: summaryCc?.length ?? 0,
+      syncJobsBeforeReview: syncJobsBeforeReview ?? false,
     },
+  };
+}
+
+export function normalizeBossTalentSearchTask(payload: unknown): NormalizedTask<BossTalentSearchTaskInput> {
+  const item = normalizeJsonObject(payload, 'request body');
+  const platform = normalizePlatform(item.platform);
+  if (platform !== 'boss') throw new Error('boss-talent-search task requires platform boss');
+  if (item.source !== 'recommend' && item.source !== 'deep-search') {
+    throw new Error('source must be recommend or deep-search');
+  }
+  const source = item.source;
+  const bossJobId = getOptionalString(item, 'bossJobId');
+  const expectedJobName = getOptionalString(item, 'expectedJobName');
+  const coreRequirements = normalizeStringArray(item.coreRequirements, 'coreRequirements');
+  const bonusRequirements = normalizeStringArray(item.bonusRequirements, 'bonusRequirements');
+  const triggerMatch = getOptionalBoolean(item, 'triggerMatch');
+  const confirmed = getOptionalBoolean(item, 'confirmed');
+  if (source === 'recommend' && (coreRequirements || bonusRequirements || triggerMatch)) {
+    throw new Error('Boss recommendation does not accept requirements or triggerMatch');
+  }
+  if (triggerMatch === true && confirmed !== true) {
+    throw new Error('Boss immediate match requires confirmed=true');
+  }
+  const input: BossTalentSearchTaskInput = {
+    platform: 'boss',
+    source,
+    bossJobId,
+    expectedJobName,
+    coreRequirements,
+    bonusRequirements,
+    triggerMatch,
+    confirmed,
+  };
+  const argv = ['--platform', 'boss', '--boss-talent-source', source];
+  pushOptional(argv, '--boss-job-id', bossJobId);
+  pushOptional(argv, '--boss-expected-job-name', expectedJobName);
+  pushOptional(argv, '--boss-core-requirements-json', coreRequirements ? JSON.stringify(coreRequirements) : undefined);
+  pushOptional(argv, '--boss-bonus-requirements-json', bonusRequirements ? JSON.stringify(bonusRequirements) : undefined);
+  pushOptionalBoolean(argv, '--boss-trigger-match', triggerMatch);
+  pushOptionalBoolean(argv, '--boss-confirmed', confirmed);
+  return {
+    input,
+    argv,
+    inputSummary: {
+      platform: 'boss', source, bossJobId, expectedJobName,
+      coreRequirementCount: coreRequirements?.length ?? 0,
+      bonusRequirementCount: bonusRequirements?.length ?? 0,
+      triggerMatch: triggerMatch ?? false,
+      confirmed: confirmed ?? false,
+    },
+  };
+}
+
+export function normalizeBossGreetTask(payload: unknown): NormalizedTask<BossGreetTaskInput> {
+  const item = normalizeJsonObject(payload, 'request body');
+  const platform = normalizePlatform(item.platform);
+  if (platform !== 'boss') throw new Error('boss-greet task requires platform boss');
+  const source = item.source as BossTalentSource;
+  if (source !== 'recommend' && source !== 'deep-search') {
+    throw new Error('boss-greet source must be recommend or deep-search');
+  }
+  const candidateId = getRequiredString(item, 'candidateId');
+  const expectedCandidateName = getRequiredString(item, 'expectedCandidateName');
+  const expectedJobName = getRequiredString(item, 'expectedJobName');
+  const bossJobId = getOptionalString(item, 'bossJobId');
+  const intentId = getOptionalString(item, 'intentId');
+  const confirmed = getOptionalBoolean(item, 'confirmed');
+  if (confirmed !== true) throw new Error('boss-greet requires confirmed=true');
+  const input: BossGreetTaskInput = {
+    platform: 'boss', source, candidateId, expectedCandidateName, expectedJobName,
+    bossJobId, intentId, confirmed: true,
+  };
+  const argv = [
+    '--platform', 'boss',
+    '--boss-greet-source', source,
+    '--boss-greet-candidate-id', candidateId,
+    '--boss-expected-candidate-name', expectedCandidateName,
+    '--boss-expected-job-name', expectedJobName,
+    '--boss-confirmed', 'true',
+  ];
+  pushOptional(argv, '--boss-job-id', bossJobId);
+  pushOptional(argv, '--boss-intent-id', intentId);
+  return {
+    input,
+    argv,
+    inputSummary: { platform: 'boss', source, candidateId, expectedCandidateName, expectedJobName, bossJobId, intentId },
+  };
+}
+
+const bossChatOperations = new Set<BossChatOperation>([
+  'list-conversations', 'open-conversation', 'read-conversation', 'read-history', 'preview-resume',
+  'send-text', 'remark', 'mark-not-fit', 'request-attachment-resume', 'accept-attachment-resume',
+  'exchange-phone', 'exchange-wechat',
+]);
+const bossChatMutations = new Set<BossChatOperation>([
+  'send-text', 'remark', 'mark-not-fit', 'request-attachment-resume', 'accept-attachment-resume',
+  'exchange-phone', 'exchange-wechat',
+]);
+
+export function normalizeBossChatOperationTask(payload: unknown): NormalizedTask<BossChatOperationTaskInput> {
+  const item = normalizeJsonObject(payload, 'request body');
+  const platform = normalizePlatform(item.platform);
+  if (platform !== 'boss') throw new Error('boss-chat-operation task requires platform boss');
+  const action = getRequiredString(item, 'action') as BossChatOperation;
+  if (!bossChatOperations.has(action)) throw new Error(`Unsupported Boss chat action: ${action}`);
+  const conversationId = getOptionalString(item, 'conversationId');
+  const expectedCandidateName = getOptionalString(item, 'expectedCandidateName');
+  const expectedJobName = getOptionalString(item, 'expectedJobName');
+  const text = getOptionalString(item, 'text');
+  const remark = getOptionalString(item, 'remark');
+  const intentId = getOptionalString(item, 'intentId');
+  const unreadOnly = getOptionalBoolean(item, 'unreadOnly');
+  const confirmed = getOptionalBoolean(item, 'confirmed');
+  if (action !== 'list-conversations' && !conversationId) throw new Error(`${action} requires conversationId`);
+  if (action === 'send-text' && !text) throw new Error('send-text requires text');
+  if (action === 'remark' && !remark) throw new Error('remark requires remark');
+  if (bossChatMutations.has(action) && (confirmed !== true || !intentId)) {
+    throw new Error(`${action} requires confirmed=true and intentId`);
+  }
+  const input: BossChatOperationTaskInput = {
+    platform: 'boss', action, conversationId, expectedCandidateName, expectedJobName,
+    text, remark, intentId, unreadOnly, confirmed,
+  };
+  const argv = ['--platform', 'boss', '--boss-chat-operation', action];
+  pushOptional(argv, '--boss-conversation-id', conversationId);
+  pushOptional(argv, '--boss-expected-candidate-name', expectedCandidateName);
+  pushOptional(argv, '--boss-expected-job-name', expectedJobName);
+  pushOptional(argv, '--boss-chat-text', text);
+  pushOptional(argv, '--boss-chat-remark', remark);
+  pushOptional(argv, '--boss-intent-id', intentId);
+  pushOptionalBoolean(argv, '--boss-unread-only', unreadOnly);
+  pushOptionalBoolean(argv, '--boss-confirmed', confirmed);
+  return {
+    input,
+    argv,
+    inputSummary: {
+      platform: 'boss', action, conversationId, expectedCandidateName, expectedJobName,
+      hasText: Boolean(text), hasRemark: Boolean(remark), intentId,
+      unreadOnly: unreadOnly ?? false, confirmed: confirmed ?? false,
+    },
+  };
+}
+
+export function normalizeBossJobSyncTask(payload: unknown): NormalizedTask<BossJobSyncTaskInput> {
+  const item = normalizeJsonObject(payload, 'request body');
+  const platform = normalizePlatform(item.platform);
+  if (platform !== 'boss') throw new Error('boss-job-sync task requires platform boss');
+  const bossJobIds = normalizeStringArray(item.bossJobIds, 'bossJobIds');
+  const includeClosed = getOptionalBoolean(item, 'includeClosed');
+  const input: BossJobSyncTaskInput = { platform: 'boss', bossJobIds, includeClosed };
+  const argv = ['--platform', 'boss', '--boss-job-sync', 'true'];
+  pushOptional(argv, '--boss-job-ids', bossJobIds?.join(','));
+  pushOptionalBoolean(argv, '--boss-include-closed-jobs', includeClosed);
+  return {
+    input,
+    argv,
+    inputSummary: { platform: 'boss', bossJobIds, includeClosed: includeClosed ?? true },
   };
 }
 
@@ -538,6 +712,10 @@ export async function normalizeSchedulableTask(
     }
     case 'boss-auto-chat': {
       const normalized = normalizeBossAutoChatTask(input);
+      return { kind, ...normalized };
+    }
+    case 'boss-job-sync': {
+      const normalized = normalizeBossJobSyncTask(input);
       return { kind, ...normalized };
     }
   }

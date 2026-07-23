@@ -135,6 +135,47 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
     };
   }
 
+  if ('source' in output && 'candidates' in output && 'matched' in output) {
+    return {
+      platform: output.platform,
+      source: output.source,
+      matched: output.matched,
+      candidateCount: output.candidates.length,
+    };
+  }
+
+  if ('greeted' in output && 'candidateId' in output) {
+    return {
+      platform: output.platform,
+      candidateId: output.candidateId,
+      greeted: output.greeted,
+      alreadyContacted: output.alreadyContacted,
+    };
+  }
+
+  if ('action' in output && 'changed' in output) {
+    return {
+      platform: output.platform,
+      action: output.action,
+      conversationId: output.conversationId,
+      changed: output.changed,
+      conversationCount: output.conversations?.length,
+      messageCount: output.messages?.length,
+      receiptPath: output.receiptPath,
+    };
+  }
+
+  if ('created' in output && 'updated' in output && 'unchanged' in output && 'failed' in output) {
+    return {
+      platform: output.platform,
+      created: output.created,
+      updated: output.updated,
+      unchanged: output.unchanged,
+      failed: output.failed,
+      resultPath: output.resultPath,
+    };
+  }
+
   if (Array.isArray(output)) {
     return {
       itemCount: output.length,

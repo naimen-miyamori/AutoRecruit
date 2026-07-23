@@ -1,5 +1,5 @@
 import { mockApplicationFilterOptions, mockCandidateDetail, mockCandidates, mockCatalogs, mockDashboardHealth, mockJobDetail, mockJobs, mockTaskDetail, mockTasks } from './mock-data';
-import type { ApplicationFilterOptions, AssistantChatRequest, AssistantChatResponse, AssistantConfirmResponse, AssistantDraft, CandidateDetail, CandidateSummary, DashboardHealth, FilterCatalog, JobDetail, JobSummary, RagAnswer, SavedFilterInput, ScheduleDefinition, ScheduleRunRecord, ScheduleSummary, TaskDetail, TaskSummary } from './types';
+import type { ApplicationFilterOptions, AssistantChatRequest, AssistantChatResponse, AssistantConfirmResponse, AssistantDraft, CandidateDetail, CandidateSummary, DashboardHealth, FilterCatalog, JobDetail, JobSummary, RagAnswer, SavedFilterInput, ScheduleDefinition, ScheduleRunRecord, ScheduleSummary, TaskDetail, TaskKind, TaskSummary } from './types';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? '/api';
 
@@ -135,7 +135,7 @@ export const api = {
       candidateId,
     });
   },
-  async submitTask(kind: 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'login-refresh' | 'rag-ops', body: Record<string, unknown>) {
+  async submitTask(kind: TaskKind, body: Record<string, unknown>) {
     return requestJson<TaskDetail>(`/tasks/${kind}`, {
       method: 'POST',
       body: JSON.stringify(body),
