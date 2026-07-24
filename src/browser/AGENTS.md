@@ -67,9 +67,11 @@ Default timing configuration:
   `PLAYWRIGHT_<PLATFORM>_{ACTION|CANDIDATE}_DELAY_{MIN|MAX}_MS`.
 - Existing `PLAYWRIGHT_LIEPIN_*ACTION_DELAY*`, `PLAYWRIGHT_LIEPIN_*CANDIDATE_DELAY*`, and
   `PLAYWRIGHT_LIEPIN_REUSE_*` names remain supported as Liepin platform overrides.
-- Click helpers should move the mouse to the target when the platform contract requires it, while
-  preserving native locator-click exceptions such as Boss chat resume opening and Zhilian salary
-  boundary selection.
+- Pointer-driven actions use the context-scoped continuous trajectory in `src/browser/pacing.ts`.
+  Every next click starts from the prior operation's recorded endpoint, including popup/current-page
+  transitions. Native locator and DOM-event exceptions such as Boss chat resume opening and Zhilian
+  salary boundaries must move the shared pointer to the target before clicking; no direct mouse move
+  or coordinate click may bypass the shared tracker.
 - DOM reads, parsing, model calls, local writes, and SMTP do not need artificial browser pacing.
 
 ## Candidate and Detail Semantics

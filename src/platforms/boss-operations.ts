@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Locator, Page } from 'playwright';
-import { waitPlatformActionPace } from '../browser/pacing.js';
+import { clickPlatformLocator, waitPlatformActionPace } from '../browser/pacing.js';
 import { config } from '../config.js';
 import type {
   BossChatConversationSummary,
@@ -137,7 +137,7 @@ async function selectBossConversationFilter(page: Page, unreadOnly: boolean): Pr
   }
   const className = await allTab.getAttribute('class') ?? '';
   if (!className.split(/\s+/).includes('active')) {
-    await runBossAction(page, () => allTab.click({ timeout: config.playwright.searchPageTimeoutMs }));
+    await clickPlatformLocator(allTab, page, 'boss', config.playwright.searchPageTimeoutMs);
     await page.locator('.user-list').first().waitFor({ state: 'visible', timeout: config.playwright.searchPageTimeoutMs });
   }
 }
@@ -263,7 +263,7 @@ async function sendBossText(page: Page, text: string): Promise<void> {
     throw new Error(`Boss chat editor contains an existing draft; refusing to overwrite it: ${current}`);
   }
   await runBossAction(page, () => editor.fill(text, { timeout: config.playwright.resumeDetailTimeoutMs }));
-  await runBossAction(page, () => submit.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
+  await clickPlatformLocator(submit, page, 'boss', config.playwright.resumeDetailTimeoutMs);
   await page.waitForFunction((expected) => Array.from(document.querySelectorAll<HTMLElement>('.chat-message-list .message-item .text-content'))
     .some((element) => (element.innerText ?? element.textContent ?? '').replace(/\s+/g, ' ').trim() === expected), text, {
     timeout: config.playwright.resumeDetailTimeoutMs,
@@ -280,7 +280,7 @@ async function clickUniqueTextControl(page: Page, pattern: RegExp, description: 
     throw new Error(`Expected one visible Boss ${description} control, found ${visible.length}.`);
   }
   const control = controls.nth(visible[0]!);
-  await runBossAction(page, () => control.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
+  await clickPlatformLocator(control, page, 'boss', config.playwright.resumeDetailTimeoutMs);
   return control;
 }
 
@@ -300,7 +300,7 @@ async function confirmBossAction(page: Page, trigger: RegExp, description: strin
     if (!await confirm.isVisible().catch(() => false)) {
       throw new Error(`Boss ${description} confirmation dialog has no confirmation control.`);
     }
-    await runBossAction(page, () => confirm.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
+    await clickPlatformLocator(confirm, page, 'boss', config.playwright.resumeDetailTimeoutMs);
   }
 }
 

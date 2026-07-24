@@ -1,5 +1,10 @@
 import type { Locator, Page } from 'playwright';
-import { clickPlatformLocator, fillPlatformLocator } from '../browser/pacing.js';
+import {
+  clickLocatorWithMouse,
+  clickPlatformLocator,
+  fillPlatformLocator,
+  moveMouseToLocatorCenter,
+} from '../browser/pacing.js';
 import type { SupportedPlatform } from '../platforms/types.js';
 
 export const searchResultTotalTextPatterns = [
@@ -38,7 +43,10 @@ export async function clickFirstVisibleText(
       if (platform) {
         await clickPlatformLocator(locator, page, platform, timeoutMs);
       } else {
-        await locator.click({ timeout: timeoutMs });
+        if (!await clickLocatorWithMouse(locator, page, timeoutMs)) {
+          await moveMouseToLocatorCenter(locator, page, timeoutMs).catch(() => false);
+          await locator.click({ timeout: timeoutMs });
+        }
       }
       return true;
     } catch {
@@ -62,7 +70,10 @@ export async function clickFirstVisibleSelector(
       if (platform) {
         await clickPlatformLocator(locator, page, platform, timeoutMs);
       } else {
-        await locator.click({ timeout: timeoutMs });
+        if (!await clickLocatorWithMouse(locator, page, timeoutMs)) {
+          await moveMouseToLocatorCenter(locator, page, timeoutMs).catch(() => false);
+          await locator.click({ timeout: timeoutMs });
+        }
       }
       return true;
     } catch {
@@ -96,7 +107,10 @@ export async function clickPrimarySearchButton(page: Page, timeoutMs = 1000, pla
       if (platform) {
         await clickPlatformLocator(locator, page, platform, timeoutMs);
       } else {
-        await locator.click({ timeout: timeoutMs });
+        if (!await clickLocatorWithMouse(locator, page, timeoutMs)) {
+          await moveMouseToLocatorCenter(locator, page, timeoutMs).catch(() => false);
+          await locator.click({ timeout: timeoutMs });
+        }
       }
       return true;
     } catch {

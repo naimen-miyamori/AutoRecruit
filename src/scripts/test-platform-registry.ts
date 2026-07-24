@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import type { Page } from 'playwright';
 
-import { getPlatformActionPaceDelayMs, getPlatformCandidatePaceDelayMs } from '../browser/pacing.js';
+import {
+  buildContinuousMouseTrajectory,
+  getPlatformActionPaceDelayMs,
+  getPlatformCandidatePaceDelayMs,
+  moveMouseContinuously,
+  moveMouseToLocatorPosition,
+} from '../browser/pacing.js';
 import { config, resolveStorageStatePath } from '../config.js';
 import { normalize51jobFilterDefinition } from '../platforms/51job-filter-normalization.js';
 import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from '../platforms/registry.js';
@@ -157,6 +164,95 @@ test('Boss pacing favors 2-3 second delays over 3-4 second delays', () => {
 
   assert.ok(lowerActionDelays >= sampleCount * 0.75 && lowerActionDelays <= sampleCount * 0.85);
   assert.ok(lowerCandidateDelays >= sampleCount * 0.75 && lowerCandidateDelays <= sampleCount * 0.85);
+});
+
+test('mouse trajectories remain continuous across operations and pages in one browser context', async () => {
+  const context = {};
+  const moves: Array<{ x: number; y: number }> = [];
+  const createPage = () => ({
+    context: () => context,
+    mouse: {
+      move: async (x: number, y: number) => {
+        moves.push({ x, y });
+      },
+    },
+  }) as unknown as Page;
+  const firstPage = createPage();
+  const secondPage = createPage();
+
+  assert.equal(await moveMouseContinuously(firstPage, { x: 320, y: 180 }), true);
+  const firstOperationEnd = moves.at(-1)!;
+  const secondOperationStartIndex = moves.length;
+  assert.equal(await moveMouseContinuously(secondPage, { x: 860, y: 620 }), true);
+
+  assert.deepEqual(firstOperationEnd, { x: 320, y: 180 });
+  assert.deepEqual(moves.at(-1), { x: 860, y: 620 });
+  const secondOperationFirstPoint = moves[secondOperationStartIndex]!;
+  assert.ok(Math.hypot(
+    secondOperationFirstPoint.x - firstOperationEnd.x,
+    secondOperationFirstPoint.y - firstOperationEnd.y,
+  ) <= 40);
+
+  for (let index = 1; index < moves.length; index += 1) {
+    assert.ok(Math.hypot(
+      moves[index]!.x - moves[index - 1]!.x,
+      moves[index]!.y - moves[index - 1]!.y,
+    ) <= 40);
+  }
+
+  const segments = buildContinuousMouseTrajectory({ x: 10, y: 20 }, { x: 500, y: 400 });
+  assert.equal(segments.length, 3);
+  assert.deepEqual({ x: segments.at(-1)!.x, y: segments.at(-1)!.y }, { x: 500, y: 400 });
+  assert.ok(segments.every((segment) => segment.steps >= 3));
+
+  const wideSegments = buildContinuousMouseTrajectory({ x: 0, y: 0 }, { x: 5000, y: 2500 });
+  let segmentStart = { x: 0, y: 0 };
+  for (const segment of wideSegments) {
+    assert.ok(Math.hypot(segment.x - segmentStart.x, segment.y - segmentStart.y) / segment.steps <= 28.01);
+    segmentStart = segment;
+  }
+
+  const interruptedContext = {};
+  const interruptedMoves: Array<{ x: number; y: number }> = [];
+  let interruptMovement = true;
+  const interruptedPage = {
+    context: () => interruptedContext,
+    mouse: {
+      move: async (x: number, y: number) => {
+        if (interruptMovement && interruptedMoves.length === 3) {
+          throw new Error('simulated pointer interruption');
+        }
+        interruptedMoves.push({ x, y });
+      },
+    },
+  } as unknown as Page;
+  await assert.rejects(
+    () => moveMouseContinuously(interruptedPage, { x: 900, y: 500 }),
+    /simulated pointer interruption/,
+  );
+  const lastSuccessfulPoint = interruptedMoves.at(-1)!;
+  const recoveryStartIndex = interruptedMoves.length;
+  interruptMovement = false;
+  await moveMouseContinuously(interruptedPage, { x: 1000, y: 650 });
+  const firstRecoveryPoint = interruptedMoves[recoveryStartIndex]!;
+  assert.ok(Math.hypot(
+    firstRecoveryPoint.x - lastSuccessfulPoint.x,
+    firstRecoveryPoint.y - lastSuccessfulPoint.y,
+  ) <= 28.01);
+
+  const locatorMoves: Array<{ x: number; y: number }> = [];
+  const locatorPage = {
+    context: () => ({}),
+    mouse: {
+      move: async (x: number, y: number) => locatorMoves.push({ x, y }),
+    },
+  } as unknown as Page;
+  const locator = {
+    boundingBox: async () => ({ x: 100, y: 200, width: 80, height: 40 }),
+    scrollIntoViewIfNeeded: async () => undefined,
+  };
+  assert.equal(await moveMouseToLocatorPosition(locator as never, locatorPage, 1000, { x: 24, y: 12 }), true);
+  assert.deepEqual(locatorMoves.at(-1), { x: 124, y: 212 });
 });
 
 test('parseSearchResultTotalFromText accepts capped and comma-separated totals', () => {

@@ -56,7 +56,8 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
 - Default capture explicitly checks `隐藏已查看`; `--include-viewed true` explicitly clears it.
   Discard stale `search-resumes` responses from before the final viewed-filter state.
 - In-page actions, successful resume-detail closing, and candidate transitions use randomized
-  `2000-3000ms` pacing. Move the mouse to click targets when possible.
+  `2000-3000ms` pacing. Every pointer click follows the shared continuous mouse trajectory; DOM or
+  forced-click fallbacks must first move that same pointer to the target.
 - After a successful parse and save, wait one Liepin action interval before closing the detail page
   and returning to search. On forwarding, detail-open, or extraction failure, stop the flow and
   leave the detail page open for inspection.
@@ -155,6 +156,8 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
 - All navigation, click, input, key, forwarding, chat, phone, and candidate-transition actions use
   shared Boss pacing: default `2000-4000ms`, weighted about 80% in `2000-3000ms` and 20% in
   `3001-4000ms`.
+- Boss pointer clicks also use the shared context-scoped trajectory. Locator-native and DOM-event
+  compatibility paths must continuously move from the prior endpoint before executing the click.
 - Account for pacing in multi-action deadlines. Do not make a valid forward/contact sequence
   impossible under the default timeout merely because its required paced actions consume the budget.
 

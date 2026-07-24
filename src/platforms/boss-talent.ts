@@ -1,5 +1,5 @@
 import type { Frame, Locator, Page } from 'playwright';
-import { waitPlatformActionPace } from '../browser/pacing.js';
+import { clickPlatformLocator, waitPlatformActionPace } from '../browser/pacing.js';
 import { config } from '../config.js';
 import type {
   BossDeepSearchForm,
@@ -208,7 +208,7 @@ async function resizeRequirementRows(page: Page, group: Locator, desiredCount: n
     if (!await add.isVisible().catch(() => false)) {
       throw new Error(`Boss deep-search ${title} has ${count} row(s), but ${desiredCount} are required and no add control is available.`);
     }
-    await runBossAction(page, () => add.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
+    await clickPlatformLocator(add, page, 'boss', config.playwright.resumeDetailTimeoutMs);
     rows = group.locator('.form-content-list-item');
     const nextCount = await rows.count();
     if (nextCount <= count) {
@@ -222,7 +222,7 @@ async function resizeRequirementRows(page: Page, group: Locator, desiredCount: n
     if (!await remove.isVisible().catch(() => false)) {
       throw new Error(`Boss deep-search ${title} has ${count} row(s), but ${desiredCount} are required and no remove control is available.`);
     }
-    await runBossAction(page, () => remove.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
+    await clickPlatformLocator(remove, page, 'boss', config.playwright.resumeDetailTimeoutMs);
     rows = group.locator('.form-content-list-item');
     const nextCount = await rows.count();
     if (nextCount >= count) {
@@ -247,9 +247,12 @@ async function synchronizeRequirementGroup(
     if (current === desired) continue;
     const editor = row.locator('.auto-resize-textarea-wrapper textarea, .auto-resize-textarea-wrapper input').first();
     if (!await editor.isVisible().catch(() => false)) {
-      await runBossAction(page, () => row.locator('.form-content-word').first().click({
-        timeout: config.playwright.resumeDetailTimeoutMs,
-      }));
+      await clickPlatformLocator(
+        row.locator('.form-content-word').first(),
+        page,
+        'boss',
+        config.playwright.resumeDetailTimeoutMs,
+      );
     }
     await editor.waitFor({ state: 'visible', timeout: config.playwright.resumeDetailTimeoutMs });
     await runBossAction(page, () => editor.fill(desired, { timeout: config.playwright.resumeDetailTimeoutMs }));
@@ -290,7 +293,7 @@ export async function triggerBossDeepSearchMatch(page: Page): Promise<BossTalent
   }
 
   const button = page.locator('.ai-form-match-footer .btn-ai-match-v2').first();
-  await runBossAction(page, () => button.click({ timeout: config.playwright.searchPageTimeoutMs }));
+  await clickPlatformLocator(button, page, 'boss', config.playwright.searchPageTimeoutMs);
   await page.locator(candidateCardSelector).first().waitFor({
     state: 'visible',
     timeout: config.playwright.searchPageTimeoutMs,
@@ -366,7 +369,7 @@ export async function greetBossTalentCandidate(page: Page, input: BossGreetInput
   if (!/打招呼|立即沟通|沟通/.test(chatText)) {
     throw new Error(`Boss candidate ${input.candidateId} does not expose a greet control.`);
   }
-  await runBossAction(page, () => chat.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
+  await clickPlatformLocator(chat, page, 'boss', config.playwright.resumeDetailTimeoutMs);
   await root.waitForFunction(({ selector, expectedId }) => {
     type VueElement = HTMLElement & { __vue__?: Record<string, unknown> };
     const cards = Array.from(document.querySelectorAll<VueElement>(selector));

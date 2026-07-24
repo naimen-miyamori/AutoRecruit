@@ -1,6 +1,6 @@
 import type { BrowserContext, Page } from 'playwright';
 import { config } from '../config.js';
-import { clickPlatformLocator } from '../browser/pacing.js';
+import { clickPlatformLocator, moveMouseToLocatorCenter } from '../browser/pacing.js';
 import {
   clickPrimarySearchButton,
   clickFirstVisibleText,
@@ -2658,6 +2658,7 @@ async function clickZhilianSalaryOption(page: Page, value: string, side: 'min' |
   }).first();
 
   try {
+    await moveMouseToLocatorCenter(option, page, 3000).catch(() => false);
     await option.click({ timeout: 3000 });
     await page.waitForTimeout(150).catch(() => undefined);
     return;

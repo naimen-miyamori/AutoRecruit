@@ -21,6 +21,11 @@ import {
 import { buildFilterKey } from '../search/filter-dom.js';
 import { normalize51jobFilterDefinition } from './51job-filter-normalization.js';
 import { clickPrimarySearchButton } from '../search/page-actions.js';
+import {
+  clickPagePointWithMouse,
+  clickPlatformLocator,
+  ensureContinuousMouseBridge,
+} from '../browser/pacing.js';
 import type { Locator, Page } from 'playwright';
 import type { SearchCondition, SearchConditionApplyResult } from '../types/job.js';
 
@@ -212,19 +217,7 @@ function build51jobCascadeFilter(
 }
 
 async function clickLocatorWithMouse(page: Page, locator: Locator): Promise<void> {
-  await locator.waitFor({ state: 'visible', timeout: 3000 });
-  await locator.evaluate((element) => {
-    element.scrollIntoView({ block: 'center', inline: 'nearest' });
-  }).catch(() => undefined);
-  await page.waitForTimeout(80);
-  const box = await locator.boundingBox();
-  if (!box) {
-    throw new Error('Target element is not clickable because its bounding box is unavailable.');
-  }
-
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.up();
+  await clickPlatformLocator(locator, page, '51job', 3000);
 }
 
 async function clickLocatorWithDomEvents(locator: Locator): Promise<void> {
@@ -523,7 +516,7 @@ async function close51jobBaseSelectPopover(
     }
   }
 
-  if (await clickPrimarySearchButton(page, 1500).catch(() => false)) {
+  if (await clickPrimarySearchButton(page, 1500, '51job').catch(() => false)) {
     if (await waitUntilHidden()) {
       return;
     }
@@ -781,9 +774,10 @@ async function click51jobExpectedSalaryOption(
     throw new Error(`Unable to locate expected salary option: ${label}`);
   }
 
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.up();
+  await clickPagePointWithMouse(page, {
+    x: box.x + box.width / 2,
+    y: box.y + box.height / 2,
+  });
 }
 
 async function extract51jobExpectedSalaryOptions(
@@ -881,6 +875,7 @@ async function extract51jobDynamicTextInputOptions(
 
   const maxDepth = Math.max(1, options.maxDepth ?? 3);
   const maxOptionsPerLevel = Math.max(1, options.maxOptionsPerLevel ?? 50);
+  await ensureContinuousMouseBridge(page);
 
   return dialogLocator.evaluate(async (dialog, {
     optionDepthLimit,
@@ -959,6 +954,13 @@ async function extract51jobDynamicTextInputOptions(
       const previousActiveLabel = readActiveLabel(root, depth);
       const previousNextMenuSignature = readMenuSignature(root, depth + 1);
       match.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const rect = match.getBoundingClientRect();
+      await (window as Window & typeof globalThis & {
+        __autorecruitMoveMouseContinuously?: (point: { x: number; y: number }) => Promise<boolean>;
+      }).__autorecruitMoveMouseContinuously?.({
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      });
       match.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
       match.click();
       match.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
@@ -1087,7 +1089,7 @@ async function clickVisibleOptionByLabel(root: Locator, label: string, timeoutMs
     try {
       await candidate.waitFor({ state: 'visible', timeout: timeoutMs });
       await candidate.scrollIntoViewIfNeeded().catch(() => undefined);
-      await candidate.click({ timeout: timeoutMs });
+      await clickPlatformLocator(candidate, root.page(), '51job', timeoutMs);
       return true;
     } catch {
       continue;
@@ -1271,9 +1273,10 @@ async function click51jobOptionItemWrapperByLabelWithMouse(
     return false;
   }
 
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.up();
+  await clickPagePointWithMouse(page, {
+    x: box.x + box.width / 2,
+    y: box.y + box.height / 2,
+  });
   await page.waitForTimeout(150);
   return true;
 }
@@ -1293,7 +1296,13 @@ async function click51jobDialogConfirmButton(page: Page, dialog: Locator, timeou
     try {
       await candidate.waitFor({ state: 'visible', timeout: timeoutMs });
       await candidate.scrollIntoViewIfNeeded().catch(() => undefined);
-      await clickLocatorWithMouse(page, candidate).catch(async () => candidate.click({ timeout: timeoutMs }));
+      await clickLocatorWithMouse(page, candidate).catch(async () => clickPlatformLocator(
+        candidate,
+        page,
+        '51job',
+        timeoutMs,
+        { force: true },
+      ));
       return true;
     } catch {
       continue;
@@ -1594,59 +1603,42 @@ async function click51jobDynamicTextInputSearchResult(
   value: string,
   timeoutMs = 3000,
 ): Promise<boolean> {
-  const clicked = await page.evaluate(async ({ targetValue, waitMs }) => {
-    const normalize = (input: string | null | undefined): string => String(input ?? '').replace(/\s+/g, ' ').trim();
-    const compact = (input: string | null | undefined): string => normalize(input).replace(/\s+/g, '');
-    const isVisible = (element: Element | null): element is HTMLElement => {
-      if (!(element instanceof HTMLElement)) {
-        return false;
-      }
-
-      const style = window.getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      return style.visibility !== 'hidden'
-        && style.display !== 'none'
-        && Number.parseFloat(style.opacity || '1') > 0
-        && rect.width > 0
-        && rect.height > 0;
-    };
-    const readPrimaryText = (element: Element): string => {
-      const primary = element.querySelector('.key-name_words, .key-name, [class*="key-name"], [title]');
-      return normalize(primary?.textContent || element.getAttribute('title') || element.textContent);
-    };
-    const findMatch = (): HTMLElement | undefined => {
+  const candidates = page.locator(
+    'li[role="option"], .el-autocomplete-suggestion li, [id^="el-autocomplete-"][role="option"]',
+  );
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const matchIndex = await candidates.evaluateAll((elements, targetValue) => {
+      const normalize = (input: string | null | undefined): string => String(input ?? '').replace(/\s+/g, ' ').trim();
+      const compact = (input: string | null | undefined): string => normalize(input).replace(/\s+/g, '');
+      const isVisible = (element: Element): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== 'hidden'
+          && style.display !== 'none'
+          && Number.parseFloat(style.opacity || '1') > 0
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      const readPrimaryText = (element: Element): string => {
+        const primary = element.querySelector('.key-name_words, .key-name, [class*="key-name"], [title]');
+        return normalize(primary?.textContent || element.getAttribute('title') || element.textContent);
+      };
       const targetCompact = compact(targetValue);
-      const candidates = Array.from(document.querySelectorAll(
-        'li[role="option"], .el-autocomplete-suggestion li, [id^="el-autocomplete-"][role="option"]',
-      )).filter(isVisible) as HTMLElement[];
-
-      return candidates.find((element) => compact(readPrimaryText(element)) === targetCompact)
-        ?? candidates.find((element) => compact(element.textContent).includes(targetCompact));
-    };
-    const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
-    const deadline = Date.now() + waitMs;
-
-    while (Date.now() < deadline) {
-      const match = findMatch();
-      if (match) {
-        match.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-        match.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-        match.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-        match.click();
-        return true;
-      }
-
-      await delay(50);
+      const exactIndex = elements.findIndex((element) => isVisible(element) && compact(readPrimaryText(element)) === targetCompact);
+      return exactIndex >= 0
+        ? exactIndex
+        : elements.findIndex((element) => isVisible(element) && compact(element.textContent).includes(targetCompact));
+    }, value);
+    if (matchIndex >= 0) {
+      await clickPlatformLocator(candidates.nth(matchIndex), page, '51job', Math.max(1, deadline - Date.now()));
+      await page.waitForTimeout(150);
+      return true;
     }
-
-    return false;
-  }, { targetValue: value, waitMs: timeoutMs });
-
-  if (clicked) {
-    await page.waitForTimeout(150);
+    await page.waitForTimeout(50);
   }
-
-  return clicked;
+  return false;
 }
 
 async function apply51jobDynamicTextInputBySearch(
@@ -2019,7 +2011,12 @@ async function apply51jobExpectedSalaryApplicationFilter(
   await click51jobExpectedSalaryOption(page, popper, min);
   await page.waitForTimeout(250);
 
-  const clickedMax = await popper.getByText(max, { exact: true }).last().click({ timeout: 2000 })
+  const clickedMax = await clickPlatformLocator(
+    popper.getByText(max, { exact: true }).last(),
+    page,
+    '51job',
+    2000,
+  )
     .then(() => true)
     .catch(() => false);
   if (!clickedMax) {

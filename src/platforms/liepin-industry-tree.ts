@@ -1,6 +1,8 @@
 import type { Locator, Page } from 'playwright';
 import {
+  clickPagePointWithMouse,
   clickPlatformLocator,
+  moveMouseToLocatorCenter,
   waitPlatformActionPace,
 } from '../browser/pacing.js';
 import {
@@ -169,12 +171,16 @@ async function clickLiepinLocatorForceFallback(locator: Locator, page: Page, tim
     await waitPlatformActionPace(page, liepinPlatform);
     return true;
   } catch {
+    await moveMouseToLocatorCenter(locator, page, timeoutMs).catch(() => false);
     await locator.click({ timeout: timeoutMs, force: true }).catch(async () => {
       const box = await locator.boundingBox().catch(() => null);
       if (!box) {
         return;
       }
-      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      await clickPagePointWithMouse(page, {
+        x: box.x + box.width / 2,
+        y: box.y + box.height / 2,
+      });
     });
     await waitPlatformActionPace(page, liepinPlatform);
     return true;
@@ -182,6 +188,7 @@ async function clickLiepinLocatorForceFallback(locator: Locator, page: Page, tim
 }
 
 async function dispatchLiepinIndustryTriggerEvents(locator: Locator, page: Page): Promise<void> {
+  await moveMouseToLocatorCenter(locator, page, 3000).catch(() => false);
   await locator.evaluate((element) => {
     const eventInit: MouseEventInit = {
       bubbles: true,
@@ -328,7 +335,10 @@ export async function openLiepinIndustryModalByLabel(page: Page, label: string):
   const icon = row.locator('.antd-fd-industry-input-icon-wrapper').first();
   const iconBox = await icon.boundingBox().catch(() => null);
   if (iconBox) {
-    await page.mouse.click(iconBox.x + iconBox.width / 2, iconBox.y + iconBox.height / 2);
+    await clickPagePointWithMouse(page, {
+      x: iconBox.x + iconBox.width / 2,
+      y: iconBox.y + iconBox.height / 2,
+    });
     await waitPlatformActionPace(page, liepinPlatform);
   }
 

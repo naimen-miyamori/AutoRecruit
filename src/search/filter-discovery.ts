@@ -1,4 +1,9 @@
 import type { Locator, Page } from 'playwright';
+import {
+  clickPagePointWithMouse,
+  clickPlatformLocator,
+  ensureContinuousMouseBridge,
+} from '../browser/pacing.js';
 import { config } from '../config.js';
 import type { SupportedPlatform } from '../platforms/types.js';
 import {
@@ -235,6 +240,7 @@ async function captureTextInputScopedContainers(
   control: SearchFilterControlSnapshot,
   preferredPlaceholder?: string,
 ): Promise<SearchFilterDomContainerSnapshot[]> {
+  await ensureContinuousMouseBridge(page);
   const containers = await page.evaluate(async ({
     maxContainers,
     maxOptionsPerContainer,
@@ -446,6 +452,13 @@ async function captureTextInputScopedContainers(
       const previousActiveLabel = readActiveLabel(root, depth);
       const previousNextMenuSignature = readMenuSignature(root, depth + 1);
       match.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const rect = match.getBoundingClientRect();
+      await (window as Window & typeof globalThis & {
+        __autorecruitMoveMouseContinuously?: (point: { x: number; y: number }) => Promise<boolean>;
+      }).__autorecruitMoveMouseContinuously?.({
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      });
       match.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
       match.click();
       match.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
@@ -1168,6 +1181,7 @@ async function openControl(
   locator: Locator,
   control: SearchFilterControlSnapshot,
   options: ResolvedDiscoveryOptions,
+  platform: SupportedPlatform,
 ): Promise<{
   changedContainers: SearchFilterDomContainerSnapshot[];
   controlType?: SearchFilterControlType;
@@ -1202,7 +1216,7 @@ async function openControl(
     const isTextLike = !['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'hidden'].includes(control.inputType);
     const behavesLikeReadonlySelect = control.tagName === 'input' && control.readOnly && !control.disabled;
     if (behavesLikeReadonlySelect) {
-      await locator.click({ timeout: Math.min(options.controlTimeoutMs, remainingTime(options.deadline)) });
+      await clickPlatformLocator(locator, page, platform, Math.min(options.controlTimeoutMs, remainingTime(options.deadline)));
     } else if (isTextLike && !options.includeRemoteProbes) {
       return {
         changedContainers: [],
@@ -1214,7 +1228,7 @@ async function openControl(
       await locator.fill(probeValue, { timeout: Math.min(options.controlTimeoutMs, remainingTime(options.deadline)) });
       shouldRestoreInputValue = true;
     } else {
-      await locator.click({ timeout: Math.min(options.controlTimeoutMs, remainingTime(options.deadline)) });
+      await clickPlatformLocator(locator, page, platform, Math.min(options.controlTimeoutMs, remainingTime(options.deadline)));
     }
   } else if (control.inputType === 'checkbox' || control.inputType === 'radio' || /^(checkbox|radio|switch)$/i.test(control.role)) {
     return {
@@ -1224,7 +1238,7 @@ async function openControl(
       message: 'Toggle controls are classified without changing state.',
     };
   } else {
-    await locator.click({ timeout: Math.min(options.controlTimeoutMs, remainingTime(options.deadline)) });
+    await clickPlatformLocator(locator, page, platform, Math.min(options.controlTimeoutMs, remainingTime(options.deadline)));
   }
 
   await waitForUiStability(page, options);
@@ -1275,7 +1289,7 @@ async function openControl(
 
 async function restorePageState(page: Page, options: ResolvedDiscoveryOptions): Promise<void> {
   await page.keyboard.press('Escape').catch(() => undefined);
-  await page.mouse.click(4, 4).catch(() => undefined);
+  await clickPagePointWithMouse(page, { x: 4, y: 4 }).catch(() => false);
   await waitForUiStability(page, options);
 }
 
@@ -1388,7 +1402,7 @@ export async function discoverSearchFiltersOnPage(
       const fallbackLocator = page.locator(selector).first();
       const interactionControl = platformOptions.mapControlForInteraction?.(fallbackControl) ?? fallbackControl;
       const locator = platformOptions.resolveInteractionLocator?.(page, interactionControl, fallbackLocator) ?? fallbackLocator;
-      const openResult = await openControl(page, locator, interactionControl, resolvedOptions);
+      const openResult = await openControl(page, locator, interactionControl, resolvedOptions, platform);
       const filteredChangedContainers = openResult.preserveScopedContainers
         ? buildFilteredContainerList(openResult.changedContainers, {
           ignoreTextPatterns: platformOptions.ignoreTextPatterns,

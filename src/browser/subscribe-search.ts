@@ -1,6 +1,6 @@
 import { Locator, Page } from 'playwright';
 import { config } from '../config.js';
-import { clickPlatformLocator, waitPlatformActionPace } from './pacing.js';
+import { clickPlatformLocator } from './pacing.js';
 import { openAuthenticatedHome as openAuthenticatedSubscribePage } from './session.js';
 import type { SearchWaitOptions, SupportedPlatform } from '../platforms/types.js';
 
@@ -343,8 +343,7 @@ async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: 
     await waitForSearchTriggerReadyRef.fn(page, searchTrigger, { deadline });
 
     try {
-      await waitPlatformActionPace(page, platform);
-      await searchTrigger.click({ timeout: getRemainingTimeout(deadline) });
+      await clickPlatformLocator(searchTrigger, page, platform, getRemainingTimeout(deadline));
       return;
     } catch (error) {
       lastError = error;
@@ -492,8 +491,7 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
 
   const card = await findSubscriptionCardRef.fn(page, searchKeyword, { deadline });
   await card.scrollIntoViewIfNeeded();
-  await waitPlatformActionPace(page, platform);
-  await card.click({ timeout: getRemainingTimeout(deadline) }).catch(() => undefined);
+  await clickPlatformLocator(card, page, platform, getRemainingTimeout(deadline)).catch(() => undefined);
 
   const searchTrigger = await resolveSearchTrigger(page, card, searchKeyword, deadline);
 

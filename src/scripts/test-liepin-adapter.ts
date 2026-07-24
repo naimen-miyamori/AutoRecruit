@@ -806,6 +806,7 @@ test('liepin adapter applies current salary application filter inputs', async ()
 
 test('liepin adapter applies checkbox application filters', async () => {
   const calls: string[] = [];
+  let activeDomLabel: string | undefined;
   const checkedByLabel = new Map<string, boolean>([
     ['海外工作经验', false],
     ['管理经验', false],
@@ -821,6 +822,19 @@ test('liepin adapter applies checkbox application filters', async () => {
     filter: ({ hasText }: { hasText?: string | RegExp } = {}) => makeLocator(hasText instanceof RegExp ? hasText.source : String(hasText ?? name)),
     innerText: async () => name,
     boundingBox: async () => null,
+    evaluateAll: async (_fn: unknown, targetLabel?: unknown) => {
+      if (typeof targetLabel !== 'string' || !checkedByLabel.has(targetLabel)) {
+        return -1;
+      }
+      activeDomLabel = targetLabel;
+      return 0;
+    },
+    evaluate: async () => {
+      if (!activeDomLabel) return false;
+      checkedByLabel.set(activeDomLabel, true);
+      calls.push(`dom:${activeDomLabel}`);
+      return true;
+    },
     click: async () => {
       calls.push(`click:${name}`);
       if (name.includes('海外工作经验')) {
@@ -2059,10 +2073,16 @@ test('liepin adapter does not directly navigate to public zhaopin resume urls wh
   assert.equal(result, popupPage);
   assert.equal(newPageCalls, 0);
   assert.deepStrictEqual(clickCalls, []);
-  assert.equal(mouseCalls.length, 3);
-  assert.match(mouseCalls[0], /^move:/);
-  assert.match(mouseCalls[1], /^move:140:210:/);
-  assert.equal(mouseCalls[2], 'click:140:210');
+  const moveCalls = mouseCalls.filter((call) => call.startsWith('move:'));
+  assert.ok(moveCalls.length > 1);
+  const finalMoveParts = (moveCalls.at(-1) ?? '').split(':');
+  const finalClickParts = (mouseCalls.at(-1) ?? '').split(':');
+  assert.equal(finalMoveParts[1], finalClickParts[1]);
+  assert.equal(finalMoveParts[2], finalClickParts[2]);
+  const clickX = Number(finalClickParts[1]);
+  const clickY = Number(finalClickParts[2]);
+  assert.ok(clickX >= 100 && clickX <= 180, `click x ${clickX} should stay inside the candidate link`);
+  assert.ok(clickY >= 200 && clickY <= 220, `click y ${clickY} should stay inside the candidate link`);
 });
 
 test('liepin adapter waits for recruiter resume detail content to hydrate before treating a safe detail url as authenticated', async () => {
@@ -3615,11 +3635,15 @@ test('liepin adapter forwards an opened resume detail to a frequent contact when
   });
 
   assert.deepStrictEqual(clickCalls, []);
-  assert.deepStrictEqual(mouseCalls.filter((call) => call === 'click:100:100'), [
-    'click:100:100',
-    'click:100:100',
-    'click:100:100',
-  ]);
+  const pointerClicks = mouseCalls.filter((call) => call.startsWith('click:'));
+  assert.equal(pointerClicks.length, 3);
+  for (const call of pointerClicks) {
+    const [, rawX, rawY] = call.split(':');
+    const x = Number(rawX);
+    const y = Number(rawY);
+    assert.ok(x >= 40 && x <= 160, `click x ${x} should stay inside the locator`);
+    assert.ok(y >= 80 && y <= 120, `click y ${y} should stay inside the locator`);
+  }
 });
 
 test('liepin adapter ignores the forward dialog title when looking for the confirm button', async () => {
@@ -3685,11 +3709,15 @@ test('liepin adapter ignores the forward dialog title when looking for the confi
   });
 
   assert.deepStrictEqual(clickCalls, []);
-  assert.deepStrictEqual(mouseCalls.filter((call) => call === 'click:100:100'), [
-    'click:100:100',
-    'click:100:100',
-    'click:100:100',
-  ]);
+  const pointerClicks = mouseCalls.filter((call) => call.startsWith('click:'));
+  assert.equal(pointerClicks.length, 3);
+  for (const call of pointerClicks) {
+    const [, rawX, rawY] = call.split(':');
+    const x = Number(rawX);
+    const y = Number(rawY);
+    assert.ok(x >= 40 && x <= 160, `click x ${x} should stay inside the locator`);
+    assert.ok(y >= 80 && y <= 120, `click y ${y} should stay inside the locator`);
+  }
 });
 
 test('liepin adapter stops after the first visible forward action fails to open a dialog', async () => {
@@ -3746,5 +3774,10 @@ test('liepin adapter stops after the first visible forward action fails to open 
     /forward dialog did not open.*Stopping without trying alternate matches/,
   );
 
-  assert.deepStrictEqual(mouseClicks, ['100:100']);
+  assert.equal(mouseClicks.length, 1);
+  const [rawX, rawY] = (mouseClicks[0] ?? '').split(':');
+  const x = Number(rawX);
+  const y = Number(rawY);
+  assert.ok(x >= 40 && x <= 160, `click x ${x} should stay inside the locator`);
+  assert.ok(y >= 80 && y <= 120, `click y ${y} should stay inside the locator`);
 });

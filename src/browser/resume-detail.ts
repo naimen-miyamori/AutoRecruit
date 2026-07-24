@@ -1875,7 +1875,6 @@ export async function openResumeDetail(context: BrowserContext, page: Page, cand
 
     try {
       const previousUrl = page.url();
-      await page.mouse.move(10, 10);
       const detailPage = await waitForResumeDetailAfterClick(
         context,
         page,

@@ -453,7 +453,7 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 | `QDRANT_URL` / `QDRANT_API_KEY` | Qdrant 连接配置 |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | 报告邮件配置 |
 
-正常多平台运行建议不要设置 `STORAGE_STATE_PATH`，让程序自动选择平台登录态。Liepin 默认操作和候选人间隔为 `2–3 秒`；Boss 默认为加权 `2–4 秒`。
+正常多平台运行建议不要设置 `STORAGE_STATE_PATH`，让程序自动选择平台登录态。Liepin 默认操作和候选人间隔为 `2–3 秒`；Boss 默认为加权 `2–4 秒`。鼠标点击在同一浏览器上下文中共享上一次落点，并沿分步轨迹连续移动到下一目标；必须使用原生或 DOM 点击的兼容路径也会先完成这段移动。
 
 ---
 
@@ -496,4 +496,3 @@ npm run web:build
 
 - [项目说明文档](./项目说明文档.md)：完整流程、架构、持久化、失败语义和运维说明
 - [AGENTS.md](./AGENTS.md)：面向代码代理的仓库级约束；目录内还有更具体的 scoped instructions
-

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Locator, Page } from 'playwright';
-import { waitPlatformActionPace } from '../browser/pacing.js';
+import { clickPlatformLocator, waitPlatformActionPace } from '../browser/pacing.js';
 import { config } from '../config.js';
 import { buildJobKey, parseJobDescription } from '../parsers/jd-parser.js';
 import { JobStore } from '../storage/job-store.js';
@@ -155,7 +155,7 @@ async function closePositionDetail(page: Page): Promise<void> {
   if (!dialog) return;
   const close = dialog.locator('.close, .dialog-close, [aria-label="Close"], [aria-label="关闭"]').first();
   if (await close.isVisible().catch(() => false)) {
-    await runBossAction(page, () => close.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
+    await clickPlatformLocator(close, page, 'boss', config.playwright.resumeDetailTimeoutMs);
   } else {
     await runBossAction(page, () => page.keyboard.press('Escape'));
   }
@@ -167,7 +167,7 @@ export async function openAndReadBossPositionDetail(
 ): Promise<BossPositionDetail> {
   const row = await findPositionRow(page, summary.bossJobId);
   const originalUrl = page.url();
-  await runBossAction(page, () => row.click({ timeout: config.playwright.resumeDetailTimeoutMs }));
+  await clickPlatformLocator(row, page, 'boss', config.playwright.resumeDetailTimeoutMs);
   const detailSelector = '.job-detail-dialog, .position-detail-dialog, .job-detail, .position-detail, [data-job-detail]';
   await page.waitForFunction((selector) => Array.from(document.querySelectorAll<HTMLElement>(selector))
     .some((element) => element.getClientRects().length > 0), detailSelector, {

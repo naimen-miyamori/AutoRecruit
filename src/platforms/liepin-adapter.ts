@@ -1,11 +1,13 @@
 import type { BrowserContext, Locator, Page, Response } from 'playwright';
 import { config } from '../config.js';
 import {
+  clickPagePointWithMouse,
   clickLocatorWithMouse,
   clickPlatformLocator,
   fillPlatformLocator,
   getPlatformCandidatePaceDelayMs,
   randomIntBetween,
+  moveMouseToLocatorCenter,
   waitOnPageOrTimer,
   waitPlatformActionPace,
   waitPlatformActionPaceWithoutPage,
@@ -282,6 +284,7 @@ async function clickLiepinLocatorWithForceFallback(locator: Locator, page: Page,
     await clickLiepinLocator(locator, page, timeoutMs);
     return true;
   } catch {
+    await moveMouseToLocatorCenter(locator, page, timeoutMs).catch(() => false);
     const forceClicked = await locator.click({ timeout: timeoutMs, force: true }).then(() => true).catch(async (error) => {
       const message = error instanceof Error ? error.message : String(error);
       if (!/unexpected argument|too many arguments/i.test(message)) {
@@ -299,68 +302,50 @@ async function clickLiepinLocatorWithForceFallback(locator: Locator, page: Page,
       return false;
     }
 
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => undefined);
+    await clickPagePointWithMouse(page, {
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+    }).catch(() => false);
     return true;
   }
 }
 
 async function dispatchLiepinBlockingOverlayCloseEvents(page: Page): Promise<boolean> {
-  const dispatched = await page.evaluate(() => {
-    const isVisible = (element: Element): boolean => {
-      if (!(element instanceof HTMLElement)) {
-        return false;
-      }
-
-      const style = window.getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      return style.display !== 'none'
-        && style.visibility !== 'hidden'
-        && style.pointerEvents !== 'none'
-        && rect.width > 0
-        && rect.height > 0;
-    };
-    const eventInit: MouseEventInit = {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-    };
-    const closeSelectors = [
-      '.ant-modal-wrap .city-modal-close',
-      '.ant-modal-root .city-modal-close',
-      '[role="dialog"] .city-modal-close',
-      '.ant-modal-wrap [class*="city-modal-close"]',
-      '.ant-modal-root [class*="city-modal-close"]',
-      '.ant-modal-wrap .antd-fd-industry-modal-close',
-      '.ant-modal-root .antd-fd-industry-modal-close',
-      '.ant-modal-wrap .antd-jobs-modal-close',
-      '.ant-modal-root .antd-jobs-modal-close',
-      '.ant-modal-wrap .ant-modal-close',
-      '.ant-modal-root .ant-modal-close',
-      '[role="dialog"] .ant-modal-close',
-      '[role="dialog"] [aria-label="Close"]',
-      '[role="dialog"] [aria-label="close"]',
-      '.ant-modal-wrap [class*="modal-close"]',
-      '.ant-modal-root [class*="modal-close"]',
-    ];
-    const targets = closeSelectors
-      .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
-      .filter((element, index, all) => all.indexOf(element) === index)
-      .filter(isVisible);
-
-    for (const target of targets.reverse()) {
-      target.dispatchEvent(new MouseEvent('pointerdown', eventInit));
-      target.dispatchEvent(new MouseEvent('mousedown', eventInit));
-      target.dispatchEvent(new MouseEvent('mouseup', eventInit));
-      target.dispatchEvent(new MouseEvent('click', eventInit));
-      if (target instanceof HTMLElement) {
-        target.click();
-      }
-    }
-
-    return targets.length > 0;
-  }).catch(() => false);
-
-  return dispatched === true;
+  const targets = page.locator([
+    '.ant-modal-wrap .city-modal-close',
+    '.ant-modal-root .city-modal-close',
+    '[role="dialog"] .city-modal-close',
+    '.ant-modal-wrap [class*="city-modal-close"]',
+    '.ant-modal-root [class*="city-modal-close"]',
+    '.ant-modal-wrap .antd-fd-industry-modal-close',
+    '.ant-modal-root .antd-fd-industry-modal-close',
+    '.ant-modal-wrap .antd-jobs-modal-close',
+    '.ant-modal-root .antd-jobs-modal-close',
+    '.ant-modal-wrap .ant-modal-close',
+    '.ant-modal-root .ant-modal-close',
+    '[role="dialog"] .ant-modal-close',
+    '[role="dialog"] [aria-label="Close"]',
+    '[role="dialog"] [aria-label="close"]',
+    '.ant-modal-wrap [class*="modal-close"]',
+    '.ant-modal-root [class*="modal-close"]',
+  ].join(', '));
+  let dispatched = false;
+  for (let index = await targets.count() - 1; index >= 0; index -= 1) {
+    const target = targets.nth(index);
+    if (!await target.isVisible().catch(() => false)) continue;
+    await waitLiepinActionPace(page);
+    await moveMouseToLocatorCenter(target, page, 1000).catch(() => false);
+    dispatched = await target.evaluate((element) => {
+      const eventInit: MouseEventInit = { bubbles: true, cancelable: true, view: window };
+      element.dispatchEvent(new MouseEvent('pointerdown', eventInit));
+      element.dispatchEvent(new MouseEvent('mousedown', eventInit));
+      element.dispatchEvent(new MouseEvent('mouseup', eventInit));
+      element.dispatchEvent(new MouseEvent('click', eventInit));
+      if (element instanceof HTMLElement) element.click();
+      return true;
+    }).catch(() => false) || dispatched;
+  }
+  return dispatched;
 }
 
 async function closeLiepinBlockingOverlays(page: Page, timeoutMs = 1000): Promise<void> {
@@ -1514,16 +1499,26 @@ async function readLiepinCheckboxFilterChecked(page: Page, label: string): Promi
 }
 
 async function clickLiepinCheckboxFilterWithDomEvents(page: Page, label: string): Promise<boolean> {
-  const clicked = await page.evaluate((targetLabel) => {
+  const wrappers = page.locator('label, [role="checkbox"], .ant-checkbox-wrapper, .semi-checkbox, [class*="checkbox"]');
+  const wrapperIndex = await wrappers.evaluateAll((elements, targetLabel) => {
     const normalize = (value: string | null | undefined): string => (value ?? '').replace(/\s+/g, ' ').trim();
-    const isVisible = (element: Element): boolean => {
+    return elements.findIndex((element) => {
+      if (!(element instanceof HTMLElement)) return false;
       const style = window.getComputedStyle(element);
       const rect = element.getBoundingClientRect();
       return style.display !== 'none'
         && style.visibility !== 'hidden'
         && rect.width > 0
-        && rect.height > 0;
-    };
+        && rect.height > 0
+        && normalize(element.textContent).includes(targetLabel);
+    });
+  }, label);
+  if (wrapperIndex < 0) return false;
+
+  const wrapper = wrappers.nth(wrapperIndex);
+  await waitLiepinActionPace(page);
+  await moveMouseToLocatorCenter(wrapper, page, 3000).catch(() => false);
+  const clicked = await wrapper.evaluate((element) => {
     const isChecked = (element: Element): boolean => {
       if (element instanceof HTMLInputElement) {
         return element.checked;
@@ -1540,17 +1535,12 @@ async function clickLiepinCheckboxFilterWithDomEvents(page: Page, label: string)
       const className = typeof element.className === 'string' ? element.className : '';
       return /\b(?:checked|selected|active|is-checked|is-active|ant-checkbox-checked|ant-switch-checked|semi-checkbox-checked|semi-switch-checked)\b/i.test(className);
     };
-    const wrappers = Array.from(document.querySelectorAll<HTMLElement>('label, [role="checkbox"], .ant-checkbox-wrapper, .semi-checkbox, [class*="checkbox"]'))
-      .filter((element) => isVisible(element) && normalize(element.textContent).includes(targetLabel));
-    const wrapper = wrappers[0];
-    if (!wrapper) {
-      return false;
-    }
+    if (!(element instanceof HTMLElement)) return false;
 
-    const input = wrapper.querySelector<HTMLInputElement>('input[type="checkbox"], input[type="radio"]');
+    const input = element.querySelector<HTMLInputElement>('input[type="checkbox"], input[type="radio"]');
     const control = input
-      ?? wrapper.querySelector<HTMLElement>('[role="checkbox"], [role="switch"], .ant-checkbox, .semi-checkbox')
-      ?? wrapper;
+      ?? element.querySelector<HTMLElement>('[role="checkbox"], [role="switch"], .ant-checkbox, .semi-checkbox')
+      ?? element;
     if (input?.disabled) {
       return false;
     }
@@ -1560,7 +1550,7 @@ async function clickLiepinCheckboxFilterWithDomEvents(page: Page, label: string)
       cancelable: true,
       view: window,
     };
-    for (const target of [control, input, wrapper].filter((item): item is HTMLElement => Boolean(item))) {
+    for (const target of [control, input, element].filter((item): item is HTMLElement => Boolean(item))) {
       target.dispatchEvent(new MouseEvent('pointerdown', eventInit));
       target.dispatchEvent(new MouseEvent('mousedown', eventInit));
     }
@@ -1572,19 +1562,19 @@ async function clickLiepinCheckboxFilterWithDomEvents(page: Page, label: string)
     } else if (control instanceof HTMLElement) {
       control.click();
     } else {
-      wrapper.click();
+      element.click();
     }
 
-    for (const target of [control, input, wrapper].filter((item): item is HTMLElement => Boolean(item))) {
+    for (const target of [control, input, element].filter((item): item is HTMLElement => Boolean(item))) {
       target.dispatchEvent(new MouseEvent('mouseup', eventInit));
     }
 
     const effectiveControl = input ?? control;
     return isChecked(effectiveControl);
-  }, label).catch(() => false);
+  }).catch(() => false);
 
   if (clicked) {
-    await waitLiepinActionPace(page);
+    await waitOnPageOrTimer(page, 100);
   }
 
   return clicked;
@@ -3504,9 +3494,7 @@ async function clickLiepinDomForwardActionAndWait(page: Page, timeoutMs: number)
 
   try {
     await waitLiepinActionPace(page);
-    await mouse.move(clickPoint.x + randomIntBetween(-80, 80), clickPoint.y + randomIntBetween(-40, 40), { steps: randomIntBetween(3, 6) }).catch(() => undefined);
-    await mouse.move(clickPoint.x, clickPoint.y, { steps: randomIntBetween(8, 16) });
-    await mouse.click(clickPoint.x, clickPoint.y);
+    await clickPagePointWithMouse(page, clickPoint);
   } catch (error) {
     throw new Error(`Failed to click the selected Liepin resume forward action. Stopping without trying alternate matches. Cause: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -3921,9 +3909,7 @@ async function clickLiepinDomFrequentContact(page: Page, contactName: string, ti
     for (const point of result.points.slice(0, 1)) {
       console.log(`Clicking Liepin frequent forward contact "${contactName}" at ${point.x},${point.y} (${point.description}; ${result.diagnostic})`);
       await waitLiepinActionPace(page);
-      await mouse.move(point.x + randomIntBetween(-40, 40), point.y + randomIntBetween(-20, 20), { steps: randomIntBetween(3, 6) }).catch(() => undefined);
-      await mouse.move(point.x, point.y, { steps: randomIntBetween(8, 16) });
-      await mouse.click(point.x, point.y);
+      await clickPagePointWithMouse(page, point);
       await waitLiepinActionPace(page);
     }
 
@@ -3988,9 +3974,7 @@ async function clickLiepinDomConfirmForward(page: Page): Promise<boolean> {
   }
 
   await waitLiepinActionPace(page);
-  await mouse.move(clickPoint.x + randomIntBetween(-40, 40), clickPoint.y + randomIntBetween(-20, 20), { steps: randomIntBetween(3, 6) }).catch(() => undefined);
-  await mouse.move(clickPoint.x, clickPoint.y, { steps: randomIntBetween(6, 12) });
-  await mouse.click(clickPoint.x, clickPoint.y);
+  await clickPagePointWithMouse(page, clickPoint);
   return true;
 }
 
