@@ -13,6 +13,7 @@ import { config, resolveStorageStatePath } from '../config.js';
 import { waitForManualLoginAndPersistSession } from './manual-login-refresh.js';
 import { getPlatformAdapter } from '../platforms/registry.js';
 import type { SupportedPlatform } from '../platforms/types.js';
+import { gotoPlatformPage } from './pacing.js';
 
 export interface BrowserSession {
   browser: Browser;
@@ -299,10 +300,7 @@ function classifyLiepinManualLoginLanding(url: string, bodyText: string): 'login
 }
 
 async function openLiepinManualLoginEntry(page: Page): Promise<void> {
-  const minDelayMs = Math.max(0, Math.floor(Math.min(config.playwright.liepinActionDelayMinMs, config.playwright.liepinActionDelayMaxMs)));
-  const maxDelayMs = Math.max(minDelayMs, Math.floor(Math.max(config.playwright.liepinActionDelayMinMs, config.playwright.liepinActionDelayMaxMs)));
-  await page.waitForTimeout(minDelayMs + Math.floor(Math.random() * (maxDelayMs - minDelayMs + 1)));
-  await page.goto('https://h.liepin.com/account/login', { waitUntil: 'domcontentloaded' });
+  await gotoPlatformPage(page, 'liepin', 'https://h.liepin.com/account/login', { waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('domcontentloaded');
 
   const diagnostics = await collectSessionDiagnostics(page);

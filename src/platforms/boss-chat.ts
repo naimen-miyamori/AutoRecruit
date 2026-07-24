@@ -804,13 +804,15 @@ export async function openAndParseBossChatResume(page: Page, opened: BossOpenedC
     throw new Error(`Boss resume introduction click left the chat page unexpectedly: ${page.url()}`);
   }
   await waitForBossResumeDetailReady(page, deadline);
+  await waitPlatformActionPace(page, 'boss');
+  const parseDeadline = Date.now() + Math.max(config.playwright.resumeDetailTimeoutMs, 1);
 
   const abstractData = await page.waitForFunction((previousCount) => {
     const values = (window as Window & typeof globalThis & {
       __autorecruitBossResumeAbstracts?: unknown[];
     }).__autorecruitBossResumeAbstracts ?? [];
     return values.length > previousCount ? values.at(-1) : undefined;
-  }, abstractMessageCount, { timeout: Math.max(deadline - Date.now(), 1), polling: 100 })
+  }, abstractMessageCount, { timeout: Math.max(parseDeadline - Date.now(), 1), polling: 100 })
     .then((handle) => handle.jsonValue() as Promise<Record<string, unknown>>)
     .catch(() => undefined);
   const abstractResume = abstractData

@@ -954,10 +954,13 @@ async function captureCandidateResume(
   postOpenActions: CandidatePostOpenActions = {},
 ): Promise<CandidateProcessResult> {
   let detailPage = session.page;
+  let detailOpened = false;
   let preserveDetailPageForInspection = false;
 
   try {
     detailPage = await platformAdapter.openResumeDetail(session.context, searchPage, candidate);
+    detailOpened = true;
+    await waitPlatformActionPaceRef.fn(detailPage, platform);
     await platformAdapter.afterResumeDetailOpened?.(detailPage, candidate, postOpenActions);
     const extraction = platformAdapter.platform === '51job'
       ? await extractResumeFromPageRef.fn(detailPage, candidate)
@@ -988,12 +991,18 @@ async function captureCandidateResume(
       failureReason: error instanceof Error ? error.message : String(error),
     };
   } finally {
-    if (!preserveDetailPageForInspection && detailPage !== session.page && detailPage !== searchPage) {
-      if (platform === 'liepin') {
-        await waitPlatformActionPaceRef.fn(detailPage, platform);
+    const usesSeparateDetailPage = detailPage !== session.page && detailPage !== searchPage;
+    const canCloseDetail = detailOpened && (usesSeparateDetailPage || platformAdapter.closeResumeDetail !== undefined);
+    if (!preserveDetailPageForInspection && canCloseDetail) {
+      await waitPlatformActionPaceRef.fn(detailPage, platform);
+      if (platformAdapter.closeResumeDetail) {
+        await platformAdapter.closeResumeDetail(searchPage, detailPage, candidate).catch(() => undefined);
+      } else {
+        await detailPage.close().catch(() => undefined);
       }
-      await detailPage.close().catch(() => undefined);
-      await (searchPage as Partial<Pick<typeof searchPage, 'bringToFront'>>).bringToFront?.call(searchPage).catch(() => undefined);
+      if (usesSeparateDetailPage) {
+        await (searchPage as Partial<Pick<typeof searchPage, 'bringToFront'>>).bringToFront?.call(searchPage).catch(() => undefined);
+      }
       session.page = searchPage;
     }
   }

@@ -49,7 +49,7 @@ Default timing configuration:
 
 | Setting | Default |
 | --- | --- |
-| `PLAYWRIGHT_SEARCH_PAGE_TIMEOUT_MS` | `20000` |
+| `PLAYWRIGHT_SEARCH_PAGE_TIMEOUT_MS` | `30000` |
 | `PLAYWRIGHT_EMPTY_RESULTS_STABLE_MS` | `2000` |
 | `PLAYWRIGHT_API_FALLBACK_TIMEOUT_MS` | `3000` |
 | `PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS` | `20000` |
@@ -57,9 +57,7 @@ Default timing configuration:
 ## Pacing
 
 - Use helpers in `src/browser/pacing.ts` for platform user actions and candidate transitions.
-- Liepin action, successful detail closing, and candidate pacing defaults to uniform
-  `2000-3000ms`.
-- Boss action and candidate pacing defaults to `2000-4000ms`, weighted about 80% in
+- 51job, Liepin, Zhilian, and Boss action and candidate pacing defaults to `2000-4000ms`, weighted about 80% in
   `2000-3000ms` and 20% in `3001-4000ms`.
 - Boss navigation, clicks, inputs, key presses, forwarding, talent matching/greet, job-detail sync,
   chat/contact actions, and candidate transitions must not bypass the shared pacing helper.
@@ -82,8 +80,10 @@ Default timing configuration:
 
 - A detail-open or extraction failure remains retryable; only successfully captured resumes become
   seen.
-- Liepin success waits one action interval before closing the detail page and foregrounding search.
-  Liepin failures leave the detail open for inspection and stop the flow.
+- Every platform waits one action interval after resume-detail readiness before forwarding or parsing,
+  then waits another action interval before successful detail cleanup. Popup platforms close the detail
+  page and foreground search; modal platforms close the current modal.
+- Liepin failures leave the detail open for inspection and stop the flow.
 - A single failed 51job click selector must not consume the whole detail deadline.
 - Modal platforms should parse the intended modal subtree rather than unrelated page chrome.
 

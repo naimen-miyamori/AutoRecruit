@@ -1,6 +1,6 @@
 import { Locator, Page } from 'playwright';
 import { config } from '../config.js';
-import { clickPlatformLocator, moveMouseThroughWaypoints } from './pacing.js';
+import { clickPlatformLocator, gotoPlatformPage, moveMouseThroughWaypoints } from './pacing.js';
 import { openAuthenticatedHome as openAuthenticatedSubscribePage } from './session.js';
 import type { SearchWaitOptions, SupportedPlatform } from '../platforms/types.js';
 
@@ -102,7 +102,7 @@ async function openAuthenticatedSubscribePageWithDeadline(
   options?: SearchWaitOptions,
 ): Promise<Page> {
   if (platform === '51job' && options?.deadline) {
-    await page.goto(config.playwright.subscribeUrl, {
+    await gotoPlatformPage(page, platform, config.playwright.subscribeUrl, {
       waitUntil: 'domcontentloaded',
       timeout: getRemainingTimeout(options.deadline),
     });
@@ -656,7 +656,7 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
 
   const searchLinkHref = await searchTrigger.getAttribute('href').catch(() => null);
   if (searchLinkHref) {
-    await page.goto(searchLinkHref, { waitUntil: 'domcontentloaded', timeout: getRemainingTimeout(deadline) });
+    await gotoPlatformPage(page, platform, searchLinkHref, { waitUntil: 'domcontentloaded', timeout: getRemainingTimeout(deadline) });
     await waitFor51jobSearchKeywordCondition(page, searchKeyword, deadline);
     if (options?.includeViewedCandidates) {
       await clear51jobViewedFilter(page, { deadline });

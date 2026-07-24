@@ -115,27 +115,27 @@ function getPlatformBooleanEnv(platform: SupportedPlatform, suffix: string, fall
 }
 
 const actionDelayMinMsByPlatform: Record<SupportedPlatform, number> = {
-  '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MIN_MS', 0),
+  '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MIN_MS', 2000),
   liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MIN_MS', 2000),
-  zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MIN_MS', 0),
+  zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MIN_MS', 2000),
   boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MIN_MS', 2000),
 };
 const actionDelayMaxMsByPlatform: Record<SupportedPlatform, number> = {
-  '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MAX_MS', 0),
-  liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MAX_MS', 3000),
-  zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MAX_MS', 0),
+  '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MAX_MS', 4000),
+  liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MAX_MS', 4000),
+  zhilian: getPlatformNumberEnv('zhilian', 'ACTION_DELAY_MAX_MS', 4000),
   boss: getPlatformNumberEnv('boss', 'ACTION_DELAY_MAX_MS', 4000),
 };
 const candidateDelayMinMsByPlatform: Record<SupportedPlatform, number> = {
-  '51job': getPlatformNumberEnv('51job', 'CANDIDATE_DELAY_MIN_MS', 0),
+  '51job': getPlatformNumberEnv('51job', 'CANDIDATE_DELAY_MIN_MS', 2000),
   liepin: getPlatformNumberEnv('liepin', 'CANDIDATE_DELAY_MIN_MS', 2000),
-  zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MIN_MS', 0),
+  zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MIN_MS', 2000),
   boss: getPlatformNumberEnv('boss', 'CANDIDATE_DELAY_MIN_MS', 2000),
 };
 const candidateDelayMaxMsByPlatform: Record<SupportedPlatform, number> = {
-  '51job': getPlatformNumberEnv('51job', 'CANDIDATE_DELAY_MAX_MS', 0),
-  liepin: getPlatformNumberEnv('liepin', 'CANDIDATE_DELAY_MAX_MS', 3000),
-  zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MAX_MS', 0),
+  '51job': getPlatformNumberEnv('51job', 'CANDIDATE_DELAY_MAX_MS', 4000),
+  liepin: getPlatformNumberEnv('liepin', 'CANDIDATE_DELAY_MAX_MS', 4000),
+  zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MAX_MS', 4000),
   boss: getPlatformNumberEnv('boss', 'CANDIDATE_DELAY_MAX_MS', 4000),
 };
 const reuseBrowserByPlatform: Record<SupportedPlatform, boolean> = {
@@ -165,7 +165,7 @@ export const config = {
     authCheckTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_AUTH_CHECK_TIMEOUT_MS', 15000),
     loginTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_LOGIN_TIMEOUT_MS', 300000),
     loginPollIntervalMs: getOptionalNumberEnv('PLAYWRIGHT_LOGIN_POLL_INTERVAL_MS', 2000),
-    searchPageTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_SEARCH_PAGE_TIMEOUT_MS', 20000),
+    searchPageTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_SEARCH_PAGE_TIMEOUT_MS', 30000),
     emptyResultsStableMs: getOptionalNumberEnv('PLAYWRIGHT_EMPTY_RESULTS_STABLE_MS', 2000),
     apiFallbackTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_API_FALLBACK_TIMEOUT_MS', 3000),
     resumeDetailTimeoutMs: getOptionalNumberEnv('PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS', 20000),

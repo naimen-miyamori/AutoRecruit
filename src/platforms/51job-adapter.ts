@@ -25,6 +25,10 @@ import {
   clickPagePointWithMouse,
   clickPlatformLocator,
   ensureContinuousMouseBridge,
+  fillPlatformLocator,
+  gotoPlatformPage,
+  pressPlatformKey,
+  waitPlatformActionPace,
 } from '../browser/pacing.js';
 import type { Locator, Page } from 'playwright';
 import type { SearchCondition, SearchConditionApplyResult } from '../types/job.js';
@@ -451,7 +455,7 @@ async function open51jobSingleSelectPopover(page: Page, trigger: Locator, label:
       return await waitFor51jobSingleSelectPopover(page, label, popoverId);
     } catch (error) {
       lastError = error;
-      await page.keyboard.press('Escape').catch(() => undefined);
+      await pressPlatformKey(page, '51job', 'Escape').catch(() => undefined);
       await waitFor51jobTransientOverlaysToSettle(page, 1500).catch(() => undefined);
     }
   }
@@ -477,7 +481,7 @@ async function open51jobExpectedSalaryPopover(page: Page, trigger: Locator): Pro
       return await waitFor51jobExpectedSalaryPopover(page, popoverId);
     } catch (error) {
       lastError = error;
-      await page.keyboard.press('Escape').catch(() => undefined);
+      await pressPlatformKey(page, '51job', 'Escape').catch(() => undefined);
       await waitFor51jobTransientOverlaysToSettle(page, 1500).catch(() => undefined);
     }
   }
@@ -504,7 +508,7 @@ async function close51jobBaseSelectPopover(
     return !(await popper.isVisible().catch(() => false));
   };
 
-  await page.keyboard.press('Escape').catch(() => undefined);
+  await pressPlatformKey(page, '51job', 'Escape').catch(() => undefined);
   if (await waitUntilHidden()) {
     return;
   }
@@ -774,6 +778,7 @@ async function click51jobExpectedSalaryOption(
     throw new Error(`Unable to locate expected salary option: ${label}`);
   }
 
+  await waitPlatformActionPace(page, '51job');
   await clickPagePointWithMouse(page, {
     x: box.x + box.width / 2,
     y: box.y + box.height / 2,
@@ -1273,6 +1278,7 @@ async function click51jobOptionItemWrapperByLabelWithMouse(
     return false;
   }
 
+  await waitPlatformActionPace(page, '51job');
   await clickPagePointWithMouse(page, {
     x: box.x + box.width / 2,
     y: box.y + box.height / 2,
@@ -1652,16 +1658,16 @@ async function apply51jobDynamicTextInputBySearch(
     return false;
   }
 
-  await input.fill(value, { timeout: 2000 });
+  await fillPlatformLocator(input, page, '51job', value, 2000);
   const clicked = await click51jobDynamicTextInputSearchResult(page, value);
   if (!clicked) {
-    await input.fill('', { timeout: 1000 }).catch(() => undefined);
+    await fillPlatformLocator(input, page, '51job', '', 1000).catch(() => undefined);
     return false;
   }
 
   const selected = await waitFor51jobDynamicTextInputDialogSelection(page, dialog, value, 2000);
   if (!selected) {
-    await input.fill('', { timeout: 1000 }).catch(() => undefined);
+    await fillPlatformLocator(input, page, '51job', '', 1000).catch(() => undefined);
     await page.waitForTimeout(150);
   }
 
@@ -1824,7 +1830,7 @@ async function fill51jobSingleSelectCustomInput(
   }
 
   for (let index = 0; index < inputValues.length; index += 1) {
-    await textInputs.nth(index).fill(inputValues[index]!.value, { timeout: 2000 });
+    await fillPlatformLocator(textInputs.nth(index), page, '51job', inputValues[index]!.value, 2000);
   }
 
   const button = popover.locator('button').filter({ hasText: '确定' }).first();
@@ -2100,7 +2106,7 @@ async function apply51jobApplicationFilter(
       status: 'applied',
     };
   } catch (error) {
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, '51job', 'Escape').catch(() => undefined);
     await waitFor51jobTransientOverlaysToSettle(page, 1500).catch(() => undefined);
     return {
       platform: '51job',
@@ -2159,7 +2165,7 @@ async function discover51jobDynamicTextInputFilter(
   try {
     await page.evaluate(() => window.scrollTo(0, 0)).catch(() => undefined);
     const extractedOptions = await extract51jobDynamicTextInputOptions(page, target, options);
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, '51job', 'Escape').catch(() => undefined);
     await page.waitForTimeout(250);
 
     return {
@@ -2171,7 +2177,7 @@ async function discover51jobDynamicTextInputFilter(
       failures: [],
     };
   } catch (error) {
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, '51job', 'Escape').catch(() => undefined);
     await page.waitForTimeout(250);
     const reason = error instanceof Error ? error.message : String(error);
     return {
@@ -2188,7 +2194,7 @@ async function discover51jobExpectedSalaryFilter(
   try {
     await page.evaluate(() => window.scrollTo(0, 0)).catch(() => undefined);
     const extractedOptions = await extract51jobExpectedSalaryOptions(page, options);
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, '51job', 'Escape').catch(() => undefined);
     await page.waitForTimeout(250);
 
     return {
@@ -2200,7 +2206,7 @@ async function discover51jobExpectedSalaryFilter(
       failures: [],
     };
   } catch (error) {
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, '51job', 'Escape').catch(() => undefined);
     await page.waitForTimeout(250);
     const reason = error instanceof Error ? error.message : String(error);
     return {
@@ -2293,10 +2299,10 @@ export const fiftyOneJobAdapter: PlatformAdapter = {
   loginUrl: 'https://ehire.51job.com/Revision/talent/subscribe',
   storageStateFileName: 'storage-state.json',
   openLoginPage: async (page) => {
-    await page.goto('https://ehire.51job.com/Revision/talent/subscribe', { waitUntil: 'domcontentloaded' });
+    await gotoPlatformPage(page, '51job', 'https://ehire.51job.com/Revision/talent/subscribe', { waitUntil: 'domcontentloaded' });
   },
   openAuthenticatedHome: async (page) => {
-    await page.goto('https://ehire.51job.com/Revision/talent/subscribe', { waitUntil: 'domcontentloaded' });
+    await gotoPlatformPage(page, '51job', 'https://ehire.51job.com/Revision/talent/subscribe', { waitUntil: 'domcontentloaded' });
     await assertAuthenticatedPage(page);
     return page;
   },

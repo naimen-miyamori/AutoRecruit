@@ -8,7 +8,7 @@ import {
   parseSearchResultTotalFromText,
   saveSearchConditionByCommonDialog,
 } from '../search/page-actions.js';
-import { clickPlatformLocator } from './pacing.js';
+import { clickPlatformLocator, gotoPlatformPage } from './pacing.js';
 import type { SearchWaitOptions } from '../platforms/types.js';
 
 const talentSearchPageUrl = 'https://ehire.51job.com/Revision/talent/search';
@@ -20,8 +20,8 @@ export const openPageLevelSearchRef = {
 };
 
 export async function openPageLevelSearch(page: Page): Promise<Page> {
-  await page.goto(subscribePageUrl, { waitUntil: 'domcontentloaded', timeout: config.playwright.searchPageTimeoutMs });
-  await page.goto(talentSearchPageUrl, { waitUntil: 'domcontentloaded', timeout: config.playwright.searchPageTimeoutMs });
+  await gotoPlatformPage(page, platform, subscribePageUrl, { waitUntil: 'domcontentloaded', timeout: config.playwright.searchPageTimeoutMs });
+  await gotoPlatformPage(page, platform, talentSearchPageUrl, { waitUntil: 'domcontentloaded', timeout: config.playwright.searchPageTimeoutMs });
 
   if (await isLoginPage(page)) {
     throw new Error('51job authenticated talent search page is not available because the session has fallen back to the login screen.');

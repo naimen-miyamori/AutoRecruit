@@ -474,7 +474,7 @@ test('zhilian adapter checks 未看过 by default when a reusable page left it u
   await captureDateNow(async () => {
     stub.setDateNow();
     await zhilianAdapter.openSubscribeSearch(stub.page, '优衣库', {
-      deadline: Date.now() + 5000,
+      deadline: Date.now() + 30000,
     });
   });
 
@@ -489,7 +489,7 @@ test('zhilian adapter clears only 未看过 when viewed candidates are explicitl
   await captureDateNow(async () => {
     stub.setDateNow();
     await zhilianAdapter.openSubscribeSearch(stub.page, '优衣库', {
-      deadline: Date.now() + 5000,
+      deadline: Date.now() + 30000,
       includeViewedCandidates: true,
     });
   });

@@ -130,11 +130,11 @@ the inner loop.
 - Pacing waits are intentional user-like action delays. Do not add unbudgeted waits that silently
   exhaust a shared readiness deadline. Multi-action flows must give pacing and page readiness a
   realistic bounded budget, or use bounded per-phase deadlines.
-- Liepin action, successful detail-close, and candidate-transition pacing defaults to randomized
-  `2000-3000ms`.
-- Boss action and candidate pacing defaults to `2000-4000ms`, weighted approximately 80% in
+- 51job, Liepin, Zhilian, and Boss action and candidate pacing defaults to `2000-4000ms`, weighted approximately 80% in
   `2000-3000ms` and 20% in `3001-4000ms`. Navigation, clicks, inputs, key presses, forwarding, and
-  candidate transitions must use shared pacing helpers; do not introduce an unpaced Boss action.
+  candidate transitions must use shared pacing helpers.
+- After a resume detail becomes ready, wait one platform action interval before forwarding or parsing.
+  After a completed candidate, wait another action interval before closing the detail page or modal.
 - Boss search keywords, direct chat text, and remarks use shared grapheme-by-grapheme typing with
   randomized `80-180ms` character delays and punctuation pauses. Keep common phrases on their
   existing option-click path, and never replace an existing chat draft.

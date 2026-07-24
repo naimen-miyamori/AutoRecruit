@@ -3,7 +3,7 @@ import { CandidateListItem, CandidateResume, EducationExperience, LanguageSkill,
 import { buildRawPageSource } from '../extraction/page-source.js';
 import { extractResumeFromSource as extractResumeFromCrawl4AiSource } from '../extraction/crawl4ai-extractor.js';
 import { config } from '../config.js';
-import { clickPlatformLocator } from './pacing.js';
+import { clickPlatformLocator, gotoPlatformPage, waitPlatformActionPace } from './pacing.js';
 
 const EDUCATION_KEYWORDS = ['博士', '硕士', '本科', '大专', '中技/中专', '中专', '高中'];
 const LANGUAGE_KEYWORDS = ['英语', '日语', '韩语', '粤语', '法语', '德语', '西班牙语'];
@@ -1667,7 +1667,7 @@ async function openResumeDetailByUrl(page: Page, candidate: CandidateListItem, d
     throw new Error(`Could not open resume detail for candidate ${candidate.candidateId}`);
   }
 
-  await page.goto(candidate.resumeUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
+  await gotoPlatformPage(page, '51job', candidate.resumeUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
 
   const bodyText = await waitForResumeDetailContent(page, candidate.candidateId, { deadline });
   if (!bodyText.includes(candidate.candidateId)) {
@@ -1868,6 +1868,8 @@ export async function openResumeDetail(context: BrowserContext, page: Page, cand
     card,
   ];
 
+  await waitPlatformActionPace(page, '51job');
+
   for (const locator of clickableLocators) {
     if (await locator.count() === 0) {
       continue;
@@ -1881,7 +1883,7 @@ export async function openResumeDetail(context: BrowserContext, page: Page, cand
         candidate.candidateId,
         previousUrl,
         deadline,
-        () => clickPlatformLocator(locator, page, '51job', remainingTime(deadline), { force: true }),
+        () => clickPlatformLocator(locator, page, '51job', remainingTime(deadline), { force: true, pace: false }),
         { triggerTimeoutMs: detailClickTriggerTimeoutMs },
       );
       if (detailPage) {

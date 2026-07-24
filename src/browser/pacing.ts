@@ -173,7 +173,7 @@ export async function ensureContinuousMouseBridge(page: Page): Promise<void> {
   continuousMouseBridgePages.add(page);
 }
 
-function getBossWeightedPaceDelayMs(min: number, max: number): number {
+function getWeightedPaceDelayMs(min: number, max: number): number {
   const lower = Math.max(0, Math.floor(Math.min(min, max)));
   const upper = Math.max(lower, Math.floor(Math.max(min, max)));
   if (lower === upper) {
@@ -190,17 +190,13 @@ function getBossWeightedPaceDelayMs(min: number, max: number): number {
 export function getPlatformActionPaceDelayMs(platform: SupportedPlatform): number {
   const min = config.playwright.actionDelayMinMsByPlatform[platform];
   const max = config.playwright.actionDelayMaxMsByPlatform[platform];
-  return platform === 'boss'
-    ? getBossWeightedPaceDelayMs(min, max)
-    : randomIntBetween(min, max);
+  return getWeightedPaceDelayMs(min, max);
 }
 
 export function getPlatformCandidatePaceDelayMs(platform: SupportedPlatform): number {
   const min = config.playwright.candidateDelayMinMsByPlatform[platform];
   const max = config.playwright.candidateDelayMaxMsByPlatform[platform];
-  return platform === 'boss'
-    ? getBossWeightedPaceDelayMs(min, max)
-    : randomIntBetween(min, max);
+  return getWeightedPaceDelayMs(min, max);
 }
 
 export async function waitOnPageOrTimer(page: Page, timeoutMs: number): Promise<void> {
@@ -233,6 +229,35 @@ export async function waitPlatformActionPaceWithoutPage(platform: SupportedPlatf
 
 export async function waitPlatformCandidatePace(page: Page, platform: SupportedPlatform): Promise<void> {
   await waitOnPageOrTimer(page, getPlatformCandidatePaceDelayMs(platform));
+}
+
+export async function gotoPlatformPage(
+  page: Page,
+  platform: SupportedPlatform,
+  url: string,
+  options?: Parameters<Page['goto']>[1],
+) {
+  await waitPlatformActionPace(page, platform);
+  return page.goto(url, options);
+}
+
+export async function reloadPlatformPage(
+  page: Page,
+  platform: SupportedPlatform,
+  options?: Parameters<Page['reload']>[0],
+) {
+  await waitPlatformActionPace(page, platform);
+  return page.reload(options);
+}
+
+export async function pressPlatformKey(
+  page: Page,
+  platform: SupportedPlatform,
+  key: string,
+  options?: Parameters<Page['keyboard']['press']>[1],
+): Promise<void> {
+  await waitPlatformActionPace(page, platform);
+  await page.keyboard.press(key, options);
 }
 
 export async function clickLocatorWithMouse(
@@ -328,9 +353,11 @@ export async function clickPlatformLocator(
   page: Page,
   platform: SupportedPlatform,
   timeoutMs: number,
-  options: { force?: boolean; position?: MousePointerPoint } = {},
+  options: { force?: boolean; position?: MousePointerPoint; pace?: boolean } = {},
 ): Promise<void> {
-  await waitPlatformActionPace(page, platform);
+  if (options.pace !== false) {
+    await waitPlatformActionPace(page, platform);
+  }
   if (!options.force && await clickLocatorWithMouse(locator, page, timeoutMs, { position: options.position })) {
     return;
   }

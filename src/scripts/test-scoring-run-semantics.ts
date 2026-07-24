@@ -1699,7 +1699,7 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(searchOpen.getCardWaitForCalls(), []);
   });
 
-  it('retries clicking the subscription search trigger without fixed backoff waits', async () => {
+  it('retries the subscription search trigger with one platform pace per click attempt', async () => {
     const searchOpen = createSubscribeSearchOpenStub();
     const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
     const originalNow = Date.now;
@@ -1728,7 +1728,9 @@ describe('scoring run semantics', () => {
     }
 
     assert.equal(attempts, 2);
-    assert.deepStrictEqual(searchOpen.getPageWaitForTimeoutCalls(), []);
+    const paceWaits = searchOpen.getPageWaitForTimeoutCalls();
+    assert.equal(paceWaits.length, 2);
+    assert.equal(paceWaits.every((delay) => delay >= 2000 && delay <= 4000), true);
   });
 
   it('collects HTML and frame evidence when the main body is empty', async () => {
@@ -1833,7 +1835,10 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(detailPage.getGotoCalls(), [
       { url: 'https://example.com/resume/100228050', waitUntil: 'domcontentloaded' },
     ]);
-    assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), [500]);
+    const waits = detailPage.getWaitForTimeoutCalls();
+    assert.equal(waits.length, 2);
+    assert.equal(waits[0]! >= 2000 && waits[0]! <= 4000, true);
+    assert.equal(waits[1], 500);
   });
 
   it('falls back to resume URL when click does not open a real resume detail page', async () => {
@@ -1852,7 +1857,9 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.name']);
     assert.deepStrictEqual(detailPage.getGotoCalls(), []);
     assert.equal(candidate.resumeUrl, 'https://example.com/resume/100228050');
-    assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
+    const waits = detailPage.getWaitForTimeoutCalls();
+    assert.equal(waits.length, 1);
+    assert.equal(waits[0]! >= 2000 && waits[0]! <= 4000, true);
   });
 
   it('accepts same-page resume detail content when online resume marker is present', async () => {
@@ -1868,7 +1875,9 @@ describe('scoring run semantics', () => {
     assert.equal(result, detailPage.page);
     assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.name']);
     assert.deepStrictEqual(detailPage.getGotoCalls(), []);
-    assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
+    const waits = detailPage.getWaitForTimeoutCalls();
+    assert.equal(waits.length, 1);
+    assert.equal(waits[0]! >= 2000 && waits[0]! <= 4000, true);
   });
 
   it('opens resume detail by click navigation without extra fixed waits once the page is ready', async () => {
@@ -1884,7 +1893,9 @@ describe('scoring run semantics', () => {
 
     assert.equal(result, detailPage.page);
     assert.deepStrictEqual(detailPage.getClickCalls(), ['card:.name']);
-    assert.deepStrictEqual(detailPage.getWaitForTimeoutCalls(), []);
+    const waits = detailPage.getWaitForTimeoutCalls();
+    assert.equal(waits.length, 1);
+    assert.equal(waits[0]! >= 2000 && waits[0]! <= 4000, true);
   });
 
   it('opens manual login in an isolated persistent browser profile', async () => {
@@ -5101,6 +5112,7 @@ describe('scoring run semantics', () => {
     let searchFocused = false;
     const callOrder: string[] = [];
     const originalWaitPlatformActionPace = indexModule.waitPlatformActionPaceRef.fn;
+    let actionPaceCalls = 0;
 
     const detailPage = {
       locator: () => ({ innerText: async () => 'raw resume text' }),
@@ -5129,7 +5141,8 @@ describe('scoring run semantics', () => {
     indexModule.waitPlatformActionPaceRef.fn = async (page, platform) => {
       assert.equal(page, detailPage);
       assert.equal(platform, 'liepin');
-      callOrder.push('pace-before-close');
+      actionPaceCalls += 1;
+      callOrder.push(actionPaceCalls === 1 ? 'pace-after-open' : 'pace-before-close');
     };
     indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
 
@@ -5151,7 +5164,71 @@ describe('scoring run semantics', () => {
     assert.equal(detailClosed, true);
     assert.equal(searchFocused, true);
     assert.equal(session.page, searchPage);
-    assert.deepStrictEqual(callOrder, ['parse', 'pace-before-close', 'close', 'focus-search']);
+    assert.deepStrictEqual(callOrder, ['pace-after-open', 'parse', 'pace-before-close', 'close', 'focus-search']);
+  });
+
+  it('paces a same-page resume modal after opening and before adapter cleanup', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-modal-detail-pace';
+    const fetchedAt = '2026-07-24T12:34:56.000Z';
+    const searchPage = createSearchPage() as Page;
+    const session = {
+      page: searchPage,
+      context: { id: 'browser-context' },
+    } as unknown as BrowserSession;
+    const callOrder: string[] = [];
+    const originalWaitPlatformActionPace = indexModule.waitPlatformActionPaceRef.fn;
+    let actionPaceCalls = 0;
+
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('zhilian'),
+      openSubscribeSearch: async () => searchPage,
+      extractCandidateList: async () => ({ candidates: [{ candidateId: 'cand-modal' }] }),
+      openResumeDetail: async () => {
+        callOrder.push('open');
+        return searchPage;
+      },
+      parseResumeDetail: async () => {
+        callOrder.push('parse');
+        return buildResume('cand-modal');
+      },
+      closeResumeDetail: async () => {
+        callOrder.push('close-modal');
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    indexModule.waitPlatformActionPaceRef.fn = async (page, platform) => {
+      assert.equal(page, searchPage);
+      assert.equal(platform, 'zhilian');
+      actionPaceCalls += 1;
+      callOrder.push(actionPaceCalls === 1 ? 'pace-after-open' : 'pace-before-close');
+    };
+    indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
+
+    try {
+      await indexModule.runResumeCaptureFlow(
+        'zhilian',
+        jobKey,
+        buildNormalizedJob(),
+        'search keyword',
+        store,
+        session,
+        fetchedAt,
+        adapter,
+      );
+    } finally {
+      indexModule.waitPlatformActionPaceRef.fn = originalWaitPlatformActionPace;
+    }
+
+    assert.deepStrictEqual(callOrder, [
+      'open',
+      'pace-after-open',
+      'parse',
+      'pace-before-close',
+      'close-modal',
+    ]);
   });
 
   it('keeps upstream extraction failures retryable by not marking them as seen', async () => {

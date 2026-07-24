@@ -44,4 +44,5 @@ export interface PlatformAdapter {
   openResumeDetail(context: BrowserContext, searchPage: Page, candidate: CandidateListItem): Promise<Page>;
   afterResumeDetailOpened?(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions): Promise<void>;
   parseResumeDetail(page: Page, candidate: CandidateListItem): Promise<CandidateResume>;
+  closeResumeDetail?(searchPage: Page, detailPage: Page, candidate: CandidateListItem): Promise<void>;
 }

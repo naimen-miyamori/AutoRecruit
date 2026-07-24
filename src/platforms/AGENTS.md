@@ -55,8 +55,8 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
   keyword, triggers search, and applies requested conditions.
 - Default capture explicitly checks `隐藏已查看`; `--include-viewed true` explicitly clears it.
   Discard stale `search-resumes` responses from before the final viewed-filter state.
-- In-page actions, successful resume-detail closing, and candidate transitions use randomized
-  `2000-3000ms` pacing. Every pointer click follows the shared continuous mouse trajectory; DOM or
+- In-page actions, post-open resume dwell, successful resume-detail closing, and candidate transitions use
+  the shared weighted `2000-4000ms` pacing. Every pointer click follows the shared continuous mouse trajectory; DOM or
   forced-click fallbacks must first move that same pointer to the target.
 - After a successful parse and save, wait one Liepin action interval before closing the detail page
   and returning to search. On forwarding, detail-open, or extraction failure, stop the flow and
@@ -118,6 +118,8 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
 ### Detail and delivery
 
 - Resume detail is a modal on `/app/search`; parse only the modal subtree.
+- After the modal becomes ready, wait one action interval before forwarding or parsing. After candidate
+  processing, wait another action interval and close the modal before continuing.
 - Copy `转给同事` -> `链接转发` and persist the current-run link as `candidateShareUrl`.
 - Scored-candidate email requires one unique current-run share link per candidate. Missing or
   duplicated links are delivery errors.

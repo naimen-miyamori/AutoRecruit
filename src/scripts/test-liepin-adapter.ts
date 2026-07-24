@@ -23,15 +23,15 @@ function runInIsolatedPageContext<TArg, TResult>(fn: (arg: TArg) => TResult, arg
 
 const liepinSearchReadyText = '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 隐藏已查看';
 
-test('liepin adapter defaults every action and candidate pace delay to 2-3 seconds', () => {
+test('liepin adapter defaults every action and candidate pace delay to 2-4 seconds', () => {
   assert.equal(config.playwright.liepinActionDelayMinMs, 2000);
-  assert.equal(config.playwright.liepinActionDelayMaxMs, 3000);
+  assert.equal(config.playwright.liepinActionDelayMaxMs, 4000);
   assert.equal(config.playwright.liepinCandidateDelayMinMs, 2000);
-  assert.equal(config.playwright.liepinCandidateDelayMaxMs, 3000);
+  assert.equal(config.playwright.liepinCandidateDelayMaxMs, 4000);
 
   for (let index = 0; index < 20; index += 1) {
     const delayMs = getLiepinCandidatePaceDelayMs();
-    assert.ok(delayMs >= 2000 && delayMs <= 3000);
+    assert.ok(delayMs >= 2000 && delayMs <= 4000);
   }
 });
 

@@ -8,6 +8,7 @@ import {
   getPlatformCandidatePaceDelayMs,
   randomIntBetween,
   moveMouseToLocatorCenter,
+  pressPlatformKey,
   waitOnPageOrTimer,
   waitPlatformActionPace,
   waitPlatformActionPaceWithoutPage,
@@ -349,7 +350,7 @@ async function dispatchLiepinBlockingOverlayCloseEvents(page: Page): Promise<boo
 }
 
 async function closeLiepinBlockingOverlays(page: Page, timeoutMs = 1000): Promise<void> {
-  await page.keyboard.press('Escape').catch(() => undefined);
+  await pressPlatformKey(page, liepinPlatform, 'Escape').catch(() => undefined);
   await waitOnPageOrTimer(page, 200);
   if (!(await hasVisibleLiepinBlockingOverlay(page))) {
     return;
@@ -402,7 +403,7 @@ async function closeLiepinBlockingOverlays(page: Page, timeoutMs = 1000): Promis
       }
     }
 
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, liepinPlatform, 'Escape').catch(() => undefined);
     await waitOnPageOrTimer(page, 300);
     if (!(await hasVisibleLiepinBlockingOverlay(page))) {
       return;
@@ -2050,7 +2051,7 @@ async function applyLiepinApplicationFilter(
       status: 'applied',
     };
   } catch (error) {
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, liepinPlatform, 'Escape').catch(() => undefined);
     return {
       platform: 'liepin',
       condition,

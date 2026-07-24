@@ -43,7 +43,7 @@ async function clickBossLocator(
   locator: Locator,
   page: Page,
   timeoutMs: number,
-  options: { force?: boolean; position?: { x: number; y: number } } = {},
+  options: { force?: boolean; position?: { x: number; y: number }; pace?: boolean } = {},
 ): Promise<void> {
   await clickPlatformLocator(locator, page, 'boss', timeoutMs, options);
 }
@@ -1802,15 +1802,24 @@ async function extractBossCandidateList(page: Page, options?: SearchWaitOptions)
   return { candidates: parseBossCandidateSnapshots(snapshots) };
 }
 
-export async function closeExistingBossResumeDialog(page: Page, deadline: number): Promise<void> {
+export async function closeExistingBossResumeDialog(
+  page: Page,
+  deadline: number,
+  options: { pace?: boolean } = {},
+): Promise<void> {
   const activeDialog = page.locator('.dialog-wrap.active[data-type="boss-dialog"], .dialog-wrap.active:has(iframe[src*="/web/frame/c-resume/"]), .dialog-wrap.active:has(.c-share-box)').first();
   if (await activeDialog.count().catch(() => 0) === 0) {
     return;
   }
 
   const closeButton = activeDialog.locator('.boss-popup__close, .close-btn, [ka="dialog_close"], .boss-dialog__close').first();
-  await clickBossLocator(closeButton, page, Math.min(remainingTime(deadline), 3000)).catch(async () => {
-    await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  await clickBossLocator(closeButton, page, Math.min(remainingTime(deadline), 3000), { pace: options.pace }).catch(async () => {
+    const pressEscape = () => page.keyboard.press('Escape');
+    if (options.pace === false) {
+      await pressEscape().catch(() => undefined);
+      return;
+    }
+    await runBossPageAction(page, pressEscape).catch(() => undefined);
   });
   await activeDialog.waitFor({ state: 'hidden', timeout: Math.min(remainingTime(deadline), 5000) }).catch(() => undefined);
 }
@@ -2307,4 +2316,7 @@ export const bossAdapter: PlatformAdapter = {
   openResumeDetail: openBossResumeDetail,
   afterResumeDetailOpened: runBossPostOpenActions,
   parseResumeDetail: parseBossResumeDetail,
+  closeResumeDetail: async (searchPage) => {
+    await closeExistingBossResumeDialog(searchPage, createResumeDetailDeadline(), { pace: false });
+  },
 };

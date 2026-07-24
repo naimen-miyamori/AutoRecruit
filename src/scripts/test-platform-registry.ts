@@ -105,27 +105,27 @@ test('resolveStorageStatePath rejects cross-platform or shared STORAGE_STATE_PAT
 
 test('browser pacing and reuse defaults are platform-specific', () => {
   assert.deepEqual(config.playwright.actionDelayMinMsByPlatform, {
-    '51job': 0,
+    '51job': 2000,
     liepin: 2000,
-    zhilian: 0,
+    zhilian: 2000,
     boss: 2000,
   });
   assert.deepEqual(config.playwright.actionDelayMaxMsByPlatform, {
-    '51job': 0,
-    liepin: 3000,
-    zhilian: 0,
+    '51job': 4000,
+    liepin: 4000,
+    zhilian: 4000,
     boss: 4000,
   });
   assert.deepEqual(config.playwright.candidateDelayMinMsByPlatform, {
-    '51job': 0,
+    '51job': 2000,
     liepin: 2000,
-    zhilian: 0,
+    zhilian: 2000,
     boss: 2000,
   });
   assert.deepEqual(config.playwright.candidateDelayMaxMsByPlatform, {
-    '51job': 0,
-    liepin: 3000,
-    zhilian: 0,
+    '51job': 4000,
+    liepin: 4000,
+    zhilian: 4000,
     boss: 4000,
   });
   assert.deepEqual(config.playwright.reuseBrowserByPlatform, {
@@ -142,6 +142,7 @@ test('browser pacing and reuse defaults are platform-specific', () => {
   });
   assert.equal(config.playwright.bossTypingDelayMinMs, 80);
   assert.equal(config.playwright.bossTypingDelayMaxMs, 180);
+  assert.equal(config.playwright.searchPageTimeoutMs, 30000);
 });
 
 test('Boss simulated typing preserves graphemes and uses bounded character delays', () => {
@@ -154,31 +155,35 @@ test('Boss simulated typing preserves graphemes and uses bounded character delay
   }
 });
 
-test('Boss action and candidate pacing always use a non-zero 2-4 second default delay', () => {
-  for (let index = 0; index < 100; index += 1) {
-    const actionDelayMs = getPlatformActionPaceDelayMs('boss');
-    const candidateDelayMs = getPlatformCandidatePaceDelayMs('boss');
-    assert.ok(actionDelayMs >= 2000 && actionDelayMs <= 4000);
-    assert.ok(candidateDelayMs >= 2000 && candidateDelayMs <= 4000);
+test('all platforms use a non-zero 2-4 second default action and candidate delay', () => {
+  for (const platform of ['51job', 'liepin', 'zhilian', 'boss'] as const) {
+    for (let index = 0; index < 100; index += 1) {
+      const actionDelayMs = getPlatformActionPaceDelayMs(platform);
+      const candidateDelayMs = getPlatformCandidatePaceDelayMs(platform);
+      assert.ok(actionDelayMs >= 2000 && actionDelayMs <= 4000);
+      assert.ok(candidateDelayMs >= 2000 && candidateDelayMs <= 4000);
+    }
   }
 });
 
-test('Boss pacing favors 2-3 second delays over 3-4 second delays', () => {
+test('all platform pacing favors 2-3 second delays over 3-4 second delays', () => {
   const sampleCount = 20_000;
-  let lowerActionDelays = 0;
-  let lowerCandidateDelays = 0;
+  for (const platform of ['51job', 'liepin', 'zhilian', 'boss'] as const) {
+    let lowerActionDelays = 0;
+    let lowerCandidateDelays = 0;
 
-  for (let index = 0; index < sampleCount; index += 1) {
-    if (getPlatformActionPaceDelayMs('boss') <= 3000) {
-      lowerActionDelays += 1;
+    for (let index = 0; index < sampleCount; index += 1) {
+      if (getPlatformActionPaceDelayMs(platform) <= 3000) {
+        lowerActionDelays += 1;
+      }
+      if (getPlatformCandidatePaceDelayMs(platform) <= 3000) {
+        lowerCandidateDelays += 1;
+      }
     }
-    if (getPlatformCandidatePaceDelayMs('boss') <= 3000) {
-      lowerCandidateDelays += 1;
-    }
+
+    assert.ok(lowerActionDelays >= sampleCount * 0.75 && lowerActionDelays <= sampleCount * 0.85);
+    assert.ok(lowerCandidateDelays >= sampleCount * 0.75 && lowerCandidateDelays <= sampleCount * 0.85);
   }
-
-  assert.ok(lowerActionDelays >= sampleCount * 0.75 && lowerActionDelays <= sampleCount * 0.85);
-  assert.ok(lowerCandidateDelays >= sampleCount * 0.75 && lowerCandidateDelays <= sampleCount * 0.85);
 });
 
 test('mouse trajectories remain continuous across operations and pages in one browser context', async () => {
@@ -584,6 +589,7 @@ test('zhilian adapter exposes the shared auth contract', () => {
   assert.equal(typeof zhilianAdapter.extractCandidateList, 'function');
   assert.equal(typeof zhilianAdapter.openResumeDetail, 'function');
   assert.equal(typeof zhilianAdapter.parseResumeDetail, 'function');
+  assert.equal(typeof zhilianAdapter.closeResumeDetail, 'function');
 });
 
 test('boss adapter exposes search, resume parsing, and configured forwarding contracts', () => {
@@ -606,4 +612,5 @@ test('boss adapter exposes search, resume parsing, and configured forwarding con
   assert.equal(typeof bossAdapter.openResumeDetail, 'function');
   assert.equal(typeof bossAdapter.afterResumeDetailOpened, 'function');
   assert.equal(typeof bossAdapter.parseResumeDetail, 'function');
+  assert.equal(typeof bossAdapter.closeResumeDetail, 'function');
 });

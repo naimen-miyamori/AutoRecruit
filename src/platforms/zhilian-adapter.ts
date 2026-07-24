@@ -1,6 +1,13 @@
 import type { BrowserContext, Page } from 'playwright';
 import { config } from '../config.js';
-import { clickPlatformLocator, moveMouseToLocatorCenter } from '../browser/pacing.js';
+import {
+  clickPlatformLocator,
+  gotoPlatformPage,
+  moveMouseToLocatorCenter,
+  pressPlatformKey,
+  reloadPlatformPage,
+  waitPlatformActionPace,
+} from '../browser/pacing.js';
 import {
   clickPrimarySearchButton,
   clickFirstVisibleText,
@@ -354,7 +361,10 @@ function isZhilianSearchUrl(url: string): boolean {
   return /^https:\/\/rd6\.zhaopin\.com\/app\/search(?:[/?#].*)?$/i.test(url);
 }
 
-async function closeExistingZhilianResumeModal(page: Page): Promise<void> {
+async function closeExistingZhilianResumeModal(
+  page: Page,
+  options: { pace?: boolean } = {},
+): Promise<void> {
   if (!isZhilianSearchUrl(page.url())) {
     return;
   }
@@ -383,6 +393,7 @@ async function closeExistingZhilianResumeModal(page: Page): Promise<void> {
       page,
       zhilianPlatform,
       Math.min(config.playwright.resumeDetailTimeoutMs, 1000),
+      { pace: options.pace },
     );
   } catch {
     if (/resumeNumber=/i.test(page.url())) {
@@ -433,7 +444,7 @@ async function openZhilianRecruiterHome(page: Page, options?: SearchWaitOptions)
   }
 
   try {
-    await page.goto(zhilianAuthenticatedHomeUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
+    await gotoPlatformPage(page, zhilianPlatform, zhilianAuthenticatedHomeUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
   } catch (error) {
     if (!isAbortNavigationError(error) || !isZhilianRecruiterUrl(page.url())) {
       throw error;
@@ -451,7 +462,7 @@ async function reloadZhilianSearchPage(page: Page, deadline: number): Promise<vo
 
   clearObservedZhilianCandidateApi(page);
   try {
-    await reload({ waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
+    await reloadPlatformPage(page, zhilianPlatform, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
   } catch (error) {
     if (!isAbortNavigationError(error) || !isZhilianSearchUrl(page.url())) {
       throw error;
@@ -906,7 +917,7 @@ async function fillZhilianDirectKeywordSearch(page: Page, keyword: string, deadl
     zhilianPlatform,
   );
   if (!didTriggerSearch) {
-    await page.keyboard.press('Enter').catch(() => undefined);
+    await pressPlatformKey(page, zhilianPlatform, 'Enter').catch(() => undefined);
   }
 
   await waitForZhilianRecruiterShell(page, { deadline });
@@ -1058,7 +1069,7 @@ async function closeBlockingZhilianFilterDiscoveryDialogs(page: Page): Promise<v
   try {
     await clickPlatformLocator(closeControl, page, zhilianPlatform, 1000);
   } catch {
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, zhilianPlatform, 'Escape').catch(() => undefined);
   }
 }
 
@@ -1290,7 +1301,7 @@ async function collectZhilianOtherFilterPopupOptions(
 }
 
 async function closeZhilianVisibleFilterPopups(page: Page, deadline: number): Promise<void> {
-  await page.keyboard.press('Escape').catch(() => undefined);
+  await pressPlatformKey(page, zhilianPlatform, 'Escape').catch(() => undefined);
   await page.evaluate(async () => {
     const normalizeText = (value: string | null | undefined): string => (value ?? '').replace(/\s+/g, ' ').trim();
     const isVisible = (element: Element | null): element is HTMLElement => {
@@ -2352,7 +2363,7 @@ async function applyZhilianDropdownApplicationFilter(
   const value = readZhilianApplicationFilterSingleValue(condition);
   await openZhilianOtherFilterDropdown(page, label);
   await clickZhilianOpenedKmOption(page, value);
-  await page.keyboard.press('Escape').catch(() => undefined);
+  await pressPlatformKey(page, zhilianPlatform, 'Escape').catch(() => undefined);
   await waitForZhilianApplicationFilterSettle(page);
 }
 
@@ -2433,7 +2444,7 @@ async function applyZhilianLanguageApplicationFilter(
 
   await openZhilianOtherFilterDropdown(page, '语言能力');
   await clickZhilianLanguageOption(page, value);
-  await page.keyboard.press('Escape').catch(() => undefined);
+  await pressPlatformKey(page, zhilianPlatform, 'Escape').catch(() => undefined);
   await waitForZhilianApplicationFilterSettle(page);
   await assertZhilianAppliedConditionValues(page, condition.fieldId, [valueCandidates]);
 }
@@ -2617,7 +2628,7 @@ async function clickZhilianCascaderConfirm(page: Page): Promise<void> {
   }
 
   await waitForZhilianApplicationFilterSettle(page);
-  await page.keyboard.press('Escape').catch(() => undefined);
+  await pressPlatformKey(page, zhilianPlatform, 'Escape').catch(() => undefined);
 }
 
 async function applyZhilianCascaderApplicationFilter(
@@ -2658,6 +2669,7 @@ async function clickZhilianSalaryOption(page: Page, value: string, side: 'min' |
   }).first();
 
   try {
+    await waitPlatformActionPace(page, zhilianPlatform);
     await moveMouseToLocatorCenter(option, page, 3000).catch(() => false);
     await option.click({ timeout: 3000 });
     await page.waitForTimeout(150).catch(() => undefined);
@@ -2742,7 +2754,7 @@ async function applyZhilianExpectedSalaryApplicationFilter(
     await openZhilianOtherFilterDropdown(page, '期望月薪');
     await clickZhilianSalaryOption(page, max, 'max');
   }
-  await page.keyboard.press('Escape').catch(() => undefined);
+  await pressPlatformKey(page, zhilianPlatform, 'Escape').catch(() => undefined);
   await waitForZhilianApplicationFilterSettle(page);
   await assertZhilianExpectedSalaryApplied(page, min, max);
 }
@@ -2765,7 +2777,7 @@ async function applyZhilianBasicApplicationFilter(
     await clickZhilianBasicFilterCustomRangeTrigger(page, rowLabels);
     await clickZhilianBasicCustomSelectRangeOption(page, rowLabels, customInput.min, 'min');
     await clickZhilianBasicCustomSelectRangeOption(page, rowLabels, customInput.max, 'max');
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, zhilianPlatform, 'Escape').catch(() => undefined);
     await waitForZhilianApplicationFilterSettle(page);
     await assertZhilianBasicCustomRangeApplied(page, rowLabels, customInput);
     return;
@@ -2786,7 +2798,7 @@ async function applyZhilianBasicApplicationFilter(
     await clickZhilianBasicFilterCustomRangeTrigger(page, rowLabels);
     await clickZhilianBasicCustomSelectRangeOption(page, rowLabels, ageCustomInput.min, 'min');
     await clickZhilianBasicCustomSelectRangeOption(page, rowLabels, ageCustomInput.max, 'max');
-    await page.keyboard.press('Escape').catch(() => undefined);
+    await pressPlatformKey(page, zhilianPlatform, 'Escape').catch(() => undefined);
     await waitForZhilianApplicationFilterSettle(page);
     await assertZhilianBasicCustomRangeApplied(page, rowLabels, ageCustomInput);
     return;
@@ -2842,7 +2854,7 @@ async function applyZhilianApplicationFilter(
     };
   } catch (error) {
     await closeZhilianVisibleFilterPopups(page, createDeadline(1000)).catch(async () => {
-      await page.keyboard.press('Escape').catch(() => undefined);
+      await pressPlatformKey(page, zhilianPlatform, 'Escape').catch(() => undefined);
     });
     return {
       platform: 'zhilian',
@@ -3181,6 +3193,7 @@ async function dismissZhilianColleagueForwardDialog(page: Page): Promise<void> {
   }
 
   try {
+    await waitPlatformActionPace(page, zhilianPlatform);
     await keyboard.press('Escape');
   } catch {
     // Best effort only. Resume parsing should not fail because the share dialog cannot be dismissed.
@@ -3811,7 +3824,7 @@ export const zhilianAdapter: PlatformAdapter = {
   loginUrl: zhilianLoginUrl,
   storageStateFileName: 'storage-state.zhilian.json',
   openLoginPage: async (page) => {
-    await page.goto(zhilianLoginUrl, { waitUntil: 'domcontentloaded' });
+    await gotoPlatformPage(page, zhilianPlatform, zhilianLoginUrl, { waitUntil: 'domcontentloaded' });
   },
   openAuthenticatedHome: async (page) => {
     await openZhilianRecruiterHome(page);
@@ -3941,6 +3954,9 @@ export const zhilianAdapter: PlatformAdapter = {
       skill: [],
       certificates: parseZhilianCertificates(lines),
     };
+  },
+  closeResumeDetail: async (searchPage) => {
+    await closeExistingZhilianResumeModal(searchPage, { pace: false });
   },
 };
 
