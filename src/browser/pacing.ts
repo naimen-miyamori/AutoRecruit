@@ -117,6 +117,38 @@ export async function moveMouseContinuously(
   return true;
 }
 
+export async function moveMouseThroughWaypoints(
+  page: Page,
+  waypoints: MousePointerPoint[],
+): Promise<boolean> {
+  const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
+  if (!mouse) {
+    return false;
+  }
+
+  const context = (page as Partial<Pick<Page, 'context'>>).context?.();
+  const pointerScope = context ?? page;
+  let segmentStart = pointerPositionByScope.get(pointerScope) ?? { x: 0, y: 0 };
+
+  for (const target of waypoints) {
+    const steps = distanceBetween(segmentStart, target) < 1
+      ? 1
+      : trajectorySteps(segmentStart, target);
+    for (let step = 1; step <= steps; step += 1) {
+      const progress = step / steps;
+      const point = {
+        x: segmentStart.x + (target.x - segmentStart.x) * progress,
+        y: segmentStart.y + (target.y - segmentStart.y) * progress,
+      };
+      await mouse.move(point.x, point.y);
+      pointerPositionByScope.set(pointerScope, point);
+    }
+    segmentStart = target;
+  }
+
+  return true;
+}
+
 export async function ensureContinuousMouseBridge(page: Page): Promise<void> {
   if (continuousMouseBridgePages.has(page)) {
     return;

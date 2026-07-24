@@ -8,6 +8,7 @@ import {
   getPlatformActionPaceDelayMs,
   getPlatformCandidatePaceDelayMs,
   moveMouseContinuously,
+  moveMouseThroughWaypoints,
   moveMouseToLocatorPosition,
   splitTypingGraphemes,
 } from '../browser/pacing.js';
@@ -213,6 +214,23 @@ test('mouse trajectories remain continuous across operations and pages in one br
       moves[index]!.y - moves[index - 1]!.y,
     ) <= 40);
   }
+
+  const waypointStartIndex = moves.length;
+  assert.equal(await moveMouseThroughWaypoints(secondPage, [
+    { x: 860, y: 760 },
+    { x: 1120, y: 760 },
+    { x: 1120, y: 900 },
+  ]), true);
+  const waypointMoves = moves.slice(waypointStartIndex);
+  assert.deepEqual(waypointMoves.at(-1), { x: 1120, y: 900 });
+  const firstWaypointIndex = waypointMoves.findIndex(({ x, y }) => x === 860 && y === 760);
+  const secondWaypointIndex = waypointMoves.findIndex(({ x, y }) => x === 1120 && y === 760);
+  assert.ok(firstWaypointIndex >= 0);
+  assert.ok(secondWaypointIndex > firstWaypointIndex);
+  assert.equal(
+    waypointMoves.slice(firstWaypointIndex, secondWaypointIndex + 1).every(({ y }) => y === 760),
+    true,
+  );
 
   const segments = buildContinuousMouseTrajectory({ x: 10, y: 20 }, { x: 500, y: 400 });
   assert.equal(segments.length, 3);

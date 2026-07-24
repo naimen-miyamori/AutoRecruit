@@ -264,6 +264,12 @@ function createSubscribeSearchOpenStub() {
   const cardSelectorWaits = new Map<string, number>();
   const pageSelectorWaits = new Map<string, number>();
   const panelSelectorWaits = new Map<string, number>();
+  const mouseMoves: Array<{ x: number; y: number }> = [];
+  const mouseClicks: Array<{ x: number; y: number }> = [];
+  const cardBox = { x: 100, y: 100, width: 120, height: 40 };
+  const panelBox = { x: 80, y: 140, width: 400, height: 240 };
+  const panelTriggerBox = { x: 400, y: 300, width: 60, height: 30 };
+  const cardTriggerBox = { x: 130, y: 110, width: 70, height: 24 };
   let popupPage: Record<string, unknown> | null = null;
   let currentUrl = 'https://example.com/subscribe';
   let searchTriggerHref: string | null = null;
@@ -338,6 +344,12 @@ function createSubscribeSearchOpenStub() {
         }
       },
       click: async () => undefined,
+      boundingBox: async () => (kind === 'panel'
+        ? panelTriggerBox
+        : kind === 'card'
+          ? cardTriggerBox
+          : null),
+      scrollIntoViewIfNeeded: async () => undefined,
       getAttribute: async (name: string) => (name === 'href' ? searchTriggerHref : null),
     }),
     filter: () => ({
@@ -357,6 +369,7 @@ function createSubscribeSearchOpenStub() {
 
   const conditionPanel = {
     isVisible: async () => conditionPanelVisible,
+    boundingBox: async () => panelBox,
     locator: (selector?: string) => {
       if (selector === '.subscribe-title') {
         return {
@@ -376,6 +389,8 @@ function createSubscribeSearchOpenStub() {
 
   const card = {
     scrollIntoViewIfNeeded: async () => undefined,
+    boundingBox: async () => cardBox,
+    evaluate: async () => false,
     click: async () => undefined,
     hover: async () => undefined,
     locator: (selector?: string) => makeWaitable('card', selector ?? '', () => availableCardSelectors.has(selector ?? '')),
@@ -448,6 +463,14 @@ function createSubscribeSearchOpenStub() {
     getByText: (text?: string) => makeWaitable('page', `text:${text ?? ''}`, () => pageTextTriggerReady),
     getByRole: (role?: string, options?: { name?: RegExp }) => makeWaitable('page', `role:${role ?? ''}:${options?.name?.toString() ?? ''}`, () => pageTextTriggerReady),
     context: () => context,
+    mouse: {
+      move: async (x: number, y: number) => {
+        mouseMoves.push({ x, y });
+      },
+      click: async (x: number, y: number) => {
+        mouseClicks.push({ x, y });
+      },
+    },
     waitForURL: async () => {
       if (popupPage) {
         throw new Error('no current-page navigation when popup opens');
@@ -545,6 +568,8 @@ function createSubscribeSearchOpenStub() {
     isViewedFilterChecked: () => viewedFilterChecked,
     getCurrentUrl: () => currentUrl,
     getClosedPageLabels: () => closedPageLabels,
+    getMouseMoves: () => mouseMoves,
+    getMouseClicks: () => mouseClicks,
   };
 }
 
@@ -1298,6 +1323,45 @@ describe('scoring run semantics', () => {
       waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
       clickSearchTriggerRef.fn = originalClickSearchTrigger;
     }
+  });
+
+  it('moves down into the matching 51job subscription panel before crossing to its search button', async () => {
+    const searchOpen = createSubscribeSearchOpenStub();
+    searchOpen.showPopup();
+    searchOpen.showConditionPanelSearchTrigger('泰国 英语');
+    const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
+    const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
+    const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
+    const originalClickSearchTrigger = clickSearchTriggerRef.fn;
+
+    openAuthenticatedSubscribePageRef.fn = (async () => searchOpen.page) as typeof openAuthenticatedSubscribePageRef.fn;
+    findSubscriptionCardRef.fn = (async () => searchOpen.card) as typeof findSubscriptionCardRef.fn;
+    waitForSearchTriggerReadyRef.fn = async () => undefined;
+    clickSearchTriggerRef.fn = async () => undefined;
+
+    try {
+      await openSubscribeSearch(searchOpen.page, '泰国 英语');
+    } finally {
+      openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
+      findSubscriptionCardRef.fn = originalFindSubscriptionCard;
+      waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
+      clickSearchTriggerRef.fn = originalClickSearchTrigger;
+    }
+
+    const mouseMoves = searchOpen.getMouseMoves();
+    const cardBridgeIndex = mouseMoves.findIndex(({ x, y }) => x === 160 && y === 120);
+    const panelEntryIndex = mouseMoves.findIndex(({ x, y }) => x === 160 && y === 183.2);
+    const panelCrossIndex = mouseMoves.findIndex(({ x, y }) => x === 430 && y === 183.2);
+    const triggerIndex = mouseMoves.findIndex(({ x, y }) => x === 430 && y === 315);
+
+    assert.ok(cardBridgeIndex >= 0);
+    assert.ok(panelEntryIndex > cardBridgeIndex);
+    assert.ok(panelCrossIndex > panelEntryIndex);
+    assert.ok(triggerIndex > panelCrossIndex);
+    assert.equal(
+      mouseMoves.slice(panelEntryIndex, panelCrossIndex + 1).every(({ y }) => y === 183.2),
+      true,
+    );
   });
 
   it('keeps the 51job viewed filter by default after opening subscription search results', async () => {

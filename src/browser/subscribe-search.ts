@@ -1,6 +1,6 @@
 import { Locator, Page } from 'playwright';
 import { config } from '../config.js';
-import { clickPlatformLocator } from './pacing.js';
+import { clickPlatformLocator, moveMouseThroughWaypoints } from './pacing.js';
 import { openAuthenticatedHome as openAuthenticatedSubscribePage } from './session.js';
 import type { SearchWaitOptions, SupportedPlatform } from '../platforms/types.js';
 
@@ -32,6 +32,15 @@ const viewedFilterMaxWaitMs = 8000;
 const searchConditionPollMs = 200;
 const platform = '51job';
 const subscribePageUrlPattern = /^https:\/\/ehire\.51job\.com\/Revision\/talent\/subscribe(?:[/?#].*)?$/i;
+
+interface SearchTriggerResolution {
+  searchTrigger: Locator;
+  activePanel?: Locator;
+}
+
+interface SearchTriggerClickOptions extends SearchWaitOptions {
+  skipInitialReadiness?: boolean;
+}
 
 export const waitForAuthenticatedSubscribeReadyRef = {
   fn: waitForAuthenticatedSubscribeReady,
@@ -251,7 +260,50 @@ async function resolveSearchTriggerFromPanel(activePanel: Locator, searchKeyword
   throw new Error(`Talent search entry did not appear within the active 51job subscription detail panel for "${searchKeyword}".`);
 }
 
-async function resolveSearchTrigger(page: Page, card: Locator, searchKeyword: string, deadline: number): Promise<Locator> {
+async function reactivateSubscriptionCardHover(
+  page: Page,
+  card: Locator,
+  searchKeyword: string,
+  deadline: number,
+): Promise<void> {
+  const cardBox = await card.boundingBox({ timeout: getRemainingTimeout(deadline) }).catch(() => null);
+  if (!cardBox) {
+    throw new Error(`Could not read the 51job saved-search card layout for "${searchKeyword}" after clicking it.`);
+  }
+
+  const cardCenter = {
+    x: cardBox.x + cardBox.width / 2,
+    y: cardBox.y + cardBox.height / 2,
+  };
+  const resetPoint = {
+    x: cardCenter.x,
+    y: Math.max(0, cardBox.y - Math.max(24, cardBox.height / 2)),
+  };
+  const movedOut = await moveMouseThroughWaypoints(page, [cardCenter, resetPoint]);
+  if (!movedOut) {
+    throw new Error(`Could not safely reset the 51job saved-search card hover for "${searchKeyword}".`);
+  }
+
+  while (Date.now() < deadline) {
+    const stillHovered = await card.evaluate((element) => element.matches(':hover')).catch(() => false);
+    if (!stillHovered) {
+      break;
+    }
+    await page.waitForTimeout(Math.min(subscriptionPanelPollMs, getRemainingTimeout(deadline))).catch(() => undefined);
+  }
+
+  const movedBack = await moveMouseThroughWaypoints(page, [cardCenter]);
+  if (!movedBack) {
+    throw new Error(`Could not safely reactivate the 51job saved-search card hover for "${searchKeyword}".`);
+  }
+}
+
+async function resolveSearchTrigger(
+  page: Page,
+  card: Locator,
+  searchKeyword: string,
+  deadline: number,
+): Promise<SearchTriggerResolution> {
   const preferredPanelDeadline = Math.min(deadline, Date.now() + preferredSubscriptionPanelWaitMs);
   const preferredActivePanel = await waitForActiveSubscriptionConditionPanel(
     page,
@@ -260,13 +312,16 @@ async function resolveSearchTrigger(page: Page, card: Locator, searchKeyword: st
     { returnUndefinedWhenMissing: true },
   );
   if (preferredActivePanel) {
-    return resolveSearchTriggerFromPanel(preferredActivePanel, searchKeyword, deadline);
+    return {
+      searchTrigger: await resolveSearchTriggerFromPanel(preferredActivePanel, searchKeyword, deadline),
+      activePanel: preferredActivePanel,
+    };
   }
 
   const selectorCandidates = searchTriggerSelectors.map((selector) => card.locator(selector).first());
   const selectorMatch = await resolveSearchTriggerFromTier(selectorCandidates, deadline);
   if (selectorMatch) {
-    return selectorMatch;
+    return { searchTrigger: selectorMatch };
   }
 
   const textCandidates = [
@@ -276,14 +331,75 @@ async function resolveSearchTrigger(page: Page, card: Locator, searchKeyword: st
   ];
   const textMatch = await resolveSearchTriggerFromTier(textCandidates, deadline);
   if (textMatch) {
-    return textMatch;
+    return { searchTrigger: textMatch };
   }
 
   const activePanel = await waitForActiveSubscriptionConditionPanel(page, searchKeyword, deadline);
   if (!activePanel) {
     throw new Error(`51job saved search "${searchKeyword}" did not become the active subscription detail panel.`);
   }
-  return resolveSearchTriggerFromPanel(activePanel, searchKeyword, deadline);
+  return {
+    searchTrigger: await resolveSearchTriggerFromPanel(activePanel, searchKeyword, deadline),
+    activePanel,
+  };
+}
+
+async function movePointerThroughActiveSubscriptionPanel(
+  page: Page,
+  card: Locator,
+  activePanel: Locator,
+  searchTrigger: Locator,
+  searchKeyword: string,
+  deadline: number,
+): Promise<void> {
+  const timeout = getRemainingTimeout(deadline);
+  const [cardBox, panelBox, triggerBox] = await Promise.all([
+    card.boundingBox({ timeout }).catch(() => null),
+    activePanel.boundingBox({ timeout }).catch(() => null),
+    searchTrigger.boundingBox({ timeout }).catch(() => null),
+  ]);
+  if (!cardBox || !panelBox || !triggerBox) {
+    const missingBoxes = [
+      !cardBox ? 'saved-search card' : '',
+      !panelBox ? 'active condition panel' : '',
+      !triggerBox ? 'search button' : '',
+    ].filter(Boolean).join(', ');
+    throw new Error(`Could not build a safe pointer route through the active 51job subscription panel for "${searchKeyword}". Missing layout: ${missingBoxes}.`);
+  }
+
+  const overlapLeft = Math.max(cardBox.x, panelBox.x);
+  const overlapRight = Math.min(cardBox.x + cardBox.width, panelBox.x + panelBox.width);
+  if (overlapRight - overlapLeft < 4) {
+    throw new Error(`The active 51job subscription panel for "${searchKeyword}" does not overlap its saved-search card.`);
+  }
+
+  const overlapInset = Math.min(12, (overlapRight - overlapLeft) / 4);
+  const bridgeX = (overlapLeft + overlapInset + overlapRight - overlapInset) / 2;
+  const cardBridgeY = cardBox.y + cardBox.height / 2;
+  const panelVerticalInset = Math.min(Math.max(16, panelBox.height * 0.18), panelBox.height / 2);
+  const panelTransitY = panelBox.y + panelVerticalInset;
+  const triggerTarget = {
+    x: triggerBox.x + triggerBox.width / 2,
+    y: triggerBox.y + triggerBox.height / 2,
+  };
+
+  const moved = await moveMouseThroughWaypoints(page, [
+    { x: bridgeX, y: cardBridgeY },
+    { x: bridgeX, y: panelTransitY },
+    { x: triggerTarget.x, y: panelTransitY },
+    triggerTarget,
+  ]);
+  if (!moved) {
+    throw new Error(`Could not move the pointer safely through the active 51job subscription panel for "${searchKeyword}".`);
+  }
+
+  const [isStillVisible, activeTitle] = await Promise.all([
+    activePanel.isVisible().catch(() => false),
+    activePanel.locator(conditionPanelTitleSelector).first().innerText().catch(() => ''),
+  ]);
+  if (!isStillVisible || normalizeText(activeTitle) !== normalizeText(searchKeyword)) {
+    throw new Error(`51job saved search "${searchKeyword}" changed while moving to its search action. Active panel title: ${activeTitle.trim() || '(none)'}`);
+  }
 }
 
 async function readSearchPageText(page: Page, deadline: number): Promise<string> {
@@ -335,12 +451,16 @@ async function waitFor51jobSearchKeywordCondition(page: Page, searchKeyword: str
   throw new Error(`51job talent search page did not confirm saved search keyword "${searchKeyword}". URL: ${page.url()}. Page text preview: ${preview}`);
 }
 
-async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: SearchWaitOptions): Promise<void> {
+async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: SearchTriggerClickOptions): Promise<void> {
   const deadline = resolveSearchDeadline(options);
   let lastError: unknown;
+  let skipReadiness = options?.skipInitialReadiness === true;
 
   while (Date.now() < deadline) {
-    await waitForSearchTriggerReadyRef.fn(page, searchTrigger, { deadline });
+    if (!skipReadiness) {
+      await waitForSearchTriggerReadyRef.fn(page, searchTrigger, { deadline });
+    }
+    skipReadiness = false;
 
     try {
       await clickPlatformLocator(searchTrigger, page, platform, getRemainingTimeout(deadline));
@@ -492,14 +612,30 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
   const card = await findSubscriptionCardRef.fn(page, searchKeyword, { deadline });
   await card.scrollIntoViewIfNeeded();
   await clickPlatformLocator(card, page, platform, getRemainingTimeout(deadline)).catch(() => undefined);
+  await reactivateSubscriptionCardHover(page, card, searchKeyword, deadline);
 
-  const searchTrigger = await resolveSearchTrigger(page, card, searchKeyword, deadline);
+  const { searchTrigger, activePanel } = await resolveSearchTrigger(page, card, searchKeyword, deadline);
+
+  if (activePanel) {
+    await waitForSearchTriggerReadyRef.fn(page, searchTrigger, { deadline });
+    await movePointerThroughActiveSubscriptionPanel(
+      page,
+      card,
+      activePanel,
+      searchTrigger,
+      searchKeyword,
+      deadline,
+    );
+  }
 
   const originalUrl = page.url();
   const popupPromise = page.context().waitForEvent('page', { timeout: getRemainingTimeout(deadline) }).catch(() => null);
   const navigationPromise = page.waitForURL((url) => url.toString() !== originalUrl, { timeout: getRemainingTimeout(deadline) }).then(() => page).catch(() => null);
 
-  await clickSearchTriggerRef.fn(page, searchTrigger, { deadline });
+  await clickSearchTriggerRef.fn(page, searchTrigger, {
+    deadline,
+    skipInitialReadiness: Boolean(activePanel),
+  });
 
   const openOutcome = await Promise.race([
     popupPromise.then((popupPage) => (popupPage ? { page: popupPage } : null)),
