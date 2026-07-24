@@ -63,6 +63,10 @@ Default timing configuration:
   `2000-3000ms` and 20% in `3001-4000ms`.
 - Boss navigation, clicks, inputs, key presses, forwarding, talent matching/greet, job-detail sync,
   chat/contact actions, and candidate transitions must not bypass the shared pacing helper.
+- Boss search keywords, direct chat text, and remarks must use the shared sequential typing helper.
+  Its default randomized character delay is `80-180ms`, with an additional punctuation pause;
+  `PLAYWRIGHT_BOSS_TYPING_DELAY_MIN_MS/MAX_MS` override the base range. Do not silently fall back to
+  whole-value `fill()` when simulated typing fails.
 - Platform-specific overrides use
   `PLAYWRIGHT_<PLATFORM>_{ACTION|CANDIDATE}_DELAY_{MIN|MAX}_MS`.
 - Existing `PLAYWRIGHT_LIEPIN_*ACTION_DELAY*`, `PLAYWRIGHT_LIEPIN_*CANDIDATE_DELAY*`, and

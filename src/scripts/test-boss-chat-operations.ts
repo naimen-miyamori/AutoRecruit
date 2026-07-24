@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { chromium } from 'playwright';
+import { typeBossLocatorSequentially } from '../browser/pacing.js';
 import { config } from '../config.js';
 import {
   executeBossChatOperation,
@@ -76,6 +77,55 @@ describe('Boss atomic chat operations', () => {
       conversationId: 'conversation-1',
       confirmed: true,
     }), /intentId/);
+  });
+
+  it('types Boss text as grapheme-by-grapheme input and refuses to overwrite existing text', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const originalActionMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalActionMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    try {
+      config.playwright.actionDelayMinMsByPlatform.boss = 0;
+      config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+      await page.setContent(`
+        <input id="replace" value="旧关键词" style="width:240px;height:32px">
+        <div id="draft" contenteditable="true" style="width:240px;height:32px">已有草稿</div>
+      `);
+      await page.locator('#replace').evaluate((element) => {
+        element.addEventListener('beforeinput', (event) => {
+          const values = JSON.parse(element.getAttribute('data-beforeinput') ?? '[]') as string[];
+          values.push((event as InputEvent).data ?? (event as InputEvent).inputType);
+          element.setAttribute('data-beforeinput', JSON.stringify(values));
+        });
+      });
+
+      const replacement = page.locator('#replace');
+      await typeBossLocatorSequentially(replacement, page, '上海👩‍💻A。', 3000, {
+        replaceExisting: true,
+        delayMinMs: 0,
+        delayMaxMs: 0,
+      });
+      assert.equal(await replacement.inputValue(), '上海👩‍💻A。');
+      const beforeInputEvents = JSON.parse(
+        await replacement.getAttribute('data-beforeinput') ?? '[]',
+      ) as string[];
+      assert.equal(beforeInputEvents[0], 'deleteContentBackward');
+      assert.equal(beforeInputEvents.slice(1).join(''), '上海👩‍💻A。');
+
+      const draft = page.locator('#draft');
+      await assert.rejects(
+        () => typeBossLocatorSequentially(draft, page, '新消息', 3000, {
+          delayMinMs: 0,
+          delayMaxMs: 0,
+        }),
+        /refusing to overwrite it: 已有草稿/,
+      );
+      assert.equal(await draft.textContent(), '已有草稿');
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalActionMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalActionMax;
+      await browser.close();
+    }
   });
 
   it('returns a stored receipt without repeating a live mutation', async () => {

@@ -450,10 +450,11 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 | `PLAYWRIGHT_<PLATFORM>_REUSE_BROWSER` | 平台级浏览器复用开关 |
 | `PLAYWRIGHT_<PLATFORM>_ACTION_DELAY_MIN_MS/MAX_MS` | 平台网页动作间隔 |
 | `PLAYWRIGHT_<PLATFORM>_CANDIDATE_DELAY_MIN_MS/MAX_MS` | 平台候选人切换间隔 |
+| `PLAYWRIGHT_BOSS_TYPING_DELAY_MIN_MS/MAX_MS` | Boss 搜索关键词、直接聊天文本和备注的逐字间隔，默认 `80-180ms` |
 | `QDRANT_URL` / `QDRANT_API_KEY` | Qdrant 连接配置 |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | 报告邮件配置 |
 
-正常多平台运行建议不要设置 `STORAGE_STATE_PATH`，让程序自动选择平台登录态。Liepin 默认操作和候选人间隔为 `2–3 秒`；Boss 默认为加权 `2–4 秒`。鼠标点击在同一浏览器上下文中共享上一次落点，并沿分步轨迹连续移动到下一目标；必须使用原生或 DOM 点击的兼容路径也会先完成这段移动。
+正常多平台运行建议不要设置 `STORAGE_STATE_PATH`，让程序自动选择平台登录态。Liepin 默认操作和候选人间隔为 `2–3 秒`；Boss 默认为加权 `2–4 秒`。Boss 搜索关键词、直接聊天文本和备注会在输入框获得焦点后按 `80-180ms` 的随机间隔逐字输入，标点处额外短暂停顿；常用语仍通过页面选项直接选择。鼠标点击在同一浏览器上下文中共享上一次落点，并沿分步轨迹连续移动到下一目标；必须使用原生或 DOM 点击的兼容路径也会先完成这段移动。
 
 ---
 

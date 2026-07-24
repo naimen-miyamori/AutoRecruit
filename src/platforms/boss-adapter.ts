@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { BrowserContext, Frame, Locator, Page } from 'playwright';
-import { clickPlatformLocator, waitPlatformActionPace } from '../browser/pacing.js';
+import { clickPlatformLocator, typeBossLocatorSequentially, waitPlatformActionPace } from '../browser/pacing.js';
 import { config } from '../config.js';
 import {
   buildSearchFilterDiscoveryStats,
@@ -325,7 +325,9 @@ async function applyBossSearchKeyword(page: Page, keyword: string, deadline: num
   }
 
   const keywordInput = frame.locator('input.search-input, .search-input').first();
-  await runBossFrameAction(frame, () => keywordInput.fill(normalizedKeyword, { timeout: remainingTime(deadline) }));
+  await typeBossLocatorSequentially(keywordInput, page, normalizedKeyword, remainingTime(deadline), {
+    replaceExisting: true,
+  });
   await runBossFrameAction(frame, () => keywordInput.press('Enter', { timeout: remainingTime(deadline) })).catch(async () => {
     await clickBossLocator(frame.locator('.icon-search').first(), page, remainingTime(deadline));
   });

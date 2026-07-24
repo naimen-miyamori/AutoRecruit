@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Locator, Page } from 'playwright';
-import { clickPlatformLocator, waitPlatformActionPace } from '../browser/pacing.js';
+import { clickPlatformLocator, typeBossLocatorSequentially, waitPlatformActionPace } from '../browser/pacing.js';
 import { config } from '../config.js';
 import type {
   BossChatConversationSummary,
@@ -262,7 +262,7 @@ async function sendBossText(page: Page, text: string): Promise<void> {
   if (current) {
     throw new Error(`Boss chat editor contains an existing draft; refusing to overwrite it: ${current}`);
   }
-  await runBossAction(page, () => editor.fill(text, { timeout: config.playwright.resumeDetailTimeoutMs }));
+  await typeBossLocatorSequentially(editor, page, text, config.playwright.resumeDetailTimeoutMs);
   await clickPlatformLocator(submit, page, 'boss', config.playwright.resumeDetailTimeoutMs);
   await page.waitForFunction((expected) => Array.from(document.querySelectorAll<HTMLElement>('.chat-message-list .message-item .text-content'))
     .some((element) => (element.innerText ?? element.textContent ?? '').replace(/\s+/g, ' ').trim() === expected), text, {
@@ -288,7 +288,9 @@ async function setBossRemark(page: Page, remark: string): Promise<void> {
   await clickUniqueTextControl(page, /备注/, 'remark');
   const input = page.locator('textarea[placeholder*="备注"], input[placeholder*="备注"], .remark-dialog textarea, .remark-dialog input').first();
   await input.waitFor({ state: 'visible', timeout: config.playwright.resumeDetailTimeoutMs });
-  await runBossAction(page, () => input.fill(remark, { timeout: config.playwright.resumeDetailTimeoutMs }));
+  await typeBossLocatorSequentially(input, page, remark, config.playwright.resumeDetailTimeoutMs, {
+    replaceExisting: true,
+  });
   await clickUniqueTextControl(page, /^(?:确定|保存)$/, 'remark confirmation');
 }
 

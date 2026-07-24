@@ -158,6 +158,10 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
   `3001-4000ms`.
 - Boss pointer clicks also use the shared context-scoped trajectory. Locator-native and DOM-event
   compatibility paths must continuously move from the prior endpoint before executing the click.
+- Boss talent-search keywords, direct chat messages, and remarks type sequentially through the
+  shared browser helper. Search and remark replacement clears the prior value first; direct chat
+  must preserve the non-empty draft guard. Common phrases remain option clicks and must not be
+  converted to sequential typing.
 - Account for pacing in multi-action deadlines. Do not make a valid forward/contact sequence
   impossible under the default timeout merely because its required paced actions consume the budget.
 

@@ -2,6 +2,7 @@ import type { Locator, Page } from 'playwright';
 import {
   clickPlatformLocator,
   moveMouseToLocatorCenter,
+  typeBossLocatorSequentially,
   waitPlatformActionPace,
 } from '../browser/pacing.js';
 import { config } from '../config.js';
@@ -920,7 +921,7 @@ async function sendBossEditorMessage(
     throw new Error(`Boss chat editor contains unexpected text before typing a message: ${currentEditorText}`);
   }
   if (currentEditorText !== message) {
-    await runBossChatAction(page, () => editor.fill(message, { timeout: config.playwright.resumeDetailTimeoutMs }));
+    await typeBossLocatorSequentially(editor, page, message, config.playwright.resumeDetailTimeoutMs);
   }
   await page.waitForFunction((expectedMessage) => {
     const editorElement = document.querySelector<HTMLElement>('#boss-chat-editor-input[contenteditable="true"]');

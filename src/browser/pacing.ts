@@ -11,14 +11,40 @@ export interface MouseTrajectorySegment extends MousePointerPoint {
   steps: number;
 }
 
+export interface BossSequentialTypingOptions {
+  replaceExisting?: boolean;
+  delayMinMs?: number;
+  delayMaxMs?: number;
+}
+
 const pointerPositionByScope = new WeakMap<object, MousePointerPoint>();
 const continuousMouseBridgePages = new WeakSet<Page>();
 export const continuousMouseBridgeName = '__autorecruitMoveMouseContinuously';
+const bossTypingPunctuationPattern = /^[，。！？；：、,.!?;:]$/u;
+const bossPunctuationDelayMinMs = 120;
+const bossPunctuationDelayMaxMs = 300;
 
 export function randomIntBetween(min: number, max: number): number {
   const lower = Math.max(0, Math.floor(Math.min(min, max)));
   const upper = Math.max(lower, Math.floor(Math.max(min, max)));
   return lower + Math.floor(Math.random() * (upper - lower + 1));
+}
+
+export function splitTypingGraphemes(value: string): string[] {
+  return Array.from(new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }).segment(value), ({ segment }) => segment);
+}
+
+export function getBossTypingDelayMs(
+  grapheme: string,
+  options: Pick<BossSequentialTypingOptions, 'delayMinMs' | 'delayMaxMs'> = {},
+): number {
+  const baseDelay = randomIntBetween(
+    options.delayMinMs ?? config.playwright.bossTypingDelayMinMs,
+    options.delayMaxMs ?? config.playwright.bossTypingDelayMaxMs,
+  );
+  return bossTypingPunctuationPattern.test(grapheme)
+    ? baseDelay + randomIntBetween(bossPunctuationDelayMinMs, bossPunctuationDelayMaxMs)
+    : baseDelay;
 }
 
 function distanceBetween(start: MousePointerPoint, end: MousePointerPoint): number {
@@ -298,4 +324,67 @@ export async function fillPlatformLocator(
 ): Promise<void> {
   await waitPlatformActionPace(page, platform);
   await locator.fill(value, { timeout: timeoutMs });
+}
+
+async function readEditableLocatorValue(locator: Locator): Promise<string> {
+  return locator.evaluate((element) => {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      return element.value;
+    }
+    if (element instanceof HTMLElement && element.isContentEditable) {
+      return element.innerText;
+    }
+    return element.textContent ?? '';
+  });
+}
+
+export async function typeBossLocatorSequentially(
+  locator: Locator,
+  page: Page,
+  value: string,
+  timeoutMs: number,
+  options: BossSequentialTypingOptions = {},
+): Promise<void> {
+  await clickPlatformLocator(locator, page, 'boss', timeoutMs);
+
+  const currentValue = await readEditableLocatorValue(locator);
+  if (currentValue === value) {
+    return;
+  }
+  if (currentValue && !options.replaceExisting) {
+    throw new Error(`Boss input contains existing text; refusing to overwrite it: ${currentValue}`);
+  }
+
+  if (currentValue) {
+    await locator.press('ControlOrMeta+A', { timeout: timeoutMs });
+    await locator.press('Backspace', { timeout: timeoutMs });
+    const clearedValue = await readEditableLocatorValue(locator);
+    if (clearedValue) {
+      throw new Error(`Boss input could not be cleared before simulated typing: ${clearedValue}`);
+    }
+  }
+
+  const graphemes = splitTypingGraphemes(value);
+  const maximumCharacterDelayMs = Math.max(
+    options.delayMinMs ?? config.playwright.bossTypingDelayMinMs,
+    options.delayMaxMs ?? config.playwright.bossTypingDelayMaxMs,
+  ) + bossPunctuationDelayMaxMs;
+  const typingDeadline = Date.now() + Math.max(timeoutMs, graphemes.length * maximumCharacterDelayMs + 2000);
+  for (let index = 0; index < graphemes.length; index += 1) {
+    const grapheme = graphemes[index]!;
+    const remainingTimeoutMs = Math.max(1, typingDeadline - Date.now());
+    if (grapheme === '\n') {
+      await locator.press('Shift+Enter', { timeout: remainingTimeoutMs });
+    } else {
+      await locator.pressSequentially(grapheme, { timeout: remainingTimeoutMs });
+    }
+    if (index < graphemes.length - 1) {
+      await waitOnPageOrTimer(page, getBossTypingDelayMs(grapheme, options));
+    }
+  }
+
+  const actualValue = await readEditableLocatorValue(locator);
+  if (actualValue !== value) {
+    throw new Error(`Boss simulated typing did not retain the expected text. Expected ${JSON.stringify(value)}, received ${JSON.stringify(actualValue)}.`);
+  }
 }

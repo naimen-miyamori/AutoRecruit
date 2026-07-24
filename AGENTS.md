@@ -135,6 +135,9 @@ the inner loop.
 - Boss action and candidate pacing defaults to `2000-4000ms`, weighted approximately 80% in
   `2000-3000ms` and 20% in `3001-4000ms`. Navigation, clicks, inputs, key presses, forwarding, and
   candidate transitions must use shared pacing helpers; do not introduce an unpaced Boss action.
+- Boss search keywords, direct chat text, and remarks use shared grapheme-by-grapheme typing with
+  randomized `80-180ms` character delays and punctuation pauses. Keep common phrases on their
+  existing option-click path, and never replace an existing chat draft.
 - Pointer-driven actions must preserve one continuous mouse path across consecutive operations and
   pages in the same browser context. Direct locator or DOM clicks that are required for compatibility
   must first move the shared pointer continuously to the target; do not reset or teleport it.

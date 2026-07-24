@@ -150,6 +150,8 @@ const reuseCdpPortByPlatform: Record<SupportedPlatform, number> = {
   zhilian: getOptionalNumberEnv('PLAYWRIGHT_ZHILIAN_REUSE_CDP_PORT', 19329),
   boss: getOptionalNumberEnv('PLAYWRIGHT_BOSS_REUSE_CDP_PORT', 19331),
 };
+const bossTypingDelayMinMs = getOptionalNumberEnv('PLAYWRIGHT_BOSS_TYPING_DELAY_MIN_MS', 80);
+const bossTypingDelayMaxMs = getOptionalNumberEnv('PLAYWRIGHT_BOSS_TYPING_DELAY_MAX_MS', 180);
 
 export const config = {
   dataDir: path.resolve(process.env.DATA_DIR ?? './data'),
@@ -171,6 +173,8 @@ export const config = {
     actionDelayMaxMsByPlatform,
     candidateDelayMinMsByPlatform,
     candidateDelayMaxMsByPlatform,
+    bossTypingDelayMinMs,
+    bossTypingDelayMaxMs,
     reuseBrowserByPlatform,
     reuseCdpPortByPlatform,
     liepinActionDelayMinMs: actionDelayMinMsByPlatform.liepin,

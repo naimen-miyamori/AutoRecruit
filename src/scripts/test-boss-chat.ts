@@ -515,6 +515,11 @@ describe('Boss candidate contact actions', () => {
         const tooltip = phoneItem.querySelector<HTMLElement>('.exchange-tooltip')!;
         const confirm = tooltip.querySelector<HTMLElement>('.boss-btn-primary')!;
         const conversation = { requestPhone: 0, phone: null, bothTalked: false };
+        editor.addEventListener('beforeinput', (event) => {
+          const values = JSON.parse(document.body.dataset.directTypingEvents ?? '[]') as string[];
+          values.push((event as InputEvent).data ?? (event as InputEvent).inputType);
+          document.body.dataset.directTypingEvents = JSON.stringify(values);
+        });
         (phoneItem as HTMLElement & { __vue__?: unknown }).__vue__ = {
           $options: { name: 'ExchangePhone' },
           conversation$: conversation,
@@ -599,6 +604,10 @@ describe('Boss candidate contact actions', () => {
       assert.deepStrictEqual(
         JSON.parse(await page.locator('body').getAttribute('data-phrase-selections') ?? '[]'),
         [bossQualifiedCandidateChatMessage, bossUnqualifiedCandidateChatMessage],
+      );
+      assert.deepStrictEqual(
+        JSON.parse(await page.locator('body').getAttribute('data-direct-typing-events') ?? '[]'),
+        ['是', '上', '海', '人', '吗', '？'],
       );
     } finally {
       await browser.close();

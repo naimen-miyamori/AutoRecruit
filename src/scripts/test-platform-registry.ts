@@ -4,10 +4,12 @@ import type { Page } from 'playwright';
 
 import {
   buildContinuousMouseTrajectory,
+  getBossTypingDelayMs,
   getPlatformActionPaceDelayMs,
   getPlatformCandidatePaceDelayMs,
   moveMouseContinuously,
   moveMouseToLocatorPosition,
+  splitTypingGraphemes,
 } from '../browser/pacing.js';
 import { config, resolveStorageStatePath } from '../config.js';
 import { normalize51jobFilterDefinition } from '../platforms/51job-filter-normalization.js';
@@ -137,6 +139,18 @@ test('browser pacing and reuse defaults are platform-specific', () => {
     zhilian: 19329,
     boss: 19331,
   });
+  assert.equal(config.playwright.bossTypingDelayMinMs, 80);
+  assert.equal(config.playwright.bossTypingDelayMaxMs, 180);
+});
+
+test('Boss simulated typing preserves graphemes and uses bounded character delays', () => {
+  assert.deepEqual(splitTypingGraphemes('上海👩‍💻A'), ['上', '海', '👩‍💻', 'A']);
+  for (let index = 0; index < 100; index += 1) {
+    const characterDelay = getBossTypingDelayMs('上');
+    const punctuationDelay = getBossTypingDelayMs('。');
+    assert.ok(characterDelay >= 80 && characterDelay <= 180);
+    assert.ok(punctuationDelay >= 200 && punctuationDelay <= 480);
+  }
 });
 
 test('Boss action and candidate pacing always use a non-zero 2-4 second default delay', () => {
