@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +8,7 @@ import { handleApiRequest } from '../server/routes.js';
 import { TaskQueue } from '../server/task-queue.js';
 import { TaskScheduler } from '../server/task-scheduler.js';
 import { JobReadModel } from '../server/job-read-model.js';
+import { bossReceiptArtifact, bossReviewArtifact, bossSyncArtifact, jobExportArtifact } from '../server/artifact-read-model.js';
 import type { TaskDetail } from '../server/types.js';
 import type { MainRunSummary } from '../index.js';
 import type { ApplicationFilterOptions } from '../search/filter-application-options.js';
@@ -62,6 +64,99 @@ describe('console API routes', () => {
       status: 'ok',
       service: 'autorecruit-console-api',
     });
+  });
+
+  it('serves Boss read models and controlled artifact downloads without opening a browser', async () => {
+    const dataDir = await makeTempDir();
+    const syncedAt = '2026-07-25T01:02:03.000Z';
+    const intentId = 'intent-read-model-1';
+    const receiptId = crypto.createHash('sha256').update(intentId).digest('hex');
+    const syncRun = {
+      platform: 'boss',
+      syncedAt,
+      positions: [{ bossJobId: 'boss-position-1', name: '门店店长', status: 'open', location: '上海' }],
+      items: [{ bossJobId: 'boss-position-1', name: '门店店长', status: 'open', jobKey: 'store-manager', sourceHash: 'jd-hash-1', outcome: 'created' }],
+      created: 1,
+      updated: 0,
+      unchanged: 0,
+      failed: 0,
+    };
+    const reviewRun = {
+      platform: 'boss',
+      reviewedAt: syncedAt,
+      scoreThreshold: 75,
+      matchMode: 'score-threshold',
+      unreadConversations: 2,
+      reviewedConversations: 2,
+      matchedCandidates: 1,
+      chatMessagesSent: 1,
+      phoneExchangeRequests: 0,
+      forwardedCandidates: 1,
+      skippedConversations: 0,
+      failedConversations: 0,
+      items: [{ conversationId: 'conversation-1', candidateName: '候选人甲', jobName: '门店店长', jobKey: 'store-manager', unreadCount: 1, status: 'forwarded', forwarded: true }],
+    };
+    const receipt = {
+      input: { platform: 'boss', action: 'send-text', conversationId: 'conversation-1', expectedCandidateName: '候选人甲', expectedJobName: '门店店长', intentId, confirmed: true, text: '您好' },
+      result: { platform: 'boss', action: 'send-text', conversationId: 'conversation-1', candidateName: '候选人甲', jobName: '门店店长', changed: true, intentId, completedAt: syncedAt, receiptPath: `data/boss/chat-operations/runs/${receiptId}.json` },
+    };
+
+    await writeJson(path.join(dataDir, 'boss', 'job-sync', 'positions.latest.json'), syncRun.positions);
+    await writeJson(path.join(dataDir, 'boss', 'job-sync', 'runs', 'sync-1.json'), syncRun);
+    await writeJson(path.join(dataDir, 'boss', 'chat-review', 'runs', 'review-1.json'), reviewRun);
+    await writeJson(path.join(dataDir, 'boss', 'chat-operations', 'runs', `${receiptId}.json`), receipt);
+    await writeJson(path.join(dataDir, 'boss', 'jobs', 'store-manager', 'jd.json'), {
+      jobKey: 'store-manager',
+      platform: 'boss',
+      bossPosition: { bossJobId: 'boss-position-1', status: 'open', syncedAt, sourceHash: 'jd-hash-1' },
+    });
+    await fs.mkdir(path.join(dataDir, 'boss', 'job-sync', 'runs'), { recursive: true });
+
+    const syncArtifact = bossSyncArtifact('sync-1');
+    const reviewArtifact = bossReviewArtifact('review-1');
+    const receiptArtifact = bossReceiptArtifact(intentId);
+    await writeJson(path.join(dataDir, 'boss', 'job-sync', 'runs', 'sync-1.json'), syncRun);
+    await writeJson(path.join(dataDir, 'boss', 'chat-review', 'runs', 'review-1.json'), reviewRun);
+
+    const positions = await handleApiRequest({ method: 'GET', pathname: '/api/boss/positions', dataDir });
+    assert.equal(positions.statusCode, 200);
+    assert.deepStrictEqual((positions.body as { positions: Array<{ jobKey?: string; sourceHash?: string }> }).positions[0], {
+      ...syncRun.positions[0],
+      jobKey: 'store-manager',
+      sourceHash: 'jd-hash-1',
+      syncedAt,
+    });
+
+    const syncRuns = await handleApiRequest({ method: 'GET', pathname: '/api/boss/job-sync/runs', dataDir });
+    assert.equal(syncRuns.statusCode, 200);
+    assert.equal((syncRuns.body as { runs: Array<{ runId: string; artifact: { artifactId: string } }> }).runs[0].runId, 'sync-1');
+    assert.equal((syncRuns.body as { runs: Array<{ artifact: { artifactId: string } }> }).runs[0].artifact.artifactId, syncArtifact.artifactId);
+
+    const syncDetail = await handleApiRequest({ method: 'GET', pathname: '/api/boss/job-sync/runs/sync-1', dataDir });
+    assert.equal(syncDetail.statusCode, 200);
+    assert.equal((syncDetail.body as { artifact: { artifactId: string } }).artifact.artifactId, syncArtifact.artifactId);
+
+    const reviewDetail = await handleApiRequest({ method: 'GET', pathname: '/api/boss/chat-reviews/review-1', dataDir });
+    assert.equal(reviewDetail.statusCode, 200);
+    assert.equal((reviewDetail.body as { artifact: { artifactId: string } }).artifact.artifactId, reviewArtifact.artifactId);
+
+    const receipts = await handleApiRequest({ method: 'GET', pathname: '/api/boss/chat-receipts', dataDir });
+    assert.equal(receipts.statusCode, 200);
+    assert.equal((receipts.body as { receipts: Array<{ receiptId: string; artifact: { artifactId: string } }> }).receipts[0].receiptId, receiptId);
+    assert.equal((receipts.body as { receipts: Array<{ artifact: { artifactId: string } }> }).receipts[0].artifact.artifactId, receiptArtifact.artifactId);
+
+    const downloaded = await handleApiRequest({ method: 'GET', pathname: `/api/artifacts/${syncArtifact.artifactId}`, dataDir });
+    assert.equal(downloaded.statusCode, 200);
+    assert.ok(Buffer.isBuffer(downloaded.body));
+    assert.match(String(downloaded.headers?.['content-disposition']), /boss-job-sync-sync-1\.json/);
+    assert.deepStrictEqual(JSON.parse((downloaded.body as Buffer).toString('utf8')), syncRun);
+
+    const missing = await handleApiRequest({ method: 'GET', pathname: `/api/boss/job-sync/runs/missing`, dataDir });
+    assert.equal(missing.statusCode, 404);
+    const invalid = await handleApiRequest({ method: 'GET', pathname: `/api/artifacts/${jobExportArtifact('boss', '../escape').artifactId}`, dataDir });
+    assert.equal(invalid.statusCode, 400);
+    const missingArtifact = await handleApiRequest({ method: 'GET', pathname: `/api/artifacts/${bossReceiptArtifact('missing-intent').artifactId}`, dataDir });
+    assert.equal(missingArtifact.statusCode, 404);
   });
 
   it('creates, lists, and stops a persisted schedule through the API', async () => {

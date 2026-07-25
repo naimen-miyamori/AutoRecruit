@@ -88,9 +88,19 @@ function corsHeaders(): Record<string, string> {
 }
 
 function writeJson(response: http.ServerResponse, result: ApiResponse): void {
+  if (Buffer.isBuffer(result.body)) {
+    response.writeHead(result.statusCode, {
+      ...corsHeaders(),
+      ...result.headers,
+    });
+    response.end(result.body);
+    return;
+  }
+
   response.writeHead(result.statusCode, {
     ...corsHeaders(),
     'content-type': 'application/json; charset=utf-8',
+    ...result.headers,
   });
   response.end(`${JSON.stringify(result.body, null, 2)}\n`);
 }

@@ -26,6 +26,8 @@ import {
   type AssistantCompletion,
 } from './cli-assistant.js';
 import { JobReadModel } from './job-read-model.js';
+import { BossReadModel } from './boss-read-model.js';
+import { ArtifactReadModel } from './artifact-read-model.js';
 import { TaskScheduler } from './task-scheduler.js';
 import { TaskQueue } from './task-queue.js';
 import {
@@ -60,12 +62,15 @@ import type {
 export interface ApiResponse<T = unknown> {
   statusCode: number;
   body: T;
+  headers?: Record<string, string>;
 }
 
 interface RouteDependencies {
   taskQueue?: TaskQueue;
   taskScheduler?: TaskScheduler;
   jobReadModel?: JobReadModel;
+  bossReadModel?: BossReadModel;
+  artifactReadModel?: ArtifactReadModel;
   dataDir?: string;
   answerQuestion?: (options: AskRagQuestionOptions) => Promise<RagAnswer>;
   answerTemporaryJdQuestion?: (input: AnswerCandidateQuestionFromJdInput) => Promise<JdQuestionAnswer>;
@@ -294,6 +299,8 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
     return taskScheduler;
   };
   const jobReadModel = request.jobReadModel ?? new JobReadModel({ dataDir });
+  const bossReadModel = request.bossReadModel ?? new BossReadModel({ dataDir });
+  const artifactReadModel = request.artifactReadModel ?? new ArtifactReadModel({ dataDir });
   const searchParams = request.searchParams ?? new URLSearchParams();
   const method = request.method.toUpperCase();
   const pathname = request.pathname.replace(/\/+$/, '') || '/';
@@ -458,6 +465,57 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
       return jsonResponse(200, {
         jobs: await jobReadModel.listJobs(platform),
       });
+    }
+
+    if (method === 'GET' && pathname === '/api/boss/positions') {
+      return jsonResponse(200, {
+        positions: await bossReadModel.listPositions(),
+      });
+    }
+
+    if (method === 'GET' && pathname === '/api/boss/job-sync/runs') {
+      return jsonResponse(200, {
+        runs: await bossReadModel.listJobSyncRuns(),
+      });
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'boss' && segments[2] === 'job-sync' && segments[3] === 'runs' && segments[4] && segments.length === 5) {
+      const run = await bossReadModel.getJobSyncRun(segments[4]);
+      return run ? jsonResponse(200, run) : notFound(`Boss job sync run not found: ${segments[4]}`);
+    }
+
+    if (method === 'GET' && pathname === '/api/boss/chat-reviews') {
+      return jsonResponse(200, {
+        runs: await bossReadModel.listChatReviewRuns(),
+      });
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'boss' && segments[2] === 'chat-reviews' && segments[3] && segments.length === 4) {
+      const run = await bossReadModel.getChatReviewRun(segments[3]);
+      return run ? jsonResponse(200, run) : notFound(`Boss chat review run not found: ${segments[3]}`);
+    }
+
+    if (method === 'GET' && pathname === '/api/boss/chat-receipts') {
+      return jsonResponse(200, {
+        receipts: await bossReadModel.listChatReceipts(),
+      });
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'boss' && segments[2] === 'chat-receipts' && segments[3] && segments.length === 4) {
+      const receipt = await bossReadModel.getChatReceipt(segments[3]);
+      return receipt ? jsonResponse(200, receipt) : notFound(`Boss chat receipt not found: ${segments[3]}`);
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'artifacts' && segments[2] && segments.length === 3) {
+      const artifact = await artifactReadModel.readArtifact(segments[2]);
+      return artifact ? {
+        statusCode: 200,
+        body: artifact.content,
+        headers: {
+          'content-type': artifact.descriptor.contentType,
+          'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(artifact.descriptor.fileName)}`,
+        },
+      } : notFound('Artifact not found');
     }
 
     if (method === 'GET' && segments[0] === 'api' && segments[1] === 'jobs' && segments[2] && segments[3] && segments.length === 4) {

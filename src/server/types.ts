@@ -17,6 +17,7 @@ import type {
   BossTalentSearchInput,
   BossTalentSearchResult,
 } from '../types/boss.js';
+import type { ArtifactDescriptor } from './api-contracts.js';
 
 export type ConsolePlatformSelection = SupportedPlatform | 'all';
 export type SearchSource = 'saved' | 'direct';
@@ -418,6 +419,7 @@ export interface JobDetail extends JobSummary {
   recipientEmail?: string;
   ccEmails?: string[];
   exportPath?: string;
+  artifacts: ArtifactDescriptor[];
 }
 
 export interface ScoreView {
@@ -447,6 +449,7 @@ export interface CandidateDetail extends CandidateSummary {
   snapshotPath?: string;
   snapshotPreview?: string;
   domSnapshotPath?: string;
+  artifacts: ArtifactDescriptor[];
 }
 
 export interface DataAnomalySummary {

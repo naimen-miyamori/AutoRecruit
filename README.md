@@ -157,12 +157,26 @@ npm run dev -- \
 
 ### 3. 启动本地控制台
 
+生产模式先构建前端，再由 API 服务同时提供接口和静态页面：
+
 ```bash
 npm run web:build
 npm run api
 ```
 
-打开 `http://127.0.0.1:4180`。前端开发可另行运行 `npm run web:dev`，默认地址为 `http://127.0.0.1:5173`。
+打开 `http://127.0.0.1:4180`。`npm run build` 已同时包含服务端编译和前端 production bundle 构建。
+
+开发模式需要 API 和 Vite 同时运行：
+
+```bash
+# 终端 1
+npm run api
+
+# 终端 2
+npm run web:dev
+```
+
+开发客户端默认地址为 `http://127.0.0.1:5173`，`/api` 请求会代理到 `http://127.0.0.1:4180`。
 
 ---
 
@@ -396,7 +410,20 @@ npm run test:rag:offline
 
 ## 控制台、API 与自动运行
 
-本地控制台支持任务队列、职位和候选人查看、搜索订阅、Boss 工作流、RAG 运维和结构化助手草稿确认。HTTP 或助手确认的浏览器任务统一通过 `TaskQueue` 串行执行，预览命令不是执行来源。
+本地控制台的一级工作区包括控制台、任务中心、岗位与人才、Boss 工作台、自动化、知识与运营、智能助手和设置。Boss 工作台集中提供职位/JD 同步、人才发现、会话中心、自动沟通审核和幂等操作回执；立即匹配、打招呼和会话变更仍需精确身份、`confirmed` 和实际 `intentId`。HTTP 或助手确认的浏览器任务统一通过 `TaskQueue` 串行执行，预览命令不是执行来源。
+
+设置了 `AUTORECRUIT_CONSOLE_API_KEY` 时，可在客户端设置页输入控制台 Bearer token。API 地址可以写入 `localStorage`，控制台 token 只写入当前标签页会话的 `sessionStorage`；模型 API key 与控制台 token 分离，也只写入 `sessionStorage`。生产客户端在 API 故障时显示真实错误，不回退到 mock 业务数据。
+
+Boss 持久化读模型通过以下 GET 接口提供职位、同步记录、自动沟通审核和操作回执：
+
+```text
+/api/boss/positions
+/api/boss/job-sync/runs[/<runId>]
+/api/boss/chat-reviews[/<runId>]
+/api/boss/chat-receipts[/<intentId>]
+```
+
+这些读取不会打开浏览器或消耗 Boss 配额。下载报告、快照和回执使用 `GET /api/artifacts/:artifactId`；`artifactId` 必须来自服务端返回的白名单引用，接口不接受任意本地路径或目录遍历输入。
 
 “自动运行”计划可以组合：
 
@@ -488,10 +515,12 @@ JD 是解析、评分、问答和 Boss 会话判断的职位依据。首次保�
 npm run typecheck
 npm run test
 npm run build
+npm run web:typecheck
+npm run test:web
 npm run web:build
 ```
 
-项目还提供筛选目录发现、筛选输入校验、简历重新解析、结果导出、RAG 质量评估和平台专项测试，具体脚本见 `package.json`。
+聚合命令已覆盖前端：`typecheck` 包含 `web:typecheck`，`test` 包含 `test:web`，`build` 包含 `web:build`。项目还提供筛选目录发现、筛选输入校验、简历重新解析、结果导出、RAG 质量评估和平台专项测试，具体脚本见 `package.json`。
 
 ## 进一步阅读
 

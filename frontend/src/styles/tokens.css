@@ -1,0 +1,36 @@
+:root {
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  color: #1f2933;
+  background: #f6f8f9;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --bg: #f6f8f9;
+  --surface: #ffffff;
+  --surface-subtle: #f0f4f5;
+  --surface-strong: #e7edef;
+  --nav: #202a2e;
+  --nav-hover: #2d393d;
+  --nav-text: #dbe4e5;
+  --text: #1f2933;
+  --muted: #5f6b76;
+  --muted-2: #87929b;
+  --line: #d9e1e3;
+  --line-strong: #bcc8cb;
+  --primary: #007c73;
+  --primary-hover: #006960;
+  --primary-soft: #dff2ef;
+  --info: #315fc9;
+  --info-soft: #e7edfb;
+  --warning: #b86a00;
+  --warning-soft: #fff0d8;
+  --danger: #c6382c;
+  --danger-soft: #fce8e6;
+  --success: #248a4a;
+  --success-soft: #e4f4e9;
+  --radius-sm: 5px;
+  --radius: 8px;
+  --shadow: 0 1px 2px rgba(22, 38, 44, 0.07), 0 8px 24px rgba(22, 38, 44, 0.04);
+  --sidebar-width: 232px;
+  --transition-fast: 140ms ease;
+}

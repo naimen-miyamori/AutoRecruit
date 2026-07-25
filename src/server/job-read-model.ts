@@ -25,6 +25,11 @@ import type {
   SessionHealth,
   TaskSummary,
 } from './types.js';
+import {
+  candidateDomArtifact,
+  candidateSnapshotArtifact,
+  jobExportArtifact,
+} from './artifact-read-model.js';
 
 interface JobReadModelOptions {
   dataDir?: string;
@@ -257,6 +262,7 @@ export class JobReadModel {
       recipientEmail: jobRecord?.recipientEmail,
       ccEmails: jobRecord?.ccEmails,
       exportPath: await pathExists(exportPath) ? exportPath : undefined,
+      artifacts: await pathExists(exportPath) ? [jobExportArtifact(platform, jobKey)] : [],
     };
   }
 
@@ -309,6 +315,10 @@ export class JobReadModel {
       snapshotPath: snapshot ? snapshotPath : undefined,
       snapshotPreview: snapshot ? truncateSnapshot(snapshot) : undefined,
       domSnapshotPath: await pathExists(domSnapshotPath) ? domSnapshotPath : undefined,
+      artifacts: [
+        ...(snapshot ? [candidateSnapshotArtifact(platform, jobKey, candidateId)] : []),
+        ...(await pathExists(domSnapshotPath) ? [candidateDomArtifact(platform, jobKey, candidateId)] : []),
+      ],
     };
   }
 
