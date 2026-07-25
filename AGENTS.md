@@ -34,6 +34,24 @@ corresponding scoped instructions.
 `README.md` and `项目说明文档.md` are the user-facing usage and architecture references. Avoid
 duplicating volatile command catalogs, selector inventories, or persistence listings here.
 
+## Long-Term Project Memory
+
+`项目说明文档.md` is the durable current-state memory for the product, architecture, data
+semantics, design rationale, operational boundaries, and known limitations. Code, schemas, and
+tests remain the behavioral source of truth; Git history records how the project changed.
+
+Any change that alters a public mode, platform boundary, workflow, API, queue or scheduling
+behavior, persistence contract, failure semantics, runtime requirement, major frontend entry, or
+core module ownership must update `项目说明文档.md` in the same work item. User-facing setup or
+command changes must also update `README.md`. Hard coding constraints belong in the relevant
+root or scoped `AGENTS.md`.
+
+Keep the long-term memory as a description of the current system, not an append-only diary. Replace
+stale statements and paths, record important reasons and boundaries, and omit secrets, candidate
+data, transient task status, debugging logs, selector inventories, and unimplemented plans. Before
+finishing a qualifying change, reconcile the documentation against the implementation, schemas,
+`package.json`, `.env.example`, and the relevant regression tests.
+
 ## Public Platform Contract
 
 `--platform all` is public CLI behavior. It must run sequentially in this exact order:
