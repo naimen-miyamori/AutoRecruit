@@ -167,6 +167,20 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
 - Account for pacing in multi-action deadlines. Do not make a valid forward/contact sequence
   impossible under the default timeout merely because its required paced actions consume the budget.
 
+### Semantic page actions
+
+- Boss page controls live under `src/platforms/boss/actions/` and are grouped by domain. Export
+  semantic operations with typed identity and results; do not expose arbitrary selectors, generic
+  text clicks, or one-file-per-DOM-control helpers.
+- `boss-adapter.ts`, `boss-chat.ts`, `boss-operations.ts`, `boss-talent.ts`, and `boss-jobs.ts` are
+  adapter/workflow/compatibility facades. They must not directly click, fill, press, navigate, or
+  copy page selectors.
+- Page actions may validate readiness and identity, but must not enter `TaskQueue`, write mutation
+  receipts or job records, call models, or decide mode-level confirmation. Read action modules must
+  not import mutation action modules.
+- Keep selectors private to their domain action. Native and DOM compatibility clicks remain inside
+  the concrete semantic action and continue to move the shared pointer before clicking.
+
 ### Normal capture and forwarding
 
 - Reuse the current Boss search page for saved/direct normal capture and conditions.
@@ -292,6 +306,9 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
 
 ## Focused Verification
 
+- Boss action context and architecture boundaries: `src/scripts/test-boss-action-context.ts`,
+  `src/scripts/test-boss-action-boundaries.ts`
+- Boss conversation read/mutation actions: `src/scripts/test-boss-conversation-actions.ts`
 - Platform registry/defaults: `src/scripts/test-platform-registry.ts`
 - Shared capture/run semantics: `src/scripts/test-scoring-run-semantics.ts`
 - Boss chat and strict matching: `src/scripts/test-boss-chat.ts`
