@@ -50,6 +50,59 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
   multi-domain runtime. Platform-specific behavior remains covered by direct domain-action tests as
   well as the matching adapter regressions.
 
+### Required action contract
+
+Every public page action must satisfy all of the following:
+
+1. Its name is a verb phrase that states a business result, not a UI mechanism. Prefer names such
+   as `openSavedSearchByKeyword`, `setViewedCandidateState`, or `forwardResumeToColleague`; reject
+   names such as `clickText`, `fillSelector`, or `dispatchDomEvent` as public APIs.
+2. Its inputs are typed business values and stable target identity. A public action must not accept
+   an arbitrary selector, locator, raw element handle, generic click callback, or caller-provided
+   DOM script.
+3. It checks the page, target identity, uniqueness, and relevant preconditions immediately before
+   the action. An absent, ambiguous, stale, or changed target is an explicit failure.
+4. It consumes the caller's existing search/detail/operation deadline. Page changes may replace the
+   action page but must not reset the deadline or create unbounded retries.
+5. It performs required platform pacing, sequential typing, and continuous pointer movement inside
+   the action, including native, forced, or DOM compatibility fallbacks.
+6. It verifies a business postcondition before reporting success and represents an already-
+   satisfied state explicitly when the operation is idempotent.
+7. It returns the smallest typed business result needed for composition, or throws/returns a typed
+   failure that preserves the platform's retry semantics. Do not leak selectors or page internals
+   as results.
+
+### Composition and ownership
+
+- Group actions by business domain, not by individual DOM control and not by a whole end-to-end
+  workflow. Navigation, search, filters, candidates, resume detail, forwarding/delivery,
+  conversations, talent, and jobs are the normal domain boundaries.
+- A workflow may combine domain actions, enforce mode isolation, request confirmation, persist
+  results, or enter `TaskQueue`; an action may operate and validate the page but must not take over
+  those workflow responsibilities.
+- Read actions must not import mutation/forwarding/delivery actions. Pure parsers receive snapshots
+  or payloads and must remain deterministic and independent of Playwright.
+- Each selector and compatibility path has one owning domain implementation. Do not duplicate it in
+  an adapter, workflow, test-only production export, shared browser helper, or another domain.
+- Avoid large barrel modules. Adapters and workflows import the explicit domain actions they use so
+  dependency direction and mutation use remain reviewable.
+
+### Definition of done
+
+A semantic-action migration is complete only when:
+
+- the domain file owns the implementation instead of re-exporting a multi-domain runtime;
+- adapters and workflows contain no user-visible browser controls and no private-runtime imports;
+- platform selectors no longer live in shared browser modules, except an explicitly documented pure
+  parsing exception;
+- read, mutation, parsing, orchestration, and persistence dependency directions pass the boundary
+  tests;
+- direct action tests cover success, absent/ambiguous targets, stale identity, idempotency,
+  deadline exhaustion, failed postconditions, and compatibility-pointer behavior as applicable;
+- matching platform, registry, CLI/run-semantics, full test, typecheck, build, and diff checks pass;
+- `项目说明文档.md` describes the resulting current architecture and removes resolved migration
+  limitations.
+
 ## 51job
 
 ### Search and viewed state
@@ -338,6 +391,8 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
 
 ## Focused Verification
 
+- Cross-platform semantic-action ownership and facade boundaries:
+  `src/scripts/test-platform-action-boundaries.ts`, plus the matching direct platform action tests
 - Boss action context and architecture boundaries: `src/scripts/test-boss-action-context.ts`,
   `src/scripts/test-boss-action-boundaries.ts`
 - Boss conversation read/mutation actions: `src/scripts/test-boss-conversation-actions.ts`

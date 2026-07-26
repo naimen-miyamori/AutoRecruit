@@ -52,6 +52,38 @@ data, transient task status, debugging logs, selector inventories, and unimpleme
 finishing a qualifying change, reconcile the documentation against the implementation, schemas,
 `package.json`, `.env.example`, and the relevant regression tests.
 
+## Semantic Action Module Design Standard
+
+Semantic action modules are the repository-wide design standard for browser automation and any
+future integration that operates an external interactive UI. This standard does not require one
+module per DOM element. The unit of reuse is one complete business intent, such as selecting a
+saved search, applying a verified filter, opening an exact candidate, forwarding a resume, or
+sending a confirmed message.
+
+- Adapters and workflows choose actions, order them, enforce confirmation and identity rules, and
+  own persistence. They must not implement user-visible page controls.
+- A platform domain action owns the selectors, compatibility fallbacks, pacing, readiness checks,
+  and postcondition for its business intent. Callers pass typed business inputs, never arbitrary
+  selectors, locators, click callbacks, or DOM event names.
+- Every mutation action must validate its target and preconditions immediately before acting,
+  preserve the caller's bounded deadline, follow platform pacing and continuous-pointer rules, and
+  verify the resulting state. Idempotent states must be explicit rather than repeated blindly.
+- Read actions, mutation actions, and pure parsers remain distinct. Page actions do not write job
+  records, queue state, receipts, reports, or call models; workflows do not bypass actions to reach
+  page controls.
+- Shared browser helpers must be selector-free and platform-neutral. Promote a helper only after at
+  least two platforms prove the same inputs, outputs, and failure semantics; otherwise keep it in
+  the owning platform domain.
+- A domain file that only re-exports a multi-domain runtime is not a completed module boundary.
+  Private compatibility runtimes may contain narrow low-level fallbacks, not the normal
+  implementation of multiple public business domains.
+- New or changed UI automation must include direct action tests and architecture-boundary tests in
+  addition to workflow regression. Existing migration debt is documented in `项目说明文档.md`; do
+  not expand it or describe the repository as fully compliant until those limitations are removed.
+
+Detailed action contracts, module ownership, naming, and verification requirements live in
+`src/platforms/AGENTS.md`.
+
 ## Public Platform Contract
 
 `--platform all` is public CLI behavior. It must run sequentially in this exact order:
@@ -208,6 +240,7 @@ Run verification in proportion to the change. The critical mappings are:
 | --- | --- |
 | CLI modes, persistence, seen/scoring semantics | `src/scripts/test-scoring-run-semantics.ts` |
 | Platform registry, default pacing, reuse defaults | `src/scripts/test-platform-registry.ts` |
+| Semantic page-action ownership and facade boundaries | `src/scripts/test-platform-action-boundaries.ts`, matching direct action tests |
 | Boss chat and property-electrician rules | `src/scripts/test-boss-chat.ts` |
 | Boss talent discovery, deep search, and greet | `src/scripts/test-boss-talent.ts`, `src/scripts/test-boss-cli-modes.ts` |
 | Boss atomic chat operations and receipts | `src/scripts/test-boss-chat-operations.ts` |
