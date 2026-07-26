@@ -105,7 +105,7 @@ export async function parseBossResumeDetail(page: Page, candidate: CandidateList
   if (payload.code !== undefined && payload.code !== 0) {
     throw new Error(`Boss resume detail API failed: ${payload.message ?? `code ${payload.code}`}`);
   }
-  return parseBossResumePayload(payload, page, candidate);
+  return parseBossResumePayload(payload, page.url(), candidate);
 }
 
 async function waitForBossForwardDialog(page: Page, deadline: number): Promise<Locator> {

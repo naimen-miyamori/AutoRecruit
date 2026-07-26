@@ -18,6 +18,38 @@ Repository-wide mode, persistence, pacing, and verification contracts remain in 
 - In direct capture, every requested condition must be applied and confirmed. A skipped or failed
   condition aborts the run before candidate extraction.
 
+## Semantic Page Actions
+
+- All four platform adapters are registration and compatibility facades. Keep user-visible page
+  controls out of `51job-adapter.ts`, `liepin-adapter.ts`, `zhilian-adapter.ts`, and
+  `boss-adapter.ts`; delegate them to the matching `src/platforms/<platform>/actions/` modules.
+- Expose actions by business intent and domain, such as navigation, saved/direct search, filter
+  replay, candidate extraction, resume detail, forwarding, or delivery. Do not expose arbitrary
+  selectors, generic text clicks, or one public function per DOM node.
+- Selectors, DOM/native compatibility paths, readiness checks, and action-specific fallbacks stay
+  private to the platform action implementation. A private `internal-page-actions.ts` may retain a
+  tightly coupled low-level compatibility fallback, but it must not remain the implementation owner
+  for normal navigation, search, filter, candidate, resume, forwarding, or delivery actions.
+- Adapters, workflows, scripts, and tests must not import a private page-action runtime directly.
+  Import the typed domain action instead. A domain action file must own its public semantic action;
+  do not satisfy this boundary with a file that only re-exports a multi-domain runtime.
+- Pure resume text conversion belongs under `src/platforms/<platform>/parsing/` when the platform
+  owns it. Parsers do not click, navigate, write local data, enter `TaskQueue`, or call models.
+  The heuristic-heavy 51job parser remains owned by `src/browser/resume-detail.ts`.
+- Page actions may validate page state and candidate identity, but must not write job records,
+  mutation receipts, reports, or queue state. Confirmation, persistence, and workflow ordering stay
+  in orchestration/workflow modules.
+- The shared `src/browser/platform-action-context.ts` owns only selector-free page/deadline
+  bookkeeping. Keep platform pacing, selectors, modal/popup differences, and post-action
+  verification in platform code. Existing 51job heuristic text parsing may remain in
+  `src/browser/resume-detail.ts`, but 51job navigation, search, candidate-card, and detail-control
+  selectors are platform action concerns rather than shared browser primitives.
+- Update `src/scripts/test-platform-action-boundaries.ts` whenever a platform facade or action
+  directory changes. The boundary test must reject facade/private-runtime imports, platform page
+  selectors outside their platform action ownership, and domain files that merely re-export a
+  multi-domain runtime. Platform-specific behavior remains covered by direct domain-action tests as
+  well as the matching adapter regressions.
+
 ## 51job
 
 ### Search and viewed state

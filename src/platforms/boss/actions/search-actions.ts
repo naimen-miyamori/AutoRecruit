@@ -20,7 +20,7 @@ import type {
   SearchConditionApplyResult,
 } from '../../../types/job.js';
 import type { CandidatePostOpenActions, SearchWaitOptions } from '../../types.js';
-import { parseBossResumeData } from '../parsing/resume-parser.js';
+import { parseBossResumeData } from './resume-actions.js';
 import {
   clickBossControl as clickBossLocator,
   runBossAction as runBossPageAction,

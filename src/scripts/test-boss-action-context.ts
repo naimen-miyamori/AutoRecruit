@@ -21,7 +21,7 @@ describe('Boss action context', () => {
     assert.ok(remainingBossActionMs(moved) > 0);
     assert.throws(
       () => remainingBossActionMs({ ...moved, deadline: Date.now() - 1 }),
-      /fixture action exceeded its action deadline/,
+      /Boss fixture action exceeded its action deadline/,
     );
   });
 

@@ -1,4 +1,3 @@
-import type { Page } from 'playwright';
 import type {
   CandidateListItem,
   CandidateResume,
@@ -164,7 +163,7 @@ function parseBossCertificates(geekDetail: Record<string, unknown>): string[] {
 
 export function parseBossResumePayload(
   payload: BossResumeApiPayload,
-  page: Page,
+  pageUrl: string,
   candidate: CandidateListItem,
 ): CandidateResume {
   const zpData = payload.zpData ?? {};
@@ -195,7 +194,7 @@ export function parseBossResumePayload(
 
   return {
     candidateId: candidate.candidateId || String(zpData.expectId ?? ''),
-    resumeUrl: candidate.resumeUrl ?? page.url(),
+    resumeUrl: candidate.resumeUrl ?? pageUrl,
     name: readString(baseInfo, 'name') ?? candidate.name,
     age: parseBossAge(readString(baseInfo, 'ageDesc')),
     nativePlace,
@@ -217,10 +216,10 @@ export function parseBossResumePayload(
   };
 }
 
-export function parseBossResumeData(
+export function parseBossResumeDataPayload(
   geekDetail: Record<string, unknown>,
-  page: Page,
+  pageUrl: string,
   candidate: CandidateListItem,
 ): CandidateResume {
-  return parseBossResumePayload({ zpData: { geekDetail } }, page, candidate);
+  return parseBossResumePayload({ zpData: { geekDetail } }, pageUrl, candidate);
 }

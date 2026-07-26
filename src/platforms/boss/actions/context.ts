@@ -1,16 +1,18 @@
 import type { Frame, Locator, Page } from 'playwright';
 import {
+  createPlatformActionContext,
+  remainingPlatformActionMs,
+  withPlatformActionPage,
+  type PlatformActionContext,
+} from '../../../browser/platform-action-context.js';
+import {
   clickPlatformLocator,
   moveMouseToLocatorPosition,
   waitPlatformActionPace,
   type MousePointerPoint,
 } from '../../../browser/pacing.js';
 
-export interface BossActionContext {
-  page: Page;
-  deadline: number;
-  operation: string;
-}
+export type BossActionContext = PlatformActionContext;
 
 export interface BossControlClickOptions {
   force?: boolean;
@@ -23,11 +25,7 @@ export function createBossActionContext(
   timeoutMs: number,
   operation: string,
 ): BossActionContext {
-  return {
-    page,
-    deadline: Date.now() + Math.max(1, timeoutMs),
-    operation,
-  };
+  return createPlatformActionContext(page, timeoutMs, `Boss ${operation}`);
 }
 
 export function withBossActionPage(
@@ -35,15 +33,11 @@ export function withBossActionPage(
   page: Page,
   deadline = context.deadline,
 ): BossActionContext {
-  return { ...context, page, deadline };
+  return withPlatformActionPage(context, page, deadline);
 }
 
 export function remainingBossActionMs(context: BossActionContext, minimumMs = 1): number {
-  const remaining = context.deadline - Date.now();
-  if (remaining < minimumMs) {
-    throw new Error(`Boss ${context.operation} exceeded its action deadline.`);
-  }
-  return remaining;
+  return remainingPlatformActionMs(context, minimumMs);
 }
 
 export async function runBossAction<T>(page: Page, action: () => Promise<T>): Promise<T> {

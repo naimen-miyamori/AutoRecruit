@@ -1,7 +1,7 @@
 import type { Page } from 'playwright';
 import { config } from '../../../config.js';
 import type { CandidateListItem, CandidateResume } from '../../../types/job.js';
-import { parseBossResumeData } from '../parsing/resume-parser.js';
+import { parseBossResumeDataPayload } from '../parsing/resume-parser.js';
 import { clickBossControlNatively, runBossAction } from './context.js';
 import { isBossChatPage } from './navigation-actions.js';
 import {
@@ -13,6 +13,14 @@ import {
 export interface BossChatResumeSource {
   candidate: CandidateListItem;
   resume: CandidateResume;
+}
+
+export function parseBossResumeData(
+  geekDetail: Record<string, unknown>,
+  page: Page,
+  candidate: CandidateListItem,
+): CandidateResume {
+  return parseBossResumeDataPayload(geekDetail, page.url(), candidate);
 }
 
 function mergeBossChatResume(summary: CandidateResume, detail: CandidateResume): CandidateResume {

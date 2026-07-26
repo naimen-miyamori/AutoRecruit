@@ -17,6 +17,7 @@ import {
   runBossPostOpenActions,
 } from './boss/actions/search-actions.js';
 import { parseBossResumeDetail } from './boss/actions/resume-detail-actions.js';
+import { parseBossResumeData } from './boss/actions/resume-actions.js';
 
 export {
   closeBossResumeDetail,
@@ -27,7 +28,7 @@ export {
   parseBossResumeDetail,
   waitForBossResumeDetailReady,
 } from './boss/actions/resume-detail-actions.js';
-export { parseBossResumeData } from './boss/parsing/resume-parser.js';
+export { parseBossResumeData };
 
 export const bossAdapter: PlatformAdapter = {
   platform: 'boss',
