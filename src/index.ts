@@ -32,7 +32,15 @@ import { evaluatePropertyElectricianHardRequirements } from './scoring/boss-chat
 import { sendBossChatSummary } from './reporting/boss-chat-summary.js';
 import { exportJobResults, type ExportJobResultsSummary } from './scripts/export-job-results.js';
 import { sendJobReport, type SendJobReportSummary } from './scripts/send-job-report-email.js';
+import { loadTalentMappingPlanFile } from './talent-mapping/plan.js';
+import { runTalentMappingWorkflow } from './talent-mapping/workflow.js';
 import { BossAutomationSettings, BossChatReviewItem, BossChatReviewRun, BossForwardingSettings, CandidateListItem, CandidateResume, JobRecord, JobSearchSource, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult, SearchCondition, SearchSubscriptionSummary } from './types/job.js';
+import {
+  isTalentMappingCorePlatform,
+  type TalentMappingPlatformSelection,
+  type TalentMappingRunSummary,
+  type TalentMappingStage,
+} from './types/talent-mapping.js';
 import type {
   BossChatOperationInput,
   BossChatOperationResult,
@@ -102,6 +110,15 @@ interface SearchSubscriptionCliInput {
   savedSearchName?: string;
 }
 
+interface TalentMappingCliInput {
+  mode: 'talent-mapping';
+  platform: TalentMappingPlatformSelection;
+  filePath: string;
+  stage: TalentMappingStage;
+  confirmedDetailOpen: boolean;
+  sourceScanRunId?: string;
+}
+
 interface JdQuestionCliInput {
   mode: 'jd-question';
   platform: CliPlatformSelection;
@@ -147,6 +164,7 @@ interface BatchRunnableJobInput extends RunnableJobInput {
 type CliInput = SingleJobCliInput
   | BatchCliInput
   | SearchSubscriptionCliInput
+  | TalentMappingCliInput
   | JdQuestionCliInput
   | BossAutoChatCliInput
   | BossTalentSearchCliInput
@@ -224,7 +242,8 @@ export type MainResult = MainRunSummary
   | BossTalentSearchResult
   | BossGreetResult
   | BossChatOperationResult
-  | BossJobSyncRun;
+  | BossJobSyncRun
+  | TalentMappingRunSummary;
 
 export const parseJobDescriptionRef = { fn: parseJobDescription };
 export const extractionBoundary = createProductionExtractionBoundary();
@@ -250,6 +269,8 @@ export const sendJobReportRef = { fn: sendJobReport };
 export const ensureAuthenticatedBrowserSessionRef = { fn: ensureAuthenticatedBrowserSession };
 export const closeBrowserSessionRef = { fn: closeBrowserSession };
 export const runSearchSubscriptionWorkflowRef = { fn: runSearchSubscriptionWorkflow };
+export const loadTalentMappingPlanFileRef = { fn: loadTalentMappingPlanFile };
+export const runTalentMappingWorkflowRef = { fn: runTalentMappingWorkflow };
 export const waitPlatformActionPaceRef = { fn: waitPlatformActionPace };
 export const waitPlatformCandidatePaceRef = { fn: waitPlatformCandidatePace };
 export const answerCandidateQuestionFromJdRef = { fn: answerCandidateQuestionFromJd };
@@ -321,6 +342,16 @@ function parseSearchSource(value: string | undefined, argumentName: string): Sea
   }
 
   throw new Error(`${argumentName} must be saved or direct`);
+}
+
+function parseTalentMappingStage(value: string | undefined): TalentMappingStage | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === 'scan' || value === 'enrich' || value === 'all') {
+    return value;
+  }
+  throw new Error('--mapping-stage must be scan, enrich, or all');
 }
 
 function parseBossForwardMode(value: string | undefined): BossForwardMode | undefined {
@@ -552,6 +583,14 @@ function parseArgs(argv: readonly string[]): CliInput {
   const applicationFilterInputFilePath = values.get('application-filter-input-file')
     ? path.resolve(values.get('application-filter-input-file')!)
     : undefined;
+  const talentMappingFilePath = values.get('talent-mapping-file')
+    ? path.resolve(values.get('talent-mapping-file')!)
+    : undefined;
+  const mappingStage = parseTalentMappingStage(values.get('mapping-stage'));
+  const mappingConfirmedDetailOpen = flagPresence.has('mapping-confirm-detail-open')
+    ? parseOptionalBoolean(values.get('mapping-confirm-detail-open'), '--mapping-confirm-detail-open')
+    : false;
+  const mappingRunId = values.get('mapping-run-id')?.trim();
 
   if (flagPresence.has('boss-auto-chat') && !bossAutoChat) {
     throw new Error('--boss-auto-chat must be true when provided');
@@ -585,6 +624,55 @@ function parseArgs(argv: readonly string[]): CliInput {
 
   if (bossForwardMode && platform !== 'boss') {
     throw new Error('--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss');
+  }
+
+  if (talentMappingFilePath) {
+    const allowedFlags = new Set([
+      'platform',
+      'talent-mapping-file',
+      'mapping-stage',
+      'mapping-confirm-detail-open',
+      'mapping-run-id',
+    ]);
+    const incompatibleFlags = [...flagPresence].filter((flag) => !allowedFlags.has(flag));
+    if (incompatibleFlags.length > 0) {
+      throw new Error(
+        `--talent-mapping-file cannot be combined with ${incompatibleFlags.map((flag) => `--${flag}`).join(', ')}`,
+      );
+    }
+    if (platform !== 'all' && !isTalentMappingCorePlatform(platform)) {
+      throw new Error('--talent-mapping-file supports 51job, liepin, zhilian, or all; Boss support is not part of the core release');
+    }
+    if (!mappingStage) {
+      throw new Error('--talent-mapping-file requires explicit --mapping-stage scan, enrich, or all');
+    }
+    if (mappingStage === 'scan' && flagPresence.has('mapping-confirm-detail-open')) {
+      throw new Error('--mapping-confirm-detail-open is valid only with --mapping-stage enrich or all');
+    }
+    if (mappingRunId && mappingStage !== 'enrich') {
+      throw new Error('--mapping-run-id is valid only with --mapping-stage enrich');
+    }
+    if (flagPresence.has('mapping-run-id') && !mappingRunId) {
+      throw new Error('--mapping-run-id must be a non-empty run ID');
+    }
+
+    return {
+      mode: 'talent-mapping',
+      platform,
+      filePath: talentMappingFilePath,
+      stage: mappingStage,
+      confirmedDetailOpen: mappingConfirmedDetailOpen,
+      sourceScanRunId: mappingRunId,
+    };
+  }
+
+  const mappingOnlyFlags = [
+    'mapping-stage',
+    'mapping-confirm-detail-open',
+    'mapping-run-id',
+  ].filter((flag) => flagPresence.has(flag));
+  if (mappingOnlyFlags.length > 0) {
+    throw new Error(`${mappingOnlyFlags.map((flag) => `--${flag}`).join(', ')} require --talent-mapping-file`);
   }
 
   const assertBossStandalone = (modeName: string, allowedFlags: readonly string[]) => {
@@ -961,13 +1049,16 @@ async function captureCandidateResume(
     detailPage = await platformAdapter.openResumeDetail(session.context, searchPage, candidate);
     detailOpened = true;
     await waitPlatformActionPaceRef.fn(detailPage, platform);
-    await platformAdapter.afterResumeDetailOpened?.(detailPage, candidate, postOpenActions);
+    const postOpenResult = await platformAdapter.afterResumeDetailOpened?.(detailPage, candidate, postOpenActions);
     const extraction = platformAdapter.platform === '51job'
       ? await extractResumeFromPageRef.fn(detailPage, candidate)
       : {
         resume: await platformAdapter.parseResumeDetail(detailPage, candidate),
       };
-    const { resume, domSnapshot } = extraction;
+    const resume = postOpenResult?.candidateShareUrl
+      ? { ...extraction.resume, candidateShareUrl: postOpenResult.candidateShareUrl }
+      : extraction.resume;
+    const { domSnapshot } = extraction;
     const rawSource = platform === 'boss'
       ? formatResumeSnapshot(resume)
       : await detailPage.locator('body').innerText().catch(() => undefined);
@@ -1750,6 +1841,22 @@ async function runSearchSubscription(input: SearchSubscriptionCliInput): Promise
   return result;
 }
 
+async function runTalentMapping(input: TalentMappingCliInput): Promise<TalentMappingRunSummary> {
+  const plan = await loadTalentMappingPlanFileRef.fn(input.filePath, {
+    platformSelection: input.platform,
+  });
+  const summary = await runTalentMappingWorkflowRef.fn({
+    plan,
+    planFilePath: input.filePath,
+    platformSelection: input.platform,
+    stage: input.stage,
+    confirmedDetailOpen: input.confirmedDetailOpen,
+    sourceScanRunId: input.sourceScanRunId,
+  });
+  console.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
 async function resolveJdQuestionContext(
   platform: SupportedPlatform,
   input: JdQuestionCliInput,
@@ -1824,6 +1931,10 @@ async function runJdQuestion(input: JdQuestionCliInput): Promise<JdQuestionRunSu
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<MainResult> {
   const input = parseArgs(argv);
+
+  if (input.mode === 'talent-mapping') {
+    return runTalentMapping(input);
+  }
 
   if (input.mode === 'boss-talent-search') {
     return runBossTalentSearchMode(input);

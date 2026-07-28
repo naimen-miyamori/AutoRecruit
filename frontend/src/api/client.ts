@@ -26,6 +26,12 @@ import type {
   TaskDetail,
   TaskKind,
   TaskSummary,
+  MappingCandidateView,
+  MappingCompanyRoleMatrixRow,
+  MappingCoverageViewRow,
+  MappingRunRecord,
+  TalentMappingProjectDetail,
+  TalentMappingProjectSummary,
 } from './contracts';
 import type { ArtifactDescriptor } from './contracts';
 
@@ -143,6 +149,14 @@ export const api = {
   listCandidates: (platform: string, jobKey: string, signal?: AbortSignal) => requestJson<{ candidates: CandidateSummary[] }>(`/jobs/${encodeURIComponent(platform)}/${encodeURIComponent(jobKey)}/candidates`, { signal }),
   getCandidate: (platform: string, jobKey: string, candidateId: string, signal?: AbortSignal) => requestJson<CandidateDetail>(`/jobs/${encodeURIComponent(platform)}/${encodeURIComponent(jobKey)}/candidates/${encodeURIComponent(candidateId)}`, { signal }),
 
+  listTalentMappings: (signal?: AbortSignal) => requestJson<{ mappings: TalentMappingProjectSummary[] }>('/talent-mappings', { signal }),
+  getTalentMapping: (mappingKey: string, signal?: AbortSignal) => requestJson<TalentMappingProjectDetail>(`/talent-mappings/${encodeURIComponent(mappingKey)}`, { signal }),
+  listTalentMappingRuns: (mappingKey: string, signal?: AbortSignal) => requestJson<{ runs: MappingRunRecord[] }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/runs`, { signal }),
+  listTalentMappingCandidates: (mappingKey: string, signal?: AbortSignal) => requestJson<{ candidates: MappingCandidateView[] }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/candidates`, { signal }),
+  listTalentMappingCompanies: (mappingKey: string, signal?: AbortSignal) => requestJson<{ companies: MappingCompanyRoleMatrixRow[] }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/companies`, { signal }),
+  getTalentMappingCoverage: (mappingKey: string, signal?: AbortSignal) => requestJson<{ coverage: MappingCoverageViewRow[] }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/coverage`, { signal }),
+  submitTalentMapping: (body: Record<string, unknown>) => postJson<TaskDetail>('/tasks/talent-mapping', body),
+
   listBossPositions: (signal?: AbortSignal) => requestJson<{ positions: BossPositionView[] }>('/boss/positions', { signal }),
   listBossJobSyncRuns: (signal?: AbortSignal) => requestJson<{ runs: BossJobSyncRunSummary[] }>('/boss/job-sync/runs', { signal }),
   getBossJobSyncRun: (runId: string, signal?: AbortSignal) => requestJson<BossJobSyncRun & { runId: string; artifact: ArtifactDescriptor }>(`/boss/job-sync/runs/${encodeURIComponent(runId)}`, { signal }),
@@ -174,6 +188,12 @@ export const queryKeys = {
   jobRuns: (platform: string, jobKey: string) => ['jobs', platform, jobKey, 'runs'] as const,
   candidates: (platform: string, jobKey: string) => ['jobs', platform, jobKey, 'candidates'] as const,
   candidate: (platform: string, jobKey: string, candidateId: string) => ['jobs', platform, jobKey, 'candidates', candidateId] as const,
+  talentMappings: ['talent-mappings'] as const,
+  talentMapping: (mappingKey: string) => ['talent-mappings', mappingKey] as const,
+  talentMappingRuns: (mappingKey: string) => ['talent-mappings', mappingKey, 'runs'] as const,
+  talentMappingCandidates: (mappingKey: string) => ['talent-mappings', mappingKey, 'candidates'] as const,
+  talentMappingCompanies: (mappingKey: string) => ['talent-mappings', mappingKey, 'companies'] as const,
+  talentMappingCoverage: (mappingKey: string) => ['talent-mappings', mappingKey, 'coverage'] as const,
   bossPositions: ['boss', 'positions'] as const,
   bossSyncRuns: ['boss', 'sync-runs'] as const,
   bossReviews: ['boss', 'reviews'] as const,

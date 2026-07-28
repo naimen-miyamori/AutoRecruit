@@ -1,0 +1,228 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import type {
+  MappingDerivedViews,
+  MappingEntityLink,
+  MappingRunRecord,
+  TalentMappingPlan,
+} from '../types/talent-mapping.js';
+
+export interface TalentMappingExportResult {
+  exportDir: string;
+  candidatesCsvPath: string;
+  companyRoleMatrixCsvPath: string;
+  coverageCsvPath: string;
+  summaryPath: string;
+}
+
+function csvCell(value: unknown): string {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  const text = typeof value === 'number' ? String(value) : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function toCsv(headers: readonly string[], rows: readonly unknown[][]): string {
+  return `${[headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\n')}\n`;
+}
+
+function percentage(value: number | undefined): string {
+  return value === undefined ? 'unknown' : `${(value * 100).toFixed(1)}%`;
+}
+
+function humanLinkedEntityCount(platformProfileCount: number, links: readonly MappingEntityLink[]): number {
+  const linkedKeys = new Set(links.flatMap((link) => link.platformCandidateKeys));
+  return platformProfileCount - linkedKeys.size + links.length;
+}
+
+function buildSummaryMarkdown(input: {
+  plan: TalentMappingPlan;
+  run: MappingRunRecord;
+  views: MappingDerivedViews;
+  entityLinks: readonly MappingEntityLink[];
+  generatedAt: string;
+}): string {
+  const { plan, run, views } = input;
+  const platformProfiles = views.candidates.length;
+  const humanEntities = humanLinkedEntityCount(platformProfiles, input.entityLinks);
+  const enriched = views.candidates.filter((candidate) => candidate.detailStatus === 'enriched').length;
+  const capped = views.coverage.filter((row) => row.coverageStatus === 'capped').length;
+  const failed = views.coverage.filter((row) => row.coverageStatus === 'failed').length;
+  const title = plan.enrichment.mode === 'card-only'
+    ? `${plan.name}（市场扫描 / Mapping 初筛）`
+    : `${plan.name}（Talent Mapping）`;
+  const rows = views.coverage.map((row) => [
+    row.sliceId,
+    row.platform,
+    row.reportedResultTotal ?? 'unknown',
+    row.scannedBatches,
+    row.observedCards,
+    row.uniquePlatformProfiles,
+    row.enrichedProfiles,
+    percentage(row.detailCoverage),
+    row.coverageStatus,
+    row.terminationReason,
+  ]);
+
+  return [
+    `# ${title}`,
+    '',
+    `- Mapping Key：${plan.mappingKey}`,
+    `- 运行 ID：${run.runId}`,
+    `- 阶段：${run.stage}`,
+    `- 运行状态：${run.status}`,
+    `- 生成时间：${input.generatedAt}`,
+    `- 平台唯一档案数：${platformProfiles}`,
+    `- 人工关联后实体数：${humanEntities}`,
+    `- 已补全详情：${enriched}`,
+    `- 受限切片：${capped}`,
+    `- 失败切片：${failed}`,
+    '',
+    '## 覆盖情况',
+    '',
+    '| 切片 | 平台 | 页面结果数 | 批次 | 卡片观察 | 平台唯一档案 | 详情补全 | 详情覆盖 | 覆盖状态 | 终止原因 |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |',
+    ...rows.map((row) => `| ${row.join(' | ')} |`),
+    '',
+    '## 口径与安全说明',
+    '',
+    '- 候选身份按 `platform:candidateId` 隔离；跨平台相似姓名、公司或职位不会自动合并。',
+    '- “平台唯一档案数”与“人工关联后实体数”是不同口径。只有 `entity-links.json` 中的人工确认关系影响后者。',
+    '- 本轮未再次出现的历史档案只表示 `not-observed-this-run`，不能解释为离职、跳槽或不再求职。',
+    '- 详情打开可能产生平台“已查看”副作用；本模块不会评分、转发、联系候选人、发送邮件或写入 RAG。',
+    ...(plan.enrichment.mode === 'card-only'
+      ? ['- 本报告仅为卡片级市场扫描 / Mapping 初筛，不代表完整人才 Mapping。']
+      : []),
+    '',
+  ].join('\n');
+}
+
+export async function exportTalentMapping(input: {
+  plan: TalentMappingPlan;
+  run: MappingRunRecord;
+  views: MappingDerivedViews;
+  exportDir: string;
+  entityLinks?: readonly MappingEntityLink[];
+  generatedAt?: string;
+}): Promise<TalentMappingExportResult> {
+  const exportDir = path.resolve(input.exportDir);
+  await fs.mkdir(exportDir, { recursive: true });
+  const candidatesCsvPath = path.join(exportDir, 'candidates.csv');
+  const companyRoleMatrixCsvPath = path.join(exportDir, 'company-role-matrix.csv');
+  const coverageCsvPath = path.join(exportDir, 'coverage.csv');
+  const summaryPath = path.join(exportDir, 'summary.md');
+
+  const candidatesCsv = toCsv([
+    'platform',
+    'candidate_id',
+    'platform_candidate_key',
+    'name',
+    'current_company',
+    'current_title',
+    'company_key',
+    'role_key',
+    'level',
+    'location',
+    'first_observed_at',
+    'last_observed_at',
+    'detail_status',
+    'source_slices',
+  ], input.views.candidates.map((candidate) => [
+    candidate.platform,
+    candidate.candidateId,
+    candidate.platformCandidateKey,
+    candidate.name,
+    candidate.currentCompany,
+    candidate.currentTitle,
+    candidate.companyKey,
+    candidate.roleKey,
+    candidate.level,
+    candidate.location,
+    candidate.firstObservedAt,
+    candidate.lastObservedAt,
+    candidate.detailStatus,
+    candidate.sourceSliceIds.join('|'),
+  ]));
+
+  const companyRoleMatrixCsv = toCsv([
+    'company_key',
+    'company_display_name',
+    'company_tier',
+    'role_key',
+    'role_display_name',
+    'level',
+    'location',
+    'platform',
+    'platform_profiles',
+    'enriched_profiles',
+    'unclassified_profiles',
+  ], input.views.companies.map((row) => [
+    row.companyKey,
+    row.companyDisplayName,
+    row.companyTier,
+    row.roleKey,
+    row.roleDisplayName,
+    row.level,
+    row.location,
+    row.platform,
+    row.platformProfiles,
+    row.enrichedProfiles,
+    row.unclassifiedProfiles,
+  ]));
+
+  const coverageCsv = toCsv([
+    'slice_id',
+    'platform',
+    'reported_result_total',
+    'reported_result_total_source',
+    'scanned_batches',
+    'observed_cards',
+    'unique_platform_profiles',
+    'eligible_for_detail',
+    'enriched_profiles',
+    'card_coverage',
+    'detail_coverage',
+    'coverage_status',
+    'run_status',
+    'termination_reason',
+  ], input.views.coverage.map((row) => [
+    row.sliceId,
+    row.platform,
+    row.reportedResultTotal,
+    row.reportedResultTotalSource,
+    row.scannedBatches,
+    row.observedCards,
+    row.uniquePlatformProfiles,
+    row.eligibleForDetail,
+    row.enrichedProfiles,
+    row.cardCoverage,
+    row.detailCoverage,
+    row.coverageStatus,
+    row.status,
+    row.terminationReason,
+  ]));
+
+  const summary = buildSummaryMarkdown({
+    plan: input.plan,
+    run: input.run,
+    views: input.views,
+    entityLinks: input.entityLinks ?? [],
+    generatedAt: input.generatedAt ?? new Date().toISOString(),
+  });
+
+  await Promise.all([
+    fs.writeFile(candidatesCsvPath, candidatesCsv, 'utf8'),
+    fs.writeFile(companyRoleMatrixCsvPath, companyRoleMatrixCsv, 'utf8'),
+    fs.writeFile(coverageCsvPath, coverageCsv, 'utf8'),
+    fs.writeFile(summaryPath, `${summary.trimEnd()}\n`, 'utf8'),
+  ]);
+
+  return {
+    exportDir,
+    candidatesCsvPath,
+    companyRoleMatrixCsvPath,
+    coverageCsvPath,
+    summaryPath,
+  };
+}

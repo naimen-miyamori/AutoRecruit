@@ -29,6 +29,21 @@ export type {
   BossPositionView,
 } from '../../../src/server/boss-read-model.js';
 export type {
+  TalentMappingDetailSelectionPreview,
+  TalentMappingProjectDetail,
+  TalentMappingProjectSummary,
+  TalentMappingRunReference,
+} from '../../../src/server/talent-mapping-read-model.js';
+export type {
+  MappingCandidateView,
+  MappingCompanyRoleMatrixRow,
+  MappingCoverageViewRow,
+  MappingRunRecord,
+  TalentMappingCorePlatform,
+  TalentMappingProject,
+  TalentMappingStage,
+} from '../../../src/types/talent-mapping.js';
+export type {
   BossChatOperation,
   BossChatOperationResult,
   BossJobSyncRun,
@@ -40,6 +55,7 @@ export type { ApplicationFilterOptions } from '../../../src/search/filter-applic
 
 export type Platform = '51job' | 'liepin' | 'zhilian' | 'boss';
 export type PlatformSelection = Platform | 'all';
+export type TalentMappingPlatformSelection = Exclude<Platform, 'boss'> | 'all';
 
 export interface RagAnswer {
   platform: Platform;

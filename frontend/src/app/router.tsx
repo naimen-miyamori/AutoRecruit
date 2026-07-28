@@ -11,6 +11,7 @@ import { KnowledgePage } from '../features/knowledge/KnowledgePage';
 import { SettingsPage } from '../features/settings/SettingsPage';
 import { TasksPage } from '../features/tasks/TasksPage';
 import { NewTaskPage } from '../features/run/NewTaskPage';
+import { TalentMappingsPage } from '../features/talentMapping/TalentMappingsPage';
 import { EmptyState } from '../components/ui';
 
 function NotFoundPage() {
@@ -29,6 +30,8 @@ export const router = createBrowserRouter([
       { path: 'jobs', element: <JobsPage /> },
       { path: 'jobs/:platform/:jobKey', element: <JobDetailPage /> },
       { path: 'jobs/:platform/:jobKey/candidates/:candidateId', element: <CandidateDetailPage /> },
+      { path: 'talent-mappings', element: <TalentMappingsPage /> },
+      { path: 'talent-mappings/:mappingKey', element: <TalentMappingsPage /> },
       { path: 'boss/*', element: <BossPage /> },
       { path: 'automation', element: <AutomationPage /> },
       { path: 'knowledge', element: <KnowledgePage /> },

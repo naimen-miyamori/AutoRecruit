@@ -94,6 +94,46 @@ describe('TaskScheduler', () => {
     assert.equal(await fs.access(path.join(dataDir, 'escaped.json')).then(() => true, () => false), false);
   });
 
+  it('does not recreate its wake timer after close while startup processing is in flight', async () => {
+    const dataDir = await makeTempDir();
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async () => output(),
+    });
+    let releaseRecovery!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
+    let listCalls = 0;
+    const store = {
+      listSchedules: async () => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          await recoveryGate;
+        }
+        return [];
+      },
+    } as unknown as ScheduleStore;
+    const scheduler = new TaskScheduler({ taskQueue: queue, store, dataDir });
+    const schedulerState = scheduler as unknown as { timer?: NodeJS.Timeout };
+
+    try {
+      await waitFor(
+        async () => schedulerState.timer === undefined ? true : undefined,
+        'startup scheduler processing',
+      );
+      scheduler.close();
+      releaseRecovery();
+      await waitFor(async () => listCalls >= 2 ? true : undefined, 'closed scheduler processing completion');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      assert.equal(schedulerState.timer, undefined);
+    } finally {
+      releaseRecovery();
+      scheduler.close();
+    }
+  });
+
   it('starts an ordered round and calculates the next run from round completion', async () => {
     const dataDir = await makeTempDir();
     const calls: string[][] = [];

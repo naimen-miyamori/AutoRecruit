@@ -24,7 +24,7 @@ import type {
   SearchCondition,
   SearchConditionApplyResult,
 } from '../../../types/job.js';
-import type { CandidatePostOpenActions, SearchWaitOptions } from '../../types.js';
+import type { CandidatePostOpenActions, CandidateProfileDetailOptions, SearchWaitOptions } from '../../types.js';
 import type { SearchFilterControlSnapshot, SearchFilterDiscoveryRunOptions } from '../../../search/filter-catalog.js';
 import { parseLiepinResumeText } from '../parsing/resume-parser.js';
 import {
@@ -2840,8 +2840,13 @@ async function waitForLiepinResumeOpenAfterClick(
   return readyPromise;
 }
 
-export async function openLiepinResumePage(context: BrowserContext, searchPage: Page, candidate: CandidateListItem): Promise<Page> {
-  const deadline = createDeadline();
+export async function openLiepinResumePage(
+  context: BrowserContext,
+  searchPage: Page,
+  candidate: CandidateListItem,
+  options?: CandidateProfileDetailOptions,
+): Promise<Page> {
+  const deadline = options?.deadline ?? createDeadline();
 
   if (candidate.resumeUrl && isSafeLiepinResumeUrl(candidate.resumeUrl)) {
     const page = await context.newPage();

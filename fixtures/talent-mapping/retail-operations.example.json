@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "mappingKey": "retail-operations-shanghai",
+  "name": "上海零售运营人才地图",
+  "objective": {
+    "roleFamilies": ["区域运营", "门店运营"],
+    "locations": ["上海"],
+    "notes": "脱敏离线测试项目"
+  },
+  "taxonomy": {
+    "targetCompanies": [
+      {
+        "companyKey": "sample-retail-a",
+        "displayName": "示例零售 A",
+        "aliases": ["示例零售（中国）有限公司"],
+        "tier": "A"
+      }
+    ],
+    "roleFamilies": [
+      {
+        "roleKey": "regional-operations",
+        "displayName": "区域运营",
+        "titleAliases": ["区域经理", "区域运营经理", "大区经理"]
+      }
+    ],
+    "levels": ["经理", "高级经理", "总监"]
+  },
+  "slices": [
+    {
+      "sliceId": "sample-a-regional-operations",
+      "label": "示例零售 A 区域运营",
+      "platformPlans": {
+        "51job": {
+          "searchSource": "direct",
+          "searchPlanFile": "./plans/51job.json"
+        },
+        "liepin": {
+          "searchSource": "direct",
+          "searchPlanFile": "./plans/liepin.json"
+        },
+        "zhilian": {
+          "searchSource": "direct",
+          "searchPlanFile": "./plans/zhilian.json"
+        }
+      }
+    }
+  ],
+  "coverage": {
+    "maxBatchesPerSlice": 3,
+    "maxCandidatesPerSlice": 50,
+    "sliceTimeoutMs": 120000
+  },
+  "enrichment": {
+    "mode": "targeted-detail",
+    "maxProfilesPerSlice": 10,
+    "maxProfilesTotal": 20,
+    "selection": {
+      "targetCompanyTiers": ["A"],
+      "samplePerMatrixCell": 3
+    }
+  }
+}

@@ -134,4 +134,53 @@ describe('migrated platform action boundaries', () => {
       }
     }
   });
+
+  it('keeps Talent Mapping batch and read-only detail actions in concrete platform domains', async () => {
+    const expectedActions = [
+      {
+        platform: '51job',
+        candidateFile: 'platforms/51job/actions/candidate-actions.ts',
+        resumeFile: 'platforms/51job/actions/resume-actions.ts',
+        readBatch: 'read51jobCurrentCandidateBatch',
+        advanceBatch: 'advance51jobToNextCandidateBatch',
+        readDetail: 'read51jobCandidateProfileDetail',
+      },
+      {
+        platform: 'liepin',
+        candidateFile: 'platforms/liepin/actions/candidate-actions.ts',
+        resumeFile: 'platforms/liepin/actions/resume-actions.ts',
+        readBatch: 'readLiepinCurrentCandidateBatch',
+        advanceBatch: 'advanceLiepinToNextCandidateBatch',
+        readDetail: 'readLiepinCandidateProfileDetail',
+      },
+      {
+        platform: 'zhilian',
+        candidateFile: 'platforms/zhilian/actions/candidate-actions.ts',
+        resumeFile: 'platforms/zhilian/actions/resume-actions.ts',
+        readBatch: 'readZhilianCurrentCandidateBatch',
+        advanceBatch: 'advanceZhilianToNextCandidateBatch',
+        readDetail: 'readZhilianCandidateProfileDetail',
+      },
+    ];
+
+    for (const expected of expectedActions) {
+      const [candidateSource, resumeSource] = await Promise.all([
+        readSource(expected.candidateFile),
+        readSource(expected.resumeFile),
+      ]);
+      assert.match(candidateSource, new RegExp(`export async function ${expected.readBatch}\\b`));
+      assert.match(candidateSource, new RegExp(`export async function ${expected.advanceBatch}\\b`));
+      assert.match(candidateSource, /batchIdentity/);
+      assert.match(candidateSource, /deadline/);
+      assert.match(resumeSource, new RegExp(`export async function ${expected.readDetail}\\b`));
+      assert.match(resumeSource, /candidate profile identity mismatch|exact candidate identity/i);
+      assert.doesNotMatch(candidateSource, /TaskQueue|TalentMappingStore/);
+      assert.doesNotMatch(resumeSource, /TaskQueue|TalentMappingStore/);
+    }
+
+    const zhilianReadSource = await readSource('platforms/zhilian/actions/internal-page-actions.ts');
+    assert.doesNotMatch(zhilianReadSource, /copyZhilianColleagueForwardLink/);
+    const zhilianDeliverySource = await readSource('platforms/zhilian/actions/delivery-actions.ts');
+    assert.match(zhilianDeliverySource, /collectZhilianResumeDeliveryMetadata/);
+  });
 });

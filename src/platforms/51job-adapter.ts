@@ -1,5 +1,9 @@
 import type { PlatformAdapter } from './types.js';
-import { extract51jobCandidateList } from './51job/actions/candidate-actions.js';
+import {
+  advance51jobToNextCandidateBatch,
+  extract51jobCandidateList,
+  read51jobCurrentCandidateBatch,
+} from './51job/actions/candidate-actions.js';
 import {
   apply51jobSearchCondition,
   discover51jobSearchFilters,
@@ -21,6 +25,7 @@ import {
 import {
   open51jobResumeDetail,
   parse51jobResumeDetail,
+  read51jobCandidateProfileDetail,
 } from './51job/actions/resume-actions.js';
 
 export const fiftyOneJobAdapter: PlatformAdapter = {
@@ -40,6 +45,9 @@ export const fiftyOneJobAdapter: PlatformAdapter = {
   readSearchConditionResultTotal: read51jobSearchConditionResultTotal,
   saveSearchCondition: savePrepared51jobSearchCondition,
   extractCandidateList: extract51jobCandidateList,
+  readCurrentCandidateBatch: read51jobCurrentCandidateBatch,
+  advanceToNextCandidateBatch: advance51jobToNextCandidateBatch,
   openResumeDetail: open51jobResumeDetail,
   parseResumeDetail: parse51jobResumeDetail,
+  readCandidateProfileDetail: read51jobCandidateProfileDetail,
 };

@@ -18,6 +18,7 @@ import type {
   BossTalentSearchResult,
 } from '../types/boss.js';
 import type { ArtifactDescriptor } from './api-contracts.js';
+import type { TalentMappingCorePlatform, TalentMappingRunSummary, TalentMappingStage } from '../types/talent-mapping.js';
 
 export type ConsolePlatformSelection = SupportedPlatform | 'all';
 export type SearchSource = 'saved' | 'direct';
@@ -30,7 +31,8 @@ export type TaskKind = 'resume-capture'
   | 'boss-chat-operation'
   | 'boss-job-sync'
   | 'login-refresh'
-  | 'rag-ops';
+  | 'rag-ops'
+  | 'talent-mapping';
 export type AssistantActionKind = TaskKind | 'rag-answer';
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type TaskLogLevel = 'info' | 'warn' | 'error';
@@ -71,6 +73,14 @@ export interface BatchTaskInput {
   liepinForwardContact?: string;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+}
+
+export interface TalentMappingTaskInput {
+  platform: TalentMappingCorePlatform | 'all';
+  talentMappingFile: string;
+  mappingStage: TalentMappingStage;
+  confirmedDetailOpen?: boolean;
+  mappingRunId?: string;
 }
 
 export interface SearchSubscriptionTaskInput {
@@ -150,6 +160,7 @@ export interface RagOpsTaskOutput {
 
 export type TaskInput = ResumeCaptureTaskInput
   | BatchTaskInput
+  | TalentMappingTaskInput
   | SearchSubscriptionTaskInput
   | BossAutoChatTaskInput
   | BossTalentSearchTaskInput
@@ -159,6 +170,7 @@ export type TaskInput = ResumeCaptureTaskInput
   | LoginRefreshTaskInput
   | RagOpsTaskInput;
 export type TaskOutput = MainResult
+  | TalentMappingRunSummary
   | LoginRefreshTaskOutput
   | RagOpsTaskOutput
   | BossTalentSearchResult
@@ -246,6 +258,13 @@ export type AssistantDraft =
   | {
     kind: 'batch';
     input: Partial<BatchTaskInput> & Record<string, unknown>;
+    missingFields: string[];
+    warnings: string[];
+    argvPreview: string[];
+  }
+  | {
+    kind: 'talent-mapping';
+    input: Partial<TalentMappingTaskInput> & Record<string, unknown>;
     missingFields: string[];
     warnings: string[];
     argvPreview: string[];

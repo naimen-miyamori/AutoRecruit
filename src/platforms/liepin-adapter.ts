@@ -1,7 +1,9 @@
 import type { PlatformAdapter } from './types.js';
 import {
+  advanceLiepinToNextCandidateBatch,
   extractLiepinCandidateList,
   getLiepinCandidatePaceDelayMs,
+  readLiepinCurrentCandidateBatch,
   waitLiepinCandidatePace,
 } from './liepin/actions/candidate-actions.js';
 import {
@@ -21,6 +23,7 @@ import {
   isSafeLiepinResumeUrl,
   openLiepinResumePage,
   parseLiepinResumeDetail,
+  readLiepinCandidateProfileDetail,
 } from './liepin/actions/resume-actions.js';
 import {
   isLiepinSearchUrl,
@@ -56,7 +59,10 @@ export const liepinAdapter: PlatformAdapter = {
   applySearchCondition: applyLiepinSearchCondition,
   saveSearchCondition: savePreparedLiepinSearchCondition,
   extractCandidateList: extractLiepinCandidateList,
+  readCurrentCandidateBatch: readLiepinCurrentCandidateBatch,
+  advanceToNextCandidateBatch: advanceLiepinToNextCandidateBatch,
   openResumeDetail: openLiepinResumePage,
   afterResumeDetailOpened: runLiepinPostOpenActions,
   parseResumeDetail: parseLiepinResumeDetail,
+  readCandidateProfileDetail: readLiepinCandidateProfileDetail,
 };

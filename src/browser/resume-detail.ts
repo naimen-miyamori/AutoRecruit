@@ -1833,8 +1833,13 @@ export async function collectResumePageEvidence(page: Page): Promise<ResumePageE
   };
 }
 
-export async function openResumeDetail(context: BrowserContext, page: Page, candidate: CandidateListItem): Promise<Page> {
-  const deadline = createDeadline();
+export async function openResumeDetail(
+  context: BrowserContext,
+  page: Page,
+  candidate: CandidateListItem,
+  options: { deadline?: number } = {},
+): Promise<Page> {
+  const deadline = options.deadline ?? createDeadline();
   const trigger = page.locator(`#no_interested_${candidate.candidateId}`).first();
 
   try {

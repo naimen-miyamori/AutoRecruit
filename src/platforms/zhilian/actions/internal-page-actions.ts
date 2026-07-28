@@ -31,7 +31,7 @@ import type {
   SearchCondition,
   SearchConditionApplyResult,
 } from '../../../types/job.js';
-import type { SearchWaitOptions } from '../../types.js';
+import type { CandidateProfileDetailOptions, SearchWaitOptions } from '../../types.js';
 import {
   boundedZhilianActionMs as boundedTimeout,
   createZhilianActionDeadline as createDeadline,
@@ -39,7 +39,6 @@ import {
   remainingZhilianActionMs as remainingTime,
 } from './context.js';
 import { parseZhilianResumeText } from '../parsing/resume-parser.js';
-import { copyZhilianColleagueForwardLink } from './delivery-actions.js';
 
 export const zhilianLoginUrl = 'https://passport.zhaopin.com/org/login';
 const zhilianDesktopShellUrl = 'https://rd6.zhaopin.com/desktop';
@@ -3505,8 +3504,9 @@ export async function openZhilianResumeDetail(
   _context: BrowserContext,
   searchPage: Page,
   candidate: CandidateListItem,
+  options?: CandidateProfileDetailOptions,
 ): Promise<Page> {
-  const deadline = createDeadline();
+  const deadline = options?.deadline ?? createDeadline();
   await closeExistingZhilianResumeModal(searchPage);
 
   let clicked = await clickZhilianSearchResultCard(searchPage, candidate, deadline);
@@ -3535,8 +3535,7 @@ export async function parseZhilianResumeDetail(
 ): Promise<CandidateResume> {
   await waitForZhilianResumeDetailReady(page, { timeoutMs: Math.min(config.playwright.resumeDetailTimeoutMs, 1000) });
   const bodyRawText = await readZhilianResumeDetailText(page);
-  const candidateShareUrl = await copyZhilianColleagueForwardLink(page);
-  const parsed = parseZhilianResumeText(bodyRawText, candidate, page.url(), candidateShareUrl);
+  const parsed = parseZhilianResumeText(bodyRawText, candidate, page.url());
   return {
     ...parsed,
     candidateId: candidate.candidateId || extractZhilianCandidateIdFromText(page.url()) || candidate.candidateId,

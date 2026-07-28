@@ -1,6 +1,7 @@
 import { ArtifactButton } from './ArtifactButton';
 import { EmptyState, JsonViewer, Section, StatusPill } from './ui';
 import type { ArtifactDescriptor } from '../api/contracts';
+import { Link } from 'react-router-dom';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -33,6 +34,29 @@ export function TaskOutput({ kind, output }: { kind: string; output: unknown }) 
     return <div className="card-list">{output.map((item, index) => <TaskOutput key={index} kind={kind} output={item} />)}</div>;
   }
   if (!isRecord(output)) return <JsonViewer value={output} />;
+
+  if (kind === 'talent-mapping') {
+    const hasGaps = output.status === 'completed-with-gaps'
+      || Number(output.failedProfiles ?? 0) > 0
+      || Number(output.cappedSlices ?? 0) > 0;
+    return (
+      <div className="page-stack">
+        {hasGaps && <div className="stale-banner"><strong>运行完成但存在覆盖缺口</strong><span>受限切片或详情失败已保留在覆盖视图中，不代表全量 Mapping。</span></div>}
+        <div className="detail-grid">
+          <div className="detail-cell"><span>项目</span><strong>{text(output.mappingKey)}</strong></div>
+          <div className="detail-cell"><span>阶段 / 状态</span><strong>{text(output.stage)} · {text(output.status)}</strong></div>
+          <div className="detail-cell"><span>卡片观察</span><strong>{text(output.observedCards)}</strong></div>
+          <div className="detail-cell"><span>平台唯一档案</span><strong>{text(output.uniquePlatformProfiles)}</strong></div>
+          <div className="detail-cell"><span>详情成功</span><strong>{text(output.enrichedProfiles)}</strong></div>
+          <div className="detail-cell"><span>详情失败</span><strong>{text(output.failedProfiles)}</strong></div>
+          <div className="detail-cell"><span>受限切片</span><strong>{text(output.cappedSlices)}</strong></div>
+          <div className="detail-cell"><span>详情副作用</span><strong>{output.detailOpenSideEffect === 'may-mark-viewed' ? '可能标记已查看' : '无详情打开'}</strong></div>
+        </div>
+        {typeof output.mappingKey === 'string' && <Link className="primary-button" to={`/talent-mappings/${encodeURIComponent(output.mappingKey)}`}>打开人才地图项目</Link>}
+        <div className="detail-grid"><div className="detail-cell"><span>Run ID</span><strong className="mono">{text(output.runId)}</strong></div><div className="detail-cell"><span>导出目录</span><strong className="mono">{text(output.exportDir)}</strong></div><div className="detail-cell"><span>运行记录</span><strong className="mono">{text(output.runPath)}</strong></div></div>
+      </div>
+    );
+  }
 
   if (kind === 'boss-talent-search') {
     const candidates = array(output.candidates);

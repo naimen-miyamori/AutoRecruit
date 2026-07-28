@@ -1,6 +1,12 @@
 import type { BrowserContext, Page } from 'playwright';
 import type { SearchFilterCatalog, SearchFilterDiscoveryRunOptions } from '../search/filter-catalog.js';
 import type { CandidateListItem, CandidateResume, SearchCondition, SearchConditionApplyResult } from '../types/job.js';
+import type {
+  AdvanceCandidateBatchInput,
+  AdvanceCandidateBatchResult,
+  CandidateProfileDetailResult,
+  CandidateResultBatch,
+} from '../types/talent-mapping.js';
 
 export const ALL_PLATFORM_RUN_ORDER = ['51job', 'liepin', 'zhilian'] as const;
 export const SUPPORTED_PLATFORMS = [...ALL_PLATFORM_RUN_ORDER, 'boss'] as const;
@@ -19,6 +25,14 @@ export interface CandidatePostOpenActions {
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
   bossForwardActionMode?: 'confirm' | 'prepare-only';
+}
+
+export interface CandidatePostOpenResult {
+  candidateShareUrl?: string;
+}
+
+export interface CandidateProfileDetailOptions {
+  deadline: number;
 }
 
 export interface PlatformAdapter {
@@ -41,8 +55,16 @@ export interface PlatformAdapter {
   }>;
   saveSearchCondition?(page: Page, savedSearchName: string, options?: SearchWaitOptions): Promise<void>;
   extractCandidateList(page: Page, options?: SearchWaitOptions): Promise<{ candidates: CandidateListItem[] }>;
-  openResumeDetail(context: BrowserContext, searchPage: Page, candidate: CandidateListItem): Promise<Page>;
-  afterResumeDetailOpened?(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions): Promise<void>;
+  openResumeDetail(context: BrowserContext, searchPage: Page, candidate: CandidateListItem, options?: CandidateProfileDetailOptions): Promise<Page>;
+  afterResumeDetailOpened?(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions): Promise<void | CandidatePostOpenResult>;
   parseResumeDetail(page: Page, candidate: CandidateListItem): Promise<CandidateResume>;
   closeResumeDetail?(searchPage: Page, detailPage: Page, candidate: CandidateListItem): Promise<void>;
+  readCurrentCandidateBatch?(page: Page, options: SearchWaitOptions): Promise<CandidateResultBatch>;
+  advanceToNextCandidateBatch?(page: Page, input: AdvanceCandidateBatchInput): Promise<AdvanceCandidateBatchResult>;
+  readCandidateProfileDetail?(
+    context: BrowserContext,
+    searchPage: Page,
+    candidate: CandidateListItem,
+    options: CandidateProfileDetailOptions,
+  ): Promise<CandidateProfileDetailResult>;
 }

@@ -41,6 +41,7 @@ export class TaskScheduler {
   private serial: Promise<void> = Promise.resolve();
   private timer?: NodeJS.Timeout;
   private unsubscribeTaskListener?: () => void;
+  private closed = false;
 
   constructor(options: TaskSchedulerOptions) {
     this.taskQueue = options.taskQueue;
@@ -205,6 +206,7 @@ export class TaskScheduler {
   }
 
   close(): void {
+    this.closed = true;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -239,6 +241,9 @@ export class TaskScheduler {
   }
 
   private requestProcess(delayMs: number): void {
+    if (this.closed) {
+      return;
+    }
     if (this.timer) {
       clearTimeout(this.timer);
     }

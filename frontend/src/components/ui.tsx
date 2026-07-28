@@ -21,6 +21,7 @@ export const TASK_LABELS = {
   'boss-job-sync': 'Boss 职位同步',
   'login-refresh': '登录刷新',
   'rag-ops': 'RAG 运维',
+  'talent-mapping': '人才地图',
 } as const;
 
 export function formatDate(value?: string): string {

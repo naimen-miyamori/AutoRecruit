@@ -46,6 +46,8 @@ async function mockApi(page: Page): Promise<void> {
       body = { taskId: 'task-talent-1', kind: 'boss-talent-search', status: 'queued' };
     } else if (request.method() === 'POST' && pathname === '/api/tasks/boss-greet') {
       body = { taskId: 'task-greet-1', kind: 'boss-greet', status: 'queued' };
+    } else if (request.method() === 'POST' && pathname === '/api/tasks/talent-mapping') {
+      body = { taskId: 'task-mapping-1', kind: 'talent-mapping', status: 'queued' };
     } else if (pathname === '/api/tasks/task-talent-1') {
       body = {
         taskId: 'task-talent-1',
@@ -79,6 +81,56 @@ async function mockApi(page: Page): Promise<void> {
       body = dashboardHealth();
     } else if (pathname === '/api/jobs') {
       body = { jobs: [] };
+    } else if (pathname === '/api/talent-mappings') {
+      body = {
+        mappings: [{
+          mappingKey: 'mapping-1',
+          name: '示例人才地图',
+          objective: { roleFamilies: ['区域运营'], locations: ['上海'] },
+          enrichmentMode: 'targeted-detail',
+          sliceCount: 1,
+          platforms: ['51job'],
+          candidateCount: 2,
+          enrichedCandidateCount: 0,
+          unclassifiedCandidateCount: 0,
+          companyMatrixRowCount: 1,
+          runCount: 1,
+          latestRun: { runId: 'scan-run-1', stage: 'scan', status: 'completed', platformSelection: '51job', startedAt: '2026-07-28T00:00:00.000Z', finishedAt: '2026-07-28T00:01:00.000Z', detailOpenSideEffect: 'none', gapCount: 0 },
+          createdAt: '2026-07-28T00:00:00.000Z',
+          updatedAt: '2026-07-28T00:01:00.000Z',
+        }],
+      };
+    } else if (pathname === '/api/talent-mappings/mapping-1') {
+      body = {
+        project: {
+          version: 1,
+          mappingKey: 'mapping-1',
+          name: '示例人才地图',
+          objective: { roleFamilies: ['区域运营'], locations: ['上海'] },
+          taxonomy: { targetCompanies: [], roleFamilies: [], levels: [] },
+          slices: [],
+          coverage: { maxBatchesPerSlice: 3, maxCandidatesPerSlice: 50, sliceTimeoutMs: 120000 },
+          enrichment: { mode: 'targeted-detail', maxProfilesPerSlice: 2, maxProfilesTotal: 2, selection: { samplePerMatrixCell: 2 } },
+          sourceFilePath: '/fixtures/mapping-1.json',
+          createdAt: '2026-07-28T00:00:00.000Z',
+          updatedAt: '2026-07-28T00:01:00.000Z',
+        },
+        summary: {
+          mappingKey: 'mapping-1', name: '示例人才地图', objective: { roleFamilies: ['区域运营'], locations: ['上海'] }, enrichmentMode: 'targeted-detail', sliceCount: 1, platforms: ['51job'], candidateCount: 2, enrichedCandidateCount: 0, unclassifiedCandidateCount: 0, companyMatrixRowCount: 1, runCount: 1,
+          latestRun: { runId: 'scan-run-1', stage: 'scan', status: 'completed', platformSelection: '51job', startedAt: '2026-07-28T00:00:00.000Z', finishedAt: '2026-07-28T00:01:00.000Z', detailOpenSideEffect: 'none', gapCount: 0 },
+          createdAt: '2026-07-28T00:00:00.000Z', updatedAt: '2026-07-28T00:01:00.000Z',
+        },
+        detailSelection: { available: true, sourceScanRunId: 'scan-run-1', platformSelection: '51job', candidateCount: 2, candidatesByPlatform: { '51job': 2 }, candidatesBySlice: [{ sliceId: 'slice-1', platform: '51job', candidateCount: 2 }] },
+        identityPolicy: { platformScoped: true, crossPlatformAutoMerge: false },
+      };
+    } else if (pathname === '/api/talent-mappings/mapping-1/runs') {
+      body = { runs: [] };
+    } else if (pathname === '/api/talent-mappings/mapping-1/candidates') {
+      body = { candidates: [] };
+    } else if (pathname === '/api/talent-mappings/mapping-1/companies') {
+      body = { companies: [] };
+    } else if (pathname === '/api/talent-mappings/mapping-1/coverage') {
+      body = { coverage: [] };
     } else if (pathname === '/api/schedules') {
       body = { schedules: [] };
     } else if (pathname === '/api/boss/positions') {
@@ -105,7 +157,7 @@ async function mockApi(page: Page): Promise<void> {
 
 describe('frontend client', () => {
   it('renders every top-level route without viewport overflow or console errors', async () => {
-    const routes = ['/', '/tasks', '/jobs', '/boss', '/automation', '/knowledge', '/assistant', '/settings', '/run'];
+    const routes = ['/', '/tasks', '/jobs', '/talent-mappings', '/boss', '/automation', '/knowledge', '/assistant', '/settings', '/run'];
     for (const viewport of [{ width: 390, height: 844 }, { width: 1024, height: 768 }, { width: 1440, height: 900 }]) {
       const page = await browser.newPage({ viewport });
       const consoleErrors: string[] = [];
@@ -162,6 +214,36 @@ describe('frontend client', () => {
     assert.equal(payload.confirmed, true);
     assert.equal(payload.intentId, reviewedIntentId);
     assert.equal(payload.candidateId, 'candidate-1');
+    await page.close();
+  });
+
+  it('submits the exact Mapping detail count and current-run confirmation through the shared task endpoint', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/talent-mappings/mapping-1`, { waitUntil: 'networkidle' });
+
+    await page.getByRole('button', { name: '详情补全（2）', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.waitFor({ state: 'visible' });
+    const dialogText = await dialog.textContent();
+    assert.ok(dialogText);
+    assert.match(dialogText, /打开 2 位候选人详情/);
+    assert.match(dialogText, /可能改变平台“已查看”状态/);
+    assert.match(dialogText, /scan-run-1/);
+
+    const confirm = dialog.getByRole('button', { name: '确认打开详情', exact: true });
+    assert.equal(await confirm.isDisabled(), true);
+    await dialog.getByRole('checkbox').check();
+    const submitted = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/talent-mapping');
+    await confirm.click();
+    const payload = (await submitted).postDataJSON() as Record<string, unknown>;
+    assert.deepStrictEqual(payload, {
+      platform: '51job',
+      talentMappingFile: '/fixtures/mapping-1.json',
+      mappingStage: 'enrich',
+      mappingRunId: 'scan-run-1',
+      confirmedDetailOpen: true,
+    });
     await page.close();
   });
 });

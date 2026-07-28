@@ -12,6 +12,7 @@ import {
   normalizeRagOpsTask,
   normalizeResumeCaptureTask,
   normalizeSearchSubscriptionTask,
+  normalizeTalentMappingTask,
 } from './task-normalizers.js';
 import type {
   AssistantChatRequest,
@@ -30,6 +31,7 @@ import type {
   RagOpsTaskInput,
   ResumeCaptureTaskInput,
   SearchSubscriptionTaskInput,
+  TalentMappingTaskInput,
 } from './types.js';
 
 export type AssistantCompletion = (request: OpenAITextCompletionRequest) => Promise<string>;
@@ -38,6 +40,7 @@ const objectSchema = z.object({}).catchall(z.unknown());
 const assistantKindSchema = z.enum([
   'resume-capture',
   'batch',
+  'talent-mapping',
   'search-subscription',
   'boss-auto-chat',
   'boss-talent-search',
@@ -96,6 +99,9 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'liepinForwardContact',
     'bossForwardMode',
     'bossForwardRecipient',
+  ],
+  'talent-mapping': [
+    'platform', 'talentMappingFile', 'mappingStage', 'confirmedDetailOpen', 'mappingRunId',
   ],
   'search-subscription': [
     'platform',
@@ -170,7 +176,7 @@ function coerceScalar(field: string, value: unknown): unknown {
     return undefined;
   }
 
-  if ((field === 'includeViewed' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates' || field === 'syncJobsBeforeReview' || field === 'triggerMatch' || field === 'confirmed' || field === 'unreadOnly' || field === 'includeClosed') && typeof value === 'string') {
+  if ((field === 'includeViewed' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates' || field === 'syncJobsBeforeReview' || field === 'triggerMatch' || field === 'confirmed' || field === 'confirmedDetailOpen' || field === 'unreadOnly' || field === 'includeClosed') && typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
     if (normalized === 'true') {
       return true;
@@ -273,6 +279,14 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
     missing.push('jobsFile');
   }
 
+  if (kind === 'talent-mapping') {
+    if (!isPresent(input.talentMappingFile)) missing.push('talentMappingFile');
+    if (!isPresent(input.mappingStage)) missing.push('mappingStage');
+    if ((input.mappingStage === 'enrich' || input.mappingStage === 'all') && input.confirmedDetailOpen !== true) {
+      missing.push('confirmedDetailOpen');
+    }
+  }
+
   if (kind === 'search-subscription' && !isPresent(input.searchSubscriptionFile)) {
     missing.push('searchSubscriptionFile');
   }
@@ -366,6 +380,10 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
     warnings.push('风险：批量任务会按 jobs 文件逐项执行。');
   }
 
+  if (kind === 'talent-mapping' && (input.mappingStage === 'enrich' || input.mappingStage === 'all')) {
+    warnings.push('风险：人才地图详情补全会打开候选人详情，可能改变平台已查看状态；本轮必须显式 confirmedDetailOpen=true，且不会评分、转发、联系、发邮件或写入 RAG。');
+  }
+
   if (kind === 'search-subscription' && input.saveSearchSubscription === true) {
     warnings.push('风险：搜索订阅会保存到招聘平台。');
   }
@@ -388,6 +406,8 @@ function previewArgv(kind: AssistantDraft['kind'], input: Record<string, unknown
         return normalizeResumeCaptureTask(input).argv;
       case 'batch':
         return normalizeBatchTask(input).argv;
+      case 'talent-mapping':
+        return approximateArgv(kind, input);
       case 'search-subscription':
         return normalizeSearchSubscriptionTask(input).argv;
       case 'boss-auto-chat':
@@ -516,6 +536,12 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   if (kind === 'batch') {
     pushPreview(argv, '--jobs-file', input.jobsFile);
   }
+  if (kind === 'talent-mapping') {
+    const argv = ['--platform', String(input.platform ?? ''), '--talent-mapping-file', String(input.talentMappingFile ?? ''), '--mapping-stage', String(input.mappingStage ?? '')];
+    pushBooleanPreview(argv, '--mapping-confirm-detail-open', input.confirmedDetailOpen);
+    pushPreview(argv, '--mapping-run-id', input.mappingRunId);
+    return argv;
+  }
   if (kind === 'search-subscription') {
     pushPreview(argv, '--search-subscription-file', input.searchSubscriptionFile);
     pushPreview(argv, '--keyword', input.keyword);
@@ -557,7 +583,7 @@ export function finalizeAssistantDraft(rawDraft: Pick<AssistantDraft, 'kind' | '
 
   return {
     kind: rawDraft.kind,
-    input: input as Partial<ResumeCaptureTaskInput | BatchTaskInput | SearchSubscriptionTaskInput | BossAutoChatTaskInput | BossTalentSearchTaskInput | BossGreetTaskInput | BossChatOperationTaskInput | BossJobSyncTaskInput | LoginRefreshTaskInput | RagOpsTaskInput> & Record<string, unknown>,
+    input: input as Partial<ResumeCaptureTaskInput | BatchTaskInput | TalentMappingTaskInput | SearchSubscriptionTaskInput | BossAutoChatTaskInput | BossTalentSearchTaskInput | BossGreetTaskInput | BossChatOperationTaskInput | BossJobSyncTaskInput | LoginRefreshTaskInput | RagOpsTaskInput> & Record<string, unknown>,
     missingFields,
     warnings,
     argvPreview: previewArgv(rawDraft.kind, input),
@@ -618,11 +644,12 @@ function buildSystemPrompt(): string {
   return [
     '你是招聘自动化 CLI 助手，只能把中文需求转换成受控任务草稿 JSON。',
     '绝对禁止输出 shell 命令、npm script、文件写入动作、破坏性命令或任何绕过后端 normalizer 的参数。',
-    '允许的 kind 只有：resume-capture、batch、search-subscription、boss-auto-chat、boss-talent-search、boss-greet、boss-chat-operation、boss-job-sync、login-refresh、rag-ops、rag-answer。',
+    '允许的 kind 只有：resume-capture、batch、talent-mapping、search-subscription、boss-auto-chat、boss-talent-search、boss-greet、boss-chat-operation、boss-job-sync、login-refresh、rag-ops、rag-answer。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
     'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
     'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。',
     'batch 字段：platform, jobsFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
+    'talent-mapping 字段：platform, talentMappingFile, mappingStage, confirmedDetailOpen, mappingRunId；mappingStage 只能 scan、enrich、all，详情阶段必须 confirmedDetailOpen=true；只允许 51job、liepin、zhilian 或 all，不允许 Boss；不与普通抓取、JD、邮件、转发、订阅或 RAG 参数组合。',
     'Boss 转发只允许 platform=boss；bossForwardMode 只能是 colleague 或 email，出现时必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',
     'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, replyToUnqualifiedCandidates, bossForwardMode, bossForwardRecipient, summaryEmail, summaryCc, syncJobsBeforeReview；platform 必须是 boss。replyToUnqualifiedCandidates 默认 false，仅显式设为 true 时才向不合适候选人发送固定拒绝常用语。转发和总结邮件参数可省略以复用已保存配置；syncJobsBeforeReview 默认 false。',
     'boss-talent-search 字段：platform, source, bossJobId, expectedJobName, coreRequirements, bonusRequirements, triggerMatch, confirmed；source 只能 recommend 或 deep-search。triggerMatch 默认 false，设为 true 时 confirmed 必须为 true。',

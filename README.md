@@ -1,6 +1,6 @@
 # Auto Recruit — 多平台招聘自动化 CLI + 本地运营控制台
 
-**Auto Recruit** 是一个基于 TypeScript、浏览器自动化和 OpenAI 兼容模型的本地招聘工作流工具。它把 **候选人搜索、简历抓取、JD 解析、匹配评分、报告导出、邮件投递、RAG 问答和定时任务** 串成可复用流程，并为 Boss 提供人才发现、自动聊天、原子会话操作及职位/JD 同步能力。
+**Auto Recruit** 是一个基于 TypeScript、浏览器自动化和 OpenAI 兼容模型的本地招聘工作流工具。它把 **候选人搜索、简历抓取、JD 解析、匹配评分、人才地图、报告导出、邮件投递、RAG 问答和定时任务** 串成可复用流程，并为 Boss 提供人才发现、自动聊天、原子会话操作及职位/JD 同步能力。
 
 生产搜索平台包括 `51job`、`liepin` 和 `zhilian`；Boss 是必须显式选择的单平台扩展。职位、简历、评分、运行记录和 RAG 事实保存在本地 `data/`，Qdrant 仅作为可重建索引。
 
@@ -21,20 +21,21 @@ npm run dev -- --platform 51job --keyword "店长" --jd-file ./jd.txt
 | --- | --- |
 | 多平台候选人处理 | 按固定顺序运行 `51job → liepin → zhilian`，统一抓取、评分和报告 |
 | 职位批量运行 | `--jobs-file` 定义多个职位，复用各自 JD、搜索条件和投递设置 |
+| Talent Mapping | 多搜索切片扫描 51job、猎聘和智联，按公司/岗位族/职级/地域聚合，并对确定性样本补全详情 |
 | Boss 人才发现 | 推荐牛人、原生深度搜索条件、显式确认的立即匹配和单人打招呼 |
 | Boss 未读会话审核 | 读取简历、按 JD 判断、转发匹配简历并生成审核摘要 |
 | Boss 职位管理 | 从职位管理页同步职位和 JD，按稳定职位 ID 建立本地映射 |
 | 招聘知识问答 | 基于职位本地事实库回答 JD 和已验证招聘信息问题 |
-| 本地运营控制台 | 任务队列、自动运行计划、职位/候选人查看、RAG 运维和结构化助手草稿 |
+| 本地运营控制台 | 任务队列、人才地图、自动运行计划、职位/候选人查看、RAG 运维和结构化助手草稿 |
 | 数据可追溯 | JSON/JSONL 为事实来源，保留简历、评分、回执、运行摘要和导出结果 |
 
 ## 平台支持
 
 | 平台 | 是否属于 `--platform all` | 搜索入口 | 平台能力 |
 | --- | --- | --- | --- |
-| `51job` | 是，第 1 个 | 保存的订阅或直接搜索 | 候选卡片详情、简历抓取与评分 |
-| `liepin` | 是，第 2 个 | 招聘端找人或直接搜索 | 可配置常用联系人转发 |
-| `zhilian` | 是，第 3 个 | 快捷搜索或直接搜索 | 报告邮件可使用本轮复制的分享链接 |
+| `51job` | 是，第 1 个 | 保存的订阅或直接搜索 | 候选卡片详情、简历抓取与评分、核心 Talent Mapping |
+| `liepin` | 是，第 2 个 | 招聘端找人或直接搜索 | 可配置常用联系人转发、核心 Talent Mapping |
+| `zhilian` | 是，第 3 个 | 快捷搜索或直接搜索 | 报告邮件可使用本轮复制的分享链接、核心 Talent Mapping |
 | `boss` | 否，仅 `--platform boss` | 当前人才搜索页及 Boss 专属入口 | 抓取、人才发现、聊天审核、原子操作、职位/JD 同步 |
 
 `--platform all` 始终串行执行前三个平台，任一平台失败会立即停止。Boss 不会隐式加入全平台或批量平台循环。
@@ -103,6 +104,7 @@ storage-state.boss.json
 | --- | --- | --- | --- |
 | 普通抓取 | `--platform <平台> --keyword ...` | 是 | 抓取；按配置转发或发送报告 |
 | 多平台/批量 | `--platform all` / `--jobs-file` | 是 | 同普通抓取 |
+| Talent Mapping | `--talent-mapping-file` | 是 | 卡片扫描较低风险；详情补全可能改变“已查看”状态并需本轮确认 |
 | 搜索订阅 | `--search-subscription-file` | 是 | 仅显式配置时保存订阅 |
 | JD/RAG 问答 | `--jd-question` / `--rag-question` | 否 | 否 |
 | Boss 自动聊天 | `--boss-auto-chat true` | 是 | 可按配置转发或回复 |
@@ -228,6 +230,34 @@ npm run dev -- --platform all --jobs-file ./jobs.json
 ```
 
 `--jobs-file` 是批量模式唯一的职位定义来源，不能和单职位的 `--keyword`、`--jd` 或 `--jd-file` 同时使用。相对筛选文件路径按 jobs 文件所在目录解析。
+
+### Talent Mapping
+
+Talent Mapping 是独立研究模式，不复用普通职位抓取链路。它不会创建岗位 `jd.json`、读写 `seen-ids.json`、评分、转发、联系候选人、发送邮件或写入 RAG。核心版本支持 `51job`、`liepin`、`zhilian` 和固定顺序的 `all`，不支持 Boss。
+
+仓库提供脱敏计划示例 [`fixtures/talent-mapping/retail-operations.example.json`](./fixtures/talent-mapping/retail-operations.example.json)。计划必须显式声明搜索切片、平台 search plan、批次/候选上限和详情策略；相对 `searchPlanFile` 从 Mapping 文件目录解析。先运行卡片扫描：
+
+```bash
+npm run dev -- \
+  --platform all \
+  --talent-mapping-file ./fixtures/talent-mapping/retail-operations.example.json \
+  --mapping-stage scan
+```
+
+正式详情补全建议使用 `targeted-detail` 计划，并引用一次成功扫描。每轮必须重新提供确认；打开详情可能改变平台的“已查看”状态：
+
+```bash
+npm run dev -- \
+  --platform all \
+  --talent-mapping-file ./fixtures/talent-mapping/retail-operations.example.json \
+  --mapping-stage enrich \
+  --mapping-run-id <scan-run-id> \
+  --mapping-confirm-detail-open true
+```
+
+也可以用 `--mapping-stage all --mapping-confirm-detail-open true` 在一轮中串行扫描并补全。`card-only` 输出只标识为“市场扫描 / Mapping 初筛”；`full-detail` 只有结果集不超过显式硬上限时才执行，超限会在打开任何详情前拒绝。Direct 条件必须全部应用成功才读取候选卡片，受批次、候选或 deadline 上限停止的运行会明确标记 `completed-with-gaps`。
+
+本地事实和导出位于 `data/talent-mapping/<mappingKey>/`。主要交付物是平台隔离的人才清单、公司岗位矩阵、切片覆盖、详情覆盖以及 `candidates.csv`、`company-role-matrix.csv`、`coverage.csv` 和 `summary.md`。唯一人数按 `platform:candidateId` 统计，系统不会依据姓名、公司或职位自动跨平台合并。
 
 ### 搜索订阅与 JD 问答
 
@@ -410,7 +440,7 @@ npm run test:rag:offline
 
 ## 控制台、API 与自动运行
 
-本地控制台的一级工作区包括控制台、任务中心、岗位与人才、Boss 工作台、自动化、知识与运营、智能助手和设置。Boss 工作台集中提供职位/JD 同步、人才发现、会话中心、自动沟通审核和幂等操作回执；立即匹配、打招呼和会话变更仍需精确身份、`confirmed` 和实际 `intentId`。HTTP 或助手确认的浏览器任务统一通过 `TaskQueue` 串行执行，预览命令不是执行来源。
+本地控制台的一级工作区包括控制台、任务中心、岗位与人才、人才地图、Boss 工作台、自动化、知识与运营、智能助手和设置。人才地图页面读取本地项目、公司矩阵、人才清单、覆盖和运行记录；详情补全按钮显示本轮确定性选择的精确人数，并要求当轮安全确认。Boss 工作台集中提供职位/JD 同步、人才发现、会话中心、自动沟通审核和幂等操作回执；立即匹配、打招呼和会话变更仍需精确身份、`confirmed` 和实际 `intentId`。HTTP 或助手确认的浏览器任务统一通过 `TaskQueue` 串行执行，预览命令不是执行来源。
 
 设置了 `AUTORECRUIT_CONSOLE_API_KEY` 时，可在客户端设置页输入控制台 Bearer token。API 地址可以写入 `localStorage`，控制台 token 只写入当前标签页会话的 `sessionStorage`；模型 API key 与控制台 token 分离，也只写入 `sessionStorage`。生产客户端在 API 故障时显示真实错误，不回退到 mock 业务数据。
 
@@ -424,6 +454,8 @@ Boss 持久化读模型通过以下 GET 接口提供职位、同步记录、自�
 ```
 
 这些读取不会打开浏览器或消耗 Boss 配额。下载报告、快照和回执使用 `GET /api/artifacts/:artifactId`；`artifactId` 必须来自服务端返回的白名单引用，接口不接受任意本地路径或目录遍历输入。
+
+Talent Mapping 任务使用 `POST /api/tasks/talent-mapping`。项目、运行、人才、公司矩阵和覆盖由 `/api/talent-mappings` 及其 `/:mappingKey`、`/runs`、`/candidates`、`/companies`、`/coverage` 子资源只读提供；这些 GET 接口只读取本地事实和派生视图，不打开浏览器。Talent Mapping 首版不可加入自动运行计划。
 
 “自动运行”计划可以组合：
 
@@ -457,6 +489,7 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 | `data/<platform>/jobs/<jobKey>/results/` | 轻量运行摘要 |
 | `data/<platform>/jobs/<jobKey>/exports/` | Markdown 等导出结果 |
 | `data/<platform>/jobs/<jobKey>/rag/` | RAG 本地事实和索引源数据 |
+| `data/talent-mapping/<mappingKey>/` | Mapping 计划快照、平台观察、详情证据、运行、派生视图和 CSV/Markdown 导出 |
 | `data/boss/chat-operations/runs/` | Boss 原子会话变更回执 |
 
 只有成功抓取的简历会标记为已查看；详情打开、转发或提取失败仍可重试。评分失败会保存失败产物，但不会撤销已经成功抓取的状态。
@@ -517,6 +550,7 @@ npm run test
 npm run build
 npm run web:typecheck
 npm run test:web
+npm run test:talent-mapping
 npm run web:build
 ```
 

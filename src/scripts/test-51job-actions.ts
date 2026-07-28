@@ -3,7 +3,11 @@ import { describe, it } from 'node:test';
 import { chromium, type Page } from 'playwright';
 import { config } from '../config.js';
 import { fiftyOneJobAdapter } from '../platforms/51job-adapter.js';
-import { extract51jobCandidateList } from '../platforms/51job/actions/candidate-actions.js';
+import {
+  advance51jobToNextCandidateBatch,
+  extract51jobCandidateList,
+  read51jobCurrentCandidateBatch,
+} from '../platforms/51job/actions/candidate-actions.js';
 import {
   click51jobControlWithDomEvents,
   create51jobActionContext,
@@ -31,6 +35,7 @@ import {
 import {
   open51jobResumeDetail,
   parse51jobResumeDetail,
+  read51jobCandidateProfileDetail,
 } from '../platforms/51job/actions/resume-actions.js';
 
 describe('51job semantic actions', () => {
@@ -48,8 +53,11 @@ describe('51job semantic actions', () => {
     assert.equal(fiftyOneJobAdapter.readSearchConditionResultTotal, read51jobSearchConditionResultTotal);
     assert.equal(fiftyOneJobAdapter.saveSearchCondition, savePrepared51jobSearchCondition);
     assert.equal(fiftyOneJobAdapter.extractCandidateList, extract51jobCandidateList);
+    assert.equal(fiftyOneJobAdapter.readCurrentCandidateBatch, read51jobCurrentCandidateBatch);
+    assert.equal(fiftyOneJobAdapter.advanceToNextCandidateBatch, advance51jobToNextCandidateBatch);
     assert.equal(fiftyOneJobAdapter.openResumeDetail, open51jobResumeDetail);
     assert.equal(fiftyOneJobAdapter.parseResumeDetail, parse51jobResumeDetail);
+    assert.equal(fiftyOneJobAdapter.readCandidateProfileDetail, read51jobCandidateProfileDetail);
   });
 
   it('preserves the recruiter subscribe URL for login and saved search entry', () => {
@@ -96,6 +104,64 @@ describe('51job semantic actions', () => {
         button,
       );
       assert.equal(await button.getAttribute('data-clicked'), 'true');
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform['51job'] = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform['51job'] = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('reads and advances exact Mapping candidate batches with a verified terminal postcondition', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const originalMin = config.playwright.actionDelayMinMsByPlatform['51job'];
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform['51job'];
+    config.playwright.actionDelayMinMsByPlatform['51job'] = 0;
+    config.playwright.actionDelayMaxMsByPlatform['51job'] = 0;
+    try {
+      await page.setContent(`
+        <div class="virtual_list" id="results">
+          <div class="talent-card"><span class="name">候选人甲</span><span>示例公司</span><span>运营经理</span><div id="no_interested_12345"></div></div>
+        </div>
+        <ul class="el-pager"><li class="active" id="active-page">1</li></ul>
+        <div class="el-pagination"><button class="btn-next" id="next" onclick="
+          document.querySelector('#results').innerHTML = '<div class=&quot;talent-card&quot;><span class=&quot;name&quot;>候选人乙</span><span>示例公司</span><span>高级经理</span><div id=&quot;no_interested_67890&quot;></div></div>';
+          document.querySelector('#active-page').textContent = '2';
+          this.classList.add('disabled');
+          this.disabled = true;
+        ">下一页</button></div>
+      `);
+      const deadline = Date.now() + 5_000;
+      const first = await read51jobCurrentCandidateBatch(page, { deadline });
+      assert.deepStrictEqual(first.candidates.map((item) => item.candidateId), ['12345']);
+      assert.equal(first.batchNumber, 1);
+      assert.equal(first.endReached, false);
+
+      await assert.rejects(
+        () => advance51jobToNextCandidateBatch(page, {
+          expectedCurrentBatchIdentity: 'stale-batch',
+          deadline,
+        }),
+        /changed before advance/i,
+      );
+      const advanced = await advance51jobToNextCandidateBatch(page, {
+        expectedCurrentBatchIdentity: first.batchIdentity,
+        deadline,
+      });
+      assert.equal(advanced.status, 'advanced');
+      if (advanced.status === 'advanced') {
+        assert.deepStrictEqual(advanced.batch.candidates.map((item) => item.candidateId), ['67890']);
+        assert.equal(advanced.batch.batchNumber, 2);
+        assert.equal(advanced.batch.endReached, true);
+        assert.notEqual(advanced.batch.batchIdentity, first.batchIdentity);
+        assert.deepStrictEqual(
+          await advance51jobToNextCandidateBatch(page, {
+            expectedCurrentBatchIdentity: advanced.batch.batchIdentity,
+            deadline,
+          }),
+          { status: 'end-reached' },
+        );
+      }
     } finally {
       config.playwright.actionDelayMinMsByPlatform['51job'] = originalMin;
       config.playwright.actionDelayMaxMsByPlatform['51job'] = originalMax;

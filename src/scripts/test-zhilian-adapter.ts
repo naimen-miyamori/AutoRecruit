@@ -3,6 +3,11 @@ import test from 'node:test';
 
 import { config } from '../config.js';
 import { zhilianAdapter, zhilianTestExports } from '../platforms/zhilian-adapter.js';
+import {
+  advanceZhilianToNextCandidateBatch,
+  readZhilianCurrentCandidateBatch,
+} from '../platforms/zhilian/actions/candidate-actions.js';
+import { readZhilianCandidateProfileDetail } from '../platforms/zhilian/actions/resume-actions.js';
 
 const zhilianShareLinkSelector = [
   'input',
@@ -123,6 +128,9 @@ test('zhilian adapter exposes the expected platform metadata', () => {
   assert.equal(zhilianAdapter.subscribeSearchUrl, 'https://rd6.zhaopin.com/app/search');
   assert.equal(zhilianAdapter.loginUrl, 'https://passport.zhaopin.com/org/login');
   assert.equal(zhilianAdapter.storageStateFileName, 'storage-state.zhilian.json');
+  assert.equal(zhilianAdapter.readCurrentCandidateBatch, readZhilianCurrentCandidateBatch);
+  assert.equal(zhilianAdapter.advanceToNextCandidateBatch, advanceZhilianToNextCandidateBatch);
+  assert.equal(zhilianAdapter.readCandidateProfileDetail, readZhilianCandidateProfileDetail);
 });
 
 test('zhilian adapter rejects login fallback pages', async () => {
@@ -3660,7 +3668,7 @@ test('zhilian resume parser reads modal resume detail content instead of the und
   assert.doesNotMatch(resume.workExperiences[0].details.join('\n'), /方女士/);
 });
 
-test('zhilian resume parser copies colleague-forward share links', async () => {
+test('zhilian resume parser stays read-only and delivery metadata copies colleague-forward share links separately', async () => {
   const modalResumeText = [
     '黄先生',
     '要附件简历',
@@ -3712,6 +3720,11 @@ test('zhilian resume parser copies colleague-forward share links', async () => {
     currentTitle: undefined,
   });
 
-  assert.equal(resume.candidateShareUrl, 'https://m.zhaopin.com/b/resume-package?zhaopinToken=share-token-from-copy');
+  assert.equal(resume.candidateShareUrl, undefined);
+  assert.deepEqual(clickCalls, []);
+  const deliveryMetadata = await zhilianAdapter.afterResumeDetailOpened!(page, {
+    candidateId: '1151819900',
+  }, {});
+  assert.equal(deliveryMetadata?.candidateShareUrl, 'https://m.zhaopin.com/b/resume-package?zhaopinToken=share-token-from-copy');
   assert.deepEqual(clickCalls, ['转给同事', '链接转发', '复制链接|复制', 'key:Escape']);
 });

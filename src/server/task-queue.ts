@@ -183,6 +183,24 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
     };
   }
 
+  if ('mode' in output && output.mode === 'talent-mapping') {
+    return {
+      mode: output.mode,
+      mappingKey: output.mappingKey,
+      runId: output.runId,
+      stage: output.stage,
+      status: output.status,
+      observedCards: output.observedCards,
+      uniquePlatformProfiles: output.uniquePlatformProfiles,
+      enrichedProfiles: output.enrichedProfiles,
+      failedProfiles: output.failedProfiles,
+      cappedSlices: output.cappedSlices,
+      exportDir: output.exportDir,
+      runPath: output.runPath,
+      detailOpenSideEffect: output.detailOpenSideEffect,
+    };
+  }
+
   if ('totalCandidates' in output) {
     return {
       jobKey: output.jobKey,

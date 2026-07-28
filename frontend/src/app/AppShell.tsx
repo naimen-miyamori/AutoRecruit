@@ -8,6 +8,7 @@ import {
   Database,
   LayoutDashboard,
   ListChecks,
+  Map,
   Settings2,
   ShieldCheck,
 } from 'lucide-react';
@@ -17,6 +18,7 @@ const NAV: Array<{ to: string; label: string; icon: typeof LayoutDashboard; exac
   { to: '/', label: '控制台', icon: LayoutDashboard, exact: true },
   { to: '/tasks', label: '任务中心', icon: ListChecks },
   { to: '/jobs', label: '岗位与人才', icon: BriefcaseBusiness },
+  { to: '/talent-mappings', label: '人才地图', icon: Map },
   { to: '/boss', label: 'Boss 工作台', icon: ShieldCheck },
   { to: '/automation', label: '自动化', icon: Clock3 },
   { to: '/knowledge', label: '知识与运营', icon: Database },
@@ -24,7 +26,7 @@ const NAV: Array<{ to: string; label: string; icon: typeof LayoutDashboard; exac
 ] as const;
 
 const PAGE_NAMES: Array<[string, string]> = [
-  ['/tasks', '任务中心'], ['/jobs', '岗位与人才'], ['/boss', 'Boss 工作台'], ['/automation', '自动化'],
+  ['/tasks', '任务中心'], ['/jobs', '岗位与人才'], ['/talent-mappings', '人才地图'], ['/boss', 'Boss 工作台'], ['/automation', '自动化'],
   ['/knowledge', '知识与运营'], ['/assistant', '智能助手'], ['/settings', '设置'], ['/run', '新建任务'], ['/', '控制台'],
 ];
 

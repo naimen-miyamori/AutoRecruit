@@ -27,6 +27,7 @@ import {
 } from './cli-assistant.js';
 import { JobReadModel } from './job-read-model.js';
 import { BossReadModel } from './boss-read-model.js';
+import { TalentMappingReadModel } from './talent-mapping-read-model.js';
 import { ArtifactReadModel } from './artifact-read-model.js';
 import { TaskScheduler } from './task-scheduler.js';
 import { TaskQueue } from './task-queue.js';
@@ -46,6 +47,7 @@ import {
   normalizeRagOpsTask,
   normalizeResumeCaptureTask,
   prepareSearchSubscriptionTask,
+  normalizeTalentMappingTask,
   type NormalizedTask,
 } from './task-normalizers.js';
 import type {
@@ -70,6 +72,7 @@ interface RouteDependencies {
   taskScheduler?: TaskScheduler;
   jobReadModel?: JobReadModel;
   bossReadModel?: BossReadModel;
+  talentMappingReadModel?: TalentMappingReadModel;
   artifactReadModel?: ArtifactReadModel;
   dataDir?: string;
   answerQuestion?: (options: AskRagQuestionOptions) => Promise<RagAnswer>;
@@ -242,6 +245,11 @@ async function confirmAssistantDraft(
         kind: draft.kind,
         task: await enqueueTask(taskQueue, draft.kind, normalizeBatchTask(draft.input)),
       };
+    case 'talent-mapping':
+      return {
+        kind: draft.kind,
+        task: await enqueueTask(taskQueue, draft.kind, await normalizeTalentMappingTask(draft.input)),
+      };
     case 'search-subscription':
       return {
         kind: draft.kind,
@@ -300,6 +308,7 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
   };
   const jobReadModel = request.jobReadModel ?? new JobReadModel({ dataDir });
   const bossReadModel = request.bossReadModel ?? new BossReadModel({ dataDir });
+  const talentMappingReadModel = request.talentMappingReadModel ?? new TalentMappingReadModel({ dataDir });
   const artifactReadModel = request.artifactReadModel ?? new ArtifactReadModel({ dataDir });
   const searchParams = request.searchParams ?? new URLSearchParams();
   const method = request.method.toUpperCase();
@@ -420,6 +429,11 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
       return jsonResponse(202, task);
     }
 
+    if (method === 'POST' && pathname === '/api/tasks/talent-mapping') {
+      const task = await enqueueTask(taskQueue, 'talent-mapping', await normalizeTalentMappingTask(request.body));
+      return jsonResponse(202, task);
+    }
+
     if (method === 'POST' && pathname === '/api/tasks/search-subscription') {
       const task = await enqueueTask(taskQueue, 'search-subscription', await prepareSearchSubscriptionTask(request.body, dataDir));
       return jsonResponse(202, task);
@@ -464,6 +478,41 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
       const platform = jobReadModel.parsePlatform(searchParams.get('platform') ?? undefined);
       return jsonResponse(200, {
         jobs: await jobReadModel.listJobs(platform),
+      });
+    }
+
+    if (method === 'GET' && pathname === '/api/talent-mappings') {
+      return jsonResponse(200, {
+        mappings: await talentMappingReadModel.listProjects(),
+      });
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments.length === 3) {
+      const mapping = await talentMappingReadModel.getProject(segments[2]);
+      return mapping ? jsonResponse(200, mapping) : notFound(`Talent Mapping project not found: ${segments[2]}`);
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'runs' && segments.length === 4) {
+      return jsonResponse(200, {
+        runs: await talentMappingReadModel.listRuns(segments[2]),
+      });
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'candidates' && segments.length === 4) {
+      return jsonResponse(200, {
+        candidates: await talentMappingReadModel.listCandidates(segments[2]),
+      });
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'companies' && segments.length === 4) {
+      return jsonResponse(200, {
+        companies: await talentMappingReadModel.listCompanies(segments[2]),
+      });
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'coverage' && segments.length === 4) {
+      return jsonResponse(200, {
+        coverage: await talentMappingReadModel.getCoverage(segments[2]),
       });
     }
 

@@ -4,6 +4,8 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { buildJobKey } from '../parsers/jd-parser.js';
 import { parsePlatformArg } from '../platforms/registry.js';
 import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
+import { isTalentMappingCorePlatform } from '../types/talent-mapping.js';
+import { loadTalentMappingPlanFile } from '../talent-mapping/plan.js';
 import type {
   BatchTaskInput,
   BossAutoChatTaskInput,
@@ -20,6 +22,7 @@ import type {
   SchedulableTaskKind,
   SearchSource,
   SearchSubscriptionTaskInput,
+  TalentMappingTaskInput,
   TaskInput,
 } from './types.js';
 import type { BossChatOperation, BossTalentSource } from '../types/boss.js';
@@ -157,6 +160,14 @@ export function normalizePlatform(value: unknown): SupportedPlatform {
   return parsePlatformArg(value.trim());
 }
 
+function normalizeTalentMappingPlatformSelection(value: unknown): TalentMappingTaskInput['platform'] {
+  const selection = normalizePlatformSelection(value);
+  if (selection !== 'all' && !isTalentMappingCorePlatform(selection)) {
+    throw new Error('Talent Mapping supports only 51job, liepin, zhilian, or all; Boss is not supported');
+  }
+  return selection;
+}
+
 export function normalizeSearchSource(value: unknown): SearchSource | undefined {
   if (value === undefined) {
     return undefined;
@@ -240,6 +251,14 @@ function assertAbsent(item: JsonObject, fieldNames: string[], context: string): 
   const present = fieldNames.filter((fieldName) => item[fieldName] !== undefined);
   if (present.length > 0) {
     throw new Error(`${context} cannot include ${present.join(', ')}`);
+  }
+}
+
+function assertOnlyFields(item: JsonObject, fieldNames: readonly string[], context: string): void {
+  const allowed = new Set(fieldNames);
+  const unsupported = Object.keys(item).filter((fieldName) => !allowed.has(fieldName));
+  if (unsupported.length > 0) {
+    throw new Error(`${context} cannot include ${unsupported.join(', ')}`);
   }
 }
 
@@ -382,6 +401,71 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
       liepinForwardContact,
       bossForwardMode,
       bossForwardRecipient,
+    },
+  };
+}
+
+export async function normalizeTalentMappingTask(payload: unknown): Promise<NormalizedTask<TalentMappingTaskInput>> {
+  const item = normalizeJsonObject(payload, 'talent-mapping task');
+  assertOnlyFields(item, [
+    'platform',
+    'talentMappingFile',
+    'mappingStage',
+    'confirmedDetailOpen',
+    'mappingRunId',
+  ], 'talent-mapping task');
+  const platform = normalizeTalentMappingPlatformSelection(item.platform);
+  const talentMappingFile = path.resolve(getRequiredString(item, 'talentMappingFile'));
+  const mappingStageValue = getRequiredString(item, 'mappingStage');
+  if (mappingStageValue !== 'scan' && mappingStageValue !== 'enrich' && mappingStageValue !== 'all') {
+    throw new Error('mappingStage must be scan, enrich, or all');
+  }
+  const mappingStage = mappingStageValue as TalentMappingTaskInput['mappingStage'];
+  const confirmedDetailOpen = getOptionalBoolean(item, 'confirmedDetailOpen');
+  const mappingRunId = getOptionalString(item, 'mappingRunId');
+
+  if (mappingStage === 'scan' && item.confirmedDetailOpen !== undefined) {
+    throw new Error('confirmedDetailOpen is valid only with mappingStage enrich or all');
+  }
+  if (mappingRunId && mappingStage !== 'enrich') {
+    throw new Error('mappingRunId is valid only with mappingStage enrich');
+  }
+
+  const plan = await loadTalentMappingPlanFile(talentMappingFile, { platformSelection: platform });
+  if (mappingStage === 'enrich' && plan.enrichment.mode === 'card-only') {
+    throw new Error('mappingStage enrich is invalid for a card-only Talent Mapping plan');
+  }
+  if ((mappingStage === 'enrich' || mappingStage === 'all')
+    && plan.enrichment.mode !== 'card-only'
+    && confirmedDetailOpen !== true) {
+    throw new Error('confirmedDetailOpen=true is required for Talent Mapping detail enrichment');
+  }
+  const input: TalentMappingTaskInput = {
+    platform,
+    talentMappingFile,
+    mappingStage,
+    confirmedDetailOpen,
+    mappingRunId,
+  };
+  const argv = [
+    '--platform', platform,
+    '--talent-mapping-file', talentMappingFile,
+    '--mapping-stage', mappingStage,
+  ];
+  if (mappingStage !== 'scan') {
+    argv.push('--mapping-confirm-detail-open', String(confirmedDetailOpen ?? false));
+  }
+  pushOptional(argv, '--mapping-run-id', mappingRunId);
+
+  return {
+    input,
+    argv,
+    inputSummary: {
+      platform,
+      talentMappingFile,
+      mappingStage,
+      confirmedDetailOpen: confirmedDetailOpen ?? false,
+      mappingRunId,
     },
   };
 }

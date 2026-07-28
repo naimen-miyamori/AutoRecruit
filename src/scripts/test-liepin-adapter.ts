@@ -7,6 +7,11 @@ import vm from 'node:vm';
 
 import { config } from '../config.js';
 import { getLiepinCandidatePaceDelayMs, liepinAdapter } from '../platforms/liepin-adapter.js';
+import {
+  advanceLiepinToNextCandidateBatch,
+  readLiepinCurrentCandidateBatch,
+} from '../platforms/liepin/actions/candidate-actions.js';
+import { readLiepinCandidateProfileDetail } from '../platforms/liepin/actions/resume-actions.js';
 
 const originalDataDir = config.dataDir;
 const testTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-liepin-adapter-'));
@@ -22,6 +27,12 @@ function runInIsolatedPageContext<TArg, TResult>(fn: (arg: TArg) => TResult, arg
 }
 
 const liepinSearchReadyText = '搜简历 搜索条件 人才搜索 快捷搜索 优衣库 订阅 隐藏已查看';
+
+test('liepin adapter wires Mapping batch and read-only detail contracts to domain actions', () => {
+  assert.equal(liepinAdapter.readCurrentCandidateBatch, readLiepinCurrentCandidateBatch);
+  assert.equal(liepinAdapter.advanceToNextCandidateBatch, advanceLiepinToNextCandidateBatch);
+  assert.equal(liepinAdapter.readCandidateProfileDetail, readLiepinCandidateProfileDetail);
+});
 
 test('liepin adapter defaults every action and candidate pace delay to 2-4 seconds', () => {
   assert.equal(config.playwright.liepinActionDelayMinMs, 2000);

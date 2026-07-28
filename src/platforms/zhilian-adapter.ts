@@ -1,5 +1,9 @@
 import type { PlatformAdapter } from './types.js';
-import { extractZhilianCandidateList } from './zhilian/actions/candidate-actions.js';
+import {
+  advanceZhilianToNextCandidateBatch,
+  extractZhilianCandidateList,
+  readZhilianCurrentCandidateBatch,
+} from './zhilian/actions/candidate-actions.js';
 import {
   applyZhilianSearchCondition,
   discoverZhilianStaticSearchFilters,
@@ -22,7 +26,9 @@ import {
   closeZhilianResumeDetail,
   openZhilianResumeDetail,
   parseZhilianResumeDetail,
+  readZhilianCandidateProfileDetail,
 } from './zhilian/actions/resume-actions.js';
+import { collectZhilianResumeDeliveryMetadata } from './zhilian/actions/delivery-actions.js';
 import { zhilianTestExports } from './zhilian/actions/internal-page-actions.js';
 
 export { zhilianTestExports };
@@ -44,7 +50,11 @@ export const zhilianAdapter: PlatformAdapter = {
   readSearchConditionResultTotal: readZhilianSearchConditionResultTotal,
   saveSearchCondition: savePreparedZhilianSearchCondition,
   extractCandidateList: extractZhilianCandidateList,
+  readCurrentCandidateBatch: readZhilianCurrentCandidateBatch,
+  advanceToNextCandidateBatch: advanceZhilianToNextCandidateBatch,
   openResumeDetail: openZhilianResumeDetail,
+  afterResumeDetailOpened: collectZhilianResumeDeliveryMetadata,
   parseResumeDetail: parseZhilianResumeDetail,
   closeResumeDetail: closeZhilianResumeDetail,
+  readCandidateProfileDetail: readZhilianCandidateProfileDetail,
 };

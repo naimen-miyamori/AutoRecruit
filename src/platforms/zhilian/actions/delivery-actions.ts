@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import type { CandidatePostOpenResult } from '../../types.js';
 import {
   clickPlatformLocator,
   waitPlatformActionPace,
@@ -347,4 +348,9 @@ export async function copyZhilianColleagueForwardLink(page: Page): Promise<strin
   } finally {
     await dismissZhilianColleagueForwardDialog(page);
   }
+}
+
+export async function collectZhilianResumeDeliveryMetadata(page: Page): Promise<CandidatePostOpenResult> {
+  const candidateShareUrl = await copyZhilianColleagueForwardLink(page);
+  return candidateShareUrl ? { candidateShareUrl } : {};
 }

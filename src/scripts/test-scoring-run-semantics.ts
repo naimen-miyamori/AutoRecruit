@@ -4783,7 +4783,7 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(result.runResult.failedCandidates, []);
   });
 
-  it('carries parsed Zhilian share links into score artifacts', async () => {
+  it('carries Zhilian delivery metadata into score artifacts', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
     const store = new indexModule.JobStore();
@@ -4799,9 +4799,9 @@ describe('scoring run semantics', () => {
         candidates: [{ candidateId: 'cand-share-link' }],
       }),
       openResumeDetail: async () => detailPage,
+      afterResumeDetailOpened: async () => ({ candidateShareUrl }),
       parseResumeDetail: async () => ({
         candidateId: 'cand-share-link',
-        candidateShareUrl,
         regions: [],
         pr: [],
         workExperiences: [],
@@ -5190,6 +5190,7 @@ describe('scoring run semantics', () => {
         callOrder.push('open');
         return searchPage;
       },
+      afterResumeDetailOpened: async () => undefined,
       parseResumeDetail: async () => {
         callOrder.push('parse');
         return buildResume('cand-modal');
