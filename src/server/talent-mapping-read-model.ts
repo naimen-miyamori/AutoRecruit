@@ -1,9 +1,22 @@
-import { TALENT_MAPPING_CORE_PLATFORMS, type MappingCandidateView, type MappingCompanyRoleMatrixRow, type MappingCoverageViewRow, type MappingRunRecord, type TalentMappingCorePlatform, type TalentMappingPlatformSelection, type TalentMappingProject } from '../types/talent-mapping.js';
+import {
+  TALENT_MAPPING_CORE_PLATFORMS,
+  type MappingCandidateView,
+  type MappingClassificationReview,
+  type MappingClassificationSuggestion,
+  type MappingCompanyRoleMatrixRow,
+  type MappingCoverageViewRow,
+  type MappingEntityLink,
+  type MappingRunRecord,
+  type TalentMappingCorePlatform,
+  type TalentMappingPlatformSelection,
+  type TalentMappingProject,
+} from '../types/talent-mapping.js';
 import {
   buildTalentMappingDetailSelections,
   countTalentMappingDetailSelections,
 } from '../talent-mapping/selection.js';
 import { TalentMappingStore } from '../talent-mapping/store.js';
+import { activeMappingEntityLinks, countConfirmedMappingEntities } from '../talent-mapping/entity-links.js';
 
 interface TalentMappingReadModelOptions {
   dataDir?: string;
@@ -31,6 +44,9 @@ export interface TalentMappingProjectSummary {
   enrichedCandidateCount: number;
   unclassifiedCandidateCount: number;
   companyMatrixRowCount: number;
+  activeEntityLinkCount: number;
+  confirmedEntityCount: number;
+  pendingClassificationSuggestionCount: number;
   runCount: number;
   latestRun?: TalentMappingRunReference;
   createdAt: string;
@@ -58,6 +74,7 @@ export interface TalentMappingProjectDetail {
   identityPolicy: {
     platformScoped: true;
     crossPlatformAutoMerge: false;
+    humanConfirmedLinking: true;
   };
 }
 
@@ -102,7 +119,12 @@ function buildSummary(input: {
   runs: readonly MappingRunRecord[];
   candidates: readonly MappingCandidateView[];
   companies: readonly MappingCompanyRoleMatrixRow[];
+  entityLinks: readonly MappingEntityLink[];
+  classificationSuggestions: readonly MappingClassificationSuggestion[];
+  classificationReviews: readonly MappingClassificationReview[];
 }): TalentMappingProjectSummary {
+  const activeLinks = activeMappingEntityLinks(input.entityLinks);
+  const reviewedSuggestionIds = new Set(input.classificationReviews.map((review) => review.suggestionId));
   return {
     mappingKey: input.project.mappingKey,
     name: input.project.name,
@@ -114,6 +136,9 @@ function buildSummary(input: {
     enrichedCandidateCount: input.candidates.filter((candidate) => candidate.detailStatus === 'enriched').length,
     unclassifiedCandidateCount: input.candidates.filter(isUnclassified).length,
     companyMatrixRowCount: input.companies.length,
+    activeEntityLinkCount: activeLinks.length,
+    confirmedEntityCount: countConfirmedMappingEntities(input.candidates.length, input.entityLinks),
+    pendingClassificationSuggestionCount: input.classificationSuggestions.filter((suggestion) => !reviewedSuggestionIds.has(suggestion.suggestionId)).length,
     runCount: input.runs.length,
     latestRun: input.runs[0] ? toRunReference(input.runs[0]) : undefined,
     createdAt: input.project.createdAt,
@@ -131,12 +156,15 @@ export class TalentMappingReadModel {
   async listProjects(): Promise<TalentMappingProjectSummary[]> {
     const projects = await this.store.listProjects();
     return Promise.all(projects.map(async (project) => {
-      const [runs, candidates, companies] = await Promise.all([
+      const [runs, candidates, companies, entityLinks, classificationSuggestions, classificationReviews] = await Promise.all([
         this.store.listRuns(project.mappingKey),
         this.store.readCandidateView(project.mappingKey),
         this.store.readCompanyView(project.mappingKey),
+        this.store.readEntityLinks(project.mappingKey),
+        this.store.readClassificationSuggestions(project.mappingKey),
+        this.store.readClassificationReviews(project.mappingKey),
       ]);
-      return buildSummary({ project, runs, candidates, companies });
+      return buildSummary({ project, runs, candidates, companies, entityLinks, classificationSuggestions, classificationReviews });
     }));
   }
 
@@ -144,18 +172,22 @@ export class TalentMappingReadModel {
     const project = await this.store.readProject(mappingKey);
     if (!project) return undefined;
 
-    const [runs, candidates, companies] = await Promise.all([
+    const [runs, candidates, companies, entityLinks, classificationSuggestions, classificationReviews] = await Promise.all([
       this.store.listRuns(mappingKey),
       this.store.readCandidateView(mappingKey),
       this.store.readCompanyView(mappingKey),
+      this.store.readEntityLinks(mappingKey),
+      this.store.readClassificationSuggestions(mappingKey),
+      this.store.readClassificationReviews(mappingKey),
     ]);
     return {
       project,
-      summary: buildSummary({ project, runs, candidates, companies }),
+      summary: buildSummary({ project, runs, candidates, companies, entityLinks, classificationSuggestions, classificationReviews }),
       detailSelection: await this.buildDetailSelectionPreview(project, runs),
       identityPolicy: {
         platformScoped: true,
         crossPlatformAutoMerge: false,
+        humanConfirmedLinking: true,
       },
     };
   }

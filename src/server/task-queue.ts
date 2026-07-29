@@ -12,11 +12,13 @@ import {
 } from '../browser/session.js';
 import { waitForManualLoginAndPersistSession } from '../browser/manual-login-refresh.js';
 import { runRagOpsTask } from './rag-ops-runner.js';
+import { runTalentMappingClassificationTask } from './talent-mapping-classification-runner.js';
 import { normalizeFailureMessage, summarizeFailureMessage } from './failure-summary.js';
 import type {
   LoginRefreshTaskInput,
   LoginRefreshTaskOutput,
   RagOpsTaskInput,
+  TalentMappingClassificationTaskInput,
   TaskQueueHealth,
   TaskDetail,
   TaskKind,
@@ -33,6 +35,10 @@ import type {
 export type TaskRunner = (argv: readonly string[], task: TaskRecord) => Promise<MainResult>;
 export type LoginRefreshRunner = (input: LoginRefreshTaskInput, task: TaskRecord) => Promise<LoginRefreshTaskOutput>;
 export type RagOpsRunner = (input: RagOpsTaskInput, task: TaskRecord) => Promise<TaskOutput>;
+export type TalentMappingClassificationRunner = (
+  input: TalentMappingClassificationTaskInput,
+  task: TaskRecord,
+) => Promise<TaskOutput>;
 
 export interface QueueTaskDefinition {
   kind: TaskKind;
@@ -56,6 +62,7 @@ interface TaskQueueOptions {
   runner?: TaskRunner;
   loginRefreshRunner?: LoginRefreshRunner;
   ragOpsRunner?: RagOpsRunner;
+  talentMappingClassificationRunner?: TalentMappingClassificationRunner;
 }
 
 async function ensureDir(dirPath: string): Promise<void> {
@@ -132,6 +139,17 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
       file: output.file,
       outputPath: output.outputPath,
       ...output.summary,
+    };
+  }
+
+  if ('mode' in output && output.mode === 'talent-mapping-classification') {
+    return {
+      mode: output.mode,
+      mappingKey: output.mappingKey,
+      model: output.model,
+      consideredCandidates: output.consideredCandidates,
+      generatedSuggestions: output.generatedSuggestions,
+      skippedCandidates: output.skippedCandidates,
     };
   }
 
@@ -259,6 +277,7 @@ export class TaskQueue {
   private readonly runner: TaskRunner;
   private readonly loginRefreshRunner: LoginRefreshRunner;
   private readonly ragOpsRunner: RagOpsRunner;
+  private readonly talentMappingClassificationRunner: TalentMappingClassificationRunner;
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly pendingTaskIds: string[] = [];
   private readonly persistChains = new Map<string, Promise<void>>();
@@ -272,6 +291,8 @@ export class TaskQueue {
     this.taskDir = options.taskDir ?? path.join(config.dataDir, 'runtime', 'tasks');
     this.runner = options.runner ?? ((argv) => runCliMain(argv));
     this.ragOpsRunner = options.ragOpsRunner ?? runRagOpsTask;
+    this.talentMappingClassificationRunner = options.talentMappingClassificationRunner
+      ?? ((input) => runTalentMappingClassificationTask(input));
     this.loginRefreshRunner = options.loginRefreshRunner ?? (async (input) => {
       await waitForManualLoginAndPersistSession(input.platform, {
         openLoginSession: openLoginSessionRef.fn,
@@ -603,6 +624,13 @@ export class TaskQueue {
 
       if (task.kind === 'rag-ops') {
         return await this.ragOpsRunner(task.input as RagOpsTaskInput, task);
+      }
+
+      if (task.kind === 'talent-mapping-classification') {
+        return await this.talentMappingClassificationRunner(
+          task.input as TalentMappingClassificationTaskInput,
+          task,
+        );
       }
 
       return await this.runner(task.argv, task);

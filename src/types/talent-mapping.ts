@@ -233,6 +233,13 @@ export interface MappingCandidateView {
   detailStatus: 'not-enriched' | 'enriched';
   latestProfileObservedAt?: string;
   resume?: CandidateResume;
+  entityId?: string;
+  manualClassification?: {
+    fields: MappingClassificationField[];
+    suggestionIds: string[];
+    reviewedAt: string;
+    reviewedBy: string;
+  };
 }
 
 export interface MappingCompanyRoleMatrixRow {
@@ -261,6 +268,7 @@ export interface MappingDerivedViews {
   candidates: MappingCandidateView[];
   companies: MappingCompanyRoleMatrixRow[];
   coverage: MappingCoverageViewRow[];
+  changes: MappingRunChangeReport;
   generatedAt: string;
 }
 
@@ -318,6 +326,120 @@ export interface MappingEntityLink {
   confirmedAt: string;
   confirmedBy: string;
   evidence: string;
+  revokedAt?: string;
+  revokedBy?: string;
+  revocationReason?: string;
+}
+
+export interface MappingEntityLinkSuggestion {
+  suggestionId: string;
+  platformCandidateKeys: [string, string];
+  evidence: string[];
+}
+
+export interface MappingEntityLinkReviewView {
+  platformProfileCount: number;
+  confirmedEntityCount: number;
+  activeLinks: MappingEntityLink[];
+  revokedLinks: MappingEntityLink[];
+  suggestions: MappingEntityLinkSuggestion[];
+}
+
+export type MappingClassificationField = 'companyKey' | 'roleKey' | 'level' | 'location';
+
+export interface MappingClassificationEvidence {
+  field: 'currentCompany' | 'currentTitle' | 'location';
+  rawValue: string;
+  observationId: string;
+}
+
+export interface MappingClassificationSuggestion {
+  suggestionId: string;
+  mappingKey: string;
+  platformCandidateKey: string;
+  sourceObservationId: string;
+  createdAt: string;
+  model: string;
+  promptVersion: 1;
+  proposed: MappingNormalizedCandidateFields;
+  rationale: string;
+  evidence: MappingClassificationEvidence[];
+}
+
+export interface MappingClassificationReview {
+  reviewId: string;
+  mappingKey: string;
+  suggestionId: string;
+  platformCandidateKey: string;
+  decision: 'accepted' | 'rejected';
+  reviewedAt: string;
+  reviewedBy: string;
+  note?: string;
+}
+
+export interface MappingClassificationSuggestionView extends MappingClassificationSuggestion {
+  review?: MappingClassificationReview;
+}
+
+export interface TalentMappingClassificationRunSummary {
+  mode: 'talent-mapping-classification';
+  mappingKey: string;
+  model: string;
+  consideredCandidates: number;
+  generatedSuggestions: number;
+  skippedCandidates: number;
+  suggestionIds: string[];
+}
+
+export type MappingComparableField =
+  | 'name'
+  | 'currentCompany'
+  | 'currentTitle'
+  | 'companyKey'
+  | 'roleKey'
+  | 'level'
+  | 'location';
+
+export interface MappingRunCandidateSnapshot {
+  platform: TalentMappingCorePlatform;
+  platformCandidateKey: string;
+  candidateId: string;
+  name?: string;
+  currentCompany?: string;
+  currentTitle?: string;
+  companyKey?: string;
+  roleKey?: string;
+  level?: string;
+  location?: string;
+  observedAt: string;
+}
+
+export interface MappingRunFieldChange {
+  field: MappingComparableField;
+  previousValue?: string;
+  currentValue?: string;
+  previousEvidence: MappingFieldEvidence[];
+  currentEvidence: MappingFieldEvidence[];
+}
+
+export interface MappingRunCandidateChange {
+  platformCandidateKey: string;
+  platform: TalentMappingCorePlatform;
+  candidateId: string;
+  fields: MappingRunFieldChange[];
+}
+
+export interface MappingRunChangeReport {
+  status: 'ready' | 'insufficient-runs';
+  mappingKey: string;
+  baseRunId?: string;
+  compareRunId?: string;
+  generatedAt: string;
+  newProfiles: MappingRunCandidateSnapshot[];
+  notObservedProfiles: MappingRunCandidateSnapshot[];
+  changedProfiles: MappingRunCandidateChange[];
+  unchangedProfiles: number;
+  caveat: string;
 }
 
 export function isTalentMappingCorePlatform(platform: SupportedPlatform): platform is TalentMappingCorePlatform {

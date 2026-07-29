@@ -28,6 +28,7 @@ import {
 import { JobReadModel } from './job-read-model.js';
 import { BossReadModel } from './boss-read-model.js';
 import { TalentMappingReadModel } from './talent-mapping-read-model.js';
+import { TalentMappingQualityService } from '../talent-mapping/quality-service.js';
 import { ArtifactReadModel } from './artifact-read-model.js';
 import { TaskScheduler } from './task-scheduler.js';
 import { TaskQueue } from './task-queue.js';
@@ -48,6 +49,7 @@ import {
   normalizeResumeCaptureTask,
   prepareSearchSubscriptionTask,
   normalizeTalentMappingTask,
+  normalizeTalentMappingClassificationTask,
   type NormalizedTask,
 } from './task-normalizers.js';
 import type {
@@ -73,6 +75,7 @@ interface RouteDependencies {
   jobReadModel?: JobReadModel;
   bossReadModel?: BossReadModel;
   talentMappingReadModel?: TalentMappingReadModel;
+  talentMappingQualityService?: TalentMappingQualityService;
   artifactReadModel?: ArtifactReadModel;
   dataDir?: string;
   answerQuestion?: (options: AskRagQuestionOptions) => Promise<RagAnswer>;
@@ -309,6 +312,7 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
   const jobReadModel = request.jobReadModel ?? new JobReadModel({ dataDir });
   const bossReadModel = request.bossReadModel ?? new BossReadModel({ dataDir });
   const talentMappingReadModel = request.talentMappingReadModel ?? new TalentMappingReadModel({ dataDir });
+  const talentMappingQualityService = request.talentMappingQualityService ?? new TalentMappingQualityService({ dataDir });
   const artifactReadModel = request.artifactReadModel ?? new ArtifactReadModel({ dataDir });
   const searchParams = request.searchParams ?? new URLSearchParams();
   const method = request.method.toUpperCase();
@@ -434,6 +438,15 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
       return jsonResponse(202, task);
     }
 
+    if (method === 'POST' && pathname === '/api/tasks/talent-mapping-classification') {
+      const task = await enqueueTask(
+        taskQueue,
+        'talent-mapping-classification',
+        normalizeTalentMappingClassificationTask(request.body),
+      );
+      return jsonResponse(202, task);
+    }
+
     if (method === 'POST' && pathname === '/api/tasks/search-subscription') {
       const task = await enqueueTask(taskQueue, 'search-subscription', await prepareSearchSubscriptionTask(request.body, dataDir));
       return jsonResponse(202, task);
@@ -514,6 +527,53 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
       return jsonResponse(200, {
         coverage: await talentMappingReadModel.getCoverage(segments[2]),
       });
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'changes' && segments.length === 4) {
+      return jsonResponse(200, {
+        changes: await talentMappingQualityService.getChangeReport(segments[2], {
+          baseRunId: searchParams.get('baseRunId')?.trim() || undefined,
+          compareRunId: searchParams.get('compareRunId')?.trim() || undefined,
+        }),
+      });
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'entity-links' && segments.length === 4) {
+      return jsonResponse(200, {
+        entityLinks: await talentMappingQualityService.getEntityLinkReview(segments[2]),
+      });
+    }
+
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'entity-links' && segments.length === 4) {
+      return jsonResponse(201, await talentMappingQualityService.confirmEntityLink(segments[2], request.body));
+    }
+
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'entity-links' && segments[4] && segments[5] === 'revoke' && segments.length === 6) {
+      return jsonResponse(200, await talentMappingQualityService.revokeEntityLink(segments[2], segments[4], request.body));
+    }
+
+    if (method === 'GET' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'classification-suggestions' && segments.length === 4) {
+      return jsonResponse(200, {
+        suggestions: await talentMappingQualityService.listClassificationSuggestions(segments[2]),
+      });
+    }
+
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'classification-suggestions' && segments[4] === 'generate' && segments.length === 5) {
+      const item = request.body === undefined ? {} : normalizeJsonObject(request.body, 'request body');
+      const task = await enqueueTask(
+        taskQueue,
+        'talent-mapping-classification',
+        normalizeTalentMappingClassificationTask({ ...item, mappingKey: segments[2] }),
+      );
+      return jsonResponse(202, task);
+    }
+
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'classification-suggestions' && segments[4] && segments[5] === 'review' && segments.length === 6) {
+      return jsonResponse(200, await talentMappingQualityService.reviewClassificationSuggestion(
+        segments[2],
+        segments[4],
+        request.body,
+      ));
     }
 
     if (method === 'GET' && pathname === '/api/boss/positions') {

@@ -58,6 +58,22 @@ export function TaskOutput({ kind, output }: { kind: string; output: unknown }) 
     );
   }
 
+  if (kind === 'talent-mapping-classification') {
+    return (
+      <div className="page-stack">
+        <div className="stale-banner"><strong>模型输出仅为待审核建议</strong><span>建议不会自动修改人才档案；只有人工接受后才会填补待归类字段。</span></div>
+        <div className="detail-grid">
+          <div className="detail-cell"><span>项目</span><strong>{text(output.mappingKey)}</strong></div>
+          <div className="detail-cell"><span>模型</span><strong>{text(output.model)}</strong></div>
+          <div className="detail-cell"><span>检查候选</span><strong>{text(output.consideredCandidates)}</strong></div>
+          <div className="detail-cell"><span>新建议</span><strong>{text(output.generatedSuggestions)}</strong></div>
+          <div className="detail-cell"><span>无有效建议</span><strong>{text(output.skippedCandidates)}</strong></div>
+        </div>
+        {typeof output.mappingKey === 'string' && <Link className="primary-button" to={`/talent-mappings/${encodeURIComponent(output.mappingKey)}`}>进入分类审核</Link>}
+      </div>
+    );
+  }
+
   if (kind === 'boss-talent-search') {
     const candidates = array(output.candidates);
     return (

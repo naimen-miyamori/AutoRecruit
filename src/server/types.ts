@@ -18,7 +18,12 @@ import type {
   BossTalentSearchResult,
 } from '../types/boss.js';
 import type { ArtifactDescriptor } from './api-contracts.js';
-import type { TalentMappingCorePlatform, TalentMappingRunSummary, TalentMappingStage } from '../types/talent-mapping.js';
+import type {
+  TalentMappingClassificationRunSummary,
+  TalentMappingCorePlatform,
+  TalentMappingRunSummary,
+  TalentMappingStage,
+} from '../types/talent-mapping.js';
 
 export type ConsolePlatformSelection = SupportedPlatform | 'all';
 export type SearchSource = 'saved' | 'direct';
@@ -32,11 +37,12 @@ export type TaskKind = 'resume-capture'
   | 'boss-job-sync'
   | 'login-refresh'
   | 'rag-ops'
-  | 'talent-mapping';
-export type AssistantActionKind = TaskKind | 'rag-answer';
+  | 'talent-mapping'
+  | 'talent-mapping-classification';
+export type AssistantActionKind = Exclude<TaskKind, 'talent-mapping-classification'> | 'rag-answer';
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type TaskLogLevel = 'info' | 'warn' | 'error';
-export type SchedulableTaskKind = 'resume-capture' | 'batch' | 'search-subscription' | 'boss-auto-chat' | 'boss-job-sync';
+export type SchedulableTaskKind = 'resume-capture' | 'batch' | 'talent-mapping' | 'search-subscription' | 'boss-auto-chat' | 'boss-job-sync';
 export type ScheduleStatus = 'enabled' | 'paused' | 'stop_requested' | 'stopped';
 export type ScheduleRunStatus = 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'stopped' | 'interrupted' | 'skipped';
 export type WorkflowFailurePolicy = 'stop-round' | 'continue';
@@ -81,6 +87,11 @@ export interface TalentMappingTaskInput {
   mappingStage: TalentMappingStage;
   confirmedDetailOpen?: boolean;
   mappingRunId?: string;
+}
+
+export interface TalentMappingClassificationTaskInput {
+  mappingKey: string;
+  limit?: number;
 }
 
 export interface SearchSubscriptionTaskInput {
@@ -161,6 +172,7 @@ export interface RagOpsTaskOutput {
 export type TaskInput = ResumeCaptureTaskInput
   | BatchTaskInput
   | TalentMappingTaskInput
+  | TalentMappingClassificationTaskInput
   | SearchSubscriptionTaskInput
   | BossAutoChatTaskInput
   | BossTalentSearchTaskInput
@@ -171,6 +183,7 @@ export type TaskInput = ResumeCaptureTaskInput
   | RagOpsTaskInput;
 export type TaskOutput = MainResult
   | TalentMappingRunSummary
+  | TalentMappingClassificationRunSummary
   | LoginRefreshTaskOutput
   | RagOpsTaskOutput
   | BossTalentSearchResult

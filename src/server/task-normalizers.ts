@@ -22,6 +22,7 @@ import type {
   SchedulableTaskKind,
   SearchSource,
   SearchSubscriptionTaskInput,
+  TalentMappingClassificationTaskInput,
   TalentMappingTaskInput,
   TaskInput,
 } from './types.js';
@@ -163,7 +164,7 @@ export function normalizePlatform(value: unknown): SupportedPlatform {
 function normalizeTalentMappingPlatformSelection(value: unknown): TalentMappingTaskInput['platform'] {
   const selection = normalizePlatformSelection(value);
   if (selection !== 'all' && !isTalentMappingCorePlatform(selection)) {
-    throw new Error('Talent Mapping supports only 51job, liepin, zhilian, or all; Boss is not supported');
+    throw new Error('Talent Mapping supports only 51job, liepin, zhilian, or all; Boss is outside the Talent Mapping product boundary');
   }
   return selection;
 }
@@ -466,6 +467,27 @@ export async function normalizeTalentMappingTask(payload: unknown): Promise<Norm
       mappingStage,
       confirmedDetailOpen: confirmedDetailOpen ?? false,
       mappingRunId,
+    },
+  };
+}
+
+export function normalizeTalentMappingClassificationTask(
+  payload: unknown,
+): NormalizedTask<TalentMappingClassificationTaskInput> {
+  const item = normalizeJsonObject(payload, 'talent-mapping-classification task');
+  assertOnlyFields(item, ['mappingKey', 'limit'], 'talent-mapping-classification task');
+  const mappingKey = getRequiredString(item, 'mappingKey');
+  const limit = getOptionalPositiveInteger(item, 'limit');
+  if (limit !== undefined && limit > 100) {
+    throw new Error('limit must be at most 100');
+  }
+  return {
+    input: { mappingKey, limit },
+    argv: [],
+    inputSummary: {
+      mappingKey,
+      limit: limit ?? 25,
+      modelInputPolicy: 'company-title-location-only',
     },
   };
 }
@@ -788,6 +810,19 @@ export async function normalizeSchedulableTask(
     }
     case 'batch': {
       const normalized = normalizeBatchTask(input);
+      return { kind, ...normalized };
+    }
+    case 'talent-mapping': {
+      const normalized = await normalizeTalentMappingTask(input);
+      if (normalized.input.mappingStage !== 'scan') {
+        throw new Error('Scheduled Talent Mapping requires mappingStage scan');
+      }
+      const plan = await loadTalentMappingPlanFile(normalized.input.talentMappingFile, {
+        platformSelection: normalized.input.platform,
+      });
+      if (plan.enrichment.mode !== 'card-only') {
+        throw new Error('Scheduled Talent Mapping requires a card-only plan');
+      }
       return { kind, ...normalized };
     }
     case 'search-subscription': {

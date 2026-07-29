@@ -22,6 +22,7 @@ export const TASK_LABELS = {
   'login-refresh': '登录刷新',
   'rag-ops': 'RAG 运维',
   'talent-mapping': '人才地图',
+  'talent-mapping-classification': '人才地图分类建议',
 } as const;
 
 export function formatDate(value?: string): string {

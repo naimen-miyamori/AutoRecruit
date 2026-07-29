@@ -16,6 +16,7 @@ export const taskKindSchema = z.enum([
   'login-refresh',
   'rag-ops',
   'talent-mapping',
+  'talent-mapping-classification',
 ]);
 
 export const apiErrorSchema = z.object({

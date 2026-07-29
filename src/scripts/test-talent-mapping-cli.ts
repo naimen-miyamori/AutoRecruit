@@ -167,7 +167,7 @@ describe('Talent Mapping CLI isolation', () => {
         '--talent-mapping-file', './mapping.json',
         '--mapping-stage', 'scan',
       ]),
-      /Boss support is not part of the core release/i,
+      /Boss is outside the Talent Mapping product boundary/i,
     );
   });
 });

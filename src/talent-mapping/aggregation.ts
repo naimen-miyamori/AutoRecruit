@@ -4,10 +4,17 @@ import type {
   MappingCompanyRoleMatrixRow,
   MappingCoverageViewRow,
   MappingDerivedViews,
+  MappingEntityLink,
+  MappingClassificationReview,
+  MappingClassificationSuggestion,
   MappingProfileObservation,
+  MappingRunRecord,
   MappingSliceRun,
   TalentMappingPlan,
 } from '../types/talent-mapping.js';
+import { applyAcceptedMappingClassifications } from './classification.js';
+import { buildMappingRunChangeReport } from './change-report.js';
+import { activeMappingEntityLinks } from './entity-links.js';
 
 function compareObserved(
   left: { observedAt: string },
@@ -171,13 +178,38 @@ export function buildTalentMappingDerivedViews(input: {
   observations: readonly MappingCandidateObservation[];
   profileObservations: readonly MappingProfileObservation[];
   sliceRuns: readonly MappingSliceRun[];
+  runs?: readonly MappingRunRecord[];
+  entityLinks?: readonly MappingEntityLink[];
+  classificationSuggestions?: readonly MappingClassificationSuggestion[];
+  classificationReviews?: readonly MappingClassificationReview[];
   generatedAt?: string;
 }): MappingDerivedViews {
-  const candidates = buildMappingCandidateViews(input.observations, input.profileObservations);
+  const generatedAt = input.generatedAt ?? new Date().toISOString();
+  let candidates = buildMappingCandidateViews(input.observations, input.profileObservations);
+  candidates = applyAcceptedMappingClassifications({
+    candidates,
+    suggestions: input.classificationSuggestions ?? [],
+    reviews: input.classificationReviews ?? [],
+  });
+  const entityByCandidate = new Map(
+    activeMappingEntityLinks(input.entityLinks ?? []).flatMap((link) =>
+      link.platformCandidateKeys.map((platformCandidateKey) => [platformCandidateKey, link.entityId] as const),
+    ),
+  );
+  candidates = candidates.map((candidate) => ({
+    ...candidate,
+    entityId: entityByCandidate.get(candidate.platformCandidateKey),
+  }));
   return {
     candidates,
     companies: buildCompanyRoleMatrix(input.plan, candidates),
     coverage: buildLatestCoverageView(input.sliceRuns),
-    generatedAt: input.generatedAt ?? new Date().toISOString(),
+    changes: buildMappingRunChangeReport({
+      mappingKey: input.plan.mappingKey,
+      runs: input.runs ?? [],
+      observations: input.observations,
+      generatedAt,
+    }),
+    generatedAt,
   };
 }

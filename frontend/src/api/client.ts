@@ -27,8 +27,12 @@ import type {
   TaskKind,
   TaskSummary,
   MappingCandidateView,
+  MappingClassificationSuggestionView,
   MappingCompanyRoleMatrixRow,
   MappingCoverageViewRow,
+  MappingEntityLink,
+  MappingEntityLinkReviewView,
+  MappingRunChangeReport,
   MappingRunRecord,
   TalentMappingProjectDetail,
   TalentMappingProjectSummary,
@@ -155,6 +159,19 @@ export const api = {
   listTalentMappingCandidates: (mappingKey: string, signal?: AbortSignal) => requestJson<{ candidates: MappingCandidateView[] }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/candidates`, { signal }),
   listTalentMappingCompanies: (mappingKey: string, signal?: AbortSignal) => requestJson<{ companies: MappingCompanyRoleMatrixRow[] }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/companies`, { signal }),
   getTalentMappingCoverage: (mappingKey: string, signal?: AbortSignal) => requestJson<{ coverage: MappingCoverageViewRow[] }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/coverage`, { signal }),
+  getTalentMappingChanges: (mappingKey: string, baseRunId?: string, compareRunId?: string, signal?: AbortSignal) => {
+    const params = new URLSearchParams();
+    if (baseRunId) params.set('baseRunId', baseRunId);
+    if (compareRunId) params.set('compareRunId', compareRunId);
+    const query = params.size ? `?${params.toString()}` : '';
+    return requestJson<{ changes: MappingRunChangeReport }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/changes${query}`, { signal });
+  },
+  getTalentMappingEntityLinks: (mappingKey: string, signal?: AbortSignal) => requestJson<{ entityLinks: MappingEntityLinkReviewView }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/entity-links`, { signal }),
+  confirmTalentMappingEntityLink: (mappingKey: string, body: Record<string, unknown>) => postJson<MappingEntityLink>(`/talent-mappings/${encodeURIComponent(mappingKey)}/entity-links`, body),
+  revokeTalentMappingEntityLink: (mappingKey: string, entityId: string, body: Record<string, unknown>) => postJson<MappingEntityLink>(`/talent-mappings/${encodeURIComponent(mappingKey)}/entity-links/${encodeURIComponent(entityId)}/revoke`, body),
+  listTalentMappingClassificationSuggestions: (mappingKey: string, signal?: AbortSignal) => requestJson<{ suggestions: MappingClassificationSuggestionView[] }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/classification-suggestions`, { signal }),
+  generateTalentMappingClassificationSuggestions: (mappingKey: string, limit = 25) => postJson<TaskDetail>(`/talent-mappings/${encodeURIComponent(mappingKey)}/classification-suggestions/generate`, { limit }),
+  reviewTalentMappingClassificationSuggestion: (mappingKey: string, suggestionId: string, body: Record<string, unknown>) => postJson<MappingClassificationSuggestionView['review']>(`/talent-mappings/${encodeURIComponent(mappingKey)}/classification-suggestions/${encodeURIComponent(suggestionId)}/review`, body),
   submitTalentMapping: (body: Record<string, unknown>) => postJson<TaskDetail>('/tasks/talent-mapping', body),
 
   listBossPositions: (signal?: AbortSignal) => requestJson<{ positions: BossPositionView[] }>('/boss/positions', { signal }),
@@ -194,6 +211,9 @@ export const queryKeys = {
   talentMappingCandidates: (mappingKey: string) => ['talent-mappings', mappingKey, 'candidates'] as const,
   talentMappingCompanies: (mappingKey: string) => ['talent-mappings', mappingKey, 'companies'] as const,
   talentMappingCoverage: (mappingKey: string) => ['talent-mappings', mappingKey, 'coverage'] as const,
+  talentMappingChanges: (mappingKey: string, baseRunId?: string, compareRunId?: string) => ['talent-mappings', mappingKey, 'changes', baseRunId ?? 'auto', compareRunId ?? 'auto'] as const,
+  talentMappingEntityLinks: (mappingKey: string) => ['talent-mappings', mappingKey, 'entity-links'] as const,
+  talentMappingClassifications: (mappingKey: string) => ['talent-mappings', mappingKey, 'classification-suggestions'] as const,
   bossPositions: ['boss', 'positions'] as const,
   bossSyncRuns: ['boss', 'sync-runs'] as const,
   bossReviews: ['boss', 'reviews'] as const,

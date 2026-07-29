@@ -641,7 +641,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       );
     }
     if (platform !== 'all' && !isTalentMappingCorePlatform(platform)) {
-      throw new Error('--talent-mapping-file supports 51job, liepin, zhilian, or all; Boss support is not part of the core release');
+      throw new Error('--talent-mapping-file supports 51job, liepin, zhilian, or all; Boss is outside the Talent Mapping product boundary');
     }
     if (!mappingStage) {
       throw new Error('--talent-mapping-file requires explicit --mapping-stage scan, enrich, or all');

@@ -9,12 +9,15 @@ import type {
   MappingBatchCheckpoint,
   MappingCandidateObservation,
   MappingCandidateView,
+  MappingClassificationReview,
+  MappingClassificationSuggestion,
   MappingCompanyRoleMatrixRow,
   MappingCoverageViewRow,
   MappingDerivedViews,
   MappingEntityLink,
   MappingProfileObservation,
   MappingRunRecord,
+  MappingRunChangeReport,
   MappingSliceRun,
   TalentMappingCorePlatform,
   TalentMappingPlan,
@@ -28,10 +31,13 @@ interface TalentMappingPaths {
   checkpointsDir: string;
   annotationsPath: string;
   entityLinksPath: string;
+  classificationSuggestionsPath: string;
+  classificationReviewsPath: string;
   viewsDir: string;
   candidatesViewPath: string;
   companiesViewPath: string;
   coverageViewPath: string;
+  changesViewPath: string;
   exportsLatestDir: string;
 }
 
@@ -157,10 +163,13 @@ export class TalentMappingStore {
       checkpointsDir: path.join(rootDir, 'runs', 'checkpoints'),
       annotationsPath: path.join(rootDir, 'annotations.jsonl'),
       entityLinksPath: path.join(rootDir, 'entity-links.json'),
+      classificationSuggestionsPath: path.join(rootDir, 'classification-suggestions.jsonl'),
+      classificationReviewsPath: path.join(rootDir, 'classification-reviews.jsonl'),
       viewsDir,
       candidatesViewPath: path.join(viewsDir, 'candidates.latest.json'),
       companiesViewPath: path.join(viewsDir, 'companies.latest.json'),
       coverageViewPath: path.join(viewsDir, 'coverage.latest.json'),
+      changesViewPath: path.join(viewsDir, 'changes.latest.json'),
       exportsLatestDir: path.join(rootDir, 'exports', 'latest'),
     };
   }
@@ -340,10 +349,22 @@ export class TalentMappingStore {
 
   async saveEntityLinks(mappingKey: string, links: readonly MappingEntityLink[]): Promise<void> {
     const platformKeys = new Set<string>();
+    const entityIds = new Set<string>();
     for (const link of links) {
+      if (entityIds.has(link.entityId)) {
+        throw new Error(`Mapping entity link ID ${link.entityId} is duplicated`);
+      }
+      entityIds.add(link.entityId);
       if (link.platformCandidateKeys.length < 2) {
         throw new Error(`Mapping entity link ${link.entityId} must contain at least two platform candidate keys`);
       }
+      if (new Set(link.platformCandidateKeys).size !== link.platformCandidateKeys.length) {
+        throw new Error(`Mapping entity link ${link.entityId} contains duplicate platform candidate keys`);
+      }
+      if (link.revokedAt && (!link.revokedBy || !link.revocationReason)) {
+        throw new Error(`Revoked Mapping entity link ${link.entityId} requires revokedBy and revocationReason`);
+      }
+      if (link.revokedAt) continue;
       for (const platformKey of link.platformCandidateKeys) {
         if (platformKeys.has(platformKey)) {
           throw new Error(`Mapping platform candidate key ${platformKey} appears in more than one entity link`);
@@ -358,21 +379,52 @@ export class TalentMappingStore {
     return (await readJsonIfExists<MappingEntityLink[]>(this.getPaths(mappingKey).entityLinksPath)) ?? [];
   }
 
+  async appendClassificationSuggestion(suggestion: MappingClassificationSuggestion): Promise<boolean> {
+    return appendJsonLineIdempotently(
+      this.getPaths(suggestion.mappingKey).classificationSuggestionsPath,
+      suggestion as MappingClassificationSuggestion & Record<string, unknown>,
+      'suggestionId',
+    );
+  }
+
+  async readClassificationSuggestions(mappingKey: string): Promise<MappingClassificationSuggestion[]> {
+    return readJsonLines<MappingClassificationSuggestion>(this.getPaths(mappingKey).classificationSuggestionsPath);
+  }
+
+  async appendClassificationReview(review: MappingClassificationReview): Promise<boolean> {
+    return appendJsonLineIdempotently(
+      this.getPaths(review.mappingKey).classificationReviewsPath,
+      review as MappingClassificationReview & Record<string, unknown>,
+      'reviewId',
+    );
+  }
+
+  async readClassificationReviews(mappingKey: string): Promise<MappingClassificationReview[]> {
+    return readJsonLines<MappingClassificationReview>(this.getPaths(mappingKey).classificationReviewsPath);
+  }
+
   async rebuildDerivedViews(mappingKey: string): Promise<MappingDerivedViews> {
     const project = await this.readProject(mappingKey);
     if (!project) {
       throw new Error(`Talent Mapping project not found: ${mappingKey}`);
     }
-    const [observations, profileObservations, runs] = await Promise.all([
+    const [observations, profileObservations, runs, entityLinks, classificationSuggestions, classificationReviews] = await Promise.all([
       this.readCandidateObservations(mappingKey),
       this.readProfileObservations(mappingKey),
       this.listRuns(mappingKey),
+      this.readEntityLinks(mappingKey),
+      this.readClassificationSuggestions(mappingKey),
+      this.readClassificationReviews(mappingKey),
     ]);
     const views = buildTalentMappingDerivedViews({
       plan: projectToPlan(project),
       observations,
       profileObservations,
       sliceRuns: runs.flatMap((run) => run.sliceRuns),
+      runs,
+      entityLinks,
+      classificationSuggestions,
+      classificationReviews,
       generatedAt: this.now().toISOString(),
     });
     const paths = this.getPaths(mappingKey);
@@ -380,6 +432,7 @@ export class TalentMappingStore {
       writeJsonIfChanged(paths.candidatesViewPath, views.candidates),
       writeJsonIfChanged(paths.companiesViewPath, views.companies),
       writeJsonIfChanged(paths.coverageViewPath, views.coverage),
+      writeJsonIfChanged(paths.changesViewPath, views.changes),
     ]);
     return views;
   }
@@ -394,6 +447,10 @@ export class TalentMappingStore {
 
   async readCoverageView(mappingKey: string): Promise<MappingCoverageViewRow[]> {
     return (await readJsonIfExists<MappingCoverageViewRow[]>(this.getPaths(mappingKey).coverageViewPath)) ?? [];
+  }
+
+  async readChangeView(mappingKey: string): Promise<MappingRunChangeReport | undefined> {
+    return readJsonIfExists<MappingRunChangeReport>(this.getPaths(mappingKey).changesViewPath);
   }
 
   getLatestExportDir(mappingKey: string): string {

@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import type { MainRunSummary } from '../index.js';
 import { normalizeScheduleCreate } from '../server/schedule-normalizers.js';
@@ -10,6 +11,9 @@ import { ScheduleStore } from '../server/schedule-store.js';
 import { getWindowState, resolveNextEligibleStart } from '../server/schedule-time.js';
 import { TaskScheduler } from '../server/task-scheduler.js';
 import { TaskQueue } from '../server/task-queue.js';
+
+const cardOnlyMappingPath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.card-only.example.json', import.meta.url));
+const detailMappingPath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.example.json', import.meta.url));
 
 async function makeTempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-task-scheduler-'));
@@ -71,6 +75,19 @@ function bossJobSyncTask(taskKey: string) {
     name: 'Boss 职位同步',
     kind: 'boss-job-sync',
     input: { platform: 'boss', includeClosed: true },
+  };
+}
+
+function mappingTask(taskKey: string, talentMappingFile = cardOnlyMappingPath, mappingStage = 'scan') {
+  return {
+    taskKey,
+    name: '人才地图市场扫描',
+    kind: 'talent-mapping',
+    input: {
+      platform: 'all',
+      talentMappingFile,
+      mappingStage,
+    },
   };
 }
 
@@ -195,6 +212,43 @@ describe('TaskScheduler', () => {
         ['--platform', 'boss', '--boss-job-sync', 'true', '--boss-include-closed-jobs', 'true'],
         ['--platform', 'boss', '--boss-auto-chat', 'true', '--boss-chat-score-threshold', '70'],
       ]);
+    } finally {
+      scheduler.close();
+    }
+  });
+
+  it('schedules only card-only Talent Mapping scans and rejects detail-capable plans or stages', async () => {
+    const dataDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return output();
+      },
+    });
+    const now = new Date('2026-07-20T02:00:00.000Z');
+    const scheduler = new TaskScheduler({ taskQueue: queue, dataDir, now: () => now });
+    try {
+      const schedule = await scheduler.createSchedule(baseSchedule([mappingTask('mapping-scan')]));
+      await waitFor(async () => {
+        const runs = await scheduler.listRuns(schedule.scheduleId);
+        return runs.find((item) => item.status === 'succeeded');
+      }, 'card-only Mapping scheduled round');
+      assert.deepStrictEqual(calls, [[
+        '--platform', 'all',
+        '--talent-mapping-file', cardOnlyMappingPath,
+        '--mapping-stage', 'scan',
+      ]]);
+
+      await assert.rejects(
+        () => scheduler.createSchedule(baseSchedule([mappingTask('detail-plan', detailMappingPath)])),
+        /requires a card-only plan/,
+      );
+      await assert.rejects(
+        () => scheduler.createSchedule(baseSchedule([mappingTask('detail-stage', cardOnlyMappingPath, 'all')])),
+        /requires mappingStage scan/,
+      );
     } finally {
       scheduler.close();
     }

@@ -48,6 +48,10 @@ async function mockApi(page: Page): Promise<void> {
       body = { taskId: 'task-greet-1', kind: 'boss-greet', status: 'queued' };
     } else if (request.method() === 'POST' && pathname === '/api/tasks/talent-mapping') {
       body = { taskId: 'task-mapping-1', kind: 'talent-mapping', status: 'queued' };
+    } else if (request.method() === 'POST' && pathname === '/api/talent-mappings/mapping-1/classification-suggestions/generate') {
+      body = { taskId: 'task-classification-1', kind: 'talent-mapping-classification', status: 'queued' };
+    } else if (request.method() === 'POST' && pathname === '/api/talent-mappings/mapping-1/entity-links') {
+      body = { entityId: 'entity-1', platformCandidateKeys: ['51job:candidate-1', 'liepin:candidate-2'], confirmedAt: '2026-07-28T00:02:00.000Z', confirmedBy: '审核员', evidence: '人工核对' };
     } else if (pathname === '/api/tasks/task-talent-1') {
       body = {
         taskId: 'task-talent-1',
@@ -94,6 +98,9 @@ async function mockApi(page: Page): Promise<void> {
           enrichedCandidateCount: 0,
           unclassifiedCandidateCount: 0,
           companyMatrixRowCount: 1,
+          activeEntityLinkCount: 0,
+          confirmedEntityCount: 2,
+          pendingClassificationSuggestionCount: 0,
           runCount: 1,
           latestRun: { runId: 'scan-run-1', stage: 'scan', status: 'completed', platformSelection: '51job', startedAt: '2026-07-28T00:00:00.000Z', finishedAt: '2026-07-28T00:01:00.000Z', detailOpenSideEffect: 'none', gapCount: 0 },
           createdAt: '2026-07-28T00:00:00.000Z',
@@ -116,21 +123,27 @@ async function mockApi(page: Page): Promise<void> {
           updatedAt: '2026-07-28T00:01:00.000Z',
         },
         summary: {
-          mappingKey: 'mapping-1', name: '示例人才地图', objective: { roleFamilies: ['区域运营'], locations: ['上海'] }, enrichmentMode: 'targeted-detail', sliceCount: 1, platforms: ['51job'], candidateCount: 2, enrichedCandidateCount: 0, unclassifiedCandidateCount: 0, companyMatrixRowCount: 1, runCount: 1,
+          mappingKey: 'mapping-1', name: '示例人才地图', objective: { roleFamilies: ['区域运营'], locations: ['上海'] }, enrichmentMode: 'targeted-detail', sliceCount: 1, platforms: ['51job'], candidateCount: 2, enrichedCandidateCount: 0, unclassifiedCandidateCount: 0, companyMatrixRowCount: 1, activeEntityLinkCount: 0, confirmedEntityCount: 2, pendingClassificationSuggestionCount: 0, runCount: 1,
           latestRun: { runId: 'scan-run-1', stage: 'scan', status: 'completed', platformSelection: '51job', startedAt: '2026-07-28T00:00:00.000Z', finishedAt: '2026-07-28T00:01:00.000Z', detailOpenSideEffect: 'none', gapCount: 0 },
           createdAt: '2026-07-28T00:00:00.000Z', updatedAt: '2026-07-28T00:01:00.000Z',
         },
         detailSelection: { available: true, sourceScanRunId: 'scan-run-1', platformSelection: '51job', candidateCount: 2, candidatesByPlatform: { '51job': 2 }, candidatesBySlice: [{ sliceId: 'slice-1', platform: '51job', candidateCount: 2 }] },
-        identityPolicy: { platformScoped: true, crossPlatformAutoMerge: false },
+        identityPolicy: { platformScoped: true, crossPlatformAutoMerge: false, humanConfirmedLinking: true },
       };
     } else if (pathname === '/api/talent-mappings/mapping-1/runs') {
       body = { runs: [] };
     } else if (pathname === '/api/talent-mappings/mapping-1/candidates') {
-      body = { candidates: [] };
+      body = { candidates: [{ platform: '51job', platformCandidateKey: '51job:candidate-1', candidateId: 'candidate-1', name: '候选人甲', currentCompany: '示例公司', currentTitle: '区域经理', firstObservedAt: '2026-07-28T00:00:00.000Z', lastObservedAt: '2026-07-28T00:01:00.000Z', sourceSliceIds: ['slice-1'], observationCount: 1, detailStatus: 'not-enriched' }, { platform: 'liepin', platformCandidateKey: 'liepin:candidate-2', candidateId: 'candidate-2', name: '候选人甲', currentCompany: '示例公司', currentTitle: '区域经理', firstObservedAt: '2026-07-28T00:00:00.000Z', lastObservedAt: '2026-07-28T00:01:00.000Z', sourceSliceIds: ['slice-1'], observationCount: 1, detailStatus: 'not-enriched' }] };
     } else if (pathname === '/api/talent-mappings/mapping-1/companies') {
       body = { companies: [] };
     } else if (pathname === '/api/talent-mappings/mapping-1/coverage') {
       body = { coverage: [] };
+    } else if (pathname === '/api/talent-mappings/mapping-1/changes') {
+      body = { changes: { status: 'insufficient-runs', mappingKey: 'mapping-1', compareRunId: 'scan-run-1', generatedAt: '2026-07-28T00:01:00.000Z', newProfiles: [], notObservedProfiles: [], changedProfiles: [], unchangedProfiles: 0, caveat: '本轮未再次观察不能解释为离职。' } };
+    } else if (pathname === '/api/talent-mappings/mapping-1/entity-links') {
+      body = { entityLinks: { platformProfileCount: 2, confirmedEntityCount: 2, activeLinks: [], revokedLinks: [], suggestions: [{ suggestionId: 'link-suggestion-1', platformCandidateKeys: ['51job:candidate-1', 'liepin:candidate-2'], evidence: ['姓名完全一致', '当前公司一致', '当前岗位一致'] }] } };
+    } else if (pathname === '/api/talent-mappings/mapping-1/classification-suggestions') {
+      body = { suggestions: [] };
     } else if (pathname === '/api/schedules') {
       body = { schedules: [] };
     } else if (pathname === '/api/boss/positions') {
@@ -243,6 +256,62 @@ describe('frontend client', () => {
       mappingStage: 'enrich',
       mappingRunId: 'scan-run-1',
       confirmedDetailOpen: true,
+    });
+    await page.close();
+  });
+
+  it('requires human evidence for Mapping entity links and queues redacted classification suggestions', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/talent-mappings/mapping-1`, { waitUntil: 'networkidle' });
+
+    await page.getByRole('button', { name: '实体关联', exact: true }).click();
+    await page.getByLabel('审核人', { exact: true }).fill('审核员');
+    await page.getByLabel('确认依据', { exact: true }).fill('人工核对');
+    await page.getByRole('button', { name: '确认同一实体', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('checkbox').check();
+    const entityRequest = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/talent-mappings/mapping-1/entity-links');
+    await dialog.getByRole('button', { name: '确认关联', exact: true }).click();
+    assert.deepStrictEqual((await entityRequest).postDataJSON(), {
+      platformCandidateKeys: ['51job:candidate-1', 'liepin:candidate-2'],
+      confirmedBy: '审核员',
+      evidence: '人工核对',
+    });
+
+    await page.getByRole('button', { name: '历次变化', exact: true }).click();
+    await page.getByText('至少需要两次成功扫描', { exact: true }).waitFor({ state: 'visible' });
+    await page.getByRole('button', { name: '分类审核', exact: true }).click();
+    const classificationRequest = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/talent-mappings/mapping-1/classification-suggestions/generate');
+    await page.getByRole('button', { name: '生成最多 25 条建议', exact: true }).click();
+    assert.deepStrictEqual((await classificationRequest).postDataJSON(), { limit: 25 });
+    await page.getByText(/分类建议任务已入队/).waitFor({ state: 'visible' });
+    await page.close();
+  });
+
+  it('creates only a scan-stage Talent Mapping schedule from the automation page', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/automation`, { waitUntil: 'networkidle' });
+
+    await page.getByLabel('计划名称', { exact: true }).fill('每日人才市场扫描');
+    await page.locator('label').filter({ hasText: '任务类型' }).locator('select').selectOption('talent-mapping');
+    await page.locator('label').filter({ hasText: /^平台/ }).first().locator('select').selectOption('all');
+    await page.locator('label').filter({ hasText: 'card-only Mapping 计划文件' }).locator('input').fill('/fixtures/mapping-card-only.json');
+    const submitted = page.waitForRequest((request) =>
+      request.method() === 'POST' && new URL(request.url()).pathname === '/api/schedules');
+    await page.getByRole('button', { name: '创建暂停计划', exact: true }).click();
+    const payload = (await submitted).postDataJSON() as {
+      enabled: boolean;
+      tasks: Array<{ kind: string; input: Record<string, unknown> }>;
+    };
+    assert.equal(payload.enabled, false);
+    assert.equal(payload.tasks.length, 1);
+    assert.equal(payload.tasks[0]?.kind, 'talent-mapping');
+    assert.deepStrictEqual(payload.tasks[0]?.input, {
+      platform: 'all',
+      talentMappingFile: '/fixtures/mapping-card-only.json',
+      mappingStage: 'scan',
     });
     await page.close();
   });

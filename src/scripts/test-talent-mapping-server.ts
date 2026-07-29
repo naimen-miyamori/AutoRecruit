@@ -11,7 +11,7 @@ import { loadTalentMappingPlanFile } from '../talent-mapping/plan.js';
 import { createMappingCandidateObservation } from '../talent-mapping/normalization.js';
 import { TalentMappingStore } from '../talent-mapping/store.js';
 import type { TaskDetail } from '../server/types.js';
-import type { MappingRunRecord, TalentMappingRunSummary } from '../types/talent-mapping.js';
+import type { MappingClassificationSuggestion, MappingRunRecord, TalentMappingRunSummary } from '../types/talent-mapping.js';
 
 const fixturePath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.example.json', import.meta.url));
 
@@ -284,6 +284,134 @@ describe('Talent Mapping server contracts', () => {
       });
       assert.equal(traversal.statusCode, 400);
       assert.match(JSON.stringify(traversal.body), /mappingKey must be a non-empty path-safe value/);
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('serves M4 change, entity-review, classification-review, and queued suggestion contracts', async () => {
+    const dataDir = await makeTempDir();
+    const classificationInputs: Array<{ mappingKey: string; limit?: number }> = [];
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async () => buildSummary(),
+      talentMappingClassificationRunner: async (input) => {
+        classificationInputs.push(input);
+        return {
+          mode: 'talent-mapping-classification',
+          mappingKey: input.mappingKey,
+          model: 'test-model',
+          consideredCandidates: 1,
+          generatedSuggestions: 1,
+          skippedCandidates: 0,
+          suggestionIds: ['suggestion-generated'],
+        };
+      },
+    });
+    try {
+      const plan = await loadTalentMappingPlanFile(fixturePath, { platformSelection: 'all' });
+      const store = new TalentMappingStore({ dataDir, now: () => new Date('2026-07-29T05:00:00.000Z') });
+      await store.saveProject(plan, fixturePath);
+      const createObservation = (input: {
+        runId: string;
+        platform: '51job' | 'liepin' | 'zhilian';
+        candidateId: string;
+        observedAt: string;
+        name: string;
+        currentCompany?: string;
+        currentTitle?: string;
+        cardText?: string;
+      }) => createMappingCandidateObservation({
+        candidate: input,
+        plan,
+        runId: input.runId,
+        sliceId: plan.slices[0]!.sliceId,
+        platform: input.platform,
+        observedAt: input.observedAt,
+        batchIdentity: `${input.runId}-batch`,
+        rankInBatch: 1,
+      });
+      await store.appendCandidateObservation(createObservation({
+        runId: 'scan-run-1', platform: '51job', candidateId: 'candidate-1',
+        observedAt: '2026-07-28T05:00:00.000Z', name: '候选人甲',
+        currentCompany: '示例零售（中国）有限公司', currentTitle: '区域经理', cardText: '上海',
+      }));
+      await store.appendCandidateObservation(createObservation({
+        runId: 'scan-run-2', platform: '51job', candidateId: 'candidate-1',
+        observedAt: '2026-07-29T05:00:00.000Z', name: '候选人甲',
+        currentCompany: '示例零售（中国）有限公司', currentTitle: '大区经理', cardText: '上海',
+      }));
+      await store.appendCandidateObservation(createObservation({
+        runId: 'scan-run-2', platform: 'liepin', candidateId: 'candidate-2',
+        observedAt: '2026-07-29T05:00:00.000Z', name: '候选人甲',
+        currentCompany: '示例零售（中国）有限公司', currentTitle: '大区经理', cardText: '上海',
+      }));
+      await store.appendCandidateObservation(createObservation({
+        runId: 'scan-run-2', platform: 'zhilian', candidateId: 'candidate-3',
+        observedAt: '2026-07-29T05:00:00.000Z', name: '候选人乙',
+        currentCompany: '待归类公司', currentTitle: '待归类岗位',
+      }));
+      const makeRun = (runId: string, at: string): MappingRunRecord => ({
+        runId, mappingKey: plan.mappingKey, mappingName: plan.name, stage: 'scan', platformSelection: 'all',
+        status: 'completed', detailOpenConfirmed: false, detailOpenSideEffect: 'none',
+        startedAt: at, finishedAt: at, sliceRuns: [],
+      });
+      await store.saveRun(makeRun('scan-run-1', '2026-07-28T05:00:00.000Z'));
+      await store.saveRun(makeRun('scan-run-2', '2026-07-29T05:00:00.000Z'));
+      await store.rebuildDerivedViews(plan.mappingKey);
+
+      const changes = await handleApiRequest({
+        method: 'GET', pathname: `/api/talent-mappings/${plan.mappingKey}/changes`, dataDir, taskQueue: queue,
+      });
+      assert.equal(changes.statusCode, 200);
+      assert.equal((changes.body as { changes: { changedProfiles: unknown[] } }).changes.changedProfiles.length, 1);
+
+      const entityReview = await handleApiRequest({
+        method: 'GET', pathname: `/api/talent-mappings/${plan.mappingKey}/entity-links`, dataDir, taskQueue: queue,
+      });
+      const suggestion = (entityReview.body as { entityLinks: { suggestions: Array<{ platformCandidateKeys: string[] }> } }).entityLinks.suggestions[0]!;
+      const confirmed = await handleApiRequest({
+        method: 'POST', pathname: `/api/talent-mappings/${plan.mappingKey}/entity-links`, dataDir, taskQueue: queue,
+        body: { platformCandidateKeys: suggestion.platformCandidateKeys, confirmedBy: '审核员', evidence: '人工核对证据' },
+      });
+      assert.equal(confirmed.statusCode, 201);
+
+      const sourceObservationId = (await store.readCandidateObservations(plan.mappingKey))
+        .find((item) => item.candidateId === 'candidate-3')!.observationId;
+      const classificationSuggestion: MappingClassificationSuggestion = {
+        suggestionId: 'suggestion-1',
+        mappingKey: plan.mappingKey,
+        platformCandidateKey: 'zhilian:candidate-3',
+        sourceObservationId,
+        createdAt: '2026-07-29T05:00:00.000Z',
+        model: 'test-model',
+        promptVersion: 1,
+        proposed: { companyKey: 'sample-retail-a' },
+        rationale: '待人工审核',
+        evidence: [{ field: 'currentCompany', rawValue: '待归类公司', observationId: sourceObservationId }],
+      };
+      await store.appendClassificationSuggestion(classificationSuggestion);
+      const reviewed = await handleApiRequest({
+        method: 'POST', pathname: `/api/talent-mappings/${plan.mappingKey}/classification-suggestions/suggestion-1/review`,
+        dataDir, taskQueue: queue, body: { decision: 'accepted', reviewedBy: '分类审核员' },
+      });
+      assert.equal(reviewed.statusCode, 200);
+      assert.equal((reviewed.body as { decision: string }).decision, 'accepted');
+
+      const generated = await handleApiRequest({
+        method: 'POST', pathname: `/api/talent-mappings/${plan.mappingKey}/classification-suggestions/generate`,
+        dataDir, taskQueue: queue, body: { limit: 12, apiKey: 'must-not-pass' },
+      });
+      assert.equal(generated.statusCode, 400);
+      const queued = await handleApiRequest({
+        method: 'POST', pathname: `/api/talent-mappings/${plan.mappingKey}/classification-suggestions/generate`,
+        dataDir, taskQueue: queue, body: { limit: 12 },
+      });
+      assert.equal(queued.statusCode, 202);
+      const task = await waitForTask(queue, (queued.body as TaskDetail).taskId);
+      assert.equal(task.kind, 'talent-mapping-classification');
+      assert.equal(task.outputSummary?.generatedSuggestions, 1);
+      assert.deepStrictEqual(classificationInputs, [{ mappingKey: plan.mappingKey, limit: 12 }]);
     } finally {
       await fs.rm(dataDir, { recursive: true, force: true });
     }

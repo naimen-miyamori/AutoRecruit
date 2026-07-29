@@ -88,6 +88,17 @@ const views: MappingDerivedViews = {
     detailCoverageStatus: 'zero-eligible',
     coverageStatus: 'capped',
   }],
+  changes: {
+    status: 'insufficient-runs',
+    mappingKey: plan.mappingKey,
+    compareRunId: run.runId,
+    generatedAt,
+    newProfiles: [],
+    notObservedProfiles: [],
+    changedProfiles: [],
+    unchangedProfiles: 0,
+    caveat: '本轮未再次观察不能解释为离职。',
+  },
 };
 
 describe('Talent Mapping exports', () => {
@@ -95,10 +106,12 @@ describe('Talent Mapping exports', () => {
     const exportDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-mapping-export-'));
     try {
       const result = await exportTalentMapping({ plan, run, views, exportDir, generatedAt });
-      const [candidates, matrix, coverage, summary] = await Promise.all([
+      const [candidates, matrix, coverage, changes, changesMarkdown, summary] = await Promise.all([
         fs.readFile(result.candidatesCsvPath, 'utf8'),
         fs.readFile(result.companyRoleMatrixCsvPath, 'utf8'),
         fs.readFile(result.coverageCsvPath, 'utf8'),
+        fs.readFile(result.changesCsvPath, 'utf8'),
+        fs.readFile(result.changesMarkdownPath, 'utf8'),
         fs.readFile(result.summaryPath, 'utf8'),
       ]);
       assert.match(candidates, /platform,candidate_id/);
@@ -106,6 +119,8 @@ describe('Talent Mapping exports', () => {
       assert.match(candidates, /"候选人,甲"/);
       assert.match(matrix, /platform_profiles/);
       assert.match(coverage, /batch-limit/);
+      assert.match(changes, /change_type/);
+      assert.match(changesMarkdown, /历次变化报告/);
       assert.match(summary, /市场扫描 \/ Mapping 初筛/);
       assert.match(summary, /跨平台.*不会自动合并/);
       assert.match(summary, /已查看.*副作用/);

@@ -6,12 +6,15 @@ import type {
   MappingRunRecord,
   TalentMappingPlan,
 } from '../types/talent-mapping.js';
+import { countConfirmedMappingEntities } from './entity-links.js';
 
 export interface TalentMappingExportResult {
   exportDir: string;
   candidatesCsvPath: string;
   companyRoleMatrixCsvPath: string;
   coverageCsvPath: string;
+  changesCsvPath: string;
+  changesMarkdownPath: string;
   summaryPath: string;
 }
 
@@ -31,11 +34,6 @@ function percentage(value: number | undefined): string {
   return value === undefined ? 'unknown' : `${(value * 100).toFixed(1)}%`;
 }
 
-function humanLinkedEntityCount(platformProfileCount: number, links: readonly MappingEntityLink[]): number {
-  const linkedKeys = new Set(links.flatMap((link) => link.platformCandidateKeys));
-  return platformProfileCount - linkedKeys.size + links.length;
-}
-
 function buildSummaryMarkdown(input: {
   plan: TalentMappingPlan;
   run: MappingRunRecord;
@@ -45,7 +43,7 @@ function buildSummaryMarkdown(input: {
 }): string {
   const { plan, run, views } = input;
   const platformProfiles = views.candidates.length;
-  const humanEntities = humanLinkedEntityCount(platformProfiles, input.entityLinks);
+  const humanEntities = countConfirmedMappingEntities(platformProfiles, input.entityLinks);
   const enriched = views.candidates.filter((candidate) => candidate.detailStatus === 'enriched').length;
   const capped = views.coverage.filter((row) => row.coverageStatus === 'capped').length;
   const failed = views.coverage.filter((row) => row.coverageStatus === 'failed').length;
@@ -64,6 +62,14 @@ function buildSummaryMarkdown(input: {
     row.coverageStatus,
     row.terminationReason,
   ]);
+  const changeSummary = views.changes.status === 'ready'
+    ? [
+      `- 变化对比：${views.changes.baseRunId} -> ${views.changes.compareRunId}`,
+      `- 新观察档案：${views.changes.newProfiles.length}`,
+      `- 明确字段变化档案：${views.changes.changedProfiles.length}`,
+      `- 本轮未再次观察档案：${views.changes.notObservedProfiles.length}`,
+    ]
+    : ['- 变化对比：至少需要两次成功 scan/all 运行'];
 
   return [
     `# ${title}`,
@@ -78,6 +84,7 @@ function buildSummaryMarkdown(input: {
     `- 已补全详情：${enriched}`,
     `- 受限切片：${capped}`,
     `- 失败切片：${failed}`,
+    ...changeSummary,
     '',
     '## 覆盖情况',
     '',
@@ -111,6 +118,8 @@ export async function exportTalentMapping(input: {
   const candidatesCsvPath = path.join(exportDir, 'candidates.csv');
   const companyRoleMatrixCsvPath = path.join(exportDir, 'company-role-matrix.csv');
   const coverageCsvPath = path.join(exportDir, 'coverage.csv');
+  const changesCsvPath = path.join(exportDir, 'changes.csv');
+  const changesMarkdownPath = path.join(exportDir, 'changes.md');
   const summaryPath = path.join(exportDir, 'summary.md');
 
   const candidatesCsv = toCsv([
@@ -127,6 +136,9 @@ export async function exportTalentMapping(input: {
     'first_observed_at',
     'last_observed_at',
     'detail_status',
+    'entity_id',
+    'manual_classification_fields',
+    'manual_classification_reviewer',
     'source_slices',
   ], input.views.candidates.map((candidate) => [
     candidate.platform,
@@ -142,6 +154,9 @@ export async function exportTalentMapping(input: {
     candidate.firstObservedAt,
     candidate.lastObservedAt,
     candidate.detailStatus,
+    candidate.entityId,
+    candidate.manualClassification?.fields.join('|'),
+    candidate.manualClassification?.reviewedBy,
     candidate.sourceSliceIds.join('|'),
   ]));
 
@@ -210,11 +225,74 @@ export async function exportTalentMapping(input: {
     entityLinks: input.entityLinks ?? [],
     generatedAt: input.generatedAt ?? new Date().toISOString(),
   });
+  const changeRows = [
+    ...input.views.changes.newProfiles.map((candidate) => [
+      'new-profile', candidate.platformCandidateKey, '', '', '', candidate.observedAt,
+    ]),
+    ...input.views.changes.notObservedProfiles.map((candidate) => [
+      'not-observed-this-run', candidate.platformCandidateKey, '', '', '', candidate.observedAt,
+    ]),
+    ...input.views.changes.changedProfiles.flatMap((candidate) => candidate.fields.map((field) => [
+      'field-change',
+      candidate.platformCandidateKey,
+      field.field,
+      field.previousValue,
+      field.currentValue,
+      '',
+    ])),
+  ];
+  const changesCsv = toCsv([
+    'change_type',
+    'platform_candidate_key',
+    'field',
+    'previous_value',
+    'current_value',
+    'observed_at',
+  ], changeRows);
+  const changesMarkdown = [
+    '# Talent Mapping 历次变化报告',
+    '',
+    `- Mapping Key：${input.plan.mappingKey}`,
+    `- 状态：${input.views.changes.status}`,
+    `- 基准运行：${input.views.changes.baseRunId ?? '-'}`,
+    `- 对比运行：${input.views.changes.compareRunId ?? '-'}`,
+    `- 新观察档案：${input.views.changes.newProfiles.length}`,
+    `- 明确字段变化档案：${input.views.changes.changedProfiles.length}`,
+    `- 本轮未再次观察档案：${input.views.changes.notObservedProfiles.length}`,
+    `- 未变化档案：${input.views.changes.unchangedProfiles}`,
+    '',
+    `> ${input.views.changes.caveat}`,
+    '',
+    '## 明确字段变化',
+    '',
+    ...(input.views.changes.changedProfiles.length === 0
+      ? ['无。']
+      : input.views.changes.changedProfiles.flatMap((candidate) => [
+        `### ${candidate.platformCandidateKey}`,
+        '',
+        ...candidate.fields.map((field) => `- ${field.field}：${field.previousValue ?? '空'} -> ${field.currentValue ?? '空'}`),
+        '',
+      ])),
+    '## 新观察档案',
+    '',
+    ...(input.views.changes.newProfiles.length === 0
+      ? ['无。']
+      : input.views.changes.newProfiles.map((candidate) => `- ${candidate.platformCandidateKey}`)),
+    '',
+    '## 本轮未再次观察档案',
+    '',
+    ...(input.views.changes.notObservedProfiles.length === 0
+      ? ['无。']
+      : input.views.changes.notObservedProfiles.map((candidate) => `- ${candidate.platformCandidateKey}`)),
+    '',
+  ].join('\n');
 
   await Promise.all([
     fs.writeFile(candidatesCsvPath, candidatesCsv, 'utf8'),
     fs.writeFile(companyRoleMatrixCsvPath, companyRoleMatrixCsv, 'utf8'),
     fs.writeFile(coverageCsvPath, coverageCsv, 'utf8'),
+    fs.writeFile(changesCsvPath, changesCsv, 'utf8'),
+    fs.writeFile(changesMarkdownPath, `${changesMarkdown.trimEnd()}\n`, 'utf8'),
     fs.writeFile(summaryPath, `${summary.trimEnd()}\n`, 'utf8'),
   ]);
 
@@ -223,6 +301,8 @@ export async function exportTalentMapping(input: {
     candidatesCsvPath,
     companyRoleMatrixCsvPath,
     coverageCsvPath,
+    changesCsvPath,
+    changesMarkdownPath,
     summaryPath,
   };
 }

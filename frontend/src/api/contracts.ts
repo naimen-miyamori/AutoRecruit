@@ -36,8 +36,12 @@ export type {
 } from '../../../src/server/talent-mapping-read-model.js';
 export type {
   MappingCandidateView,
+  MappingClassificationSuggestionView,
   MappingCompanyRoleMatrixRow,
   MappingCoverageViewRow,
+  MappingEntityLink,
+  MappingEntityLinkReviewView,
+  MappingRunChangeReport,
   MappingRunRecord,
   TalentMappingCorePlatform,
   TalentMappingProject,

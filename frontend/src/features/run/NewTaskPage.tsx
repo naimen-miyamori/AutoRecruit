@@ -72,7 +72,7 @@ export function NewTaskPage() {
       body = { ...commonBody(form), jobsFile: form.jobsFile.trim() };
     } else if (mode === 'talent-mapping') {
       if (!form.talentMappingFile.trim()) return setValidationError('Talent Mapping 计划文件必填');
-      if (form.platform === 'boss') return setValidationError('核心 Talent Mapping 不支持 Boss');
+      if (form.platform === 'boss') return setValidationError('Boss 不属于 Talent Mapping 产品范围');
       body = { platform: form.platform, talentMappingFile: form.talentMappingFile.trim(), mappingStage: 'scan' };
     } else if (mode === 'search-subscription') {
       if (!form.searchSubscriptionFile.trim()) return setValidationError('搜索订阅文件必填');
