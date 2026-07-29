@@ -2,253 +2,231 @@
 
 Repository-wide guidance for coding agents working on Auto Recruit.
 
-## Scope and Routing
+## Scope, Inheritance, and Routing
 
-This repository is a TypeScript CLI and local operations console for recruitment automation.
-The core production browser platforms are `51job`, `liepin`, and `zhilian`. Boss (`boss`) is a
-single-platform extension for search/capture, talent discovery, configured forwarding, atomic chat
-operations, unread-chat review, and position/JD synchronization.
+This repository is a TypeScript CLI and local operations console for recruitment automation. The core
+production browser platforms are 51job, Liepin, and Zhilian. Boss is a single-platform extension
+for search/capture, talent discovery, configured forwarding, atomic chat operations, unread-chat
+review, and position/JD synchronization.
+
+Apply this root document to every change. A scoped AGENTS.md on the changed path adds and clarifies
+constraints; it must not silently weaken a root safety or public-product contract. Cross-domain
+changes read every affected scoped document. If two rules genuinely conflict, stop and resolve the
+exception in their closest common parent before implementation; do not choose one by omission.
 
 Keep ownership boundaries intact:
 
-- Platform-specific behavior belongs under `src/platforms/`.
-- Shared orchestration belongs in `src/index.ts`.
-- Shared browser/session helpers belong under `src/browser/`.
-- Storage behavior belongs under `src/storage/`.
-- RAG behavior belongs under `src/rag/`.
-- HTTP, assistant, queue, and scheduler behavior belongs under `src/server/`.
+- Platform-specific behavior belongs under src/platforms/.
+- Shared orchestration belongs in src/index.ts.
+- Shared browser/session helpers belong in src/browser/.
+- Ordinary job persistence belongs in src/storage/. A domain with an independent lifecycle and
+  authoritative fact model may own its local store, such as Talent Mapping or RAG.
+- RAG behavior belongs in src/rag/.
+- HTTP, assistant, queue, and scheduler behavior belongs in src/server/.
+- React console presentation belongs in frontend/.
 
-More specific instructions exist in these directories:
+More specific instructions are routed as follows:
 
 | Scope | Instructions |
 | --- | --- |
-| Platform adapters and Boss chat | `src/platforms/AGENTS.md` |
-| Browser sessions, pacing, deadlines, and resume parsing | `src/browser/AGENTS.md` |
-| RAG storage, retrieval, answers, and quality loops | `src/rag/AGENTS.md` |
-| Console assistant, HTTP routes, queue, and scheduler | `src/server/AGENTS.md` |
+| Cross-platform adapters and semantic actions | src/platforms/AGENTS.md |
+| 51job-specific actions | src/platforms/51job/AGENTS.md |
+| Liepin-specific actions, forwarding, and filters | src/platforms/liepin/AGENTS.md |
+| Zhilian-specific actions, delivery, and filters | src/platforms/zhilian/AGENTS.md |
+| Boss search, chat, talent, and job sync | src/platforms/boss/AGENTS.md |
+| Browser sessions, deadlines, pacing, pointer, and parser primitives | src/browser/AGENTS.md |
+| Talent Mapping plans, runs, reviews, changes, and exports | src/talent-mapping/AGENTS.md |
+| RAG facts, retrieval, answers, and quality loops | src/rag/AGENTS.md |
+| Console assistant, HTTP routes, queue, and scheduler | src/server/AGENTS.md |
+| React operations console | frontend/AGENTS.md |
 
-Changes in `src/index.ts`, `src/config.ts`, `src/search/`, `src/scripts/`, `src/scoring/`,
-`src/reporting/`, tests, or the frontend that alter one of those domains must also consult the
-corresponding scoped instructions.
+Changes in src/index.ts, src/config.ts, src/search/, src/scripts/, src/scoring/, src/reporting/, or
+tests that alter a domain must also consult that domain's scoped instructions.
 
-`README.md` and `项目说明文档.md` are the user-facing usage and architecture references. Avoid
-duplicating volatile command catalogs, selector inventories, or persistence listings here.
+README.md and 项目说明文档.md are the user-facing usage and architecture references. Avoid
+duplicating volatile command catalogs, selector inventories, filter field counts, or persistence
+listings in them or in AGENTS.md; code, schemas, fixtures, and regression tests are the facts for
+those details.
 
 ## Long-Term Project Memory
 
-`项目说明文档.md` is the durable current-state memory for the product, architecture, data
-semantics, design rationale, operational boundaries, and known limitations. Code, schemas, and
-tests remain the behavioral source of truth; Git history records how the project changed.
+项目说明文档.md is the durable current-state memory for product, architecture, data semantics,
+design rationale, operational boundaries, and known limitations. Code, schemas, and tests remain
+the behavioral source of truth; Git history records how the project changed.
 
-Any change that alters a public mode, platform boundary, workflow, API, queue or scheduling
-behavior, persistence contract, failure semantics, runtime requirement, major frontend entry, or
-core module ownership must update `项目说明文档.md` in the same work item. User-facing setup or
-command changes must also update `README.md`. Hard coding constraints belong in the relevant
-root or scoped `AGENTS.md`.
+Any change that alters a public mode, platform boundary, workflow, API, queue/scheduling behavior,
+persistence contract, failure semantics, runtime requirement, major frontend entry, or core module
+ownership updates 项目说明文档.md in the same work item. User-facing setup or command changes also
+update README.md. Hard coding constraints belong in this root document or the relevant scoped
+AGENTS.md.
 
-Keep the long-term memory as a description of the current system, not an append-only diary. Replace
-stale statements and paths, record important reasons and boundaries, and omit secrets, candidate
-data, transient task status, debugging logs, selector inventories, and unimplemented plans. Before
-finishing a qualifying change, reconcile the documentation against the implementation, schemas,
-`package.json`, `.env.example`, and the relevant regression tests.
+Keep long-term memory current rather than diary-like. Replace stale statements and paths; record
+important reasons and boundaries; omit secrets, candidate data, transient task status, debugging
+logs, selector inventories, and unimplemented plans. Before finishing a qualifying change,
+reconcile documentation with implementation, schemas, package.json, .env.example, and regression
+tests.
 
 ## Planning Document Placement
 
-All new implementation, design, remediation, and rollout plans belong in the local
-`docs/plan/` archive. Do not create plan documents in the repository root, `src/`, or another
-documentation directory. Create a new plan with `npm run plan:new -- --topic <kebab-case-topic>
---title <title>` and validate local placement and metadata with `npm run plan:check`.
+All new implementation, design, remediation, and rollout plans belong in the local docs/plan/
+archive. Do not create plan documents in the repository root, src/, or another documentation
+directory. Create a new plan with:
 
-- New files use `YYYY-MM-DD-<kebab-case-topic>-plan.md` and state status, last-updated date, and
-  Git submission policy at the top.
-- `docs/plan/README.md` is the local index; the creation command adds each new plan to it.
-- `docs/` remains ignored by Git, so plans, the local index, and the local template are not staged
-  or committed by default. If that policy changes, redesign `.gitignore` and this section together;
+    rtk npm run plan:new -- --topic <kebab-case-topic> --title <title>
+
+Validate local placement and metadata with rtk npm run plan:check.
+
+- New files use YYYY-MM-DD-<kebab-case-topic>-plan.md and state status, last-updated date, and Git
+  submission policy at the top.
+- docs/plan/README.md is the local index; the creation command adds each new plan to it.
+- docs/ remains ignored by Git, so plans, the local index, and the local template are not staged or
+  committed by default. If that policy changes, redesign .gitignore and this section together;
   never mix tracked and untracked plan conventions ad hoc.
-- A completed plan records decisions and acceptance evidence only. Update `README.md` and
-  `项目说明文档.md` with stable current behavior; neither document is a plan archive.
-- Existing historical names in `docs/plan/` are grandfathered. Every new plan must pass the current
+- A completed plan records decisions and acceptance evidence only. Update README.md and
+  项目说明文档.md with stable current behavior; neither document is a plan archive.
+- Existing historical names in docs/plan/ are grandfathered. Every new plan passes the current
   naming and metadata checks.
 
 ## Semantic Action Module Design Standard
 
-Semantic action modules are the repository-wide design standard for browser automation and any
-future integration that operates an external interactive UI. This standard does not require one
-module per DOM element. The unit of reuse is one complete business intent, such as selecting a
+Semantic action modules are the repository-wide standard for browser automation and future external
+interactive integrations. The reusable unit is one complete business intent, such as selecting a
 saved search, applying a verified filter, opening an exact candidate, forwarding a resume, or
 sending a confirmed message.
 
-- Adapters and workflows choose actions, order them, enforce confirmation and identity rules, and
-  own persistence. They must not implement user-visible page controls.
-- A platform domain action owns the selectors, compatibility fallbacks, pacing, readiness checks,
-  and postcondition for its business intent. Callers pass typed business inputs, never arbitrary
-  selectors, locators, click callbacks, or DOM event names.
-- Every mutation action must validate its target and preconditions immediately before acting,
-  preserve the caller's bounded deadline, follow platform pacing and continuous-pointer rules, and
-  verify the resulting state. Idempotent states must be explicit rather than repeated blindly.
+- Adapters/workflows choose actions, order them, enforce confirmation/identity rules, and own
+  persistence; they do not implement user-visible controls.
+- A platform action owns selectors, compatibility fallbacks, pacing, readiness, and postcondition
+  for one business intent. Callers pass typed business inputs, never DOM mechanics.
+- Every mutation validates target and preconditions immediately before acting, preserves the
+  caller's bounded deadline, follows pacing/continuous-pointer rules, and verifies result state.
+  Idempotent state is explicit rather than blindly retried.
 - Read actions, mutation actions, and pure parsers remain distinct. Page actions do not write job
-  records, queue state, receipts, reports, or call models; workflows do not bypass actions to reach
-  page controls.
-- Shared browser helpers must be selector-free and platform-neutral. Promote a helper only after at
-  least two platforms prove the same inputs, outputs, and failure semantics; otherwise keep it in
-  the owning platform domain.
-- A domain file that only re-exports a multi-domain runtime is not a completed module boundary.
-  Private compatibility runtimes may contain narrow low-level fallbacks, not the normal
-  implementation of multiple public business domains.
-- New or changed UI automation must include direct action tests and architecture-boundary tests in
-  addition to workflow regression. Existing migration debt is documented in `项目说明文档.md`; do
-  not expand it or describe the repository as fully compliant until those limitations are removed.
+  records, queue state, receipts, reports, or call models; workflows do not bypass actions.
+- Shared browser helpers are selector-free and platform-neutral. Promote only after two platforms
+  prove equivalent inputs, outputs, and failure semantics.
+- A domain file that only re-exports a multi-domain runtime is not a completed boundary. Private
+  compatibility runtimes are narrow low-level fallbacks, never normal owners of multiple domains.
+- Changed UI automation includes direct action and architecture-boundary tests in addition to
+  workflow regression. Do not expand documented migration debt or claim full compliance before it
+  is actually removed.
 
-Detailed action contracts, module ownership, naming, and verification requirements live in
-`src/platforms/AGENTS.md`.
+Detailed action contracts and platform ownership live in src/platforms/AGENTS.md.
 
 ## Public Platform Contract
 
-`--platform all` is public CLI behavior. It must run sequentially in this exact order:
+platform all is public CLI behavior. It runs sequentially in this exact order:
 
-1. `51job`
-2. `liepin`
-3. `zhilian`
+1. 51job
+2. Liepin
+3. Zhilian
 
-If one platform fails, stop immediately and propagate the error. Boss must run only through
-`--platform boss`; do not add it to `listSupportedPlatforms()`, `--platform all`, or the inner loop
-of `--platform all --jobs-file` unless that public contract is explicitly redesigned.
+If one platform fails, stop immediately and propagate the error. Boss runs only through platform
+boss; do not add it to listSupportedPlatforms(), platform all, or the inner loop of an all-platform
+jobs-file run unless the public contract is explicitly redesigned.
 
-For `--platform all --jobs-file`, jobs-file order is the outer loop and the platform order above is
+For an all-platform jobs-file run, jobs-file order is the outer loop and the platform order above is
 the inner loop.
 
 ## CLI and Mode Isolation
 
-### Job input and reuse
+### Job Input and Reuse
 
-- A new job key requires `--jd` or `--jd-file`. A rerun reuses persisted `jd.json` and must not
-  reparse JD text unnecessarily.
-- Job-scoped reusable inputs share `data/<platform>/jobs/<jobKey>/jd.json`: JD, report delivery,
+- A new job key requires jd or jd-file. A rerun reuses persisted jd.json and does not reparse
+  unchanged JD text.
+- Job-scoped reusable inputs share data/<platform>/jobs/<jobKey>/jd.json: JD, report delivery,
   search source, normalized direct-search conditions, original application-filter input, and Boss
   forwarding settings.
 - Explicit CLI values replace saved canonical values; omitted values reuse them. Do not append
   duplicate history or rewrite an unchanged job record.
 
-### Standalone modes
+### Standalone Modes
 
-- `--jd-question` and `--rag-question` are aliases and standalone. They must not open a browser,
-  capture or score resumes, export reports, or send email.
-- A stored-job question uses persisted RAG without reparsing JD. A temporary `--jd` or `--jd-file`
-  question uses only that JD and must not create job records, persistent RAG indexes, or production
-  `answer-logs.jsonl` entries.
-- Search-subscription mode (`--search-subscription-file`) is standalone. It must not parse JD,
-  create job records, capture or score resumes, export reports, send email, or alter seen state.
-- Boss auto-chat is standalone and must preserve the platform and flag isolation defined in
-  `src/platforms/AGENTS.md`.
-- Boss talent discovery, single-candidate greet, atomic chat operations, and position/JD sync are
-  standalone and require `--platform boss`. Recommendation and deep-search reads default to
-  read-only; immediate match, greet, and chat mutations require explicit confirmation.
-- Of the new Boss modes, only position/JD sync is schedulable. Do not schedule quota-consuming
-  matching, candidate contact, or arbitrary chat mutations.
+- jd-question and rag-question are aliases and standalone. They do not open a browser, capture or
+  score resumes, export reports, or send email.
+- A stored-job question uses persisted RAG without JD reparsing. A temporary JD question uses only
+  that JD and creates no job record, persistent RAG index, or production answer log.
+- Search subscription is standalone. It does not parse JD, create jobs, capture/score resumes,
+  export, send email, or alter seen state.
+- Boss auto-chat, talent discovery, greet, atomic chat operations, and position/JD sync are
+  standalone Boss-only modes. Reads default to read-only; match, greet, chat, and contact mutations
+  require explicit confirmation. Only position/JD sync is schedulable.
+- Talent Mapping is isolated market research, not normal capture: it supports only 51job, Liepin,
+  and Zhilian; it does not write ordinary job/seen/score/report/email/RAG state. See
+  src/talent-mapping/AGENTS.md for run and review contracts.
 
-### Batch and normal capture
+### Batch and Normal Capture
 
-- Batch mode uses `--jobs-file` as its only job-definition source. Reject combinations with
-  single-job `--keyword`, `--jd`, or `--jd-file`.
-- Run-level switches such as `--include-viewed`, report delivery, search source, filter-input file,
-  and valid Liepin forwarding remain allowed. Job-level search/filter values override CLI defaults;
-  relative filter paths resolve from the jobs-file directory.
-- `--search-source saved|direct` is only for normal capture. A new job defaults to `saved`; an
-  omitted value on rerun reuses persisted settings.
-- `--application-filter-input-file` is valid only with explicit `--search-source direct` in normal
-  capture. Build conditions from
-  `data/<platform>/filter-catalog/application-filter-options.latest.json`, then persist normalized
-  conditions and original input. A skipped or failed requested condition is a run error; never
-  capture from a partially applied direct-filter set.
-- `--include-viewed` defaults to `false`, is only for normal capture, and remains invalid in
-  search-subscription mode.
+- Batch mode uses jobs-file as its only job-definition source. Reject combinations with single-job
+  keyword, jd, or jd-file.
+- Run-level include-viewed, report delivery, search source, filter-input file, and valid
+  Liepin-forwarding remain allowed. Job-level search/filter values override CLI defaults; relative
+  filter paths resolve from the jobs-file directory.
+- search-source saved|direct is only for normal capture. New jobs default to saved; omitted rerun
+  values reuse persisted settings.
+- application-filter-input-file requires explicit direct search in normal capture. Build conditions
+  from the saved application-filter catalog, persist normalized conditions and original input, and
+  fail the run if any requested condition is skipped or fails.
+- include-viewed defaults false, is normal-capture-only, and is invalid in search subscription.
 
 ## Persistence and Run Semantics
 
-- Local job data is platform-scoped under `data/<platform>/jobs/<jobKey>/`; never reuse a job
-  record across platforms solely because the keyword matches.
-- Explicit empty-result states are successful zero-candidate runs, not extraction failures.
-- Only successfully captured resumes are marked seen. Detail-open, forwarding, or extraction
-  failures remain retryable.
-- Mark successful captures as seen before scoring.
-- A scoring failure persists a `status: failed` score artifact and must not undo seen state.
-- Latest run results stay lightweight: platform, counts, and candidate-ID lists rather than full
-  card payloads.
-- Exported markdown and email bodies must visibly identify the source platform.
-- Zhilian delivery and Boss chat-review persistence have additional platform rules in
-  `src/platforms/AGENTS.md`.
-- Boss-synced job records are keyed by stable Boss position ID as well as name. Same-name positions
-  with different IDs must never merge. An unchanged JD hash must not trigger reparsing or a job
-  record rewrite, and a parse failure must not replace the last valid JD.
-- Boss chat mutations use an explicit intent ID and persist a receipt. Retrying the same intent must
-  return the existing result rather than repeat the external action.
-- Local JSON/JSONL files are the source of truth for persisted product data. Rebuildable external
-  indexes must never become the only copy.
+- Local job data is platform-scoped under data/<platform>/jobs/<jobKey>/; never reuse a job record
+  across platforms solely because a keyword matches.
+- Explicit empty results are successful zero-candidate runs, not extraction failures.
+- Only successfully captured resumes become seen. Detail-open, forwarding, or extraction failures
+  stay retryable. Mark successful captures seen before scoring.
+- A scoring failure persists a failed score artifact and does not undo seen state. Latest results
+  remain lightweight: platform, counts, and candidate IDs rather than full card payloads.
+- Exported markdown and email visibly identify source platform. Platform delivery, Boss chat
+  persistence, mapping-local persistence, and review artifacts have additional scoped rules.
+- Boss position records use stable ID as well as name. Unchanged JD hash never reparses/rewrites;
+  a parse failure never replaces the last valid JD. Boss chat mutations use intent IDs and durable
+  receipts so retry returns existing result instead of repeating external action.
+- Local JSON/JSONL is the source of truth for persisted product data. Rebuildable external indexes
+  never become the sole copy.
 
 ## Browser, Pacing, and Deadline Contracts
 
-- Use platform-scoped Playwright storage state. Leave `STORAGE_STATE_PATH` unset for normal
-  multi-platform runs.
-- Headed runs may refresh an expired session through manual login; headless runs must fail with
-  actionable instructions.
-- Reuse the platform-scoped headed browser and existing authenticated tab whenever supported.
-  Do not create repeated login tabs or replace a usable current page.
-- A normal search uses one deadline from search entry through candidate extraction. A detail open
-  uses one bounded detail deadline and races popup/current-page/modal readiness within it.
-- Pacing waits are intentional user-like action delays. Do not add unbudgeted waits that silently
-  exhaust a shared readiness deadline. Multi-action flows must give pacing and page readiness a
-  realistic bounded budget, or use bounded per-phase deadlines.
-- 51job, Liepin, Zhilian, and Boss action and candidate pacing defaults to `2000-4000ms`, weighted approximately 80% in
-  `2000-3000ms` and 20% in `3001-4000ms`. Navigation, clicks, inputs, key presses, forwarding, and
-  candidate transitions must use shared pacing helpers.
-- After a resume detail becomes ready, wait one platform action interval before forwarding or parsing.
-  After a completed candidate, wait another action interval before closing the detail page or modal.
-- Boss search keywords, direct chat text, and remarks use shared grapheme-by-grapheme typing with
-  randomized `80-180ms` character delays and punctuation pauses. Keep common phrases on their
-  existing option-click path, and never replace an existing chat draft.
-- Pointer-driven actions must preserve one continuous mouse path across consecutive operations and
-  pages in the same browser context. Direct locator or DOM clicks that are required for compatibility
-  must first move the shared pointer continuously to the target; do not reset or teleport it.
+- Use platform-scoped Playwright storage state. Headed runs may refresh expired sessions through
+  manual login; headless runs fail with actionable instructions.
+- Reuse the platform-scoped headed browser and authenticated tab where supported; avoid repeated
+  login tabs and replacing a usable current page.
+- A search has one deadline from entry through extraction. Detail opens have one bounded deadline
+  and race valid platform readiness paths inside it. Pacing is intentional user-like delay, not an
+  unbudgeted wait that consumes readiness time.
+- Action and candidate pacing defaults to 2000–4000ms with a weighted 2000–3000ms majority.
+  Navigation, clicks, input, keys, forwarding, and candidate transitions use shared pacing;
+  detailed platform typing and post-detail dwell rules live in scoped platform documents.
+- Pointer-driven actions preserve one continuous path across operations and pages. Compatibility
+  locator/DOM clicks move the shared pointer first; never teleport or reset it.
 
-Detailed session, parsing, and platform interaction requirements live in the browser and platform
-scoped instructions.
+See src/browser/AGENTS.md and the matching platform document before changing these flows.
 
 ## RAG and Console Safety
 
-- RAG local JSONL facts are authoritative; Qdrant is a rebuildable index.
-- Preserve platform/job isolation in retrieval. Only verified recruiter facts may become answer
-  facts; candidate turns and unverified recruiter turns remain audit/context data.
-- No trusted source or insufficient confidence must produce an explicit no-answer result, not a
-  speculative model call.
-- Offline eval and regression paths must not append production answer logs.
-- `rag:api` is an internal interface, not a complete auth gateway.
-- The console assistant produces structured drafts only. It must reject arbitrary shell, script,
-  and file-write requests and must never execute model-suggested commands.
-- Request-scoped console model settings may affect assistant drafts and console RAG answers only.
-  Never persist or log the API key, include it in model input, or let it alter confirmed execution.
-- `/api/assistant/confirm` must reuse shared normalizers and the existing `TaskQueue`; preview argv
-  is not an execution source of truth.
-- HTTP and assistant-confirmed Boss browser operations must execute through `TaskQueue`. Read-only
-  operations must remain distinguishable from quota-consuming/contact mutations, and risk
-  acceptance does not replace the mode-specific `confirmed` and identity checks.
+- RAG local JSONL facts are authoritative; Qdrant is rebuildable. Retrieval preserves
+  platform/job isolation and only verified recruiter facts become answer facts.
+- No trusted source or insufficient confidence produces explicit no-answer, not model speculation.
+  Offline eval/regression does not append production answer logs.
+- rag:api is internal, not a complete auth gateway.
+- The console assistant produces structured drafts only. It rejects arbitrary shell, script, and
+  file-write requests and never executes model-suggested commands.
+- Request-scoped console model settings affect assistant drafts and console RAG answers only.
+  Never persist/log API keys, include them in model input, or let them alter confirmed execution.
+- assistant confirmation reuses normalizers and TaskQueue; preview argv is not execution authority.
+  HTTP and assistant-confirmed Boss work enters TaskQueue; risk acceptance does not replace
+  mode-specific confirmation and identity checks.
 
-See `src/rag/AGENTS.md` and `src/server/AGENTS.md` before changing those flows.
+See src/rag/AGENTS.md and src/server/AGENTS.md before changing those flows.
 
 ## Runtime
 
-- Use Node 24 LTS by default. `.nvmrc` is `24`; `package.json` supports `>=24 <27`.
-- Node 26 support uses `scripts/node-ts-hooks.mjs`; runtime scripts do not rely on `tsx`.
-- Prefix repository shell commands with `rtk`.
-- Environment variables load through `dotenv` in `src/config.ts`.
-- `OPENAI_API_KEY` is required for JD parsing and scoring. Model routing may use
-  `OPENAI_BASE_URL`, `OPENAI_MODEL`, `JD_PARSING_MODEL`, `SCORING_MODEL`, and optional `RAG_MODEL`.
-- Persisted RAG defaults to Qdrant plus the local embedding HTTP service; set
-  `RAG_EMBEDDING_PROVIDER=openai` only intentionally.
-- Browser engine defaults to CloakBrowser; `BROWSER_ENGINE=playwright` uses bundled Chromium.
-- SMTP delivery uses `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and `SMTP_FROM`.
-
-Operational setup, full environment-variable reference, and command examples belong in
-`README.md` and `项目说明文档.md`.
+- Use Node 24 LTS by default. .nvmrc is 24 and package.json supports >=24 <27.
+- Node 26 support uses scripts/node-ts-hooks.mjs; runtime scripts do not rely on tsx.
+- Prefix repository shell commands with rtk.
+- Environment variables load through dotenv in src/config.ts. Operational environment references,
+  commands, and deployment setup belong in README.md and 项目说明文档.md.
 
 ## Verification Matrix
 
@@ -256,34 +234,33 @@ Run verification in proportion to the change. The critical mappings are:
 
 | Contract | Primary tests |
 | --- | --- |
-| CLI modes, persistence, seen/scoring semantics | `src/scripts/test-scoring-run-semantics.ts` |
-| Platform registry, default pacing, reuse defaults | `src/scripts/test-platform-registry.ts` |
-| Semantic page-action ownership and facade boundaries | `src/scripts/test-platform-action-boundaries.ts`, matching direct action tests |
-| Boss chat and property-electrician rules | `src/scripts/test-boss-chat.ts` |
-| Boss talent discovery, deep search, and greet | `src/scripts/test-boss-talent.ts`, `src/scripts/test-boss-cli-modes.ts` |
-| Boss atomic chat operations and receipts | `src/scripts/test-boss-chat-operations.ts` |
-| Boss position/JD sync and ID mapping | `src/scripts/test-boss-job-sync.ts` |
-| Liepin adapter/search/filter behavior | `src/scripts/test-liepin-adapter.ts` |
-| Zhilian adapter/search/filter behavior | `src/scripts/test-zhilian-adapter.ts` |
-| Search subscription | `src/scripts/test-search-subscription.ts` |
-| RAG behavior | matching `src/scripts/test-rag-*.ts` tests |
-| HTTP, assistant, and scheduler behavior | `src/scripts/test-server-api.ts`, `src/scripts/test-task-scheduler.ts` |
+| CLI modes, persistence, seen/scoring semantics | src/scripts/test-scoring-run-semantics.ts |
+| Platform registry, default pacing, reuse defaults | src/scripts/test-platform-registry.ts |
+| Semantic page-action ownership and facade boundaries | src/scripts/test-platform-action-boundaries.ts and matching direct action tests |
+| Boss chat, talent, operations, and position sync | matching src/scripts/test-boss-*.ts tests |
+| Liepin/Zhilian adapter and filter behavior | src/scripts/test-liepin-adapter.ts and src/scripts/test-zhilian-adapter.ts |
+| Search subscription | src/scripts/test-search-subscription.ts |
+| Talent Mapping workflow, quality, and server behavior | src/scripts/test-talent-mapping-*.ts |
+| RAG behavior | matching src/scripts/test-rag-*.ts tests |
+| HTTP, assistant, and scheduler behavior | src/scripts/test-server-api.ts and src/scripts/test-task-scheduler.ts |
+| Frontend contracts and safety UI | src/scripts/test-frontend-client.ts |
+| AGENTS routing and structure | src/scripts/test-agent-instructions.ts and npm run agents:check |
 
 Baseline commands:
 
-- `rtk npm run typecheck`
-- `rtk npm run test`
-- `rtk npm run build`
+- rtk npm run typecheck
+- rtk npm run test
+- rtk npm run build
 
-Use focused Node test commands during iteration, then expand verification according to risk.
+Use focused Node tests during iteration, then expand verification according to risk.
 
 ## Data and Reporting Safety
 
-- Do not commit `.env`, browser storage-state files, candidate data, generated reports, or `data/`.
-- Migration must not overwrite an existing platform target job directory.
-- DOCX export is offline maintenance, not part of normal capture/scoring/email orchestration.
-- Candidate photos may come only from that candidate's confirmed detail-page avatar evidence. Never
-  use default avatars, logos, school images, SVG assets, similar-candidate photos, or the template
-  sample. If identity is uncertain, omit the photo.
+- Do not commit .env, browser storage-state files, candidate data, generated reports, or data/.
+- Migration never overwrites an existing platform target job directory.
+- DOCX export is offline maintenance, not normal capture/scoring/email orchestration.
+- Candidate photos come only from that candidate's confirmed detail-page avatar evidence. Never use
+  default avatars, logos, school images, SVG assets, similar-candidate photos, or template samples.
+  Omit the photo when identity is uncertain.
 - Preserve original resume text where possible. Do not invent records by splitting same-company
   multi-role histories without page evidence.

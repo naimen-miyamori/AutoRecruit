@@ -1,87 +1,59 @@
 # Server and Console Instructions
 
-These instructions apply to HTTP routes, task normalization, the console assistant, the shared task
-queue, and scheduler behavior under `src/server/`. Frontend and CLI changes that consume these APIs
-must preserve the same contracts.
+## Scope and Inheritance
 
-## Shared Execution Path
+These instructions apply to HTTP routes, task normalization, the console assistant, shared TaskQueue,
+and scheduler behavior under src/server/. Apply root AGENTS.md first. Frontend and CLI changes that
+consume these APIs preserve this contract; read frontend/AGENTS.md and the owning domain document
+when they are affected.
 
-- HTTP tasks, assistant-confirmed tasks, and scheduled tasks must reuse the existing `TaskQueue`.
-- Shared request validation and argv construction belong in `task-normalizers.ts`.
-- Do not add an assistant-specific or scheduler-specific execution runner that bypasses normalizers,
-  queueing, platform isolation, or CLI semantics.
-- Preview argv is explanatory only and is never the execution source of truth.
-- Preserve the CLI's mode isolation and platform constraints for normal capture, batch,
-  search-subscription, login refresh, Boss auto-chat, Boss talent/greet/chat-operation/job-sync
-  modes, RAG operations, and standalone RAG answers.
-- Routes must not call Boss browser modules directly. HTTP and assistant-confirmed Boss operations
-  normalize a task and enter the shared queue before live browser work starts.
+## Ownership and Boundaries
 
-## Console Assistant Safety
+- Server code owns routes, request validation, normalizers, queue/scheduler orchestration, internal
+  API boundaries, assistant draft handling, and task result presentation contracts.
+- HTTP tasks, assistant-confirmed tasks, and scheduled tasks reuse TaskQueue. Shared validation and
+  argv construction belong in task-normalizers.ts; preview argv is explanatory, never execution
+  authority.
+- Do not add assistant- or scheduler-specific runners that bypass normalizers, queueing, platform
+  isolation, CLI semantics, domain confirmation, or identity checks. Routes do not call live Boss
+  browser modules directly.
 
-- `cli-assistant.ts` is a structured draft layer. A model may produce an `AssistantDraft`, warnings,
-  and missing-field prompts only.
-- Reject arbitrary shell, script, and file-write requests. Never execute or persist model-suggested
+## Assistant and Model Safety
+
+- cli-assistant.ts produces structured drafts, warnings, and missing-field prompts only. Reject
+  arbitrary shell, script, and file-write requests; never execute or persist model-suggested
   commands.
-- Drop or warn about unsupported/unsafe fields before confirmation. Confirmation must still pass
-  through shared normalizers and fail there when the final request is invalid.
-- `/api/assistant/confirm` finalizes the draft and submits through the shared queue; it must not trust
-  preview argv.
-- Boss immediate match, greet, and chat mutations require both a mode-specific `confirmed: true`
-  field and final assistant risk acceptance. Read-only talent/chat drafts do not acquire mutation
-  authority merely because they share a task kind or page.
+- Drop or warn about unsafe fields before confirmation, then normalize again at confirmation.
+  assistant/confirm submits through TaskQueue and never trusts preview argv.
+- Boss immediate match, greet, and chat mutation need both mode-specific confirmed true and final
+  assistant risk acceptance. Read-only drafts never acquire mutation authority by sharing a kind.
+- Web UI baseUrl, model, and apiKey overrides apply only to assistant draft generation and console
+  RAG answering. Never store, log, or send an API key to normal task execution or domain facts.
 
-## Request-Scoped Model Settings
+## API, Queue, and Scheduler Contracts
 
-- Web UI `baseUrl`, `model`, and `apiKey` overrides apply only to assistant draft generation and
-  console RAG question answering.
-- Never store an API key in task records, assistant drafts, persisted config, logs, answer logs, or
-  model input.
-- Request-scoped model settings must not alter confirmed task execution.
+- Preserve CLI isolation and platform constraints for capture, batch, search subscription, login,
+  Boss, RAG, and Mapping modes. HTTP and assistant-confirmed Boss work normalizes then queues before
+  browser activity.
+- Assistant rag-answer is standalone: no task, browser, capture, scoring, export, or email.
+  Stored-job and temporary-JD answers preserve the RAG fact, isolation, and no-answer contracts.
+- Internal HTTP endpoints are not a full auth gateway. Host binding, body limits, static paths, and
+  optional API keys are configuration; do not hard-code secrets or deployment addresses.
+- The queue is serial and deterministic. The persistence-backed scheduler is completion-driven,
+  normalizes identifiers/time windows, preserves DST behavior, and supports stop-after-current-task
+  semantics without inferring state from UI previews.
+- A scheduler/assistant may compose existing modes but never broaden them. Boss position/JD sync may
+  be scheduled; talent matching, greet, and atomic chat mutations are not. Talent Mapping scheduling
+  is limited to card-only scan-stage plans; reject enrichment/all and detail-capable plans before
+  queueing.
+- Preserve intent IDs in task input/summaries for audit. Platform receipts enforce mutation retry
+  idempotency; queue delivery is not assumed exactly once.
 
-## Assistant RAG Answers
+## Verification
 
-- Assistant `rag-answer` is standalone and must not create tasks, open browsers, capture or score
-  resumes, export reports, or send email.
-- Stored-job answers use persisted RAG and do not reparse JD.
-- Temporary JD answers use only the provided JD and must not create job records, persistent indexes,
-  or production answer logs.
-- Follow `src/rag/AGENTS.md` for fact trust, isolation, and no-answer behavior.
-
-## Internal API Boundary
-
-- `rag:api` and the console HTTP server are internal product interfaces, not full auth gateways.
-- Optional API keys are lightweight internal-entry protection. Do not imply built-in multi-tenancy,
-  RBAC, rate limiting, centralized audit, or alerting.
-- Request body limits, host binding, API keys, and static frontend paths remain runtime configuration;
-  do not hard-code secrets or deployment-specific addresses.
-
-## Queue and Scheduler
-
-- The queue is single-process and serial. Preserve deterministic task ordering and existing task
-  state transitions.
-- The scheduler is persistence-backed and completion-driven. It shares `TaskQueue`, maintains
-  schedule/round records, and supports stop-after-current-task semantics.
-- Normalize schedule identifiers and time windows through the shared schedule modules. Preserve DST
-  behavior and do not infer scheduler state solely from UI previews.
-- A scheduler or assistant feature may compose existing task modes but must not broaden what those
-  modes are allowed to do.
-- Boss position/JD sync is schedulable and may precede Boss auto-chat in one ordered round. Talent
-  matching, greet, and atomic chat mutation kinds are intentionally not schedulable.
-- Preserve intent IDs in task input and summaries where useful for audit, but do not derive external
-  execution from task argv previews. Mutation retry idempotency is enforced by the platform receipt,
-  not by assuming queue delivery is exactly once.
-
-## Focused Verification
-
-- HTTP routes and assistant behavior: `src/scripts/test-server-api.ts`
-- Scheduler persistence/time/order behavior: `src/scripts/test-task-scheduler.ts`
-- Shared execution and CLI isolation: `src/scripts/test-scoring-run-semantics.ts`
-- Boss task normalization/API paths: `src/scripts/test-server-api.ts`,
-  `src/scripts/test-boss-cli-modes.ts`
-- Boss operation and sync semantics: `src/scripts/test-boss-chat-operations.ts`,
-  `src/scripts/test-boss-job-sync.ts`
-- RAG API behavior: matching `src/scripts/test-rag-api.ts` and other `test-rag-*.ts` files
-
-Run `rtk npm run typecheck` after server contract changes and expand to the full test suite according
-to risk.
+- HTTP routes and assistant behavior: src/scripts/test-server-api.ts.
+- Scheduler persistence, time, order, and task restrictions: src/scripts/test-task-scheduler.ts.
+- Shared execution and CLI isolation: src/scripts/test-scoring-run-semantics.ts and the matching
+  Boss/Talent Mapping CLI tests.
+- Run npm run typecheck after server contract changes and expand to npm run test and npm run build
+  for shared API, queue, scheduler, or domain-normalizer changes.

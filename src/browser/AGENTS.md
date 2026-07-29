@@ -1,108 +1,77 @@
 # Browser Instructions
 
-These instructions apply to shared browser sessions, page readiness, pacing, and 51job-oriented
-resume parsing under `src/browser/`.
+## Scope and Inheritance
 
-## Session and Authentication
+These instructions apply to shared browser sessions, page readiness, pacing, pointer state, and the
+documented heuristic resume parser under src/browser/. Apply root AGENTS.md first. Platform UI
+behavior, selectors, login destinations, modal/popup variants, forwarding, chat, and filters belong
+to the matching src/platforms/<platform>/AGENTS.md.
 
-- Use platform-scoped storage state:
-  - 51job: `storage-state.json`
-  - Liepin: `storage-state.liepin.json`
-  - Zhilian: `storage-state.zhilian.json`
-  - Boss: `storage-state.boss.json`
-- Leave `STORAGE_STATE_PATH` unset for normal multi-platform runs. Reject unsafe shared or
-  cross-platform overrides.
-- If a saved session is missing or expired, headed runs may refresh it through manual login and then
-  verify the persisted state. Headless runs cannot refresh and must fail with a useful rerun message.
-- Liepin is always headed. Manual-login polling must not probe unrelated pages before recruiter
-  cookies exist.
-- Zhilian login starts at `https://passport.zhaopin.com/org/login`.
-- Reuse the current authenticated page and browser context rather than opening repeated login tabs.
+## Ownership and Boundaries
 
-## Reusable Browser Contract
+- Browser helpers are selector-free and platform-neutral. Promote a helper only when at least two
+  platforms share the same typed inputs, outputs, and failure semantics.
+- Browser code owns session/profile lifecycle, reusable browser/context/page selection, deadline
+  utilities, user-like pacing, continuous pointer tracking, and common parser primitives.
+- Platform actions own platform pacing application, sequential input semantics, selectors,
+  compatibility clicks, readiness variants, and business postconditions. Workflows own persistence,
+  confirmation, and task execution.
 
-- 51job, Liepin, Zhilian, and Boss default to reusable headed mode unless their platform override is
-  `false`.
-- Default CDP ports are `19325`, `19327`, `19329`, and `19331` respectively.
-- Browser engine defaults to CloakBrowser. `BROWSER_ENGINE=playwright` is the supported fallback.
-- A reusable run should leave the browser on the useful authenticated search/chat page. Close only
-  detail pages or stale tabs that the platform contract says to close.
-- Boss search, recommendation/deep-search, chat, and job-management flows share the Boss-scoped
-  browser/profile and should reuse the current useful Boss tab.
+## Session and Reuse
+
+- Use platform-scoped storage state and leave STORAGE_STATE_PATH unset for normal multi-platform
+  runs. Reject unsafe shared or cross-platform state overrides.
+- A missing or expired session may refresh through manual headed login and then verify persisted
+  state. Headless runs cannot refresh and must fail with an actionable rerun instruction.
+- Reuse the authenticated context and useful page whenever supported. Do not create repeated login
+  tabs or replace a usable current page; close only stale tabs or detail pages when the owning
+  platform contract requires it.
+- Browser engine and reusable-profile defaults remain configuration concerns. Do not duplicate
+  platform port, profile, or login-page inventories here.
 
 ## Deadlines and Readiness
 
-- Orchestration creates one search deadline before opening search entry and passes it through search
-  opening and candidate extraction.
-- Avoid sequential full-timeout waits. Use remaining-time calculations and race all valid readiness
-  paths inside the shared deadline.
-- Detail opening follows the same total-deadline principle:
-  - 51job and Liepin race popup/current-page navigation/content readiness.
-  - Zhilian and Boss use modal readiness without repeating a full detail wait.
-- A stable empty visible list or explicit platform empty text is successful readiness, not failure.
-- Keep API fallback short and subordinate to DOM readiness.
-- Pacing and readiness are different concerns. Pacing must happen before the relevant user action,
-  while readiness waits for the resulting page state. Multi-action flows must budget both without
-  silently exhausting the deadline.
+- Orchestration creates one search deadline and passes it through search entry and candidate
+  extraction. Detail operations use one bounded detail deadline.
+- Use remaining-time calculations and race valid readiness paths within the existing budget. Do not
+  stack sequential full-timeout waits, reset deadlines after navigation, or add unbudgeted waiting.
+- A stable empty list or explicit platform empty state is successful readiness. API fallback is
+  short and subordinate to DOM readiness.
+- Pacing happens before an action; readiness waits for its result. Multi-action flows budget both
+  intentionally instead of silently consuming the whole deadline.
 
-Default timing configuration:
+## Pacing and Pointer Contracts
 
-| Setting | Default |
-| --- | --- |
-| `PLAYWRIGHT_SEARCH_PAGE_TIMEOUT_MS` | `30000` |
-| `PLAYWRIGHT_EMPTY_RESULTS_STABLE_MS` | `2000` |
-| `PLAYWRIGHT_API_FALLBACK_TIMEOUT_MS` | `3000` |
-| `PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS` | `20000` |
+- Use src/browser/pacing.ts for user-action and candidate-transition timing. The shared default
+  range remains 2000–4000ms with the configured weighted distribution; platform configuration may
+  provide compatible overrides.
+- Pointer-driven operations preserve one context-scoped continuous trajectory across pages and
+  popup/modal transitions. Native locator, forced, or DOM-event compatibility paths first move the
+  shared pointer to the target; no helper may teleport or bypass the tracker.
+- Shared typing helpers preserve intentional sequential input behavior. The owning platform decides
+  when it is required and whether clearing an existing value is allowed; browser helpers must not
+  silently degrade required typing to whole-value fill.
+- DOM reads, deterministic parsing, model calls, local writes, and SMTP do not need artificial
+  browser pacing.
 
-## Pacing
+## Candidate Detail and Parsing
 
-- Use helpers in `src/browser/pacing.ts` for platform user actions and candidate transitions.
-- 51job, Liepin, Zhilian, and Boss action and candidate pacing defaults to `2000-4000ms`, weighted about 80% in
-  `2000-3000ms` and 20% in `3001-4000ms`.
-- Boss navigation, clicks, inputs, key presses, forwarding, talent matching/greet, job-detail sync,
-  chat/contact actions, and candidate transitions must not bypass the shared pacing helper.
-- Boss search keywords, direct chat text, and remarks must use the shared sequential typing helper.
-  Its default randomized character delay is `80-180ms`, with an additional punctuation pause;
-  `PLAYWRIGHT_BOSS_TYPING_DELAY_MIN_MS/MAX_MS` override the base range. Do not silently fall back to
-  whole-value `fill()` when simulated typing fails.
-- Platform-specific overrides use
-  `PLAYWRIGHT_<PLATFORM>_{ACTION|CANDIDATE}_DELAY_{MIN|MAX}_MS`.
-- Existing `PLAYWRIGHT_LIEPIN_*ACTION_DELAY*`, `PLAYWRIGHT_LIEPIN_*CANDIDATE_DELAY*`, and
-  `PLAYWRIGHT_LIEPIN_REUSE_*` names remain supported as Liepin platform overrides.
-- Pointer-driven actions use the context-scoped continuous trajectory in `src/browser/pacing.ts`.
-  Every next click starts from the prior operation's recorded endpoint, including popup/current-page
-  transitions. Native locator and DOM-event exceptions such as Boss chat resume opening and Zhilian
-  salary boundaries must move the shared pointer to the target before clicking; no direct mouse move
-  or coordinate click may bypass the shared tracker.
-- DOM reads, parsing, model calls, local writes, and SMTP do not need artificial browser pacing.
+- A detail-open or extraction failure stays retryable; only a successful capture becomes seen.
+  Platform actions enforce their required post-ready dwell and successful cleanup/inspection
+  behavior.
+- Parse the intended detail subtree, never unrelated page chrome. Keep platform modal/popup logic
+  out of shared browser helpers.
+- src/browser/resume-detail.ts remains the heuristic-heavy 51job extraction fallback. Preserve
+  original field text, require page-structure evidence, and never invent histories by splitting
+  same-company multi-role records. Validate changes with stored snapshots and offline reparsing.
+- Crawl4AI is optional. The built-in parser remains usable when the local Python environment or
+  Crawl4AI is unavailable.
 
-## Candidate and Detail Semantics
+## Verification
 
-- A detail-open or extraction failure remains retryable; only successfully captured resumes become
-  seen.
-- Every platform waits one action interval after resume-detail readiness before forwarding or parsing,
-  then waits another action interval before successful detail cleanup. Popup platforms close the detail
-  page and foreground search; modal platforms close the current modal.
-- Liepin failures leave the detail open for inspection and stop the flow.
-- A single failed 51job click selector must not consume the whole detail deadline.
-- Modal platforms should parse the intended modal subtree rather than unrelated page chrome.
-
-## Resume Parsing
-
-`src/browser/resume-detail.ts` is heuristic-heavy and primarily owns 51job extraction fallbacks.
-
-- Validate parser changes against stored snapshots and offline reparsing before changing live flow.
-- Preserve original field text when possible.
-- Use page-structure evidence; do not invent records by splitting same-company multi-role histories.
-- Keep whole-page section slicing, DOM work-history snapshots, and Chinese-language heuristics narrow
-  and covered by focused tests or stored-snapshot validation.
-- Crawl4AI is optional. If `.venv/bin/python` or Crawl4AI is unavailable, the built-in parser must
-  continue.
-
-Useful offline checks:
-
-- `rtk npm run reparse:resumes -- <platform> <jobKey>`
-- `rtk npm run validate:resumes`
-- `rtk npm run capture:resume-dom -- --platform <platform> <jobKey> <searchKeyword> <candidateId>`
-- `rtk node --import ./scripts/node-ts-hooks.mjs src/scripts/debug-work-lines.ts <platform> <jobKey> <candidateId>`
-- `rtk node --import ./scripts/node-ts-hooks.mjs src/scripts/debug-work-boundaries.ts <platform> <jobKey> <candidateId>`
+- Shared session, pacing, resume parsing, registry, and capture semantics:
+  src/scripts/test-platform-registry.ts, src/scripts/test-51job-actions.ts, and
+  src/scripts/test-scoring-run-semantics.ts.
+- Action ownership and pointer/deadline boundary behavior:
+  src/scripts/test-platform-action-boundaries.ts plus the matching platform action tests.
+- Parser work uses the documented offline reparse/validation scripts before any live-flow change.
