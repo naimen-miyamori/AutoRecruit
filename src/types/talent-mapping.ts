@@ -150,6 +150,17 @@ export interface MappingProfileObservation {
   detailOpenSideEffect: 'may-mark-viewed';
   selectionReason: string[];
   rawSnapshotPath?: string;
+  rawSnapshotSha256?: string;
+}
+
+export interface MappingProfileSnapshotConflict {
+  conflictId: string;
+  mappingKey: string;
+  platform: TalentMappingCorePlatform;
+  profileObservationId: string;
+  existingSnapshotSha256?: string;
+  incomingSnapshotSha256: string;
+  detectedAt: string;
 }
 
 export type MappingTerminationReason =
@@ -194,6 +205,13 @@ export interface MappingRunRecord {
   stage: TalentMappingStage;
   platformSelection: TalentMappingPlatformSelection;
   sourceScanRunId?: string;
+  /** Immutable, validated plan captured before the run starts. */
+  planHash?: string;
+  /** Hash of the search scope, taxonomy and normalization contract only. */
+  scanContractHash?: string;
+  scopeFingerprint?: MappingRunScopeFingerprint;
+  contractStatus?: 'verified' | 'legacy-unverifiable';
+  planSnapshotPath?: string;
   status: MappingSliceRunStatus;
   detailOpenConfirmed: boolean;
   detailOpenSideEffect: 'none' | 'may-mark-viewed';
@@ -202,6 +220,29 @@ export interface MappingRunRecord {
   sliceRuns: MappingSliceRun[];
   exportDir?: string;
   error?: string;
+}
+
+export interface MappingRunScopeSlice {
+  sliceId: string;
+  platform: TalentMappingCorePlatform;
+  searchPlanHash: string;
+}
+
+export interface MappingRunScopeFingerprint {
+  platforms: TalentMappingCorePlatform[];
+  slices: MappingRunScopeSlice[];
+  coverage: MappingCoverageLimits;
+}
+
+export interface MappingRunContract {
+  version: 1;
+  mappingKey: string;
+  runId: string;
+  capturedAt: string;
+  plan: TalentMappingPlan;
+  planHash: string;
+  scanContractHash: string;
+  scopeFingerprint: MappingRunScopeFingerprint;
 }
 
 export interface MappingBatchCheckpoint {
@@ -294,6 +335,11 @@ export interface CandidateResultBatch {
   batchIdentity: string;
   batchNumber?: number;
   endReached: boolean;
+  /**
+   * `endReached` is valid only when the platform action has an observable
+   * terminal proof. An empty extraction by itself is never terminal evidence.
+   */
+  terminalEvidence: 'explicit-empty-result' | 'explicit-pagination-end' | 'not-terminal';
 }
 
 export interface AdvanceCandidateBatchInput {
@@ -303,7 +349,7 @@ export interface AdvanceCandidateBatchInput {
 
 export type AdvanceCandidateBatchResult =
   | { status: 'advanced'; batch: CandidateResultBatch }
-  | { status: 'end-reached' };
+  | { status: 'end-reached'; terminalEvidence: 'explicit-pagination-end' };
 
 export interface CandidateProfileDetailResult {
   resume: CandidateResume;
@@ -368,17 +414,23 @@ export interface MappingClassificationSuggestion {
 
 export interface MappingClassificationReview {
   reviewId: string;
+  /** Stable suggestion-level key; multiple immutable audit events form versions of this review. */
+  reviewKey: string;
+  reviewVersion: number;
   mappingKey: string;
   suggestionId: string;
   platformCandidateKey: string;
-  decision: 'accepted' | 'rejected';
+  decision: 'accepted' | 'rejected' | 'revoked';
   reviewedAt: string;
   reviewedBy: string;
   note?: string;
+  supersedesReviewId?: string;
+  revokesReviewId?: string;
 }
 
 export interface MappingClassificationSuggestionView extends MappingClassificationSuggestion {
   review?: MappingClassificationReview;
+  reviewHistory?: MappingClassificationReview[];
 }
 
 export interface TalentMappingClassificationRunSummary {
@@ -430,10 +482,13 @@ export interface MappingRunCandidateChange {
 }
 
 export interface MappingRunChangeReport {
-  status: 'ready' | 'insufficient-runs';
+  status: 'ready' | 'partial' | 'incomparable' | 'insufficient';
   mappingKey: string;
   baseRunId?: string;
   compareRunId?: string;
+  baseScanContractHash?: string;
+  compareScanContractHash?: string;
+  comparisonReasons: string[];
   generatedAt: string;
   newProfiles: MappingRunCandidateSnapshot[];
   notObservedProfiles: MappingRunCandidateSnapshot[];

@@ -139,7 +139,7 @@ async function mockApi(page: Page): Promise<void> {
     } else if (pathname === '/api/talent-mappings/mapping-1/coverage') {
       body = { coverage: [] };
     } else if (pathname === '/api/talent-mappings/mapping-1/changes') {
-      body = { changes: { status: 'insufficient-runs', mappingKey: 'mapping-1', compareRunId: 'scan-run-1', generatedAt: '2026-07-28T00:01:00.000Z', newProfiles: [], notObservedProfiles: [], changedProfiles: [], unchangedProfiles: 0, caveat: '本轮未再次观察不能解释为离职。' } };
+      body = { changes: { status: 'insufficient', mappingKey: 'mapping-1', compareRunId: 'scan-run-1', generatedAt: '2026-07-28T00:01:00.000Z', comparisonReasons: ['至少需要两次成功的 scan/all 运行。'], newProfiles: [], notObservedProfiles: [], changedProfiles: [], unchangedProfiles: 0, caveat: '本轮未再次观察不能解释为离职。' } };
     } else if (pathname === '/api/talent-mappings/mapping-1/entity-links') {
       body = { entityLinks: { platformProfileCount: 2, confirmedEntityCount: 2, activeLinks: [], revokedLinks: [], suggestions: [{ suggestionId: 'link-suggestion-1', platformCandidateKeys: ['51job:candidate-1', 'liepin:candidate-2'], evidence: ['姓名完全一致', '当前公司一致', '当前岗位一致'] }] } };
     } else if (pathname === '/api/talent-mappings/mapping-1/classification-suggestions') {

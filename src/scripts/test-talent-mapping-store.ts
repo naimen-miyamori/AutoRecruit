@@ -11,6 +11,7 @@ import {
   createMappingCandidateObservation,
 } from '../talent-mapping/normalization.js';
 import { TalentMappingStore } from '../talent-mapping/store.js';
+import { buildMappingRunContract } from '../talent-mapping/run-contract.js';
 import type { MappingProfileObservation, MappingRunRecord } from '../types/talent-mapping.js';
 
 const fixturePath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.example.json', import.meta.url));
@@ -98,9 +99,15 @@ describe('TalentMappingStore', () => {
       };
       const profileFirst = await store.appendProfileObservation(profileObservation, { rawText: '脱敏详情文本' });
       const profileSecond = await store.appendProfileObservation(profileObservation, { rawText: '脱敏详情文本' });
+      const profileConflict = await store.appendProfileObservation(profileObservation, { rawText: '内容不同的重试详情文本' });
       assert.equal(profileFirst.appended, true);
       assert.equal(profileSecond.appended, false);
+      assert.equal(profileConflict.appended, false);
       assert.match(profileFirst.observation.rawSnapshotPath ?? '', /^platforms\/51job\/snapshots\//);
+      assert.match(profileFirst.observation.rawSnapshotPath ?? '', /[a-f0-9]{64}\.txt$/);
+      assert.equal(profileFirst.observation.rawSnapshotSha256?.length, 64);
+      assert.equal(profileConflict.observation.rawSnapshotSha256, profileFirst.observation.rawSnapshotSha256);
+      assert.equal((await store.readProfileSnapshotConflicts(plan.mappingKey)).length, 1);
       assert.equal((await store.readProfileObservations(plan.mappingKey)).length, 1);
 
       await store.saveCheckpoint({
@@ -165,6 +172,28 @@ describe('TalentMappingStore', () => {
       const second = store.createRunId();
       assert.notEqual(first, second);
       assert.doesNotMatch(first, /[/:]/);
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('persists an immutable, hashed plan snapshot for each run', async () => {
+    const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-mapping-contract-'));
+    const plan = await loadTalentMappingPlanFile(fixturePath, { platformSelection: 'all' });
+    try {
+      const store = new TalentMappingStore({ dataDir });
+      const contract = buildMappingRunContract({
+        plan,
+        runId: 'contract-run',
+        platformSelection: 'all',
+        capturedAt: '2026-07-28T04:00:00.000Z',
+      });
+      await store.saveRunContract(contract);
+      assert.deepStrictEqual(await store.readRunContract(plan.mappingKey, 'contract-run'), contract);
+      await assert.rejects(
+        () => store.saveRunContract({ ...contract, scanContractHash: 'tampered' }),
+        /immutable and does not match the existing snapshot/,
+      );
     } finally {
       await fs.rm(dataDir, { recursive: true, force: true });
     }

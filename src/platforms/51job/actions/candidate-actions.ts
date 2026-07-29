@@ -85,6 +85,17 @@ async function read51jobBatchNumber(page: Page): Promise<number | undefined> {
   return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
+async function hasExplicit51jobEmptyResult(page: Page): Promise<boolean> {
+  const marker = page.getByText(/没有搜索到相关的人才|暂无符合条件的人才|暂无搜索结果/, { exact: false });
+  const count = await marker.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    if (await marker.nth(index).isVisible().catch(() => false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function extract51jobCandidateList(
   ...args: Parameters<PlatformAdapter['extractCandidateList']>
 ): Promise<Awaited<ReturnType<PlatformAdapter['extractCandidateList']>>> {
@@ -102,11 +113,17 @@ export async function read51jobCurrentCandidateBatch(
   const candidates = await collectCandidateList(page, options);
   const batchNumber = await read51jobBatchNumber(page);
   const nextControl = candidates.length > 0 ? await find51jobNextBatchControl(page) : undefined;
+  const terminalEvidence = await hasExplicit51jobEmptyResult(page)
+    ? 'explicit-empty-result' as const
+    : nextControl && await isDisabled(nextControl)
+      ? 'explicit-pagination-end' as const
+      : 'not-terminal' as const;
   return {
     candidates,
     batchIdentity: buildCandidateBatchIdentity('51job', candidates, batchNumber),
     batchNumber,
-    endReached: candidates.length === 0 || Boolean(nextControl && await isDisabled(nextControl)),
+    endReached: terminalEvidence !== 'not-terminal',
+    terminalEvidence,
   };
 }
 
@@ -125,7 +142,7 @@ export async function advance51jobToNextCandidateBatch(
     throw new Error('51job candidate batch end cannot be established because no explicit next-page state is visible');
   }
   if (await isDisabled(nextControl)) {
-    return { status: 'end-reached' };
+    return { status: 'end-reached', terminalEvidence: 'explicit-pagination-end' };
   }
 
   await waitPlatformActionPace(page, '51job');

@@ -16,8 +16,10 @@ import type {
   MappingDerivedViews,
   MappingEntityLink,
   MappingProfileObservation,
+  MappingProfileSnapshotConflict,
   MappingRunRecord,
   MappingRunChangeReport,
+  MappingRunContract,
   MappingSliceRun,
   TalentMappingCorePlatform,
   TalentMappingPlan,
@@ -28,6 +30,7 @@ interface TalentMappingPaths {
   rootDir: string;
   mappingPath: string;
   runsDir: string;
+  runContractsDir: string;
   checkpointsDir: string;
   annotationsPath: string;
   entityLinksPath: string;
@@ -47,6 +50,7 @@ interface PlatformMappingPaths {
   profileObservationsPath: string;
   profilesDir: string;
   snapshotsDir: string;
+  snapshotConflictsPath: string;
 }
 
 export interface TalentMappingStoreOptions {
@@ -160,6 +164,7 @@ export class TalentMappingStore {
       rootDir,
       mappingPath: path.join(rootDir, 'mapping.json'),
       runsDir: path.join(rootDir, 'runs'),
+      runContractsDir: path.join(rootDir, 'runs', 'contracts'),
       checkpointsDir: path.join(rootDir, 'runs', 'checkpoints'),
       annotationsPath: path.join(rootDir, 'annotations.jsonl'),
       entityLinksPath: path.join(rootDir, 'entity-links.json'),
@@ -182,6 +187,7 @@ export class TalentMappingStore {
       profileObservationsPath: path.join(dir, 'profile-observations.jsonl'),
       profilesDir: path.join(dir, 'profiles'),
       snapshotsDir: path.join(dir, 'snapshots'),
+      snapshotConflictsPath: path.join(dir, 'snapshot-conflicts.jsonl'),
     };
   }
 
@@ -255,14 +261,55 @@ export class TalentMappingStore {
     options: { rawText?: string } = {},
   ): Promise<{ appended: boolean; observation: MappingProfileObservation }> {
     const paths = this.getPlatformPaths(observation.mappingKey, observation.platform);
+    const existing = (await readJsonLines<MappingProfileObservation>(paths.profileObservationsPath))
+      .find((item) => item.profileObservationId === observation.profileObservationId);
+    if (existing) {
+      if (options.rawText !== undefined) {
+        const incomingSnapshotSha256 = createHash('sha256').update(options.rawText).digest('hex');
+        let existingSnapshotSha256 = existing.rawSnapshotSha256;
+        if (!existingSnapshotSha256 && existing.rawSnapshotPath) {
+          const snapshotPath = path.join(this.getPaths(observation.mappingKey).rootDir, existing.rawSnapshotPath);
+          const existingText = await fs.readFile(snapshotPath, 'utf8').catch(() => undefined);
+          if (existingText !== undefined) {
+            existingSnapshotSha256 = createHash('sha256').update(existingText).digest('hex');
+          }
+        }
+        if (existingSnapshotSha256 !== incomingSnapshotSha256) {
+          const conflict: MappingProfileSnapshotConflict = {
+            conflictId: createHash('sha256').update([
+              observation.profileObservationId,
+              existingSnapshotSha256 ?? 'missing',
+              incomingSnapshotSha256,
+            ].join('\u001f')).digest('hex'),
+            mappingKey: observation.mappingKey,
+            platform: observation.platform,
+            profileObservationId: observation.profileObservationId,
+            existingSnapshotSha256,
+            incomingSnapshotSha256,
+            detectedAt: this.now().toISOString(),
+          };
+          await appendJsonLineIdempotently(
+            paths.snapshotConflictsPath,
+            conflict as MappingProfileSnapshotConflict & Record<string, unknown>,
+            'conflictId',
+          );
+        }
+      }
+      return { appended: false, observation: existing };
+    }
+
     let storedObservation = observation;
-    if (options.rawText) {
+    if (options.rawText !== undefined) {
       await ensureDir(paths.snapshotsDir);
-      const snapshotPath = path.join(paths.snapshotsDir, `${observation.profileObservationId}.txt`);
-      await fs.writeFile(snapshotPath, options.rawText, 'utf8');
+      const rawSnapshotSha256 = createHash('sha256').update(options.rawText).digest('hex');
+      const snapshotPath = path.join(paths.snapshotsDir, `${observation.profileObservationId}-${rawSnapshotSha256}.txt`);
+      await fs.writeFile(snapshotPath, options.rawText, { encoding: 'utf8', flag: 'wx' }).catch(async (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'EEXIST') throw error;
+      });
       storedObservation = {
         ...observation,
         rawSnapshotPath: path.relative(this.getPaths(observation.mappingKey).rootDir, snapshotPath),
+        rawSnapshotSha256,
       };
     }
 
@@ -278,6 +325,13 @@ export class TalentMappingStore {
       );
     }
     return { appended, observation: storedObservation };
+  }
+
+  async readProfileSnapshotConflicts(mappingKey: string): Promise<MappingProfileSnapshotConflict[]> {
+    const values = await Promise.all((['51job', 'liepin', 'zhilian'] as const).map((platform) =>
+      readJsonLines<MappingProfileSnapshotConflict>(this.getPlatformPaths(mappingKey, platform).snapshotConflictsPath),
+    ));
+    return values.flat();
   }
 
   async readCandidateObservations(mappingKey: string): Promise<MappingCandidateObservation[]> {
@@ -308,6 +362,30 @@ export class TalentMappingStore {
     const filePath = path.join(this.getPaths(run.mappingKey).runsDir, `${run.runId}.json`);
     await writeJson(filePath, run);
     return filePath;
+  }
+
+  async saveRunContract(contract: MappingRunContract): Promise<string> {
+    assertSafePathSegment(contract.runId, 'runId');
+    const filePath = path.join(this.getPaths(contract.mappingKey).runContractsDir, `${contract.runId}.json`);
+    const existing = await readJsonIfExists<MappingRunContract>(filePath);
+    if (existing) {
+      if (!isDeepStrictEqual(existing, contract)) {
+        throw new Error(`Talent Mapping run contract ${contract.runId} is immutable and does not match the existing snapshot`);
+      }
+      return filePath;
+    }
+    await writeJson(filePath, contract);
+    return filePath;
+  }
+
+  async readRunContract(
+    mappingKey: string,
+    runId: string,
+  ): Promise<MappingRunContract | undefined> {
+    assertSafePathSegment(runId, 'runId');
+    return readJsonIfExists<MappingRunContract>(
+      path.join(this.getPaths(mappingKey).runContractsDir, `${runId}.json`),
+    );
   }
 
   async readRun(mappingKey: string, runId: string): Promise<MappingRunRecord | undefined> {

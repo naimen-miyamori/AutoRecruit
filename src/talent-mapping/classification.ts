@@ -211,8 +211,7 @@ export function applyAcceptedMappingClassifications(input: {
 }): MappingCandidateView[] {
   const suggestionById = new Map(input.suggestions.map((suggestion) => [suggestion.suggestionId, suggestion]));
   const acceptedByCandidate = new Map<string, Array<{ suggestion: MappingClassificationSuggestion; review: MappingClassificationReview }>>();
-  for (const review of input.reviews) {
-    if (review.decision !== 'accepted') continue;
+  for (const review of effectiveAcceptedMappingClassificationReviews(input.reviews)) {
     const suggestion = suggestionById.get(review.suggestionId);
     if (!suggestion || suggestion.platformCandidateKey !== review.platformCandidateKey) continue;
     const values = acceptedByCandidate.get(review.platformCandidateKey) ?? [];
@@ -244,4 +243,39 @@ export function applyAcceptedMappingClassifications(input: {
     };
     return next;
   });
+}
+
+function reviewVersionKey(review: MappingClassificationReview): string {
+  return review.reviewKey || `${review.mappingKey}\u001f${review.suggestionId}`;
+}
+
+function compareReviewVersion(left: MappingClassificationReview, right: MappingClassificationReview): number {
+  return (left.reviewVersion ?? 0) - (right.reviewVersion ?? 0)
+    || left.reviewedAt.localeCompare(right.reviewedAt)
+    || left.reviewId.localeCompare(right.reviewId);
+}
+
+/**
+ * Reviews are append-only audit events. The latest event for each suggestion is
+ * authoritative; accepted reviews superseded by another effective review are
+ * intentionally excluded from all derived facts.
+ */
+export function effectiveAcceptedMappingClassificationReviews(
+  reviews: readonly MappingClassificationReview[],
+): MappingClassificationReview[] {
+  const latestByKey = new Map<string, MappingClassificationReview>();
+  for (const review of reviews) {
+    const key = reviewVersionKey(review);
+    const current = latestByKey.get(key);
+    if (!current || compareReviewVersion(current, review) < 0) {
+      latestByKey.set(key, review);
+    }
+  }
+  const currentReviews = [...latestByKey.values()];
+  const superseded = new Set(
+    currentReviews.flatMap((review) => review.supersedesReviewId ? [review.supersedesReviewId] : []),
+  );
+  return currentReviews
+    .filter((review) => review.decision === 'accepted' && !superseded.has(review.reviewId))
+    .sort(compareReviewVersion);
 }

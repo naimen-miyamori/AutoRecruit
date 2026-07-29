@@ -26,6 +26,7 @@ import {
   buildMappingProfileObservationId,
   createMappingCandidateObservation,
 } from './normalization.js';
+import { buildMappingRunContract } from './run-contract.js';
 import { isMappingPlatformPlanEnabled } from './plan.js';
 import {
   buildTalentMappingDetailSelections,
@@ -109,6 +110,55 @@ function terminationStatus(reason: MappingTerminationReason): MappingSliceRunSta
     return 'completed-with-gaps';
   }
   return 'completed';
+}
+
+function assertCandidateBatchTerminalContract(batch: {
+  endReached: boolean;
+  terminalEvidence: 'explicit-empty-result' | 'explicit-pagination-end' | 'not-terminal';
+}, platform: TalentMappingCorePlatform): void {
+  const terminalByEvidence = batch.terminalEvidence !== 'not-terminal';
+  if (batch.endReached !== terminalByEvidence) {
+    throw new Error(
+      `${platform} Mapping candidate batch returned inconsistent terminal state: `
+      + `endReached=${String(batch.endReached)}, terminalEvidence=${batch.terminalEvidence}`,
+    );
+  }
+}
+
+function normalizeIdentityValue(value: string): string {
+  return value.trim().toLocaleLowerCase().replace(/\s+/g, ' ');
+}
+
+function assertSelectedCandidateCardIdentity(
+  selected: SelectedMappingCandidate,
+  current: CandidateListItem,
+  platform: TalentMappingCorePlatform,
+): void {
+  if (current.candidateId !== selected.candidate.candidateId) {
+    throw new Error(
+      `${platform} selected candidate identity mismatch: expected ${selected.candidate.candidateId}, got ${current.candidateId}`,
+    );
+  }
+  const fields: Array<keyof Pick<CandidateListItem, 'name' | 'currentCompany' | 'currentTitle'>> = [
+    'name',
+    'currentCompany',
+    'currentTitle',
+  ];
+  for (const field of fields) {
+    const expected = selected.candidate[field];
+    if (!expected) continue;
+    const actual = current[field];
+    if (!actual) {
+      throw new Error(
+        `${platform} selected candidate ${current.candidateId} no longer exposes expected ${field} evidence before detail open`,
+      );
+    }
+    if (normalizeIdentityValue(actual) !== normalizeIdentityValue(expected)) {
+      throw new Error(
+        `${platform} selected candidate ${current.candidateId} ${field} changed before detail open: expected ${expected}, got ${actual}`,
+      );
+    }
+  }
 }
 
 function assertWorkflowInput(input: RunTalentMappingWorkflowInput): void {
@@ -203,8 +253,12 @@ async function scanSlicePlatform(input: {
       terminationReason = 'empty-result';
     } else {
       let batch = await input.adapter.readCurrentCandidateBatch(prepared.page, { deadline });
-      if (batch.candidates.length === 0 && !batch.endReached) {
-        throw new Error(`${input.platform} returned an empty Mapping candidate batch without an explicit terminal state`);
+      assertCandidateBatchTerminalContract(batch, input.platform);
+      if (batch.candidates.length === 0) {
+        throw new Error(
+          `${input.platform} reported ${reportedResultTotal} Mapping results but returned an empty initial candidate batch `
+          + `(${batch.terminalEvidence}); refusing to treat it as a completed scan`,
+        );
       }
 
       while (true) {
@@ -246,12 +300,6 @@ async function scanSlicePlatform(input: {
           savedAt: input.now().toISOString(),
         });
 
-        if (batch.endReached) {
-          terminationReason = batch.candidates.length === 0 && uniqueCandidateIds.size === 0
-            ? 'empty-result'
-            : 'end-reached';
-          break;
-        }
         if (uniqueCandidateIds.size >= input.plan.coverage.maxCandidatesPerSlice) {
           terminationReason = 'candidate-limit';
           break;
@@ -264,15 +312,25 @@ async function scanSlicePlatform(input: {
           terminationReason = 'deadline';
           break;
         }
+        if (batch.endReached) {
+          terminationReason = batch.terminalEvidence === 'explicit-empty-result' && uniqueCandidateIds.size === 0
+            ? 'empty-result'
+            : 'end-reached';
+          break;
+        }
 
         const advanced = await input.adapter.advanceToNextCandidateBatch(prepared.page, {
           expectedCurrentBatchIdentity: batch.batchIdentity,
           deadline,
         });
         if (advanced.status === 'end-reached') {
+          if (advanced.terminalEvidence !== 'explicit-pagination-end') {
+            throw new Error(`${input.platform} advanced to an unverified Mapping candidate batch terminal state`);
+          }
           terminationReason = 'end-reached';
           break;
         }
+        assertCandidateBatchTerminalContract(advanced.batch, input.platform);
         batch = advanced.batch;
       }
     }
@@ -422,22 +480,24 @@ async function enrichSlicePlatform(input: {
       for (const batchCandidate of batch.candidates) {
         const selected = pending.get(batchCandidate.candidateId);
         if (!selected) continue;
-        const candidate = {
-          ...batchCandidate,
-          name: selected.candidate.name ?? batchCandidate.name,
-          currentCompany: selected.candidate.currentCompany ?? batchCandidate.currentCompany,
-          currentTitle: selected.candidate.currentTitle ?? batchCandidate.currentTitle,
-        };
+        const candidate = batchCandidate;
         const detailDeadline = Date.now()
           + config.playwright.resumeDetailTimeoutMs
           + config.playwright.actionDelayMaxMsByPlatform[input.platform] * 2;
         try {
+          assertSelectedCandidateCardIdentity(selected, candidate, input.platform);
           const detail = await input.adapter.readCandidateProfileDetail(
             session.context,
             prepared.page,
             candidate,
             { deadline: detailDeadline },
           );
+          if (detail.resume.candidateId !== candidate.candidateId) {
+            throw new Error(
+              `${input.platform} candidate profile identity mismatch after detail open: `
+              + `expected ${candidate.candidateId}, got ${detail.resume.candidateId}`,
+            );
+          }
           const profileObservation: MappingProfileObservation = {
             profileObservationId: buildMappingProfileObservationId({
               runId: input.runId,
@@ -618,11 +678,19 @@ export async function runTalentMappingWorkflow(
   await store.saveProject(input.plan, input.planFilePath);
   const runId = store.createRunId();
   const startedAt = dependencies.now().toISOString();
+  const runContract = buildMappingRunContract({
+    plan: input.plan,
+    runId,
+    platformSelection: input.platformSelection,
+    capturedAt: startedAt,
+  });
+  await store.saveRunContract(runContract);
   const platforms = selectedPlatforms(input.platformSelection);
   const sessions = new Map<TalentMappingCorePlatform, BrowserSession>();
   const sliceRuns: MappingSliceRun[] = [];
   let sourceObservations: MappingCandidateObservation[] = [];
   let sourceRun: MappingRunRecord | undefined;
+  let executionPlan = input.plan;
   let fatalError: Error | undefined;
 
   const getSession = async (platform: TalentMappingCorePlatform): Promise<BrowserSession> => {
@@ -658,28 +726,46 @@ export async function runTalentMappingWorkflow(
 
     if (input.stage === 'enrich') {
       sourceRun = await resolveSourceRun(store, input.plan, input.sourceScanRunId);
-      assertSourceRunCoversSelection({ sourceRun, slices: input.plan.slices, platforms });
+      const sourceContract = await store.readRunContract(input.plan.mappingKey, sourceRun.runId);
+      if (!sourceContract
+        || sourceRun.contractStatus !== 'verified'
+        || !sourceRun.scanContractHash
+        || sourceRun.scanContractHash !== sourceContract.scanContractHash) {
+        throw new Error(
+          `Talent Mapping scan run ${sourceRun.runId} is legacy-unverifiable and cannot be used for strict detail enrichment; run a new scan first`,
+        );
+      }
+      if (sourceContract.scanContractHash !== runContract.scanContractHash) {
+        throw new Error(
+          `Talent Mapping scan run ${sourceRun.runId} uses a different scan contract; run a new scan before enrichment`,
+        );
+      }
+      executionPlan = {
+        ...sourceContract.plan,
+        enrichment: input.plan.enrichment,
+      };
+      assertSourceRunCoversSelection({ sourceRun, slices: executionPlan.slices, platforms });
       sourceObservations = (await store.readCandidateObservations(input.plan.mappingKey))
         .filter((observation) => observation.runId === sourceRun!.runId);
     }
 
-    if ((input.stage === 'enrich' || input.stage === 'all') && input.plan.enrichment.mode !== 'card-only') {
+    if ((input.stage === 'enrich' || input.stage === 'all') && executionPlan.enrichment.mode !== 'card-only') {
       const sourceSliceRuns = sourceRun?.sliceRuns ?? sliceRuns;
       const selections = buildTalentMappingDetailSelections({
-        plan: input.plan,
+        plan: executionPlan,
         observations: sourceObservations,
         sourceSliceRuns,
-        slices: input.plan.slices,
+        slices: executionPlan.slices,
         platforms,
       });
-      for (const slice of input.plan.slices) {
+      for (const slice of executionPlan.slices) {
         for (const platform of platforms) {
           if (!isMappingPlatformPlanEnabled(slice.platformPlans[platform])) continue;
           const key = `${slice.sliceId}\u001f${platform}`;
           const selected = selections.get(key) ?? [];
           const baseRun = sourceSliceRuns.find((run) => run.sliceId === slice.sliceId && run.platform === platform);
           const result = await enrichSlicePlatform({
-            plan: input.plan,
+            plan: executionPlan,
             runId,
             slice,
             platform,
@@ -712,7 +798,7 @@ export async function runTalentMappingWorkflow(
     sourceObservations = (await store.readCandidateObservations(input.plan.mappingKey))
       .filter((observation) => observation.runId === sourceRunId);
   }
-  const detailStage = (input.stage === 'enrich' || input.stage === 'all') && input.plan.enrichment.mode !== 'card-only';
+  const detailStage = (input.stage === 'enrich' || input.stage === 'all') && executionPlan.enrichment.mode !== 'card-only';
   const run: MappingRunRecord = {
     runId,
     mappingKey: input.plan.mappingKey,
@@ -720,6 +806,11 @@ export async function runTalentMappingWorkflow(
     stage: input.stage,
     platformSelection: input.platformSelection,
     sourceScanRunId: sourceRun?.runId,
+    planHash: runContract.planHash,
+    scanContractHash: runContract.scanContractHash,
+    scopeFingerprint: runContract.scopeFingerprint,
+    contractStatus: 'verified',
+    planSnapshotPath: `runs/contracts/${runId}.json`,
     status: runStatus(sliceRuns, fatalError),
     detailOpenConfirmed: detailStage && input.confirmedDetailOpen,
     detailOpenSideEffect: detailStage ? 'may-mark-viewed' : 'none',
@@ -728,7 +819,7 @@ export async function runTalentMappingWorkflow(
     sliceRuns,
     error: fatalError?.message,
   };
-  const summary = await finalizeRun({ plan: input.plan, store, run, sourceObservations });
+  const summary = await finalizeRun({ plan: executionPlan, store, run, sourceObservations });
   if (fatalError) {
     throw new TalentMappingWorkflowError(
       `Talent Mapping run ${runId} failed: ${fatalError.message}`,

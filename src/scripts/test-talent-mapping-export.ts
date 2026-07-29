@@ -41,15 +41,15 @@ const views: MappingDerivedViews = {
     platformCandidateKey: '51job:candidate-1',
     candidateId: 'candidate-1',
     name: '候选人,甲',
-    currentCompany: '示例公司',
-    currentTitle: '运营经理',
+    currentCompany: '=formula',
+    currentTitle: '+formula',
     companyKey: 'sample',
     roleKey: 'operations',
     level: '经理',
     location: '上海',
     firstObservedAt: generatedAt,
     lastObservedAt: generatedAt,
-    sourceSliceIds: ['slice-1'],
+    sourceSliceIds: ['@slice-1'],
     observationCount: 1,
     detailStatus: 'not-enriched',
   }],
@@ -89,9 +89,10 @@ const views: MappingDerivedViews = {
     coverageStatus: 'capped',
   }],
   changes: {
-    status: 'insufficient-runs',
+    status: 'insufficient',
     mappingKey: plan.mappingKey,
     compareRunId: run.runId,
+    comparisonReasons: ['至少需要两次成功的 scan/all 运行。'],
     generatedAt,
     newProfiles: [],
     notObservedProfiles: [],
@@ -117,6 +118,9 @@ describe('Talent Mapping exports', () => {
       assert.match(candidates, /platform,candidate_id/);
       assert.match(candidates, /51job/);
       assert.match(candidates, /"候选人,甲"/);
+      assert.match(candidates, /'=formula/);
+      assert.match(candidates, /'\+formula/);
+      assert.match(candidates, /'@slice-1/);
       assert.match(matrix, /platform_profiles/);
       assert.match(coverage, /batch-limit/);
       assert.match(changes, /change_type/);

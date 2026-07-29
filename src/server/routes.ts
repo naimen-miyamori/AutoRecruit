@@ -28,7 +28,7 @@ import {
 import { JobReadModel } from './job-read-model.js';
 import { BossReadModel } from './boss-read-model.js';
 import { TalentMappingReadModel } from './talent-mapping-read-model.js';
-import { TalentMappingQualityService } from '../talent-mapping/quality-service.js';
+import { TalentMappingConflictError, TalentMappingQualityService } from '../talent-mapping/quality-service.js';
 import { ArtifactReadModel } from './artifact-read-model.js';
 import { TaskScheduler } from './task-scheduler.js';
 import { TaskQueue } from './task-queue.js';
@@ -576,6 +576,14 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
       ));
     }
 
+    if (method === 'POST' && segments[0] === 'api' && segments[1] === 'talent-mappings' && segments[2] && segments[3] === 'classification-suggestions' && segments[4] && segments[5] === 'revoke' && segments.length === 6) {
+      return jsonResponse(200, await talentMappingQualityService.revokeClassificationSuggestion(
+        segments[2],
+        segments[4],
+        request.body,
+      ));
+    }
+
     if (method === 'GET' && pathname === '/api/boss/positions') {
       return jsonResponse(200, {
         positions: await bossReadModel.listPositions(),
@@ -701,6 +709,15 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
 
     return notFound(`No route for ${method} ${pathname}`);
   } catch (error) {
+    if (error instanceof TalentMappingConflictError) {
+      return jsonResponse(409, {
+        error: {
+          code: 'conflict',
+          message: error.message,
+          latest: error.latest,
+        },
+      });
+    }
     return badRequest(error instanceof Error ? error.message : String(error));
   }
 }

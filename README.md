@@ -255,11 +255,11 @@ npm run dev -- \
   --mapping-confirm-detail-open true
 ```
 
-也可以用 `--mapping-stage all --mapping-confirm-detail-open true` 在一轮中串行扫描并补全。`card-only` 输出只标识为“市场扫描 / Mapping 初筛”；`full-detail` 只有结果集不超过显式硬上限时才执行，超限会在打开任何详情前拒绝。Direct 条件必须全部应用成功才读取候选卡片，受批次、候选或 deadline 上限停止的运行会明确标记 `completed-with-gaps`。
+也可以用 `--mapping-stage all --mapping-confirm-detail-open true` 在一轮中串行扫描并补全。每次 scan/all 会保存不可变的已校验计划快照、`planHash`、`scanContractHash` 和范围指纹；`enrich` 只能使用合同相同的扫描，搜索切片、taxonomy、归一化或覆盖范围改变后必须重新扫描。缺少合同的历史运行可浏览，但不能作为严格详情补全来源。`card-only` 输出只标识为“市场扫描 / Mapping 初筛”；`full-detail` 只有结果集不超过显式硬上限时才执行，超限会在打开任何详情前拒绝。Direct 条件必须全部应用成功才读取候选卡片，只有页面/API 的明确空结果或分页终点才能完成扫描；受批次、候选或 deadline 上限停止的运行会明确标记 `completed-with-gaps`。
 
 本地事实和导出位于 `data/talent-mapping/<mappingKey>/`。主要交付物是平台隔离的人才清单、公司岗位矩阵、切片/详情覆盖和历次变化，以及 `candidates.csv`、`company-role-matrix.csv`、`coverage.csv`、`changes.csv`、`changes.md` 和 `summary.md`。唯一人数默认按 `platform:candidateId` 统计；系统只生成非权威的跨平台可能关联线索，人工填写审核人和证据并确认后才显示“人工关联后实体数”，撤销也保留审计记录。关联不会合并原始平台档案或改变详情执行目标。
 
-控制台“人才地图”还提供历次运行对比和分类审核。变化报告默认比较最近两次成功的 `scan`/`all`，显示新增、明确字段变化、本轮未再次观察和未变化档案；“未再次观察”绝不解释为离职、跳槽或不再求职。模型分类任务通过共享 `TaskQueue` 执行，使用 `TALENT_MAPPING_MODEL`（未设置时回退 `OPENAI_MODEL`）；输入只含截断的当前公司、当前职位和由确定性规则确认的标准化地域，不含姓名、平台候选 ID、卡片全文、简历或联系方式。模型输出只能引用计划 taxonomy，且只有人工接受后才能填补仍为空的分类字段。
+控制台“人才地图”还提供历次运行对比和分类审核。变化报告默认比较最近两次成功的 `scan`/`all`；只有扫描合同、平台/切片/覆盖范围一致且两次完整结束时才为 `ready` 并显示“本轮未再次观察”。`partial`、`incomparable` 和 `insufficient` 仍会说明可观察差异及原因，但不会把缺失观察列为人员变化；“未再次观察”绝不解释为离职、跳槽或不再求职。模型分类任务通过共享 `TaskQueue` 执行，使用 `TALENT_MAPPING_MODEL`（未设置时回退 `OPENAI_MODEL`）；输入只含截断的当前公司、当前职位和由确定性规则确认的标准化地域，不含姓名、平台候选 ID、卡片全文、简历或联系方式。模型输出只能引用计划 taxonomy，且只有人工接受后才能填补仍为空的分类字段；接受记录可按审核人和原因撤销或以新的建议替代，冲突提交返回 `409`。所有 CSV 单元格都会中和公式前缀，详情原文快照按内容哈希不可变保存。
 
 ### 搜索订阅与 JD 问答
 
@@ -457,7 +457,7 @@ Boss 持久化读模型通过以下 GET 接口提供职位、同步记录、自�
 
 这些读取不会打开浏览器或消耗 Boss 配额。下载报告、快照和回执使用 `GET /api/artifacts/:artifactId`；`artifactId` 必须来自服务端返回的白名单引用，接口不接受任意本地路径或目录遍历输入。
 
-Talent Mapping 浏览器任务使用 `POST /api/tasks/talent-mapping`，分类建议使用 `POST /api/tasks/talent-mapping-classification` 或项目下的 `/classification-suggestions/generate`。项目、运行、人才、公司矩阵、覆盖和变化由 `/api/talent-mappings` 及其 `/:mappingKey`、`/runs`、`/candidates`、`/companies`、`/coverage`、`/changes` 子资源提供；`/entity-links` 和 `/classification-suggestions` 分别承载人工实体关联及分类建议审核。GET 接口只读取本地事实和派生视图，不打开浏览器。
+Talent Mapping 浏览器任务使用 `POST /api/tasks/talent-mapping`，分类建议使用 `POST /api/tasks/talent-mapping-classification` 或项目下的 `/classification-suggestions/generate`。项目、运行、人才、公司矩阵、覆盖和变化由 `/api/talent-mappings` 及其 `/:mappingKey`、`/runs`、`/candidates`、`/companies`、`/coverage`、`/changes` 子资源提供；`/entity-links` 和 `/classification-suggestions` 分别承载人工实体关联及分类建议审核，已接受建议可通过 `/classification-suggestions/:suggestionId/revoke` 以原因撤销。冲突的人工写入返回 `409`，GET 接口只读取本地事实和派生视图，不打开浏览器。
 
 自动运行只接受 `mappingStage: "scan"` 且计划 `enrichment.mode` 为 `card-only` 的 Talent Mapping 任务；`enrich`、`all`、`targeted-detail` 和 `full-detail` 会在创建/更新计划时被服务端拒绝，调度不能静默获得详情打开权限。
 
@@ -494,7 +494,7 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 | `data/<platform>/jobs/<jobKey>/results/` | 轻量运行摘要 |
 | `data/<platform>/jobs/<jobKey>/exports/` | Markdown 等导出结果 |
 | `data/<platform>/jobs/<jobKey>/rag/` | RAG 本地事实和索引源数据 |
-| `data/talent-mapping/<mappingKey>/` | Mapping 计划快照、平台观察、详情证据、人工关联/分类审核、变化视图和 CSV/Markdown 导出 |
+| `data/talent-mapping/<mappingKey>/` | 当前 Mapping 配置、每运行不可变合同、平台观察、内容哈希详情证据/冲突记录、人工关联/分类审核、变化视图和 CSV/Markdown 导出 |
 | `data/boss/chat-operations/runs/` | Boss 原子会话变更回执 |
 
 只有成功抓取的简历会标记为已查看；详情打开、转发或提取失败仍可重试。评分失败会保存失败产物，但不会撤销已经成功抓取的状态。

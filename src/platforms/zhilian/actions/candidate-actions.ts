@@ -114,6 +114,17 @@ async function hasZhilianSearchResultBoundary(page: Page): Promise<boolean> {
   return false;
 }
 
+async function hasExplicitZhilianEmptyResult(page: Page): Promise<boolean> {
+  const marker = page.getByText(/没有符合条件的人才|暂无符合条件的人才|暂无搜索结果/, { exact: false });
+  const count = await marker.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    if (await marker.nth(index).isVisible().catch(() => false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function scrollZhilianVirtualCandidateBatch(
   page: Page,
   candidates: readonly CandidateListItem[],
@@ -158,14 +169,17 @@ export async function readZhilianCurrentCandidateBatch(
   const { candidates } = await extractZhilianCandidateList(page, options);
   const batchNumber = await readZhilianBatchNumber(page);
   const nextControl = candidates.length > 0 ? await findZhilianNextBatchControl(page) : undefined;
-  const explicitEnd = candidates.length === 0
-    || await hasZhilianSearchResultBoundary(page)
-    || Boolean(nextControl && await isDisabled(nextControl));
+  const terminalEvidence = await hasExplicitZhilianEmptyResult(page)
+    ? 'explicit-empty-result' as const
+    : await hasZhilianSearchResultBoundary(page) || Boolean(nextControl && await isDisabled(nextControl))
+      ? 'explicit-pagination-end' as const
+      : 'not-terminal' as const;
   return {
     candidates,
     batchIdentity: buildCandidateBatchIdentity('zhilian', candidates, batchNumber),
     batchNumber,
-    endReached: explicitEnd,
+    endReached: terminalEvidence !== 'not-terminal',
+    terminalEvidence,
   };
 }
 
@@ -179,13 +193,13 @@ export async function advanceZhilianToNextCandidateBatch(
     throw new Error(`Zhilian candidate batch changed before advance: expected ${input.expectedCurrentBatchIdentity}, got ${current.batchIdentity}`);
   }
   if (current.endReached) {
-    return { status: 'end-reached' };
+    return { status: 'end-reached', terminalEvidence: 'explicit-pagination-end' };
   }
 
   const nextControl = await findZhilianNextBatchControl(page);
   if (nextControl) {
     if (await isDisabled(nextControl)) {
-      return { status: 'end-reached' };
+      return { status: 'end-reached', terminalEvidence: 'explicit-pagination-end' };
     }
     await waitPlatformActionPace(page, 'zhilian');
     await clickPlatformLocator(nextControl, page, 'zhilian', remainingMs(input.deadline), { pace: false });
@@ -199,7 +213,7 @@ export async function advanceZhilianToNextCandidateBatch(
       return { status: 'advanced', batch: next };
     }
     if (next.endReached) {
-      return { status: 'end-reached' };
+      return { status: 'end-reached', terminalEvidence: 'explicit-pagination-end' };
     }
     await page.waitForTimeout(Math.min(150, remainingMs(input.deadline))).catch(() => undefined);
   }

@@ -397,6 +397,17 @@ describe('Talent Mapping server contracts', () => {
       });
       assert.equal(reviewed.statusCode, 200);
       assert.equal((reviewed.body as { decision: string }).decision, 'accepted');
+      const conflictingReview = await handleApiRequest({
+        method: 'POST', pathname: `/api/talent-mappings/${plan.mappingKey}/classification-suggestions/suggestion-1/review`,
+        dataDir, taskQueue: queue, body: { decision: 'rejected', reviewedBy: '另一位审核员' },
+      });
+      assert.equal(conflictingReview.statusCode, 409);
+      const revoked = await handleApiRequest({
+        method: 'POST', pathname: `/api/talent-mappings/${plan.mappingKey}/classification-suggestions/suggestion-1/revoke`,
+        dataDir, taskQueue: queue, body: { reviewedBy: '分类审核员', reason: '人工复核后撤销' },
+      });
+      assert.equal(revoked.statusCode, 200);
+      assert.equal((revoked.body as { decision: string }).decision, 'revoked');
 
       const generated = await handleApiRequest({
         method: 'POST', pathname: `/api/talent-mappings/${plan.mappingKey}/classification-suggestions/generate`,

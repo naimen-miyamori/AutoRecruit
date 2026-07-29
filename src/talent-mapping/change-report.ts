@@ -7,6 +7,7 @@ import type {
   MappingRunChangeReport,
   MappingRunRecord,
 } from '../types/talent-mapping.js';
+import { stableMappingHash } from './run-contract.js';
 
 const comparableFields: MappingComparableField[] = [
   'name',
@@ -110,6 +111,42 @@ function resolveComparisonRuns(input: {
   return { base, compare };
 }
 
+function isCompleteScanRun(run: MappingRunRecord): boolean {
+  return run.status === 'completed'
+    && run.sliceRuns.every((sliceRun) => sliceRun.status === 'completed'
+      && (sliceRun.terminationReason === 'end-reached' || sliceRun.terminationReason === 'empty-result'));
+}
+
+function comparisonReadiness(base: MappingRunRecord, compare: MappingRunRecord): {
+  status: 'ready' | 'partial' | 'incomparable';
+  reasons: string[];
+} {
+  const reasons: string[] = [];
+  if (base.contractStatus !== 'verified' || compare.contractStatus !== 'verified'
+    || !base.scanContractHash || !compare.scanContractHash
+    || !base.scopeFingerprint || !compare.scopeFingerprint) {
+    return {
+      status: 'incomparable',
+      reasons: ['至少一次历史运行缺少可验证的不可变扫描合同（legacy-unverifiable）。'],
+    };
+  }
+  if (base.scanContractHash !== compare.scanContractHash) {
+    return {
+      status: 'incomparable',
+      reasons: ['两次运行的搜索、taxonomy、归一化或覆盖合同哈希不同。'],
+    };
+  }
+  if (stableMappingHash(base.scopeFingerprint) !== stableMappingHash(compare.scopeFingerprint)) {
+    return {
+      status: 'incomparable',
+      reasons: ['两次运行的平台、切片或覆盖范围不同。'],
+    };
+  }
+  if (!isCompleteScanRun(base)) reasons.push(`基准运行 ${base.runId} 未完整到达扫描终点。`);
+  if (!isCompleteScanRun(compare)) reasons.push(`对比运行 ${compare.runId} 未完整到达扫描终点。`);
+  return { status: reasons.length > 0 ? 'partial' : 'ready', reasons };
+}
+
 export function buildMappingRunChangeReport(input: {
   mappingKey: string;
   runs: readonly MappingRunRecord[];
@@ -123,10 +160,13 @@ export function buildMappingRunChangeReport(input: {
   const { base, compare } = resolveComparisonRuns(input);
   if (!base || !compare) {
     return {
-      status: 'insufficient-runs',
+      status: 'insufficient',
       mappingKey: input.mappingKey,
       baseRunId: base?.runId,
       compareRunId: compare?.runId,
+      baseScanContractHash: base?.scanContractHash,
+      compareScanContractHash: compare?.scanContractHash,
+      comparisonReasons: ['至少需要两次成功的 scan/all 运行。'],
       generatedAt,
       newProfiles: [],
       notObservedProfiles: [],
@@ -136,14 +176,18 @@ export function buildMappingRunChangeReport(input: {
     };
   }
 
+  const readiness = comparisonReadiness(base, compare);
+
   const before = latestObservationsForRun(input.observations, base.runId);
   const after = latestObservationsForRun(input.observations, compare.runId);
   const newProfiles = [...after.entries()]
     .filter(([key]) => !before.has(key))
     .map(([, observation]) => snapshot(observation));
-  const notObservedProfiles = [...before.entries()]
-    .filter(([key]) => !after.has(key))
-    .map(([, observation]) => snapshot(observation));
+  const notObservedProfiles = readiness.status === 'ready'
+    ? [...before.entries()]
+      .filter(([key]) => !after.has(key))
+      .map(([, observation]) => snapshot(observation))
+    : [];
   const changedProfiles: MappingRunCandidateChange[] = [];
   let unchangedProfiles = 0;
 
@@ -177,10 +221,13 @@ export function buildMappingRunChangeReport(input: {
   const byKey = (left: { platformCandidateKey: string }, right: { platformCandidateKey: string }) =>
     left.platformCandidateKey.localeCompare(right.platformCandidateKey);
   return {
-    status: 'ready',
+    status: readiness.status,
     mappingKey: input.mappingKey,
     baseRunId: base.runId,
     compareRunId: compare.runId,
+    baseScanContractHash: base.scanContractHash,
+    compareScanContractHash: compare.scanContractHash,
+    comparisonReasons: readiness.reasons,
     generatedAt,
     newProfiles: newProfiles.sort(byKey),
     notObservedProfiles: notObservedProfiles.sort(byKey),

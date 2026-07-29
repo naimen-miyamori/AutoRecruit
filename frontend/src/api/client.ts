@@ -172,6 +172,7 @@ export const api = {
   listTalentMappingClassificationSuggestions: (mappingKey: string, signal?: AbortSignal) => requestJson<{ suggestions: MappingClassificationSuggestionView[] }>(`/talent-mappings/${encodeURIComponent(mappingKey)}/classification-suggestions`, { signal }),
   generateTalentMappingClassificationSuggestions: (mappingKey: string, limit = 25) => postJson<TaskDetail>(`/talent-mappings/${encodeURIComponent(mappingKey)}/classification-suggestions/generate`, { limit }),
   reviewTalentMappingClassificationSuggestion: (mappingKey: string, suggestionId: string, body: Record<string, unknown>) => postJson<MappingClassificationSuggestionView['review']>(`/talent-mappings/${encodeURIComponent(mappingKey)}/classification-suggestions/${encodeURIComponent(suggestionId)}/review`, body),
+  revokeTalentMappingClassificationSuggestion: (mappingKey: string, suggestionId: string, body: Record<string, unknown>) => postJson<MappingClassificationSuggestionView['review']>(`/talent-mappings/${encodeURIComponent(mappingKey)}/classification-suggestions/${encodeURIComponent(suggestionId)}/revoke`, body),
   submitTalentMapping: (body: Record<string, unknown>) => postJson<TaskDetail>('/tasks/talent-mapping', body),
 
   listBossPositions: (signal?: AbortSignal) => requestJson<{ positions: BossPositionView[] }>('/boss/positions', { signal }),

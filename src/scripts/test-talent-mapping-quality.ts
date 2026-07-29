@@ -10,6 +10,7 @@ import { countConfirmedMappingEntities } from '../talent-mapping/entity-links.js
 import { createMappingCandidateObservation } from '../talent-mapping/normalization.js';
 import { loadTalentMappingPlanFile } from '../talent-mapping/plan.js';
 import { TalentMappingQualityService } from '../talent-mapping/quality-service.js';
+import { buildMappingRunContract } from '../talent-mapping/run-contract.js';
 import { TalentMappingStore } from '../talent-mapping/store.js';
 import { runTalentMappingClassificationTask } from '../server/talent-mapping-classification-runner.js';
 import type {
@@ -22,12 +23,23 @@ import type {
 const fixturePath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.example.json', import.meta.url));
 
 function runRecord(plan: TalentMappingPlan, runId: string, startedAt: string): MappingRunRecord {
+  const contract = buildMappingRunContract({
+    plan,
+    runId,
+    platformSelection: 'all',
+    capturedAt: startedAt,
+  });
   return {
     runId,
     mappingKey: plan.mappingKey,
     mappingName: plan.name,
     stage: 'scan',
     platformSelection: 'all',
+    planHash: contract.planHash,
+    scanContractHash: contract.scanContractHash,
+    scopeFingerprint: contract.scopeFingerprint,
+    contractStatus: 'verified',
+    planSnapshotPath: `runs/contracts/${runId}.json`,
     status: 'completed',
     detailOpenConfirmed: false,
     detailOpenSideEffect: 'none',
@@ -92,6 +104,37 @@ describe('Talent Mapping M4 quality loops', () => {
     assert.match(report.caveat, /不能解释为离职/);
   });
 
+  it('disables not-observed conclusions for partial or incomparable runs', async () => {
+    const plan = await loadTalentMappingPlanFile(fixturePath, { platformSelection: 'all' });
+    const firstAt = '2026-07-28T01:00:00.000Z';
+    const secondAt = '2026-07-29T01:00:00.000Z';
+    const observations = [
+      observation({ plan, runId: 'run-1', platform: '51job', candidateId: 'missing', observedAt: firstAt, name: '候选人甲' }),
+      observation({ plan, runId: 'run-2', platform: '51job', candidateId: 'new', observedAt: secondAt, name: '候选人乙' }),
+    ];
+    const partialBase = { ...runRecord(plan, 'run-1', firstAt), status: 'completed-with-gaps' as const };
+    const compare = runRecord(plan, 'run-2', secondAt);
+    const partial = buildMappingRunChangeReport({
+      mappingKey: plan.mappingKey,
+      runs: [partialBase, compare],
+      observations,
+      generatedAt: secondAt,
+    });
+    assert.equal(partial.status, 'partial');
+    assert.equal(partial.notObservedProfiles.length, 0);
+    assert.equal(partial.newProfiles[0]?.platformCandidateKey, '51job:new');
+
+    const incompatible = buildMappingRunChangeReport({
+      mappingKey: plan.mappingKey,
+      runs: [runRecord(plan, 'run-1', firstAt), { ...compare, scanContractHash: 'different-contract' }],
+      observations,
+      generatedAt: secondAt,
+    });
+    assert.equal(incompatible.status, 'incomparable');
+    assert.equal(incompatible.notObservedProfiles.length, 0);
+    assert.match(incompatible.comparisonReasons.join('\n'), /合同哈希不同/);
+  });
+
   it('keeps cross-platform link suggestions non-authoritative until explicit confirmation and preserves revocation audit', async () => {
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-mapping-links-'));
     const plan = await loadTalentMappingPlanFile(fixturePath, { platformSelection: 'all' });
@@ -119,11 +162,19 @@ describe('Talent Mapping M4 quality loops', () => {
       assert.equal(before.suggestions.length, 1);
       assert.equal(before.activeLinks.length, 0);
       assert.equal(before.confirmedEntityCount, 2);
-      const link = await service.confirmEntityLink(plan.mappingKey, {
-        platformCandidateKeys: before.suggestions[0]!.platformCandidateKeys,
-        confirmedBy: '审核员甲',
-        evidence: '人工核对公司、岗位及履历后确认',
-      });
+      const [link, retriedLink] = await Promise.all([
+        service.confirmEntityLink(plan.mappingKey, {
+          platformCandidateKeys: before.suggestions[0]!.platformCandidateKeys,
+          confirmedBy: '审核员甲',
+          evidence: '人工核对公司、岗位及履历后确认',
+        }),
+        service.confirmEntityLink(plan.mappingKey, {
+          platformCandidateKeys: before.suggestions[0]!.platformCandidateKeys,
+          confirmedBy: '审核员甲',
+          evidence: '人工核对公司、岗位及履历后确认',
+        }),
+      ]);
+      assert.equal(link.entityId, retriedLink.entityId);
       const confirmed = await service.getEntityLinkReview(plan.mappingKey);
       assert.equal(confirmed.activeLinks.length, 1);
       assert.equal(confirmed.confirmedEntityCount, 1);
@@ -202,16 +253,57 @@ describe('Talent Mapping M4 quality loops', () => {
         }),
         /evidence value does not match its source observation/,
       );
-      await service.reviewClassificationSuggestion(plan.mappingKey, suggestions[0]!.suggestionId, {
-        decision: 'accepted',
-        reviewedBy: '分类审核员',
-        note: '页面字段支持该归类',
-      });
+      const acceptedReviews = await Promise.all([
+        service.reviewClassificationSuggestion(plan.mappingKey, suggestions[0]!.suggestionId, {
+          decision: 'accepted',
+          reviewedBy: '分类审核员',
+          note: '页面字段支持该归类',
+        }),
+        service.reviewClassificationSuggestion(plan.mappingKey, suggestions[0]!.suggestionId, {
+          decision: 'accepted',
+          reviewedBy: '分类审核员',
+          note: '页面字段支持该归类',
+        }),
+      ]);
+      assert.equal(acceptedReviews[0]!.reviewId, acceptedReviews[1]!.reviewId);
       const afterReview = await store.readCandidateView(plan.mappingKey);
       assert.equal(afterReview[0]?.companyKey, 'sample-retail-a');
       assert.equal(afterReview[0]?.roleKey, 'regional-operations');
       assert.equal(afterReview[0]?.manualClassification?.reviewedBy, '分类审核员');
       assert.equal((await service.listClassificationSuggestions(plan.mappingKey))[0]?.review?.decision, 'accepted');
+
+      const replacementSuggestion = {
+        ...suggestions[0]!,
+        suggestionId: 'replacement-classification-suggestion',
+        proposed: { ...suggestions[0]!.proposed, level: '高级经理' },
+        createdAt: '2026-07-28T06:30:00.000Z',
+      };
+      await store.appendClassificationSuggestion(replacementSuggestion);
+      await assert.rejects(
+        () => service.reviewClassificationSuggestion(plan.mappingKey, replacementSuggestion.suggestionId, {
+          decision: 'accepted',
+          reviewedBy: '分类审核员乙',
+        }),
+        /already have an accepted review/,
+      );
+      const replacementReview = await service.reviewClassificationSuggestion(plan.mappingKey, replacementSuggestion.suggestionId, {
+        decision: 'accepted',
+        reviewedBy: '分类审核员乙',
+        note: '更正职级判断',
+        supersedeReviewId: acceptedReviews[0]!.reviewId,
+      });
+      assert.equal((await store.readCandidateView(plan.mappingKey))[0]?.level, '高级经理');
+      assert.equal(replacementReview.supersedesReviewId, acceptedReviews[0]!.reviewId);
+
+      const revokedReview = await service.revokeClassificationSuggestion(plan.mappingKey, replacementSuggestion.suggestionId, {
+        reviewedBy: '分类审核员丙',
+        reason: '后续页面证据不足，撤销人工分类',
+      });
+      assert.equal(revokedReview.decision, 'revoked');
+      assert.equal(revokedReview.supersedesReviewId, acceptedReviews[0]!.reviewId);
+      assert.equal((await store.readCandidateView(plan.mappingKey))[0]?.companyKey, undefined);
+      assert.equal((await service.listClassificationSuggestions(plan.mappingKey))
+        .find((suggestion) => suggestion.suggestionId === replacementSuggestion.suggestionId)?.review?.decision, 'revoked');
     } finally {
       await fs.rm(dataDir, { recursive: true, force: true });
     }

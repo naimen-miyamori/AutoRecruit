@@ -136,6 +136,7 @@ describe('51job semantic actions', () => {
       assert.deepStrictEqual(first.candidates.map((item) => item.candidateId), ['12345']);
       assert.equal(first.batchNumber, 1);
       assert.equal(first.endReached, false);
+      assert.equal(first.terminalEvidence, 'not-terminal');
 
       await assert.rejects(
         () => advance51jobToNextCandidateBatch(page, {
@@ -153,13 +154,14 @@ describe('51job semantic actions', () => {
         assert.deepStrictEqual(advanced.batch.candidates.map((item) => item.candidateId), ['67890']);
         assert.equal(advanced.batch.batchNumber, 2);
         assert.equal(advanced.batch.endReached, true);
+        assert.equal(advanced.batch.terminalEvidence, 'explicit-pagination-end');
         assert.notEqual(advanced.batch.batchIdentity, first.batchIdentity);
         assert.deepStrictEqual(
           await advance51jobToNextCandidateBatch(page, {
             expectedCurrentBatchIdentity: advanced.batch.batchIdentity,
             deadline,
           }),
-          { status: 'end-reached' },
+          { status: 'end-reached', terminalEvidence: 'explicit-pagination-end' },
         );
       }
     } finally {

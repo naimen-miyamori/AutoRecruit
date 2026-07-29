@@ -22,7 +22,10 @@ function csvCell(value: unknown): string {
   if (value === undefined || value === null) {
     return '';
   }
-  const text = typeof value === 'number' ? String(value) : String(value);
+  const rawText = typeof value === 'number' ? String(value) : String(value);
+  // Spreadsheet applications treat these prefixes as formulas even in ordinary
+  // candidate fields. Keep exported values textual without changing local facts.
+  const text = /^[=+\-@]/.test(rawText) ? `'${rawText}` : rawText;
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
@@ -69,7 +72,10 @@ function buildSummaryMarkdown(input: {
       `- 明确字段变化档案：${views.changes.changedProfiles.length}`,
       `- 本轮未再次观察档案：${views.changes.notObservedProfiles.length}`,
     ]
-    : ['- 变化对比：至少需要两次成功 scan/all 运行'];
+    : [
+      `- 变化对比状态：${views.changes.status}`,
+      `- 变化对比说明：${views.changes.comparisonReasons.join('；') || '至少需要两次成功 scan/all 运行'}`,
+    ];
 
   return [
     `# ${title}`,
@@ -256,6 +262,9 @@ export async function exportTalentMapping(input: {
     `- 状态：${input.views.changes.status}`,
     `- 基准运行：${input.views.changes.baseRunId ?? '-'}`,
     `- 对比运行：${input.views.changes.compareRunId ?? '-'}`,
+    `- 基准合同：${input.views.changes.baseScanContractHash ?? '-'}`,
+    `- 对比合同：${input.views.changes.compareScanContractHash ?? '-'}`,
+    `- 口径说明：${input.views.changes.comparisonReasons.join('；') || '-'}`,
     `- 新观察档案：${input.views.changes.newProfiles.length}`,
     `- 明确字段变化档案：${input.views.changes.changedProfiles.length}`,
     `- 本轮未再次观察档案：${input.views.changes.notObservedProfiles.length}`,

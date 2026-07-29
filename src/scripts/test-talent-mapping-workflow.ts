@@ -11,6 +11,7 @@ import {
   runTalentMappingWorkflow,
   TalentMappingWorkflowError,
 } from '../talent-mapping/workflow.js';
+import { buildMappingRunContract } from '../talent-mapping/run-contract.js';
 import type { CandidateListItem } from '../types/job.js';
 import type {
   CandidateResultBatch,
@@ -23,6 +24,7 @@ import type {
 interface MockPageState {
   keyword?: string;
   batchIndex: number;
+  preparationCount?: number;
 }
 
 function makePage(platform: TalentMappingCorePlatform): Page {
@@ -54,12 +56,20 @@ function candidate(candidateId: string, overrides: Partial<CandidateListItem> = 
   };
 }
 
-function batch(platform: TalentMappingCorePlatform, keyword: string, batchIndex: number, candidates: CandidateListItem[], endReached: boolean): CandidateResultBatch {
+function batch(
+  platform: TalentMappingCorePlatform,
+  keyword: string,
+  batchIndex: number,
+  candidates: CandidateListItem[],
+  endReached: boolean,
+  terminalEvidence: CandidateResultBatch['terminalEvidence'] = endReached ? 'explicit-pagination-end' : 'not-terminal',
+): CandidateResultBatch {
   return {
     candidates,
     batchIdentity: `${platform}:${keyword}:${batchIndex}`,
     batchNumber: batchIndex + 1,
     endReached,
+    terminalEvidence,
   };
 }
 
@@ -110,12 +120,17 @@ function makeAdapter(input: {
   calls: string[];
   state: WeakMap<Page, MockPageState>;
   batchesByKeyword: Record<string, CandidateResultBatch[]>;
+  detailBatchesByKeyword?: Record<string, CandidateResultBatch[]>;
+  resultTotalByKeyword?: Record<string, number>;
   failPrepareForKeyword?: string;
   failDetailCandidateIds?: Set<string>;
 }): PlatformAdapter {
   const readBatch = async (page: Page): Promise<CandidateResultBatch> => {
     const state = input.state.get(page)!;
-    const values = input.batchesByKeyword[state.keyword ?? ''] ?? [];
+    const keyword = state.keyword ?? '';
+    const values = state.preparationCount && state.preparationCount > 1
+      ? input.detailBatchesByKeyword?.[keyword] ?? input.batchesByKeyword[keyword] ?? []
+      : input.batchesByKeyword[keyword] ?? [];
     return values[state.batchIndex] ?? batch(input.platform, state.keyword ?? 'unknown', state.batchIndex, [], true);
   };
   return {
@@ -129,7 +144,8 @@ function makeAdapter(input: {
     assertAuthenticated: async () => undefined,
     openSubscribeSearch: async (page, keyword) => {
       input.calls.push(`prepare:${keyword}`);
-      input.state.set(page, { keyword, batchIndex: 0 });
+      const preparationCount = (input.state.get(page)?.preparationCount ?? 0) + 1;
+      input.state.set(page, { keyword, batchIndex: 0, preparationCount });
       return page;
     },
     prepareSearchConditionPage: async (page, keyword) => {
@@ -137,12 +153,13 @@ function makeAdapter(input: {
       if (input.failPrepareForKeyword === keyword) {
         throw new Error(`prepare failed:${keyword}`);
       }
-      input.state.set(page, { keyword, batchIndex: 0 });
+      const preparationCount = (input.state.get(page)?.preparationCount ?? 0) + 1;
+      input.state.set(page, { keyword, batchIndex: 0, preparationCount });
       return page;
     },
     readSearchConditionResultTotal: async (page) => {
       const state = input.state.get(page)!;
-      const resultTotal = (input.batchesByKeyword[state.keyword ?? ''] ?? [])
+      const resultTotal = input.resultTotalByKeyword?.[state.keyword ?? ''] ?? (input.batchesByKeyword[state.keyword ?? ''] ?? [])
         .flatMap((value) => value.candidates)
         .length;
       input.calls.push(`total:${state.keyword}`);
@@ -321,6 +338,70 @@ describe('Talent Mapping workflow', () => {
     });
   });
 
+  it('rejects an empty initial batch when the platform reported positive results', async () => {
+    const plan = makePlan();
+    await withWorkflowEnvironment(plan, async ({ store, calls, state, pages, adapters }) => {
+      const page = makePage('51job');
+      pages.set('51job', page);
+      state.set(page, { batchIndex: 0 });
+      const keyword = 'slice-1-51job';
+      adapters.set('51job', makeAdapter({
+        platform: '51job',
+        calls,
+        state,
+        batchesByKeyword: {
+          [keyword]: [batch('51job', keyword, 0, [], true, 'explicit-empty-result')],
+        },
+        resultTotalByKeyword: { [keyword]: 3 },
+      }));
+
+      await assert.rejects(
+        () => runTalentMappingWorkflow({
+          plan,
+          planFilePath: '/tmp/mapping.json',
+          platformSelection: '51job',
+          stage: 'scan',
+          confirmedDetailOpen: false,
+          store,
+          dependencies: dependencies({ adapters, pages, calls }),
+        }),
+        (error: unknown) => error instanceof TalentMappingWorkflowError
+          && /reported 3 Mapping results but returned an empty initial candidate batch/.test(error.message),
+      );
+    });
+  });
+
+  it('never marks a scan complete when its candidate cap is reached on a terminal batch', async () => {
+    const plan = makePlan({ coverage: { maxCandidatesPerSlice: 1 } });
+    await withWorkflowEnvironment(plan, async ({ store, calls, state, pages, adapters }) => {
+      const page = makePage('51job');
+      pages.set('51job', page);
+      state.set(page, { batchIndex: 0 });
+      const keyword = 'slice-1-51job';
+      adapters.set('51job', makeAdapter({
+        platform: '51job',
+        calls,
+        state,
+        batchesByKeyword: {
+          [keyword]: [batch('51job', keyword, 0, [candidate('candidate-1')], true)],
+        },
+      }));
+
+      const summary = await runTalentMappingWorkflow({
+        plan,
+        planFilePath: '/tmp/mapping.json',
+        platformSelection: '51job',
+        stage: 'scan',
+        confirmedDetailOpen: false,
+        store,
+        dependencies: dependencies({ adapters, pages, calls }),
+      });
+      assert.equal(summary.status, 'completed-with-gaps');
+      assert.equal(summary.cappedSlices, 1);
+      assert.equal((await store.readRun(plan.mappingKey, summary.runId))?.sliceRuns[0].terminationReason, 'candidate-limit');
+    });
+  });
+
   it('fails fast by slice/platform and retains a failed run plus completed checkpoints', async () => {
     const platforms = ['51job', 'liepin', 'zhilian'] as const;
     const plan = makePlan({ slices: makeSlices(['slice-1', 'slice-2'], [...platforms]) });
@@ -421,6 +502,49 @@ describe('Talent Mapping workflow', () => {
       assert.deepStrictEqual(await fs.readdir(dataDir), ['talent-mapping']);
       const mappingFiles = await fs.readdir(path.join(dataDir, 'talent-mapping'), { recursive: true });
       assert.equal(mappingFiles.some((entry) => /(^|\/)jd\.json$|seen-ids\.json$|answer-logs\.jsonl$|(^|\/)scores\//.test(entry)), false);
+    });
+  });
+
+  it('records a detail gap when the current card conflicts with the selected identity evidence', async () => {
+    const plan = makePlan({
+      enrichment: {
+        mode: 'targeted-detail',
+        maxProfilesPerSlice: 5,
+        maxProfilesTotal: 5,
+        selection: { targetCompanyTiers: ['A'], samplePerMatrixCell: 1 },
+      },
+    });
+    await withWorkflowEnvironment(plan, async ({ store, calls, state, pages, adapters }) => {
+      const page = makePage('51job');
+      pages.set('51job', page);
+      state.set(page, { batchIndex: 0 });
+      const keyword = 'slice-1-51job';
+      adapters.set('51job', makeAdapter({
+        platform: '51job',
+        calls,
+        state,
+        batchesByKeyword: {
+          [keyword]: [batch('51job', keyword, 0, [candidate('candidate-1')], true)],
+        },
+        detailBatchesByKeyword: {
+          [keyword]: [batch('51job', keyword, 0, [candidate('candidate-1', { currentTitle: '门店经理' })], true)],
+        },
+      }));
+
+      const summary = await runTalentMappingWorkflow({
+        plan,
+        planFilePath: '/tmp/mapping.json',
+        platformSelection: '51job',
+        stage: 'all',
+        confirmedDetailOpen: true,
+        store,
+        dependencies: dependencies({ adapters, pages, calls }),
+      });
+      assert.equal(summary.status, 'completed-with-gaps');
+      assert.equal(summary.failedProfiles, 1);
+      assert.equal(summary.enrichedProfiles, 0);
+      assert.equal(calls.some((call) => call.startsWith('detail:')), false);
+      assert.equal((await store.readProfileObservations(plan.mappingKey)).length, 0);
     });
   });
 
@@ -546,12 +670,24 @@ describe('Talent Mapping workflow', () => {
     });
     await withWorkflowEnvironment(plan, async ({ store, calls, pages, adapters }) => {
       const observedAt = '2026-07-28T04:00:00.000Z';
+      const sourceContract = buildMappingRunContract({
+        plan,
+        runId: 'single-platform-scan',
+        platformSelection: '51job',
+        capturedAt: observedAt,
+      });
+      await store.saveRunContract(sourceContract);
       await store.saveRun({
         runId: 'single-platform-scan',
         mappingKey: plan.mappingKey,
         mappingName: plan.name,
         stage: 'scan',
         platformSelection: '51job',
+        planHash: sourceContract.planHash,
+        scanContractHash: sourceContract.scanContractHash,
+        scopeFingerprint: sourceContract.scopeFingerprint,
+        contractStatus: 'verified',
+        planSnapshotPath: 'runs/contracts/single-platform-scan.json',
         status: 'completed',
         detailOpenConfirmed: false,
         detailOpenSideEffect: 'none',
@@ -590,6 +726,106 @@ describe('Talent Mapping workflow', () => {
         (error: unknown) => error instanceof TalentMappingWorkflowError && /does not cover selected slice\/platform slice-1\/liepin/.test(error.message),
       );
       assert.deepStrictEqual(calls, []);
+    });
+  });
+
+  it('rejects strict enrichment from a legacy scan without an immutable contract', async () => {
+    const plan = makePlan({
+      enrichment: {
+        mode: 'targeted-detail',
+        maxProfilesPerSlice: 5,
+        maxProfilesTotal: 5,
+        selection: { samplePerMatrixCell: 1 },
+      },
+    });
+    await withWorkflowEnvironment(plan, async ({ store, calls, pages, adapters }) => {
+      const observedAt = '2026-07-28T04:00:00.000Z';
+      await store.saveRun({
+        runId: 'legacy-scan',
+        mappingKey: plan.mappingKey,
+        mappingName: plan.name,
+        stage: 'scan',
+        platformSelection: '51job',
+        status: 'completed',
+        detailOpenConfirmed: false,
+        detailOpenSideEffect: 'none',
+        startedAt: observedAt,
+        finishedAt: observedAt,
+        sliceRuns: [],
+      });
+      await assert.rejects(
+        () => runTalentMappingWorkflow({
+          plan,
+          planFilePath: '/tmp/mapping.json',
+          platformSelection: '51job',
+          stage: 'enrich',
+          confirmedDetailOpen: true,
+          sourceScanRunId: 'legacy-scan',
+          store,
+          dependencies: dependencies({ adapters, pages, calls }),
+        }),
+        (error: unknown) => error instanceof TalentMappingWorkflowError
+          && /legacy-unverifiable/.test(error.message),
+      );
+    });
+  });
+
+  it('refuses to enrich a scan after its search or taxonomy contract has changed', async () => {
+    const plan = makePlan({
+      enrichment: {
+        mode: 'targeted-detail',
+        maxProfilesPerSlice: 5,
+        maxProfilesTotal: 5,
+        selection: { targetCompanyTiers: ['A'], samplePerMatrixCell: 1 },
+      },
+    });
+    await withWorkflowEnvironment(plan, async ({ store, calls, state, pages, adapters }) => {
+      const page = makePage('51job');
+      pages.set('51job', page);
+      state.set(page, { batchIndex: 0 });
+      const keyword = 'slice-1-51job';
+      adapters.set('51job', makeAdapter({
+        platform: '51job',
+        calls,
+        state,
+        batchesByKeyword: {
+          [keyword]: [batch('51job', keyword, 0, [candidate('candidate-1')], true)],
+        },
+      }));
+      const scan = await runTalentMappingWorkflow({
+        plan,
+        planFilePath: '/tmp/mapping.json',
+        platformSelection: '51job',
+        stage: 'scan',
+        confirmedDetailOpen: false,
+        store,
+        dependencies: dependencies({ adapters, pages, calls }),
+      });
+      const driftedPlan: TalentMappingPlan = {
+        ...plan,
+        taxonomy: {
+          ...plan.taxonomy,
+          targetCompanies: plan.taxonomy.targetCompanies.map((company) => ({
+            ...company,
+            aliases: [...company.aliases, '已变化的公司别名'],
+          })),
+        },
+      };
+      await assert.rejects(
+        () => runTalentMappingWorkflow({
+          plan: driftedPlan,
+          planFilePath: '/tmp/mapping.json',
+          platformSelection: '51job',
+          stage: 'enrich',
+          confirmedDetailOpen: true,
+          sourceScanRunId: scan.runId,
+          store,
+          dependencies: dependencies({ adapters, pages, calls }),
+        }),
+        (error: unknown) => error instanceof TalentMappingWorkflowError
+          && /different scan contract/.test(error.message),
+      );
+      assert.equal(calls.some((call) => call.startsWith('detail:')), false);
     });
   });
 });
