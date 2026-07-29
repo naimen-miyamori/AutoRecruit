@@ -21,6 +21,7 @@ interface FormState {
   searchSubscriptionName: string;
   saveSearchSubscription: boolean;
   includeViewed: boolean;
+  includeBoss: boolean;
   searchSource: '' | 'saved' | 'direct';
   applicationFilterInputFile: string;
   email: string;
@@ -38,7 +39,7 @@ interface FormState {
 
 const initialForm: FormState = {
   platform: '51job', keyword: '', jd: '', jdFile: '', jobsFile: '', talentMappingFile: '', searchSubscriptionFile: '', searchSubscriptionName: '', saveSearchSubscription: false,
-  includeViewed: false, searchSource: '', applicationFilterInputFile: '', email: '', cc: '', liepinForwardContact: '', bossForwardMode: '', bossForwardRecipient: '',
+  includeViewed: false, includeBoss: false, searchSource: '', applicationFilterInputFile: '', email: '', cc: '', liepinForwardContact: '', bossForwardMode: '', bossForwardRecipient: '',
   scoreThreshold: '70', requireAllHardRequirements: true, replyToUnqualifiedCandidates: false, summaryEmail: '', summaryCc: '', syncJobsBeforeReview: false,
 };
 
@@ -63,12 +64,14 @@ export function NewTaskPage() {
     if (mode === 'resume-capture') {
       if (!form.keyword.trim()) return setValidationError('关键词必填');
       if (form.jd && form.jdFile) return setValidationError('JD 文本和 JD 文件不能同时填写');
+      if ((form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && Boolean(form.bossForwardMode) !== Boolean(form.bossForwardRecipient.trim())) return setValidationError('Boss 转发方式和收件人必须同时填写');
       body = commonBody(form);
       body.keyword = form.keyword.trim();
       body.jd = form.jd.trim() || undefined;
       body.jdFile = form.jdFile.trim() || undefined;
     } else if (mode === 'batch') {
       if (!form.jobsFile.trim()) return setValidationError('批量任务文件必填');
+      if ((form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && Boolean(form.bossForwardMode) !== Boolean(form.bossForwardRecipient.trim())) return setValidationError('Boss 转发方式和收件人必须同时填写');
       body = { ...commonBody(form), jobsFile: form.jobsFile.trim() };
     } else if (mode === 'talent-mapping') {
       if (!form.talentMappingFile.trim()) return setValidationError('Talent Mapping 计划文件必填');
@@ -94,7 +97,7 @@ export function NewTaskPage() {
       <Section>
         <div className="segmented">{([['resume-capture', '简历抓取'], ['batch', '批量任务'], ['talent-mapping', '人才地图扫描'], ['search-subscription', '搜索订阅'], ['boss-auto-chat', 'Boss 自动沟通'], ['login-refresh', '登录刷新']] as const).map(([value, label]) => <button type="button" className={mode === value ? 'active' : ''} key={value} onClick={() => setModeSafe(value)}>{label}</button>)}</div>
       </Section>
-      <Section title="任务参数" description={mode === 'boss-auto-chat' ? 'Boss 是单平台独立模式。' : mode === 'talent-mapping' ? '此入口只执行卡片扫描；详情补全需在人才地图项目页核对精确人数并逐轮确认。' : '全部平台只包含 51job、猎聘和智联，不包含 Boss。'}>
+      <Section title="任务参数" description={mode === 'boss-auto-chat' ? 'Boss 是单平台独立模式。' : mode === 'talent-mapping' ? '此入口只执行卡片扫描；详情补全需在人才地图项目页核对精确人数并逐轮确认。' : '全部主平台默认运行 51job、猎聘和智联；普通抓取与批量可显式追加直猎邦。'}>
         <div className="form-grid">
           <label><span>平台</span><select value={form.platform} onChange={(event) => set('platform', event.target.value as PlatformSelection)} disabled={mode === 'boss-auto-chat'}>{(mode === 'boss-auto-chat' ? ['boss'] : mode === 'login-refresh' ? ['51job', 'liepin', 'zhilian', 'boss'] : mode === 'talent-mapping' ? ['51job', 'liepin', 'zhilian', 'all'] : ['51job', 'liepin', 'zhilian', 'boss', 'all']).map((item) => <option value={item} key={item}>{PLATFORM_LABELS[item as keyof typeof PLATFORM_LABELS]}</option>)}</select></label>
           {(mode === 'resume-capture' || mode === 'search-subscription') && <label><span>关键词</span><input value={form.keyword} onChange={(event) => set('keyword', event.target.value)} placeholder="例如：Java 后端" /></label>}
@@ -102,11 +105,12 @@ export function NewTaskPage() {
           {mode === 'talent-mapping' && <><label className="wide"><span>Talent Mapping 计划文件</span><input value={form.talentMappingFile} onChange={(event) => set('talentMappingFile', event.target.value)} placeholder="./mapping/retail-operations.json" /></label><div className="security-note wide">计划文件必须显式设置批次、候选和详情上限。扫描不会写岗位、seen、评分、邮件或 RAG；完成扫描后从“人才地图”项目页发起详情补全。</div></>}
           {mode === 'search-subscription' && <><label><span>订阅文件</span><input value={form.searchSubscriptionFile} onChange={(event) => set('searchSubscriptionFile', event.target.value)} placeholder="./search-subscription.json" /></label><label><span>订阅名称</span><input value={form.searchSubscriptionName} onChange={(event) => set('searchSubscriptionName', event.target.value)} /></label><label className="checkbox-field"><input type="checkbox" checked={form.saveSearchSubscription} onChange={(event) => set('saveSearchSubscription', event.target.checked)} />保存平台订阅</label></>}
           {mode === 'resume-capture' && <><label className="wide"><span>JD 文本</span><textarea value={form.jd} onChange={(event) => set('jd', event.target.value)} rows={6} /></label><label><span>JD 文件</span><input value={form.jdFile} onChange={(event) => set('jdFile', event.target.value)} placeholder="./jd.txt" /></label></>}
-          {(mode === 'resume-capture' || mode === 'batch') && <><label><span>搜索来源</span><select value={form.searchSource} onChange={(event) => set('searchSource', event.target.value as FormState['searchSource'])}><option value="">复用岗位设置</option><option value="saved">已保存搜索</option><option value="direct">直接搜索</option></select></label><label className="checkbox-field"><input type="checkbox" checked={form.includeViewed} onChange={(event) => set('includeViewed', event.target.checked)} />包含已查看候选人</label></>}
+          {(mode === 'resume-capture' || mode === 'batch') && <><label><span>搜索来源</span><select value={form.searchSource} onChange={(event) => set('searchSource', event.target.value as FormState['searchSource'])}><option value="">复用岗位设置</option><option value="saved">已保存搜索</option><option value="direct">直接搜索</option></select></label><label className="checkbox-field"><input type="checkbox" checked={form.includeViewed} onChange={(event) => set('includeViewed', event.target.checked)} />包含已查看候选人</label>{form.platform === 'all' && <label className="checkbox-field"><input type="checkbox" checked={form.includeBoss} onChange={(event) => set('includeBoss', event.target.checked)} />包含 Boss 直聘·直猎邦 Pro</label>}</>}
           {showFilter && <label><span>筛选条件文件</span><input value={form.applicationFilterInputFile} onChange={(event) => set('applicationFilterInputFile', event.target.value)} placeholder="由下方构建器生成或填写路径" /></label>}
           {(mode === 'resume-capture' || mode === 'batch') && <><label><span>报告邮箱</span><input type="email" value={form.email} onChange={(event) => set('email', event.target.value)} /></label><label><span>抄送</span><input value={form.cc} onChange={(event) => set('cc', event.target.value)} placeholder="逗号分隔" /></label></>}
           {(form.platform === 'liepin' || form.platform === 'all') && (mode === 'resume-capture' || mode === 'batch') && <label><span>猎聘转发联系人</span><input value={form.liepinForwardContact} onChange={(event) => set('liepinForwardContact', event.target.value)} /></label>}
-          {form.platform === 'boss' && (mode === 'resume-capture' || mode === 'batch' || mode === 'boss-auto-chat') && <><label><span>Boss 转发方式</span><select value={form.bossForwardMode} onChange={(event) => set('bossForwardMode', event.target.value as FormState['bossForwardMode'])}><option value="">不转发</option><option value="colleague">站内同事</option><option value="email">邮件</option></select></label><label><span>Boss 转发收件人</span><input value={form.bossForwardRecipient} onChange={(event) => set('bossForwardRecipient', event.target.value)} /></label></>}
+          {(form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && (mode === 'resume-capture' || mode === 'batch' || mode === 'boss-auto-chat') && <><label><span>Boss 转发方式</span><select value={form.bossForwardMode} onChange={(event) => set('bossForwardMode', event.target.value as FormState['bossForwardMode'])}><option value="">不转发</option><option value="colleague">站内同事</option><option value="email">邮件</option></select></label><label><span>Boss 转发收件人</span><input value={form.bossForwardRecipient} onChange={(event) => set('bossForwardRecipient', event.target.value)} /></label></>}
+          {form.platform === 'all' && form.includeBoss && (mode === 'resume-capture' || mode === 'batch') && <div className="security-note wide">直猎邦会作为第 4 个阶段运行并打开候选人详情；如该岗位已保存 Boss 转发配置，省略本次参数时可能复用该配置。深度搜索、打招呼、聊天和职位同步不会执行。</div>}
           {mode === 'boss-auto-chat' && <><label className="checkbox-field"><input type="checkbox" checked={form.requireAllHardRequirements} onChange={(event) => set('requireAllHardRequirements', event.target.checked)} />所有硬性要求必须满足</label>{!form.requireAllHardRequirements && <label><span>评分线</span><input type="number" min="0" max="100" value={form.scoreThreshold} onChange={(event) => set('scoreThreshold', event.target.value)} /></label>}<label className="checkbox-field"><input type="checkbox" checked={form.replyToUnqualifiedCandidates} onChange={(event) => set('replyToUnqualifiedCandidates', event.target.checked)} />回复不合适候选人</label><label className="checkbox-field"><input type="checkbox" checked={form.syncJobsBeforeReview} onChange={(event) => set('syncJobsBeforeReview', event.target.checked)} />审查前同步职位/JD</label><label><span>总结邮件</span><input type="email" value={form.summaryEmail} onChange={(event) => set('summaryEmail', event.target.value)} /></label><label><span>总结抄送</span><input value={form.summaryCc} onChange={(event) => set('summaryCc', event.target.value)} /></label></>}
         </div>
         <div className="form-actions"><button className="primary-button" type="button" disabled={mutation.isPending} onClick={submit}><Play size={16} />{mutation.isPending ? '提交中' : mode === 'talent-mapping' ? '提交扫描任务' : '提交任务'}</button></div>
@@ -126,13 +130,14 @@ function splitList(value: string): string[] | undefined {
 function commonBody(form: FormState): Record<string, unknown> {
   return {
     platform: form.platform,
+    includeBoss: form.platform === 'all' ? form.includeBoss : undefined,
     includeViewed: form.includeViewed,
     searchSource: form.searchSource || undefined,
     applicationFilterInputFile: form.searchSource === 'direct' ? form.applicationFilterInputFile.trim() || undefined : undefined,
     email: form.email.trim() || undefined,
     cc: splitList(form.cc),
     liepinForwardContact: form.platform === 'liepin' || form.platform === 'all' ? form.liepinForwardContact.trim() || undefined : undefined,
-    bossForwardMode: form.platform === 'boss' ? form.bossForwardMode || undefined : undefined,
-    bossForwardRecipient: form.platform === 'boss' ? form.bossForwardRecipient.trim() || undefined : undefined,
+    bossForwardMode: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossForwardMode || undefined : undefined,
+    bossForwardRecipient: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossForwardRecipient.trim() || undefined : undefined,
   };
 }

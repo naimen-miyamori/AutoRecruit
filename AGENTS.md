@@ -115,18 +115,27 @@ Detailed action contracts and platform ownership live in src/platforms/AGENTS.md
 
 ## Public Platform Contract
 
-platform all is public CLI behavior. It runs sequentially in this exact order:
+Plain `platform all` is public CLI behavior. It runs sequentially in this exact order:
 
 1. 51job
 2. Liepin
 3. Zhilian
 
-If one platform fails, stop immediately and propagate the error. Boss runs only through platform
-boss; do not add it to listSupportedPlatforms(), platform all, or the inner loop of an all-platform
-jobs-file run unless the public contract is explicitly redesigned.
+If one platform fails, stop immediately and propagate the error. Normal capture and batch may opt
+into Boss/直猎邦 as a fourth stage only with `--platform all --include-boss true`; its order is:
 
-For an all-platform jobs-file run, jobs-file order is the outer loop and the platform order above is
-the inner loop.
+1. 51job
+2. Liepin
+3. Zhilian
+4. Boss
+
+`listSupportedPlatforms()` remains the core three-platform list for modes whose `all` contract has
+not expanded. Use the capture-specific platform selection only in normal capture and batch; do not
+implicitly add Boss to search subscription, JD/RAG questions, filter discovery, Talent Mapping, or
+Boss independent modes.
+
+For an all-platform jobs-file run, jobs-file order is the outer loop and the selected platform order
+above is the inner loop. Existing schedules and tasks without `includeBoss` remain core-only.
 
 ## CLI and Mode Isolation
 
@@ -164,6 +173,9 @@ the inner loop.
   filter paths resolve from the jobs-file directory.
 - search-source saved|direct is only for normal capture. New jobs default to saved; omitted rerun
   values reuse persisted settings.
+- include-boss is valid only for normal capture or batch with platform all. It defaults false; when
+  true, Boss uses the ordinary capture chain and may reuse the Boss job's saved forwarding setting.
+  It never authorizes Boss talent matching, greetings, chat operations, or position sync.
 - application-filter-input-file requires explicit direct search in normal capture. Build conditions
   from the saved application-filter catalog, persist normalized conditions and original input, and
   fail the run if any requested condition is skipped or fails.
@@ -237,7 +249,7 @@ Run verification in proportion to the change. The critical mappings are:
 | CLI modes, persistence, seen/scoring semantics | src/scripts/test-scoring-run-semantics.ts |
 | Platform registry, default pacing, reuse defaults | src/scripts/test-platform-registry.ts |
 | Semantic page-action ownership and facade boundaries | src/scripts/test-platform-action-boundaries.ts and matching direct action tests |
-| Boss chat, talent, operations, and position sync | matching src/scripts/test-boss-*.ts tests |
+| Boss normal capture/search, chat, talent, operations, and position sync | src/scripts/test-boss-search-actions.ts and matching src/scripts/test-boss-*.ts tests |
 | Liepin/Zhilian adapter and filter behavior | src/scripts/test-liepin-adapter.ts and src/scripts/test-zhilian-adapter.ts |
 | Search subscription | src/scripts/test-search-subscription.ts |
 | Talent Mapping workflow, quality, and server behavior | src/scripts/test-talent-mapping-*.ts |

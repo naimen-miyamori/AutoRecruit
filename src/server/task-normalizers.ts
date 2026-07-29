@@ -196,6 +196,7 @@ function normalizeBossForwardMode(value: unknown): BossForwardMode | undefined {
 function normalizeBossForwarding(
   item: JsonObject,
   platform: ConsolePlatformSelection,
+  includeBoss = false,
 ): { bossForwardMode?: BossForwardMode; bossForwardRecipient?: string } {
   const bossForwardMode = normalizeBossForwardMode(getOptionalString(item, 'bossForwardMode'));
   const bossForwardRecipient = getOptionalString(item, 'bossForwardRecipient');
@@ -203,11 +204,19 @@ function normalizeBossForwarding(
     throw new Error('bossForwardMode and bossForwardRecipient must be provided together');
   }
 
-  if (bossForwardMode && platform !== 'boss') {
-    throw new Error('Boss forwarding can only be used with platform boss');
+  if (bossForwardMode && platform !== 'boss' && !(platform === 'all' && includeBoss)) {
+    throw new Error('Boss forwarding can only be used with platform boss or platform all with includeBoss=true');
   }
 
   return { bossForwardMode, bossForwardRecipient };
+}
+
+function normalizeCaptureIncludeBoss(item: JsonObject, platform: ConsolePlatformSelection): boolean | undefined {
+  const includeBoss = getOptionalBoolean(item, 'includeBoss');
+  if (includeBoss !== undefined && platform !== 'all') {
+    throw new Error('includeBoss can only be used with platform all');
+  }
+  return includeBoss;
 }
 
 function normalizeCc(value: unknown): string[] | undefined {
@@ -274,6 +283,7 @@ function summarizeText(value: string | undefined, maxLength = 120): string | und
 export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<ResumeCaptureTaskInput> {
   const item = normalizeJsonObject(payload, 'request body');
   const platform = normalizePlatformSelection(item.platform);
+  const includeBoss = normalizeCaptureIncludeBoss(item, platform);
   const keyword = getRequiredString(item, 'keyword');
   const jd = getOptionalString(item, 'jd');
   const jdFile = getOptionalString(item, 'jdFile');
@@ -283,7 +293,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
   const email = getOptionalString(item, 'email');
   const cc = normalizeCc(item.cc);
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
-  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform);
+  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform, includeBoss === true);
 
   if (jd && jdFile) {
     throw new Error('jd and jdFile are mutually exclusive');
@@ -299,6 +309,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
 
   const input: ResumeCaptureTaskInput = {
     platform,
+    includeBoss,
     keyword,
     jd,
     jdFile,
@@ -312,6 +323,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
     bossForwardRecipient,
   };
   const argv = ['--platform', platform, '--keyword', keyword];
+  pushOptionalBoolean(argv, '--include-boss', includeBoss);
   pushOptional(argv, '--jd', jd);
   pushOptional(argv, '--jd-file', jdFile);
   pushOptionalBoolean(argv, '--include-viewed', includeViewed);
@@ -328,6 +340,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
     argv,
     inputSummary: {
       platform,
+      includeBoss: includeBoss ?? false,
       keyword,
       hasJd: Boolean(jd),
       jdPreview: summarizeText(jd),
@@ -349,6 +362,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   assertAbsent(item, ['keyword', 'jd', 'jdFile'], 'batch task');
 
   const platform = normalizePlatformSelection(item.platform);
+  const includeBoss = normalizeCaptureIncludeBoss(item, platform);
   const jobsFile = getRequiredString(item, 'jobsFile');
   const includeViewed = getOptionalBoolean(item, 'includeViewed');
   const searchSource = normalizeSearchSource(item.searchSource);
@@ -356,7 +370,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   const email = getOptionalString(item, 'email');
   const cc = normalizeCc(item.cc);
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
-  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform);
+  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform, includeBoss === true);
 
   if (applicationFilterInputFile && searchSource !== 'direct') {
     throw new Error('applicationFilterInputFile requires searchSource direct');
@@ -368,6 +382,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
 
   const input: BatchTaskInput = {
     platform,
+    includeBoss,
     jobsFile,
     includeViewed,
     searchSource,
@@ -379,6 +394,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
     bossForwardRecipient,
   };
   const argv = ['--platform', platform, '--jobs-file', jobsFile];
+  pushOptionalBoolean(argv, '--include-boss', includeBoss);
   pushOptionalBoolean(argv, '--include-viewed', includeViewed);
   pushOptional(argv, '--search-source', searchSource);
   pushOptional(argv, '--application-filter-input-file', applicationFilterInputFile);
@@ -393,6 +409,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
     argv,
     inputSummary: {
       platform,
+      includeBoss: includeBoss ?? false,
       jobsFile,
       includeViewed: includeViewed ?? false,
       searchSource: searchSource ?? 'stored-or-saved',
@@ -494,7 +511,7 @@ export function normalizeTalentMappingClassificationTask(
 
 export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTask<SearchSubscriptionTaskInput> {
   const item = normalizeJsonObject(payload, 'request body');
-  assertAbsent(item, ['jd', 'jdFile', 'email', 'cc', 'includeViewed', 'liepinForwardContact', 'bossForwardMode', 'bossForwardRecipient', 'searchSource'], 'search-subscription task');
+  assertAbsent(item, ['jd', 'jdFile', 'email', 'cc', 'includeViewed', 'includeBoss', 'liepinForwardContact', 'bossForwardMode', 'bossForwardRecipient', 'searchSource'], 'search-subscription task');
 
   const platform = normalizePlatformSelection(item.platform);
   const searchSubscriptionFile = getRequiredString(item, 'searchSubscriptionFile');
@@ -538,6 +555,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
     'jdFile',
     'jobsFile',
     'includeViewed',
+    'includeBoss',
     'searchSource',
     'applicationFilterInputFile',
     'email',

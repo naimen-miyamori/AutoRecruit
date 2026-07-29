@@ -2,7 +2,7 @@
 
 **Auto Recruit** 是一个基于 TypeScript、浏览器自动化和 OpenAI 兼容模型的本地招聘工作流工具。它把 **候选人搜索、简历抓取、JD 解析、匹配评分、人才地图、报告导出、邮件投递、RAG 问答和定时任务** 串成可复用流程，并为 Boss 提供人才发现、自动聊天、原子会话操作及职位/JD 同步能力。
 
-生产搜索平台包括 `51job`、`liepin` 和 `zhilian`；Boss 是必须显式选择的单平台扩展。职位、简历、评分、运行记录和 RAG 事实保存在本地 `data/`，Qdrant 仅作为可重建索引。
+生产普通抓取默认覆盖 `51job`、`liepin` 和 `zhilian`；Boss 直聘·直猎邦 Pro 可作为显式选择的单平台，或通过 `--platform all --include-boss true` 加入普通抓取和批量任务的第 4 阶段。职位、简历、评分、运行记录和 RAG 事实保存在本地 `data/`，Qdrant 仅作为可重建索引。
 
 ```bash
 npm install
@@ -36,9 +36,9 @@ npm run dev -- --platform 51job --keyword "店长" --jd-file ./jd.txt
 | `51job` | 是，第 1 个 | 保存的订阅或直接搜索 | 候选卡片详情、简历抓取与评分、核心 Talent Mapping |
 | `liepin` | 是，第 2 个 | 招聘端找人或直接搜索 | 可配置常用联系人转发、核心 Talent Mapping |
 | `zhilian` | 是，第 3 个 | 快捷搜索或直接搜索 | 报告邮件可使用本轮复制的分享链接、核心 Talent Mapping |
-| `boss` | 否，仅 `--platform boss` | 当前人才搜索页及 Boss 专属入口 | 抓取、人才发现、聊天审核、原子操作、职位/JD 同步 |
+| `boss` | 可选第 4 个；仅普通抓取/批量的 `all + --include-boss true` | `https://www.zhipin.com/web/chat/search` 人才库及 Boss 专属入口 | 抓取、人才发现、聊天审核、原子操作、职位/JD 同步 |
 
-`--platform all` 始终串行执行前三个平台，任一平台失败会立即停止。Boss 不会隐式加入全平台或批量平台循环。
+普通 `--platform all` 串行执行前三个平台；普通抓取或批量明确加上 `--include-boss true` 后，顺序为 `51job → liepin → zhilian → boss`。任一平台失败会立即停止。搜索订阅、JD/RAG 问答、筛选发现和 Talent Mapping 的 `all` 仍只覆盖前三个平台，已有任务和自动运行计划未设置该字段时也保持三平台行为。
 
 ---
 
@@ -103,7 +103,7 @@ storage-state.boss.json
 | 模式 | 入口 | 是否打开浏览器 | 是否可能产生外部动作 |
 | --- | --- | --- | --- |
 | 普通抓取 | `--platform <平台> --keyword ...` | 是 | 抓取；按配置转发或发送报告 |
-| 多平台/批量 | `--platform all` / `--jobs-file` | 是 | 同普通抓取 |
+| 多平台/批量 | `--platform all [--include-boss true]` / `--jobs-file` | 是 | 同普通抓取 |
 | Talent Mapping | `--talent-mapping-file` | 是 | 卡片扫描较低风险；详情补全可能改变“已查看”状态并需本轮确认 |
 | 搜索订阅 | `--search-subscription-file` | 是 | 仅显式配置时保存订阅 |
 | JD/RAG 问答 | `--jd-question` / `--rag-question` | 否 | 否 |
@@ -155,7 +155,17 @@ npm run dev -- \
   --jd-file ./jd.txt
 ```
 
-该命令只运行 `51job`、`liepin` 和 `zhilian`，不包含 Boss。
+该命令默认只运行 `51job`、`liepin` 和 `zhilian`。如要把直猎邦作为第 4 个普通抓取阶段，显式开启：
+
+```bash
+npm run dev -- \
+  --platform all \
+  --include-boss true \
+  --keyword "店长" \
+  --jd-file ./jd.txt
+```
+
+这不会触发 Boss 的推荐牛人、深度搜索、立即匹配、打招呼、聊天或职位同步等专属模式。
 
 ### 3. 启动本地控制台
 
@@ -210,13 +220,25 @@ npm run dev -- \
 
 默认跳过已查看候选人；只有普通抓取可以使用 `--include-viewed true`。
 
+### 将直猎邦加入普通抓取
+
+`--include-boss true` 只允许与普通抓取或批量任务的 `--platform all` 组合。系统会在打开第一个浏览器前，核对所有选中平台是否已有岗位 JD（或本次提供可用 JD），并在 direct 搜索时校验同一筛选输入能否被每个平台的 catalog 完整解释；任一项不满足会一次性失败，不会先运行前三个平台。
+
+Boss 阶段复用 `data/boss/`、独立登录态和本地 `seen-ids.json`。直猎邦当前没有与前三个平台等价的页面级“已查看”筛选，因此 `--include-viewed true` 只切换前三个平台的页面筛选；Boss 仍依赖本地 seen 过滤已成功抓取的候选人。若 Boss 岗位已有保存的转发设置，省略本次转发参数时可能复用该设置；显式 `--boss-forward-mode` 和 `--boss-forward-recipient` 也可在 `all + --include-boss true` 中使用，并只作用于 Boss 阶段。
+
 ### 批量职位
 
 ```bash
 npm run dev -- --platform all --jobs-file ./jobs.json
 ```
 
-`jobs.json` 是 JSON 数组，职位顺序是外层循环，平台顺序是内层循环：
+需要在每个职位末尾加入直猎邦时：
+
+```bash
+npm run dev -- --platform all --include-boss true --jobs-file ./jobs.json
+```
+
+`jobs.json` 是 JSON 数组，职位顺序是外层循环，平台顺序是内层循环。默认内层为 `51job → liepin → zhilian`；开启直猎邦后为 `51job → liepin → zhilian → boss`：
 
 ```json
 [
@@ -263,7 +285,7 @@ npm run dev -- \
 
 ### 搜索订阅与 JD 问答
 
-搜索订阅模式只应用筛选、读取结果数，并可选择保存订阅；它不会解析 JD、抓取或评分候选人，也不会改变已查看状态：
+搜索订阅模式只应用筛选、读取结果数，并可选择保存订阅；它不会解析 JD、抓取或评分候选人，也不会改变已查看状态。该模式不接受 `--include-boss`，其 `all` 仍只覆盖前三个平台：
 
 ```bash
 npm run dev -- \
@@ -287,7 +309,7 @@ npm run dev -- \
 
 ## Boss 工作流
 
-Boss 只通过 `--platform boss` 运行。网页导航、点击、输入、按键、简历转发和候选人切换都使用共享的随机操作节奏，默认约为 `2–4 秒`。
+Boss 专属模式只通过 `--platform boss` 运行；普通搜索/简历抓取另可通过 `--platform all --include-boss true` 作为第 4 阶段执行。网页导航、点击、输入、按键、简历转发和候选人切换都使用共享的随机操作节奏，默认约为 `2–4 秒`。
 
 ### 普通搜索与简历抓取
 
@@ -300,7 +322,7 @@ npm run dev -- \
   --boss-forward-recipient resume@example.com
 ```
 
-流程按候选人打开详情、按配置转发、提取并保存简历；全部新候选人抓取后再统一评分、导出和发送报告。因此普通抓取中的转发发生在评分之前，并非只转发评分合适的候选人。
+流程按候选人打开详情、按配置转发、提取并保存简历；全部新候选人抓取后再统一评分、导出和发送报告。因此普通抓取中的转发发生在评分之前，并非只转发评分合适的候选人。搜索结果必须出现候选卡片、站点明确空态或明确错误；未就绪的 iframe 不会被误记为零候选人。详情打开会按当前卡片的稳定 Boss 标识复核，不会仅按列表序号点击。
 
 ### 推荐牛人与原生深度搜索
 
@@ -468,7 +490,7 @@ Talent Mapping 浏览器任务使用 `POST /api/tasks/talent-mapping`，分类�
 - Boss 职位/JD 同步
 - Boss 自动聊天
 
-计划按每日时间窗口和轮次间隔运行，并与手工任务共享一个全局队列。Boss 立即匹配、单人打招呼和原子会话变更不能加入自动运行计划；新增 Boss 独立模式中只有职位/JD 同步可调度。
+计划按每日时间窗口和轮次间隔运行，并与手工任务共享一个全局队列。普通抓取或批量计划选择 `all` 时可显式保存“包含 Boss 直聘·直猎邦 Pro”；历史计划缺少该字段时按 `false` 解释。Boss 立即匹配、单人打招呼和原子会话变更不能加入自动运行计划；新增 Boss 独立模式中只有职位/JD 同步可调度。
 
 控制计划：
 
@@ -528,7 +550,7 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 
 ### `--platform all` 会运行 Boss 吗？
 
-不会。它只按 `51job → liepin → zhilian` 顺序串行运行。Boss 必须显式使用 `--platform boss`。
+默认不会。`--platform all` 按 `51job → liepin → zhilian` 顺序串行运行；普通抓取或批量加上 `--include-boss true` 后才在末尾运行 Boss 直聘·直猎邦 Pro。Boss 的人才发现、聊天和职位同步等专属模式仍必须显式使用 `--platform boss`。
 
 ### 为什么新职位必须提供 JD？
 

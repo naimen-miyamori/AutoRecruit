@@ -9,9 +9,11 @@ scheduled work.
 
 ## Ownership and Boundaries
 
-- Boss runs only as platform boss and never enters platform all or Talent Mapping. Its actions own
-  page controls, selectors, compatibility paths, pacing, readiness, identity checks, and business
-  postconditions; Boss adapter/workflow facades must not directly operate the page.
+- Boss is normally selected as platform boss. Ordinary capture and batch may opt into it as the
+  fourth `all` stage only with explicit `includeBoss`; Talent Mapping and every Boss independent
+  mode remain outside that loop. Its actions own page controls, selectors, compatibility paths,
+  pacing, readiness, identity checks, and business postconditions; Boss adapter/workflow facades
+  must not directly operate the page.
 - Action modules do not enter TaskQueue, write receipts or job records, call models, or decide
   confirmation. Read actions remain separate from mutation actions. Workflows own confirmation,
   persistence, intent receipts, and mode isolation.
@@ -33,8 +35,8 @@ scheduled work.
 ## Talent Discovery and Atomic Conversations
 
 - Recommendation and native deep search are standalone and read-only by default. They do not enter
-  normal capture, batch, search subscription, auto-chat, or platform all. Candidate execution uses
-  stable Boss IDs, never name or visual card order.
+  normal capture, batch, search subscription, auto-chat, or opt-in all-platform capture. Candidate
+  execution uses stable Boss IDs, never name or visual card order.
 - Deep-search requirement synchronization distinguishes core and bonus requirements, verifies the
   resulting form, and requires at least one core item, remaining quota, enabled match control, and
   explicit confirmation before matching. Reading form/cards never consumes quota, and a match

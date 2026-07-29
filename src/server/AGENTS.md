@@ -35,6 +35,10 @@ when they are affected.
 - Preserve CLI isolation and platform constraints for capture, batch, search subscription, login,
   Boss, RAG, and Mapping modes. HTTP and assistant-confirmed Boss work normalizes then queues before
   browser activity.
+- `includeBoss` belongs only to normal capture/batch with `platform=all`. It defaults false for
+  hand-created and persisted schedule inputs; normalizers may add Boss as the fourth capture stage
+  only when it is explicitly true. Preview warnings must disclose possible reuse of saved Boss
+  forwarding, but preview remains non-authoritative.
 - Assistant rag-answer is standalone: no task, browser, capture, scoring, export, or email.
   Stored-job and temporary-JD answers preserve the RAG fact, isolation, and no-answer contracts.
 - Internal HTTP endpoints are not a full auth gateway. Host binding, body limits, static paths, and

@@ -187,6 +187,48 @@ describe('TaskScheduler', () => {
     }
   });
 
+  it('keeps legacy all schedules core-only and requires explicit Boss opt-in', async () => {
+    const dataDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return output();
+      },
+    });
+    const now = new Date('2026-07-20T02:00:00.000Z');
+    const scheduler = new TaskScheduler({ taskQueue: queue, dataDir, now: () => now });
+
+    try {
+      const schedule = await scheduler.createSchedule(baseSchedule([
+        {
+          taskKey: 'legacy-all',
+          name: '历史三平台抓取',
+          kind: 'resume-capture',
+          input: { platform: 'all', keyword: '店长' },
+        },
+        {
+          taskKey: 'opt-in-boss',
+          name: '含直猎邦抓取',
+          kind: 'resume-capture',
+          input: { platform: 'all', includeBoss: true, keyword: '店长' },
+        },
+      ]));
+      await waitFor(async () => {
+        const runs = await scheduler.listRuns(schedule.scheduleId);
+        return runs.find((item) => item.status === 'succeeded');
+      }, 'core and opt-in capture schedule');
+
+      assert.deepStrictEqual(calls, [
+        ['--platform', 'all', '--keyword', '店长'],
+        ['--platform', 'all', '--keyword', '店长', '--include-boss', 'true'],
+      ]);
+    } finally {
+      scheduler.close();
+    }
+  });
+
   it('chains scheduled Boss job sync before auto-chat review', async () => {
     const dataDir = await makeTempDir();
     const calls: string[][] = [];

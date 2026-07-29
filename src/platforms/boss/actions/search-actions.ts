@@ -288,6 +288,27 @@ async function countBossCandidateCards(page: Page, deadline: number): Promise<nu
   return frame.locator('.geek-info-card').count().catch(() => 0);
 }
 
+async function waitForBossSearchResults(frame: Frame, deadline: number): Promise<void> {
+  await frame.waitForFunction(
+    () => {
+      const bodyText = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim();
+      const hasCards = document.querySelectorAll('.geek-info-card').length > 0;
+      const hasExplicitEmpty = /暂无|没有|未找到|无相关|搜索使用方法/.test(bodyText);
+      const hasLoadError = /数据加载异常/.test(bodyText);
+      const isStillLoading = /(?:加载中|正在加载|加载资料)/.test(bodyText);
+      return hasLoadError || hasCards || (hasExplicitEmpty && !isStillLoading);
+    },
+    undefined,
+    { timeout: remainingTime(deadline), polling: 250 },
+  );
+
+  const hasLoadError = await frame.evaluate(() => /数据加载异常/.test((document.body?.innerText ?? '').replace(/\s+/g, ' ').trim()))
+    .catch(() => false);
+  if (hasLoadError) {
+    throw new Error('Boss search reported a data-loading error.');
+  }
+}
+
 async function applyBossSearchKeyword(page: Page, keyword: string, deadline: number): Promise<void> {
   const normalizedKeyword = normalizeText(keyword);
   if (!normalizedKeyword) {
@@ -313,14 +334,12 @@ async function applyBossSearchKeyword(page: Page, keyword: string, deadline: num
     (expectedKeyword) => {
       const input = document.querySelector<HTMLInputElement>('input.search-input, .search-input');
       const inputValue = (input?.value ?? input?.textContent ?? '').replace(/\s+/g, ' ').trim();
-      const bodyText = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim();
-      const hasCards = document.querySelectorAll('.geek-info-card').length > 0;
-      const hasExplicitEmpty = /暂无|没有|未找到|无相关|搜索使用方法/.test(bodyText);
-      return inputValue === expectedKeyword && (hasCards || hasExplicitEmpty);
+      return inputValue === expectedKeyword;
     },
     normalizedKeyword,
     { timeout: remainingTime(deadline), polling: 250 },
   );
+  await waitForBossSearchResults(frame, deadline);
 }
 
 async function openBossSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page> {
@@ -347,7 +366,7 @@ async function openBossDirectSearch(
   const deadline = createSearchDeadline(options);
   const searchPage = await prepareBossSearchConditionPage(page, keyword, { ...options, deadline });
   for (const condition of conditions) {
-    const result = await applyBossSearchCondition(searchPage, condition);
+    const result = await applyBossSearchCondition(searchPage, condition, deadline);
     if (result.status !== 'applied') {
       const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
         ? ` ${condition.fieldId}`
@@ -1554,12 +1573,12 @@ async function applyBossAgeApplicationFilter(
 async function applyBossSupportedApplicationFilter(
   page: Page,
   condition: Extract<SearchCondition, { kind: 'applicationFilter' }>,
+  deadline: number,
 ): Promise<void> {
   if (!bossSupportedApplicationFilterFieldIds.has(condition.fieldId)) {
     throw new Error(`Unsupported Boss application filter: ${condition.fieldId}`);
   }
 
-  const deadline = createSearchDeadline();
   const frame = await waitForBossSearchFrame(page, deadline);
 
   if (condition.fieldKind === 'salaryRange' || condition.fieldId === 'expected_salary') {
@@ -1589,9 +1608,10 @@ async function applyBossSupportedApplicationFilter(
 async function applyBossApplicationFilter(
   page: Page,
   condition: Extract<SearchCondition, { kind: 'applicationFilter' }>,
+  deadline: number,
 ): Promise<SearchConditionApplyResult> {
   try {
-    await applyBossSupportedApplicationFilter(page, condition);
+    await applyBossSupportedApplicationFilter(page, condition, deadline);
     return {
       platform: 'boss',
       condition,
@@ -1611,6 +1631,7 @@ async function applyBossApplicationFilter(
 async function applyBossSearchCondition(
   page: Page,
   condition: SearchCondition,
+  deadline = createSearchDeadline(),
 ): Promise<SearchConditionApplyResult> {
   if (!isApplicationFilterCondition(condition)) {
     return {
@@ -1621,7 +1642,7 @@ async function applyBossSearchCondition(
     };
   }
 
-  return applyBossApplicationFilter(page, condition);
+  return applyBossApplicationFilter(page, condition, deadline);
 }
 
 async function readBossSearchConditionResultTotal(page: Page, options?: SearchWaitOptions): Promise<{
@@ -1630,10 +1651,7 @@ async function readBossSearchConditionResultTotal(page: Page, options?: SearchWa
 }> {
   const deadline = createSearchDeadline(options);
   const frame = await waitForBossSearchFrame(page, deadline);
-  await frame.locator('.geek-info-card').first().waitFor({
-    state: 'visible',
-    timeout: Math.min(remainingTime(deadline), 5000),
-  }).catch(() => undefined);
+  await waitForBossSearchResults(frame, deadline);
   return {
     resultTotal: await frame.locator('.geek-info-card').count().catch(() => 0),
     resultTotalSource: 'page',
@@ -1744,10 +1762,7 @@ function parseBossCandidateSnapshots(snapshots: BossCandidateCardSnapshot[]): Ca
 
 async function collectBossCandidateSnapshots(page: Page, deadline: number): Promise<BossCandidateCardSnapshot[]> {
   const frame = await waitForBossSearchFrame(page, deadline);
-  await frame.locator('.geek-info-card, a[ka="search_click_open_resume"]').first().waitFor({
-    state: 'visible',
-    timeout: remainingTime(deadline),
-  }).catch(() => undefined);
+  await waitForBossSearchResults(frame, deadline);
 
   return frame.locator('.geek-info-card').evaluateAll((cards) => cards.map((card, index) => {
     const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
@@ -1778,37 +1793,34 @@ async function extractBossCandidateList(page: Page, options?: SearchWaitOptions)
 
 async function resolveBossCandidateAnchorIndex(page: Page, candidate: CandidateListItem, deadline: number): Promise<number> {
   const frame = await waitForBossSearchFrame(page, deadline);
-  const anchors = frame.locator('a[ka="search_click_open_resume"]');
+  const anchors = frame.locator('a[ka="search_click_open_resume"], a[data-expect], a[data-jid], a[data-lid]');
   const anchorCount = await anchors.count();
   if (anchorCount === 0) {
     throw new Error(`Could not open Boss resume detail for candidate ${candidate.candidateId}: no candidate cards are visible.`);
   }
 
-  const matchedIndex = await anchors.evaluateAll((elements, target) => {
-    const candidateId = target.candidateId;
-    const searchResultIndex = typeof target.searchResultIndex === 'number' ? target.searchResultIndex : undefined;
+  if (candidate.candidateId.startsWith('boss-card-')) {
+    throw new Error(`Could not open Boss resume detail for candidate ${candidate.candidateId}: card has no stable Boss identity.`);
+  }
 
-    return elements.findIndex((element, index) => {
+  const matchedIndexes = await anchors.evaluateAll((elements, candidateId) => {
+    return elements.flatMap((element, index) => {
       const dataExpect = element.getAttribute('data-expect') ?? '';
       const dataJid = element.getAttribute('data-jid') ?? '';
       const dataLid = element.getAttribute('data-lid') ?? '';
 
-      return dataExpect === candidateId
+      return (dataExpect === candidateId
         || dataJid === candidateId
         || dataLid === candidateId
-        || (dataJid && dataLid && `${dataJid}_${dataLid}` === candidateId)
-        || searchResultIndex === index;
+        || (dataJid && dataLid && `${dataJid}_${dataLid}` === candidateId)) ? [index] : [];
     });
-  }, {
-    candidateId: candidate.candidateId,
-    searchResultIndex: candidate.searchResultIndex,
-  });
+  }, candidate.candidateId);
 
-  if (matchedIndex < 0) {
-    throw new Error(`Could not find Boss candidate card for ${candidate.candidateId}.`);
+  if (matchedIndexes.length !== 1) {
+    throw new Error(`Could not uniquely find Boss candidate card for ${candidate.candidateId}; matched ${matchedIndexes.length}.`);
   }
 
-  return matchedIndex;
+  return matchedIndexes[0]!;
 }
 
 async function openBossResumeDetail(_context: BrowserContext, searchPage: Page, candidate: CandidateListItem): Promise<Page> {
@@ -1817,7 +1829,7 @@ async function openBossResumeDetail(_context: BrowserContext, searchPage: Page, 
 
   const frame = await waitForBossSearchFrame(searchPage, deadline);
   const targetIndex = await resolveBossCandidateAnchorIndex(searchPage, candidate, deadline);
-  const candidateAnchor = frame.locator('a[ka="search_click_open_resume"]').nth(targetIndex);
+  const candidateAnchor = frame.locator('a[ka="search_click_open_resume"], a[data-expect], a[data-jid], a[data-lid]').nth(targetIndex);
   const safeClickTarget = candidateAnchor.locator('.geek-info-detail, .search-geek-info, .card-inner').first();
   const clickable = await safeClickTarget.count().catch(() => 0) > 0 ? safeClickTarget : candidateAnchor;
 

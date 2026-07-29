@@ -14,11 +14,16 @@ import {
 } from '../browser/pacing.js';
 import { config, resolveStorageStatePath } from '../config.js';
 import { normalize51jobFilterDefinition } from '../platforms/51job-filter-normalization.js';
-import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from '../platforms/registry.js';
+import { getPlatformAdapter, listCapturePlatforms, listSupportedPlatforms, parsePlatformArg } from '../platforms/registry.js';
 import { parseSearchResultTotalFromText } from '../search/page-actions.js';
 
 test('listSupportedPlatforms returns the stable supported platform order', () => {
   assert.deepEqual(listSupportedPlatforms(), ['51job', 'liepin', 'zhilian']);
+});
+
+test('listCapturePlatforms adds Boss only when explicitly requested', () => {
+  assert.deepEqual(listCapturePlatforms(), ['51job', 'liepin', 'zhilian']);
+  assert.deepEqual(listCapturePlatforms(true), ['51job', 'liepin', 'zhilian', 'boss']);
 });
 
 test('parsePlatformArg defaults to 51job', () => {

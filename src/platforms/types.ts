@@ -8,8 +8,11 @@ import type {
   CandidateResultBatch,
 } from '../types/talent-mapping.js';
 
-export const ALL_PLATFORM_RUN_ORDER = ['51job', 'liepin', 'zhilian'] as const;
-export const SUPPORTED_PLATFORMS = [...ALL_PLATFORM_RUN_ORDER, 'boss'] as const;
+export const CORE_PLATFORM_RUN_ORDER = ['51job', 'liepin', 'zhilian'] as const;
+// Kept as a compatibility alias for modes whose public `all` contract remains core-platform only.
+export const ALL_PLATFORM_RUN_ORDER = CORE_PLATFORM_RUN_ORDER;
+export const CAPTURE_PLATFORM_RUN_ORDER = [...CORE_PLATFORM_RUN_ORDER, 'boss'] as const;
+export const SUPPORTED_PLATFORMS = CAPTURE_PLATFORM_RUN_ORDER;
 
 export type SupportedPlatform = (typeof SUPPORTED_PLATFORMS)[number];
 export type BossForwardMode = 'colleague' | 'email';

@@ -55,6 +55,7 @@ export interface TaskLogEntry {
 
 export interface ResumeCaptureTaskInput {
   platform: ConsolePlatformSelection;
+  includeBoss?: boolean;
   keyword: string;
   jd?: string;
   jdFile?: string;
@@ -70,6 +71,7 @@ export interface ResumeCaptureTaskInput {
 
 export interface BatchTaskInput {
   platform: ConsolePlatformSelection;
+  includeBoss?: boolean;
   jobsFile: string;
   includeViewed?: boolean;
   searchSource?: SearchSource;

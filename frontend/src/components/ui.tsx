@@ -7,7 +7,7 @@ export const PLATFORM_LABELS = {
   '51job': '51job',
   liepin: '猎聘',
   zhilian: '智联',
-  boss: 'Boss 直聘',
+  boss: 'Boss 直聘·直猎邦 Pro',
 } as const;
 
 export const TASK_LABELS = {

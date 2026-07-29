@@ -15,6 +15,7 @@ import { BrowserSession, closeBrowserSessionRef, createFreshBrowserSessionRef, c
 import { validateCandidateListExtraction } from '../extraction/extractor.js';
 import { resolveOpenAISettings } from '../llm/openai-client.js';
 import { liepinAdapter } from '../platforms/liepin-adapter.js';
+import { bossAdapter } from '../platforms/boss-adapter.js';
 import { zhilianAdapter } from '../platforms/zhilian-adapter.js';
 import { extractCandidateScoreFromTextResponse } from '../scoring/score-resume.js';
 import { openResumeByUrl } from './capture-resume-dom-snapshot.js';
@@ -927,6 +928,13 @@ function stubSuccessfulRun(indexModule: Awaited<ReturnType<typeof loadIndexModul
     candidates: [{ candidateId: 'cand-1' }],
   });
   zhilianAdapter.parseResumeDetail = async () => buildResume('cand-1');
+  bossAdapter.openSubscribeSearch = (async () => createSearchPage()) as typeof bossAdapter.openSubscribeSearch;
+  bossAdapter.openDirectSearch = (async () => createSearchPage()) as NonNullable<typeof bossAdapter.openDirectSearch>;
+  bossAdapter.openResumeDetail = (async () => createDetailPage()) as typeof bossAdapter.openResumeDetail;
+  bossAdapter.extractCandidateList = async () => ({
+    candidates: [{ candidateId: 'boss-cand-1' }],
+  });
+  bossAdapter.parseResumeDetail = async () => buildResume('boss-cand-1');
   indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
   indexModule.exportJobResultsRef.fn = async (_platform: string, jobKey: string) => ({
     jobKey,
@@ -6672,6 +6680,115 @@ describe('scoring run semantics', () => {
     assert.equal(zhilianJobRecord.rawText, '职位名称：多平台测试');
   });
 
+  it('adds Boss as the fourth capture platform only when --include-boss true is provided', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const keyword = `all-platform-boss-${Date.now()}`;
+    const authenticatedPlatforms: string[] = [];
+    const exportPlatforms: string[] = [];
+
+    stubSuccessfulRun(indexModule);
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async (platform) => {
+      authenticatedPlatforms.push(platform);
+      return {
+        page: { id: `${platform}-root-page`, close: async () => undefined },
+        context: { close: async () => undefined },
+        browser: { close: async () => undefined },
+      } as never;
+    };
+    indexModule.exportJobResultsRef.fn = async (platform: string, jobKey: string) => {
+      exportPlatforms.push(platform);
+      return {
+        jobKey,
+        exportPath: `/tmp/${platform}-export.md`,
+        summary: { candidateCount: 1, successCount: 1, failureCount: 0 },
+        markdown: '# export',
+      };
+    };
+
+    const output = await captureConsole(async () => {
+      const result = assertAllPlatformsSummary(await indexModule.main([
+        '--platform',
+        'all',
+        '--include-boss',
+        'true',
+        '--keyword',
+        keyword,
+        '--jd',
+        '职位名称：含直猎邦全平台测试',
+      ]));
+
+      assert.deepStrictEqual(result.map((entry) => entry.platform), ['51job', 'liepin', 'zhilian', 'boss']);
+    });
+
+    assert.deepStrictEqual(authenticatedPlatforms, ['51job', 'liepin', 'zhilian', 'boss']);
+    assert.deepStrictEqual(exportPlatforms, ['51job', 'liepin', 'zhilian', 'boss']);
+    assert.match(output.stderr.join('\n'), /may open resume details and reuse saved Boss forwarding settings/);
+    const store = new indexModule.JobStore();
+    assert.equal((await store.readJobRecord('boss', keyword)).platform, 'boss');
+  });
+
+  it('rejects --include-boss outside all-platform capture even when false', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        'boss',
+        '--include-boss',
+        'false',
+        '--keyword',
+        `include-boss-single-${Date.now()}`,
+        '--jd',
+        '职位名称：直猎邦参数隔离',
+      ]),
+      /--include-boss can only be used with --platform all/,
+    );
+  });
+
+  it('preflights every opt-in capture platform before opening a browser', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const keyword = `all-platform-preflight-${Date.now()}`;
+    const authenticatedPlatforms: string[] = [];
+
+    stubSuccessfulRun(indexModule);
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async (platform) => {
+      authenticatedPlatforms.push(platform);
+      return {
+        page: { id: `${platform}-root-page`, close: async () => undefined },
+        context: { close: async () => undefined },
+        browser: { close: async () => undefined },
+      } as never;
+    };
+
+    for (const platform of ['51job', 'liepin', 'zhilian'] as const) {
+      await indexModule.main([
+        '--platform',
+        platform,
+        '--keyword',
+        keyword,
+        '--jd',
+        '职位名称：预检测试',
+      ]);
+    }
+    authenticatedPlatforms.length = 0;
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        'all',
+        '--include-boss',
+        'true',
+        '--keyword',
+        keyword,
+      ]),
+      new RegExp(`Capture preflight failed before opening a browser:[\\s\\S]*${keyword} / boss: Missing required argument --jd or --jd-file`),
+    );
+    assert.deepStrictEqual(authenticatedPlatforms, []);
+  });
+
   it('runs direct search for every supported platform in registry order when --platform all is provided', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
@@ -6819,6 +6936,62 @@ describe('scoring run semantics', () => {
       'batch-all-two:zhilian',
     ]);
     assert.deepStrictEqual(printedSummary.map((entry) => `${entry.summary.jobKey}:${entry.platform}`), exportOrder);
+  });
+
+  it('runs batch jobs outer and includes Boss fourth only with --include-boss true', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const jobsFilePath = path.join(tempDir, 'jobs-all-boss.json');
+    const exportOrder: string[] = [];
+
+    await fs.writeFile(jobsFilePath, JSON.stringify([
+      { keyword: 'batch boss one', jd: '职位名称：批量直猎邦一' },
+      { keyword: 'batch boss two', jd: '职位名称：批量直猎邦二' },
+    ], null, 2), 'utf8');
+
+    stubSuccessfulRun(indexModule);
+    indexModule.exportJobResultsRef.fn = async (platform: string, jobKey: string) => {
+      exportOrder.push(`${jobKey}:${platform}`);
+      return {
+        jobKey,
+        exportPath: `/tmp/${platform}-${jobKey}.md`,
+        summary: { candidateCount: 1, successCount: 1, failureCount: 0 },
+        markdown: '# export',
+      };
+    };
+
+    await captureConsole(async () => {
+      const result = assertBatchSummary(await indexModule.main([
+        '--platform',
+        'all',
+        '--include-boss',
+        'true',
+        '--jobs-file',
+        jobsFilePath,
+      ]));
+
+      assert.deepStrictEqual(result.map((entry) => `${entry.summary.jobKey}:${entry.platform}`), [
+        'batch-boss-one:51job',
+        'batch-boss-one:liepin',
+        'batch-boss-one:zhilian',
+        'batch-boss-one:boss',
+        'batch-boss-two:51job',
+        'batch-boss-two:liepin',
+        'batch-boss-two:zhilian',
+        'batch-boss-two:boss',
+      ]);
+    });
+
+    assert.deepStrictEqual(exportOrder, [
+      'batch-boss-one:51job',
+      'batch-boss-one:liepin',
+      'batch-boss-one:zhilian',
+      'batch-boss-one:boss',
+      'batch-boss-two:51job',
+      'batch-boss-two:liepin',
+      'batch-boss-two:zhilian',
+      'batch-boss-two:boss',
+    ]);
   });
 
   it('allows batch jobs to override direct application filter input files relative to the jobs file', async () => {

@@ -393,6 +393,53 @@ describe('console API routes', () => {
     assert.equal(completed.inputSummary.bossForwardRecipient, 'recruiter@example.com');
   });
 
+  it('queues an opt-in all-platform capture with Boss as a fourth stage', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      body: {
+        platform: 'all',
+        includeBoss: true,
+        keyword: '物业电工',
+        jd: '负责物业电气维修',
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'recruiter@example.com',
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+    assert.equal(completed.status, 'succeeded');
+    assert.deepStrictEqual(calls[0], [
+      '--platform',
+      'all',
+      '--keyword',
+      '物业电工',
+      '--include-boss',
+      'true',
+      '--jd',
+      '负责物业电气维修',
+      '--boss-forward-mode',
+      'email',
+      '--boss-forward-recipient',
+      'recruiter@example.com',
+    ]);
+    assert.equal(completed.inputSummary.includeBoss, true);
+    assert.equal(completed.inputSummary.bossForwardMode, 'email');
+  });
+
   it('queues Boss auto-chat review with an explicit forwarding target', async () => {
     const taskDir = await makeTempDir();
     const calls: string[][] = [];
@@ -749,7 +796,7 @@ describe('console API routes', () => {
       apiKey: 'sk-test-assistant',
     });
     assert.match((completionRequests[0] as { instructions?: string }).instructions ?? '', /boss/);
-    assert.match((completionRequests[0] as { instructions?: string }).instructions ?? '', /all 只代表 51job、liepin、zhilian/);
+    assert.match((completionRequests[0] as { instructions?: string }).instructions ?? '', /includeBoss=true/);
     assert.doesNotMatch((completionRequests[0] as { input?: string }).input ?? '', /sk-test-assistant/);
     const body = response.body as { draft?: { kind?: string; missingFields?: string[]; warnings?: string[]; argvPreview?: string[]; input?: Record<string, unknown> } };
     assert.equal(body.draft?.kind, 'resume-capture');
@@ -829,8 +876,8 @@ describe('console API routes', () => {
     const body = response.body as { draft?: { missingFields?: string[]; warnings?: string[] }; clarificationQuestions?: string[] };
     assert.deepStrictEqual(body.draft?.missingFields, ['jd 或 jdFile']);
     assert.match(body.clarificationQuestions?.join('\n') ?? '', /JD|jd/);
-    assert.match(body.draft?.warnings?.join('\n') ?? '', /全部平台/);
-    assert.match(body.draft?.warnings?.join('\n') ?? '', /Boss/);
+    assert.match(body.draft?.warnings?.join('\n') ?? '', /全部主平台/);
+    assert.match(body.draft?.warnings?.join('\n') ?? '', /直猎邦/);
   });
 
   it('recomputes assistant missing fields after users fill draft inputs', async () => {

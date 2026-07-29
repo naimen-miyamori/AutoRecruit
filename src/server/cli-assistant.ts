@@ -80,6 +80,7 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'jd',
     'jdFile',
     'includeViewed',
+    'includeBoss',
     'searchSource',
     'applicationFilterInputFile',
     'email',
@@ -92,6 +93,7 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'platform',
     'jobsFile',
     'includeViewed',
+    'includeBoss',
     'searchSource',
     'applicationFilterInputFile',
     'email',
@@ -176,7 +178,7 @@ function coerceScalar(field: string, value: unknown): unknown {
     return undefined;
   }
 
-  if ((field === 'includeViewed' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates' || field === 'syncJobsBeforeReview' || field === 'triggerMatch' || field === 'confirmed' || field === 'confirmedDetailOpen' || field === 'unreadOnly' || field === 'includeClosed') && typeof value === 'string') {
+  if ((field === 'includeViewed' || field === 'includeBoss' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates' || field === 'syncJobsBeforeReview' || field === 'triggerMatch' || field === 'confirmed' || field === 'confirmedDetailOpen' || field === 'unreadOnly' || field === 'includeClosed') && typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
     if (normalized === 'true') {
       return true;
@@ -240,6 +242,13 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
   if ((kind === 'resume-capture' || kind === 'batch')
     && isPresent(input.bossForwardMode) !== isPresent(input.bossForwardRecipient)) {
     missing.push(isPresent(input.bossForwardMode) ? 'bossForwardRecipient' : 'bossForwardMode');
+  }
+
+  if ((kind === 'resume-capture' || kind === 'batch')
+    && input.platform === 'all'
+    && isPresent(input.bossForwardMode)
+    && input.includeBoss !== true) {
+    missing.push('includeBoss');
   }
 
   if (kind === 'boss-auto-chat') {
@@ -324,7 +333,9 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
   }
 
   if (input.platform === 'all') {
-    warnings.push('风险：全部平台会按 51job -> 猎聘 -> 智联顺序执行，任一平台失败会停止；Boss 需单独选择。');
+    warnings.push(input.includeBoss === true
+      ? '风险：全部主平台会按 51job -> 猎聘 -> 智联 -> Boss 直聘·直猎邦 Pro 顺序执行，任一平台失败会停止；Boss 阶段会打开简历详情，且可能复用已保存的转发配置。'
+      : '风险：全部主平台会按 51job -> 猎聘 -> 智联顺序执行，任一平台失败会停止；未启用 includeBoss 时不会运行直猎邦。');
   }
 
   if ((kind === 'resume-capture' || kind === 'batch') && input.includeViewed === true) {
@@ -551,6 +562,7 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   }
 
   pushBooleanPreview(argv, '--include-viewed', input.includeViewed);
+  pushBooleanPreview(argv, '--include-boss', input.includeBoss);
   pushPreview(argv, '--search-source', input.searchSource);
   pushPreview(argv, '--application-filter-input-file', input.applicationFilterInputFile);
   pushPreview(argv, '--email', input.email);
@@ -647,10 +659,10 @@ function buildSystemPrompt(): string {
     '允许的 kind 只有：resume-capture、batch、talent-mapping、search-subscription、boss-auto-chat、boss-talent-search、boss-greet、boss-chat-operation、boss-job-sync、login-refresh、rag-ops、rag-answer。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
     'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
-    'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。',
-    'batch 字段：platform, jobsFile, includeViewed, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
+    'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。',
+    'batch 字段：platform, jobsFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
     'talent-mapping 字段：platform, talentMappingFile, mappingStage, confirmedDetailOpen, mappingRunId；mappingStage 只能 scan、enrich、all，详情阶段必须 confirmedDetailOpen=true；只允许 51job、liepin、zhilian 或 all，不允许 Boss；不与普通抓取、JD、邮件、转发、订阅或 RAG 参数组合。',
-    'Boss 转发只允许 platform=boss；bossForwardMode 只能是 colleague 或 email，出现时必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',
+    'Boss 转发允许 platform=boss，或 platform=all 且 includeBoss=true；bossForwardMode 只能是 colleague 或 email，出现时必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',
     'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, replyToUnqualifiedCandidates, bossForwardMode, bossForwardRecipient, summaryEmail, summaryCc, syncJobsBeforeReview；platform 必须是 boss。replyToUnqualifiedCandidates 默认 false，仅显式设为 true 时才向不合适候选人发送固定拒绝常用语。转发和总结邮件参数可省略以复用已保存配置；syncJobsBeforeReview 默认 false。',
     'boss-talent-search 字段：platform, source, bossJobId, expectedJobName, coreRequirements, bonusRequirements, triggerMatch, confirmed；source 只能 recommend 或 deep-search。triggerMatch 默认 false，设为 true 时 confirmed 必须为 true。',
     'boss-greet 字段：platform, source, candidateId, expectedCandidateName, expectedJobName, bossJobId, intentId, confirmed；必须提供精确候选人 ID、预期姓名、预期职位，confirmed 必须为 true。',
@@ -660,7 +672,7 @@ function buildSystemPrompt(): string {
     'login-refresh 字段：platform，只允许 51job、liepin、zhilian、boss。',
     'rag-ops 字段：action, platform, jobKey, keyword, question, file, policyFile, reviewer, limit, includeReviewed, failOnIssue；action 只能是 doctor、review、metrics、ops、rebuild。',
     'rag-answer 字段：platform, jobKey, keyword, jd, jdFile, question, topK, autoIndex, logAnswer, metadata。',
-    '平台只能是 51job、liepin、zhilian、boss、all；all 只代表 51job、liepin、zhilian，不包含 boss；rag-answer 和 login-refresh 不能使用 all。',
+    '平台只能是 51job、liepin、zhilian、boss、all；普通抓取或批量任务的 all 在 includeBoss=true 时按 51job、liepin、zhilian、boss 执行，否则仍是前三个平台。其他模式的 all 不包含 boss；rag-answer 和 login-refresh 不能使用 all。',
     'applicationFilterInputFile 只能用于 direct 普通简历抓取或批量任务，搜索订阅只作为订阅包装输入。',
     '如果信息不足，把字段名放到 missingFields，并用 clarificationQuestions 给出中文追问。',
   ].join('\n');

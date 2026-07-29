@@ -7,7 +7,7 @@ import { BrowserSession, closeBrowserSession, ensureAuthenticatedBrowserSession 
 import { waitPlatformActionPace, waitPlatformCandidatePace } from './browser/pacing.js';
 import { createProductionExtractionBoundary } from './extraction/production-extractor.js';
 import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
-import { getPlatformAdapter, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
+import { getPlatformAdapter, listCapturePlatforms, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
 import { forwardBossResume } from './platforms/boss-adapter.js';
 import { executeBossChatOperation } from './platforms/boss-operations.js';
@@ -75,6 +75,7 @@ interface RunnableJobInput extends ReportDeliveryOptions {
   jobDescriptionText?: string;
   jobDescriptionFilePath?: string;
   includeViewedCandidates: boolean;
+  includeBoss: boolean;
   liepinForwardContact?: string;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
@@ -93,6 +94,7 @@ interface BatchCliInput extends ReportDeliveryOptions {
   platform: CliPlatformSelection;
   jobsFilePath: string;
   includeViewedCandidates: boolean;
+  includeBoss: boolean;
   liepinForwardContact?: string;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
@@ -473,6 +475,7 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     jobDescriptionText: jd,
     jobDescriptionFilePath: jdFile,
     includeViewedCandidates: input.includeViewedCandidates,
+    includeBoss: input.includeBoss,
     liepinForwardContact: input.liepinForwardContact,
     bossForwardMode: input.bossForwardMode,
     bossForwardRecipient: input.bossForwardRecipient,
@@ -502,8 +505,12 @@ async function loadBatchJobInputs(input: BatchCliInput): Promise<BatchRunnableJo
   return payload.map((item, index) => parseBatchJobItem(item, index, input));
 }
 
-function listSelectedPlatforms(platform: CliPlatformSelection): SupportedPlatform[] {
+function listSelectedCorePlatforms(platform: CliPlatformSelection): SupportedPlatform[] {
   return platform === 'all' ? listSupportedPlatforms() : [platform];
+}
+
+function listSelectedCapturePlatforms(platform: CliPlatformSelection, includeBoss: boolean): SupportedPlatform[] {
+  return platform === 'all' ? listCapturePlatforms(includeBoss) : [platform];
 }
 
 function parseArgs(argv: readonly string[]): CliInput {
@@ -543,6 +550,9 @@ function parseArgs(argv: readonly string[]): CliInput {
   const jdQuestion = values.get('jd-question') ?? values.get('rag-question');
   const includeViewedCandidates = flagPresence.has('include-viewed')
     ? parseOptionalBoolean(values.get('include-viewed'), '--include-viewed')
+    : false;
+  const includeBoss = flagPresence.has('include-boss')
+    ? parseOptionalBoolean(values.get('include-boss'), '--include-boss')
     : false;
   const liepinForwardContact = values.get('liepin-forward-contact')?.trim();
   const bossForwardMode = parseBossForwardMode(values.get('boss-forward-mode')?.trim());
@@ -622,8 +632,12 @@ function parseArgs(argv: readonly string[]): CliInput {
     throw new Error('--boss-forward-recipient must be a non-empty string');
   }
 
-  if (bossForwardMode && platform !== 'boss') {
-    throw new Error('--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss');
+  if (flagPresence.has('include-boss') && platform !== 'all') {
+    throw new Error('--include-boss can only be used with --platform all');
+  }
+
+  if (bossForwardMode && platform !== 'boss' && !(platform === 'all' && includeBoss)) {
+    throw new Error('--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss or --platform all --include-boss true');
   }
 
   if (talentMappingFilePath) {
@@ -807,6 +821,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       'email',
       'cc',
       'include-viewed',
+      'include-boss',
       'liepin-forward-contact',
       'search-source',
       'application-filter-input-file',
@@ -859,8 +874,8 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error('--jd-question must be a non-empty string');
     }
 
-    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || saveSearchSubscription || searchSubscriptionName) {
-      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, --application-filter-input-file, --save-search-subscription, or --search-subscription-name');
+    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || saveSearchSubscription || searchSubscriptionName) {
+      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, --application-filter-input-file, --save-search-subscription, or --search-subscription-name');
     }
 
     if (jobDescriptionText && jobDescriptionFilePath) {
@@ -882,8 +897,8 @@ function parseArgs(argv: readonly string[]): CliInput {
   }
 
   if (searchSubscriptionFilePath) {
-    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
-      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, or --application-filter-input-file');
+    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
+      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, or --application-filter-input-file');
     }
 
     return {
@@ -916,6 +931,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       recipientEmail,
       ccEmails,
       includeViewedCandidates,
+      includeBoss,
       liepinForwardContact,
       bossForwardMode,
       bossForwardRecipient,
@@ -946,6 +962,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     jobDescriptionText,
     jobDescriptionFilePath,
     includeViewedCandidates,
+    includeBoss,
     liepinForwardContact,
     bossForwardMode,
     bossForwardRecipient,
@@ -1646,6 +1663,52 @@ function resolveBossForwardingSettings(
   return existingJobRecord?.bossForwarding;
 }
 
+async function preflightCaptureRun(
+  inputs: readonly RunnableJobInput[],
+  platforms: readonly SupportedPlatform[],
+): Promise<void> {
+  const store = new JobStore();
+  const checks = inputs.flatMap((input) => platforms.map(async (platform) => {
+    try {
+      const platformInput = buildSinglePlatformInput(input, platform);
+      const jobKey = buildJobKey(platformInput.searchKeyword, '');
+      const existingJobRecord = await store.readJobRecordIfExists(platform, jobKey);
+
+      if (!existingJobRecord && !platformInput.jobDescriptionText && !platformInput.jobDescriptionFilePath) {
+        throw new Error('Missing required argument --jd or --jd-file');
+      }
+
+      if (!existingJobRecord && platformInput.jobDescriptionFilePath) {
+        await readFile(platformInput.jobDescriptionFilePath, 'utf8');
+      }
+
+      await resolveResumeCaptureSearchSettings(platformInput, existingJobRecord);
+      return undefined;
+    } catch (error) {
+      return { keyword: input.searchKeyword, platform, error };
+    }
+  }));
+  const failures = (await Promise.all(checks)).filter((failure): failure is {
+    keyword: string;
+    platform: SupportedPlatform;
+    error: unknown;
+  } => failure !== undefined);
+
+  if (failures.length > 0) {
+    const details = failures.map(({ keyword, platform, error }) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return `- ${keyword} / ${platform}: ${message}`;
+    });
+    throw new Error(`Capture preflight failed before opening a browser:\n${details.join('\n')}`);
+  }
+}
+
+function warnBossCaptureOptIn(): void {
+  console.warn(
+    'Boss/直猎邦 is enabled as the fourth capture stage. It may open resume details and reuse saved Boss forwarding settings; no talent matching, greeting, chat, or job-sync actions will run.',
+  );
+}
+
 async function runSinglePlatform(input: SinglePlatformCliInput, options: { printSummary: boolean } = { printSummary: true }): Promise<MainRunSummary> {
   const platformAdapter = resolvePlatformAdapter(input.platform);
   const store = new JobStore();
@@ -1798,10 +1861,15 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
 
 async function runBatchJobs(input: BatchCliInput): Promise<BatchJobRunSummary[]> {
   const jobs = await loadBatchJobInputs(input);
+  const platforms = listSelectedCapturePlatforms(input.platform, input.includeBoss);
+  await preflightCaptureRun(jobs, platforms);
+  if (input.includeBoss) {
+    warnBossCaptureOptIn();
+  }
   const summaries: BatchJobRunSummary[] = [];
 
   for (const job of jobs) {
-    for (const platform of listSelectedPlatforms(input.platform)) {
+    for (const platform of platforms) {
       summaries.push({
         keyword: job.searchKeyword,
         platform,
@@ -1817,7 +1885,7 @@ async function runBatchJobs(input: BatchCliInput): Promise<BatchJobRunSummary[]>
 async function runSearchSubscription(input: SearchSubscriptionCliInput): Promise<SearchSubscriptionSummary | SearchSubscriptionSummary[]> {
   const summaries: SearchSubscriptionSummary[] = [];
 
-  for (const platform of listSelectedPlatforms(input.platform)) {
+  for (const platform of listSelectedCorePlatforms(input.platform)) {
     const adapter = resolvePlatformAdapter(platform);
     const plan = await loadSearchConditionPlanFile(input.filePath, {
       platform,
@@ -1892,7 +1960,7 @@ async function runJdQuestion(input: JdQuestionCliInput): Promise<JdQuestionRunSu
   const store = new JobStore();
   const summaries: JdQuestionRunSummary[] = [];
 
-  for (const platform of listSelectedPlatforms(input.platform)) {
+  for (const platform of listSelectedCorePlatforms(input.platform)) {
     const context = await resolveJdQuestionContext(platform, input, store);
     const answer = context.stored && context.jobKey
       ? await answerQuestionWithRagRef.fn({
@@ -1970,8 +2038,13 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 
   if (input.platform === 'all') {
     const summaries: AllPlatformsRunSummary[] = [];
+    const platforms = listSelectedCapturePlatforms(input.platform, input.includeBoss);
+    await preflightCaptureRun([input], platforms);
+    if (input.includeBoss) {
+      warnBossCaptureOptIn();
+    }
 
-    for (const platform of listSupportedPlatforms()) {
+    for (const platform of platforms) {
       summaries.push({
         platform,
         summary: await runSinglePlatform(buildSinglePlatformInput(input, platform), { printSummary: false }),

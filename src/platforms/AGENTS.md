@@ -22,7 +22,9 @@ contracts.
   parsing integration, compatibility fallbacks, pacing, readiness, and semantic actions.
 - Shared orchestration belongs in src/index.ts, platform-neutral browser primitives in src/browser/,
   and persistence, confirmation, queueing, and mode selection in their owning workflows/domains.
-- Boss remains single-platform only and never enters the registry used by platform all.
+- Boss keeps one platform key and adapter. Normal capture/batch may opt into it as the fourth stage
+  only through the capture-specific `all + includeBoss` selection; core `all` registries used by
+  search subscription, questions, filter discovery, and Talent Mapping remain three-platform.
 - Search entry and extraction consume the caller's shared search deadline. Detail opening consumes
   one total detail deadline: popup/current-page/content races are platform-owned, and modal
   platforms use modal readiness without resetting the budget.
