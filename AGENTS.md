@@ -52,6 +52,24 @@ data, transient task status, debugging logs, selector inventories, and unimpleme
 finishing a qualifying change, reconcile the documentation against the implementation, schemas,
 `package.json`, `.env.example`, and the relevant regression tests.
 
+## Planning Document Placement
+
+All new implementation, design, remediation, and rollout plans belong in the local
+`docs/plan/` archive. Do not create plan documents in the repository root, `src/`, or another
+documentation directory. Create a new plan with `npm run plan:new -- --topic <kebab-case-topic>
+--title <title>` and validate local placement and metadata with `npm run plan:check`.
+
+- New files use `YYYY-MM-DD-<kebab-case-topic>-plan.md` and state status, last-updated date, and
+  Git submission policy at the top.
+- `docs/plan/README.md` is the local index; the creation command adds each new plan to it.
+- `docs/` remains ignored by Git, so plans, the local index, and the local template are not staged
+  or committed by default. If that policy changes, redesign `.gitignore` and this section together;
+  never mix tracked and untracked plan conventions ad hoc.
+- A completed plan records decisions and acceptance evidence only. Update `README.md` and
+  `项目说明文档.md` with stable current behavior; neither document is a plan archive.
+- Existing historical names in `docs/plan/` are grandfathered. Every new plan must pass the current
+  naming and metadata checks.
+
 ## Semantic Action Module Design Standard
 
 Semantic action modules are the repository-wide design standard for browser automation and any

@@ -562,6 +562,18 @@ npm run web:build
 
 聚合命令已覆盖前端：`typecheck` 包含 `web:typecheck`，`test` 包含 `test:web`，`build` 包含 `web:build`。项目还提供筛选目录发现、筛选输入校验、简历重新解析、结果导出、RAG 质量评估和平台专项测试，具体脚本见 `package.json`。
 
+### 本地计划文档
+
+实现、设计和治理计划统一存放于本地 `docs/plan/`，默认受 `.gitignore` 保护而不提交。首次使用或恢复工作区执行：
+
+```bash
+npm run plan:init
+npm run plan:new -- --topic talent-pipeline --title "人才管道计划"
+npm run plan:check
+```
+
+新计划必须使用 `YYYY-MM-DD-<topic>-plan.md`，并在顶部说明状态、最近更新和提交策略。`plan:new` 会创建模板化文档并更新本地索引；`plan:check` 会拒绝根目录、`src/` 或其他位置的计划文档。功能完成后的稳定行为仍以本 README 和 [`项目说明文档.md`](./项目说明文档.md) 为准。
+
 ## 进一步阅读
 
 - [项目说明文档](./项目说明文档.md)：完整流程、架构、持久化、失败语义和运维说明
