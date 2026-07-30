@@ -189,6 +189,29 @@ function createSearchDeadline(options?: SearchWaitOptions): number {
   return options?.deadline ?? Date.now() + Math.max(config.playwright.searchPageTimeoutMs, 1);
 }
 
+function bossDirectSearchActionUnits(condition: SearchCondition): number {
+  if (!isApplicationFilterCondition(condition)) return 1;
+  if (condition.fieldId === 'city') return 4;
+  if (condition.fieldId === 'education' || condition.fieldId === 'work_years') return 4;
+  if (condition.fieldId === 'age') return 3;
+  if (condition.fieldId === 'job_scope') return 2;
+  return 2;
+}
+
+function createBossDirectSearchDeadline(
+  conditions: SearchCondition[],
+  options?: SearchWaitOptions,
+): number {
+  if (options?.deadline !== undefined) return options.deadline;
+  const pacingUpperBound = Math.max(config.playwright.actionDelayMaxMsByPlatform.boss, 1);
+  // One bounded search deadline must cover intentional pacing as well as page
+  // readiness. A direct search with custom sliders has several paced pointer
+  // operations; the ordinary 30s list-read budget is not sufficient for it.
+  const estimatedMs = 24_000 + (12 + conditions.reduce((total, condition) => total + bossDirectSearchActionUnits(condition), 0)) * pacingUpperBound;
+  const boundedMs = Math.min(120_000, estimatedMs);
+  return Date.now() + Math.max(config.playwright.searchPageTimeoutMs, boundedMs);
+}
+
 function createResumeDetailDeadline(): number {
   return Date.now() + Math.max(config.playwright.resumeDetailTimeoutMs, 1);
 }
@@ -365,12 +388,20 @@ async function openBossDirectSearch(
   conditions: SearchCondition[],
   options?: SearchWaitOptions,
 ): Promise<Page> {
-  const deadline = createSearchDeadline(options);
+  const deadline = createBossDirectSearchDeadline(conditions, options);
   const searchPage = await prepareBossSearchConditionPage(page, keyword, { ...options, deadline });
   await resetBossSearchFilters(searchPage, deadline);
   await selectBossUnrestrictedJob(searchPage, deadline);
-  await applyBossSearchKeyword(searchPage, keyword, deadline);
-  for (const condition of conditions) {
+  const jobScopeConditions = conditions.filter((condition) => (
+    isApplicationFilterCondition(condition) && condition.fieldId === 'job_scope'
+  ));
+  const cityConditions = conditions.filter((condition) => (
+    isApplicationFilterCondition(condition) && condition.fieldId === 'city'
+  ));
+  const remainingConditions = conditions.filter((condition) => (
+    !jobScopeConditions.includes(condition) && !cityConditions.includes(condition)
+  ));
+  for (const condition of jobScopeConditions) {
     const result = await applyBossSearchCondition(searchPage, condition, deadline);
     if (result.status !== 'applied') {
       const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
@@ -379,6 +410,27 @@ async function openBossDirectSearch(
       throw new Error(`Boss direct search condition ${condition.kind}${fieldLabel} failed: ${result.message ?? result.status}`);
     }
   }
+  await applyBossSearchKeyword(searchPage, keyword, deadline);
+  for (const condition of cityConditions) {
+    const result = await applyBossSearchCondition(searchPage, condition, deadline);
+    if (result.status !== 'applied') {
+      const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
+        ? ` ${condition.fieldId}`
+        : '';
+      throw new Error(`Boss direct search condition ${condition.kind}${fieldLabel} failed: ${result.message ?? result.status}`);
+    }
+  }
+  for (const condition of remainingConditions) {
+    const result = await applyBossSearchCondition(searchPage, condition, deadline);
+    if (result.status !== 'applied') {
+      const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
+        ? ` ${condition.fieldId}`
+        : '';
+      throw new Error(`Boss direct search condition ${condition.kind}${fieldLabel} failed: ${result.message ?? result.status}`);
+    }
+  }
+
+  await assertBossDirectSearchPostcondition(searchPage, keyword, conditions, deadline);
 
   return searchPage;
 }
@@ -589,23 +641,66 @@ const bossSupportedApplicationFilterFieldIds = new Set([
 type BossCustomSliderRange = {
   min: number;
   max: number;
+  minLabel: string;
+  maxLabel: string;
 };
 
-const bossCustomSliderConfigByFieldId: Record<string, {
+type BossCustomSliderScaleValue = {
+  raw: number;
+  label: string;
+};
+
+type BossCustomSliderConfig = {
   rootSelector: string;
   triggerSelector: string;
   sliderSelector: string;
-}> = {
+  visibleValueSelector: string;
+  maximum: number;
+  values: BossCustomSliderScaleValue[];
+};
+
+const bossCustomSliderConfigByFieldId: Record<string, BossCustomSliderConfig> = {
   education: {
     rootSelector: '.degree-ui',
     triggerSelector: '.degree-select-custom-label',
     sliderSelector: '.degree-select-custom-slider .ui-slider',
+    visibleValueSelector: '.degree-select-custom-content',
+    maximum: 7,
+    values: [
+      { raw: 2, label: '中专/中技' },
+      { raw: 3, label: '高中' },
+      { raw: 4, label: '大专' },
+      { raw: 5, label: '本科' },
+      { raw: 6, label: '硕士' },
+      { raw: 7, label: '博士' },
+    ],
   },
   work_years: {
     rootSelector: '.experience-select',
     triggerSelector: '.custom',
     sliderSelector: '.ui-slider',
+    visibleValueSelector: '.experience-select-custom-content',
+    maximum: 12,
+    values: [
+      { raw: 1, label: '在校/应届' },
+      { raw: 2, label: '1年' },
+      { raw: 3, label: '2年' },
+      { raw: 4, label: '3年' },
+      { raw: 5, label: '4年' },
+      { raw: 6, label: '5年' },
+      { raw: 7, label: '6年' },
+      { raw: 8, label: '7年' },
+      { raw: 9, label: '8年' },
+      { raw: 10, label: '9年' },
+      { raw: 11, label: '10年' },
+      { raw: 12, label: '10年以上' },
+    ],
   },
+};
+
+const bossCustomSliderFieldIdByLabel: Record<string, keyof typeof bossCustomSliderConfigByFieldId> = {
+  学历要求: 'education',
+  经验要求: 'work_years',
 };
 
 const bossAgePresetLabels = new Set(['不限', '20-25', '25-30', '30-35', '35-40', '40-50', '50以上']);
@@ -622,11 +717,15 @@ function bossMoreFilterItemLocator(frame: Frame, label: string) {
 function addBossCustomInputSpec(
   options: SearchFilterOption[],
   customInputSpec: SearchFilterOptionInputSpec | undefined,
-  customRangeMaximum?: number,
+  customSliderFieldId?: keyof typeof bossCustomSliderConfigByFieldId,
 ): SearchFilterOption[] {
   if (!customInputSpec) {
     return options;
   }
+
+  const customSlider = customSliderFieldId
+    ? bossCustomSliderConfigByFieldId[customSliderFieldId]
+    : undefined;
 
   return options.map((option) => {
     if (option.label !== '自定义' && option.value !== '自定义') {
@@ -639,8 +738,8 @@ function addBossCustomInputSpec(
         ...customInputSpec,
         fields: customInputSpec.fields.map((field) => ({
           ...field,
-          options: customRangeMaximum && (field.key === 'min' || field.key === 'max')
-            ? Array.from({ length: customRangeMaximum }, (_, index) => String(index + 1))
+          options: customSlider && (field.key === 'min' || field.key === 'max')
+            ? customSlider.values.map((entry) => entry.label)
             : field.options,
         })),
       },
@@ -661,7 +760,7 @@ function buildBossFilterDefinition(
       selected: option.selected,
     })),
     configItem.customInputSpec,
-    snapshot?.customRangeMaximum,
+    bossCustomSliderFieldIdByLabel[configItem.label],
   );
   const status: SearchFilterDiscoveryStatus = options.length > 0
     ? 'optionsExtracted'
@@ -1174,6 +1273,37 @@ function readBossApplicationFilterSingleValue(
   return conditionValue;
 }
 
+function resolveBossCustomSliderBoundary(
+  fieldId: string,
+  rawValue: unknown,
+  boundaryName: 'min' | 'max',
+): BossCustomSliderScaleValue {
+  const configItem = bossCustomSliderConfigByFieldId[fieldId];
+  if (!configItem) {
+    throw new Error(`Boss application filter ${fieldId} does not expose a custom slider.`);
+  }
+
+  const value = normalizeBossApplicationFilterValue(rawValue);
+  const semanticMatch = configItem.values.find((entry) => entry.label === value);
+  if (semanticMatch) {
+    return semanticMatch;
+  }
+
+  // Existing persisted direct-search conditions used the page's numeric slider
+  // indexes. Preserve those records as an explicit compatibility input, but
+  // resolve their visible meaning before operating the page.
+  const legacyRaw = Number.parseInt(value, 10);
+  if (/^\d+$/.test(value)) {
+    const legacyMatch = configItem.values.find((entry) => entry.raw === legacyRaw);
+    if (legacyMatch) {
+      return legacyMatch;
+    }
+  }
+
+  const supportedValues = configItem.values.map((entry) => entry.label).join('、');
+  throw new Error(`Boss application filter ${fieldId} custom ${boundaryName} must use a semantic boundary (${supportedValues}); received ${value || '(empty)'}.`);
+}
+
 function readBossCustomSliderRange(
   condition: Extract<SearchCondition, { kind: 'applicationFilter' }>,
 ): BossCustomSliderRange | undefined {
@@ -1184,12 +1314,17 @@ function readBossCustomSliderRange(
   if (!input) {
     throw new Error(`Boss application filter ${condition.fieldId} custom selection requires input.min and input.max.`);
   }
-  const min = Number.parseInt(normalizeBossApplicationFilterValue(input.min), 10);
-  const max = Number.parseInt(normalizeBossApplicationFilterValue(input.max), 10);
-  if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min) {
-    throw new Error(`Boss application filter ${condition.fieldId} custom range must use positive ordered integer boundaries.`);
+  const min = resolveBossCustomSliderBoundary(condition.fieldId, input.min, 'min');
+  const max = resolveBossCustomSliderBoundary(condition.fieldId, input.max, 'max');
+  if (max.raw < min.raw) {
+    throw new Error(`Boss application filter ${condition.fieldId} custom range minimum ${min.label} cannot exceed maximum ${max.label}.`);
   }
-  return { min, max };
+  return {
+    min: min.raw,
+    max: max.raw,
+    minLabel: min.label,
+    maxLabel: max.label,
+  };
 }
 
 function readBossApplicationFilterMultiValues(
@@ -1442,7 +1577,14 @@ async function readBossCustomSliderState(
   frame: Frame,
   fieldId: string,
   deadline: number,
-): Promise<{ min: number; max: number; maximum: number; box: { x: number; y: number; width: number; height: number } }> {
+): Promise<{
+  min: number;
+  max: number;
+  maximum: number;
+  visibleValue?: string;
+  visibleValuePresent: boolean;
+  box: { x: number; y: number; width: number; height: number };
+}> {
   const configItem = bossCustomSliderConfigByFieldId[fieldId];
   if (!configItem) {
     throw new Error(`Boss custom slider is not configured for ${fieldId}.`);
@@ -1452,11 +1594,15 @@ async function readBossCustomSliderState(
   await slider.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
   const rawValue = await root.locator('input[type="hidden"]').first().inputValue({ timeout: Math.min(remainingTime(deadline), 3000) });
   const values = rawValue.split(',').map((item) => Number.parseInt(item.trim(), 10));
-  if (values.length !== 2 || values.some((value) => !Number.isInteger(value) || value < 1)) {
+  if (values.length !== 2 || values.some((value) => !Number.isInteger(value) || value < 1 || value > configItem.maximum)) {
     throw new Error(`Boss custom slider ${fieldId} does not expose two positive integer boundaries.`);
   }
   const [min, max] = values as [number, number];
-  const maximum = Math.max(min, max);
+  const visibleValueLocator = root.locator(configItem.visibleValueSelector).first();
+  const visibleValuePresent = await visibleValueLocator.count() > 0;
+  const visibleValue = visibleValuePresent
+    ? normalizeText(await visibleValueLocator.innerText({ timeout: Math.min(remainingTime(deadline), 3000) }).catch(() => '')) || undefined
+    : undefined;
   const box = await slider.boundingBox();
   if (!box || box.width <= 0 || box.height <= 0) {
     throw new Error(`Boss custom slider ${fieldId} is not measurable.`);
@@ -1466,7 +1612,14 @@ async function readBossCustomSliderState(
   if (await handles.count() !== 2) {
     throw new Error(`Boss custom slider ${fieldId} does not expose two handles.`);
   }
-  return { min, max, maximum, box };
+  return {
+    min,
+    max,
+    maximum: configItem.maximum,
+    visibleValue,
+    visibleValuePresent,
+    box,
+  };
 }
 
 async function dragBossCustomSliderHandle(
@@ -1524,7 +1677,7 @@ async function applyBossCustomSliderApplicationFilter(
   if (input.max > initial.maximum) {
     throw new Error(`Boss custom slider ${fieldId} maximum is ${initial.maximum}, requested ${input.max}.`);
   }
-  const ratioFor = (value: number) => Math.max(0, Math.min(1, (value - 0.5) / Math.max(initial.maximum - 1, 1)));
+  const ratioFor = (value: number) => Math.max(0, Math.min(1, (value - 1) / Math.max(initial.maximum - 1, 1)));
   const targetPoint = (value: number) => ({
     x: initial.box.x + ratioFor(value) * initial.box.width,
     y: initial.box.y + initial.box.height / 2,
@@ -1532,8 +1685,25 @@ async function applyBossCustomSliderApplicationFilter(
   const slider = root.locator(configItem.sliderSelector).first();
   const primaryHandles = slider.locator('.ui-slider-button');
   const handles = await primaryHandles.count() === 2 ? primaryHandles : slider.locator('.ui-slider-button-wrap');
-  await dragBossCustomSliderHandle(page, handles.nth(0), targetPoint(input.min), deadline, false, ratioFor(input.min));
-  await dragBossCustomSliderHandle(page, handles.nth(1), targetPoint(input.max), deadline, false, ratioFor(input.max));
+  const moveLower = async (domFallback = false, fallbackRatio = ratioFor(input.min)) => {
+    await dragBossCustomSliderHandle(page, handles.nth(0), targetPoint(input.min), deadline, domFallback, fallbackRatio);
+  };
+  const moveUpper = async (domFallback = false, fallbackRatio = ratioFor(input.max)) => {
+    await dragBossCustomSliderHandle(page, handles.nth(1), targetPoint(input.max), deadline, domFallback, fallbackRatio);
+  };
+  // Expand/shrink the non-blocking side first. This is required when the two
+  // handles currently overlap: dragging the lower handle upward first would
+  // otherwise be clamped by the upper handle, and vice versa.
+  if (input.min > initial.max) {
+    await moveUpper();
+    await moveLower();
+  } else if (input.max < initial.min) {
+    await moveLower();
+    await moveUpper();
+  } else {
+    await moveLower();
+    await moveUpper();
+  }
   await waitForBossFilterSettle(frame, deadline);
   let after = await readBossCustomSliderState(frame, fieldId, deadline);
   if (after.min !== input.min || after.max !== input.max) {
@@ -1541,16 +1711,23 @@ async function applyBossCustomSliderApplicationFilter(
     // the centre of its next segment. Try bounded, pointer-preserving alternatives
     // before declaring the exact range unavailable.
     const fallbackRatios = [
+      (value: number) => Math.max(0, Math.min(1, (value - 0.5) / Math.max(initial.maximum - 1, 1))),
       (value: number) => Math.max(0, Math.min(1, value / initial.maximum)),
-      (value: number) => Math.max(0, Math.min(1, (value + 0.5) / initial.maximum)),
     ];
     for (const fallbackRatioFor of fallbackRatios) {
-      const fallbackTargetPoint = (value: number) => ({
-        x: initial.box.x + fallbackRatioFor(value) * initial.box.width,
-        y: initial.box.y + initial.box.height / 2,
-      });
-      await dragBossCustomSliderHandle(page, handles.nth(0), fallbackTargetPoint(input.min), deadline, true, fallbackRatioFor(input.min));
-      await dragBossCustomSliderHandle(page, handles.nth(1), fallbackTargetPoint(input.max), deadline, true, fallbackRatioFor(input.max));
+      const fallbackTargetPoint = (value: number) => ({ x: initial.box.x + fallbackRatioFor(value) * initial.box.width, y: initial.box.y + initial.box.height / 2 });
+      const moveFallbackLower = async () => dragBossCustomSliderHandle(page, handles.nth(0), fallbackTargetPoint(input.min), deadline, true, fallbackRatioFor(input.min));
+      const moveFallbackUpper = async () => dragBossCustomSliderHandle(page, handles.nth(1), fallbackTargetPoint(input.max), deadline, true, fallbackRatioFor(input.max));
+      if (input.min > after.max) {
+        await moveFallbackUpper();
+        await moveFallbackLower();
+      } else if (input.max < after.min) {
+        await moveFallbackLower();
+        await moveFallbackUpper();
+      } else {
+        await moveFallbackLower();
+        await moveFallbackUpper();
+      }
       await waitForBossFilterSettle(frame, deadline);
       after = await readBossCustomSliderState(frame, fieldId, deadline);
       if (after.min === input.min && after.max === input.max) {
@@ -1560,6 +1737,10 @@ async function applyBossCustomSliderApplicationFilter(
   }
   if (after.min !== input.min || after.max !== input.max) {
     throw new Error(`Boss custom slider ${fieldId} did not match ${input.min},${input.max}; observed ${after.min},${after.max}.`);
+  }
+  const expectedVisibleValue = `${input.minLabel}-${input.maxLabel}`;
+  if (after.visibleValuePresent && after.visibleValue !== expectedVisibleValue) {
+    throw new Error(`Boss custom slider ${fieldId} visible value did not match ${expectedVisibleValue}; observed ${after.visibleValue ?? '(empty)'}.`);
   }
 }
 
@@ -1661,6 +1842,41 @@ async function applyBossCityApplicationFilter(
   }
   await clickBossLocator(cityBox.locator('button').nth(confirmIndex), page, Math.min(remainingTime(deadline), 5000));
   await waitForBossFilterSettle(frame, deadline);
+}
+
+async function readBossSelectedCityApplicationFilter(
+  page: Page,
+  frame: Frame,
+  deadline: number,
+): Promise<string[]> {
+  const trigger = frame.locator('.city-wrap .city, .city-wrap .square').first();
+  const cityBox = frame.locator('.city-wrap .city-box').first();
+  const initiallyVisible = await cityBox.isVisible().catch(() => false);
+  if (!initiallyVisible) {
+    await clickBossLocator(trigger, page, Math.min(remainingTime(deadline), 5000));
+    await cityBox.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
+    await frame.waitForTimeout(Math.min(500, remainingTime(deadline))).catch(() => undefined);
+  }
+  try {
+    return await cityBox.locator('.dropdown-province > li').evaluateAll((elements) => elements.flatMap((element) => {
+      const item = element as HTMLElement;
+      const checkbox = item.querySelector<HTMLElement>('.city-checkbox, .mul-checkbox-ui');
+      const selected = /status1|checked|active/.test(checkbox?.className ?? '') || Boolean(item.querySelector<HTMLInputElement>('input')?.checked);
+      const label = (item.textContent ?? '').replace(/\s+/g, ' ').trim();
+      return selected && label ? [label] : [];
+    }));
+  } finally {
+    // The live city panel does not reliably close for Escape or outside clicks.
+    // Re-submit its already verified selection through the native confirmation
+    // button so a direct-search action always returns a stable, collapsed page.
+    const confirmationIndex = await cityBox.locator('button').evaluateAll((buttons) => buttons.findIndex((button) => /确定|确认|完成/.test((button.textContent ?? '').replace(/\s+/g, ' ').trim())));
+    if (confirmationIndex < 0) {
+      throw new Error('Boss city selector confirmation button is unavailable during postcondition verification.');
+    }
+    await clickBossLocator(cityBox.locator('button').nth(confirmationIndex), page, Math.min(remainingTime(deadline), 5000));
+    await waitForBossFilterSettle(frame, deadline);
+    await cityBox.waitFor({ state: 'hidden', timeout: Math.min(remainingTime(deadline), 5000) });
+  }
 }
 
 async function applyBossJobScopeApplicationFilter(
@@ -2335,7 +2551,11 @@ async function snapshotBossSearchFilterState(
   deadline = createSearchDeadline(),
 ): Promise<BossSearchFilterState> {
   const frame = await waitForBossSearchFrame(page, deadline);
-  const snapshot = await frame.evaluate((moreLabels) => {
+  const customSliderLabels = Object.fromEntries(Object.entries(bossCustomSliderConfigByFieldId).map(([fieldId, configItem]) => [
+    fieldId,
+    Object.fromEntries(configItem.values.map((entry) => [String(entry.raw), entry.label])),
+  ]));
+  const snapshot = await frame.evaluate(({ moreLabels, customSliderLabels: sliderLabels }) => {
     const normalize = (value: string | null | undefined): string => (value ?? '').replace(/\s+/g, ' ').trim();
     const selectedLabels = (rootSelector: string, optionSelector: string): string[] => {
       const root = document.querySelector<HTMLElement>(rootSelector);
@@ -2361,11 +2581,11 @@ async function snapshotBossSearchFilterState(
           item.querySelector<HTMLElement>('.dropdown-select span.ipt, .defalut-select, .major-input-ui, .input-inner-container > span')?.textContent
           || item.querySelector<HTMLInputElement>('input[type="hidden"]')?.value,
         );
-      if (label) more[label] = selectedValue || label;
+      if (label && selectedValue && selectedValue !== label) more[label] = selectedValue;
     }
     const readToggle = (selector: string): boolean => Boolean(document.querySelector<HTMLInputElement>(`${selector} input[type="checkbox"]`)?.checked);
     const selectedAgeLabels = selectedLabels('.age-select', '.age-item, .custom');
-    const customSliderRange = (rootSelector: string): string | undefined => {
+    const customSliderRange = (rootSelector: string, fieldId: 'education' | 'work_years'): string | undefined => {
       const root = document.querySelector<HTMLElement>(rootSelector);
       const slider = root?.querySelector<HTMLElement>('.ui-slider');
       const raw = normalize(root?.querySelector<HTMLInputElement>('input[type="hidden"]')?.value);
@@ -2373,7 +2593,11 @@ async function snapshotBossSearchFilterState(
       if (!slider || values.length !== 2 || values.some((value) => !Number.isInteger(value) || value < 1)) return undefined;
       const customActive = /(?:active|selected)/.test(root?.querySelector<HTMLElement>('.degree-select-custom-label, .custom')?.className ?? '')
         || !/custom-slider-disabled/.test(slider.className);
-      return customActive || values[0] !== 1 ? `custom:${values[0]}-${values[1]}` : undefined;
+      if (!customActive && values[0] === 1) return undefined;
+      const labels = values.map((value) => sliderLabels[fieldId]?.[String(value)]);
+      return labels.every(Boolean)
+        ? `custom:${labels.join('-')}`
+        : `custom:raw:${values[0]}-${values[1]}`;
     };
     const ageCustom = document.querySelector<HTMLElement>('.age-select .age-custom');
     const ageCustomVisible = Boolean(ageCustom) && (() => {
@@ -2389,6 +2613,7 @@ async function snapshotBossSearchFilterState(
     const jobOptions = Array.from(document.querySelectorAll<HTMLElement>('.search-job-list-C .ui-dropmenu-list li'));
     const activeJobScopeIndex = jobOptions.findIndex((option) => /\bactive\b/i.test(option.className));
     const cityInput = document.querySelector<HTMLInputElement>('.city-wrap .search-city-kw input');
+    const citySummary = document.querySelector<HTMLElement>('.city-wrap .city');
     const cityOptions = Array.from(document.querySelectorAll<HTMLElement>('.city-wrap .dropdown-province > li')).flatMap((item) => {
       const checkbox = item.querySelector<HTMLElement>('.city-checkbox, .mul-checkbox-ui');
       const selected = /status1|checked|active/.test(checkbox?.className ?? '') || Boolean(item.querySelector<HTMLInputElement>('input')?.checked);
@@ -2399,13 +2624,16 @@ async function snapshotBossSearchFilterState(
       keyword: normalize(keywordInput?.value || keywordInput?.textContent),
       jobScope: normalize(jobScope?.textContent),
       jobScopeIndex: activeJobScopeIndex,
-      city: normalize(cityInput?.value),
+      city: (() => {
+        const summary = normalize(citySummary?.textContent);
+        return /^(?:城市|请选择|全国)$/.test(summary) ? normalize(cityInput?.value) : summary || normalize(cityInput?.value);
+      })(),
       cityOptions,
       company: normalize(companyInput?.value),
       inline: {
-        education: customSliderRange('.degree-ui') ? [customSliderRange('.degree-ui')!] : selectedLabels('.degree-ui', '.degree-item, .degree-select-custom-label'),
+        education: customSliderRange('.degree-ui', 'education') ? [customSliderRange('.degree-ui', 'education')!] : selectedLabels('.degree-ui', '.degree-item, .degree-select-custom-label'),
         school_nature: selectedLabels('.school-ui', '.degree-item, .checkbox-text'),
-        work_years: customSliderRange('.experience-select') ? [customSliderRange('.experience-select')!] : selectedLabels('.experience-select', '.exp-item, .custom'),
+        work_years: customSliderRange('.experience-select', 'work_years') ? [customSliderRange('.experience-select', 'work_years')!] : selectedLabels('.experience-select', '.exp-item, .custom'),
         age: ageCustomVisible && ageCustomValues.length >= 2
           ? [`custom:${ageCustomValues.join('-')}`]
           : selectedAgeLabels,
@@ -2416,13 +2644,13 @@ async function snapshotBossSearchFilterState(
         no_colleague_resume_exchange: readToggle('.high_search_checkbox[ka="search_change_exchange_resume"]'),
       },
     };
-  }, bossMoreApplicationFilterLabelsInOrder);
+  }, { moreLabels: bossMoreApplicationFilterLabelsInOrder, customSliderLabels });
   return snapshot;
 }
 
 function isBossSearchFilterBaseline(state: BossSearchFilterState): boolean {
   const isUnlimited = (values: string[]) => values.length === 0 || (values.length === 1 && values[0] === '不限');
-  const moreValues = Object.entries(state.more);
+  const moreValues = Object.values(state.more);
   return isUnlimited(state.inline.education)
     && isUnlimited(state.inline.school_nature)
     && isUnlimited(state.inline.work_years)
@@ -2432,7 +2660,7 @@ function isBossSearchFilterBaseline(state: BossSearchFilterState): boolean {
     && !state.city
     && (state.cityOptions?.length ?? 0) === 0
     && !state.company
-    && moreValues.every(([label, value]) => value === label || value === '薪资区间');
+    && moreValues.every((value) => value === '不限');
 }
 
 export function assertBossSearchFilterStateRestorable(state: BossSearchFilterState): void {
@@ -2499,6 +2727,117 @@ function assertBossEquivalentSearchFilterState(
     || !sameToggles
   ) {
     throw new Error('Boss search filters did not restore to the exact entry state.');
+  }
+}
+
+async function assertBossDirectSearchPostcondition(
+  page: Page,
+  keyword: string,
+  conditions: SearchCondition[],
+  deadline: number,
+): Promise<void> {
+  const state = await snapshotBossSearchFilterState(page, deadline);
+  const expectedKeyword = normalizeText(keyword);
+  if (state.keyword !== expectedKeyword) {
+    throw new Error(`Boss direct search postcondition mismatch for keyword: expected ${expectedKeyword}, observed ${state.keyword || '(empty)'}.`);
+  }
+
+  const frame = await waitForBossSearchFrame(page, deadline);
+  for (const condition of conditions) {
+    if (!isApplicationFilterCondition(condition)) continue;
+
+    if (condition.fieldId === 'job_scope') {
+      const expected = readBossApplicationFilterSingleValue(condition);
+      const active = await frame.locator('.search-job-list-C .ui-dropmenu-list li').evaluateAll((options) => {
+        const option = options.find((element) => /\bactive\b/.test(element.className));
+        if (!option) return undefined;
+        const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+        return {
+          label: normalize(option.textContent),
+          value: normalize(option.getAttribute('data-id')) || normalize(option.getAttribute('data-value')) || normalize(option.getAttribute('ka')),
+        };
+      });
+      if (!active || (expected !== active.label && expected !== active.value)) {
+        throw new Error(`Boss direct search postcondition mismatch for job_scope: expected ${expected}, observed ${active?.label ?? '(empty)'}.`);
+      }
+      continue;
+    }
+
+    if (condition.fieldId === 'city') {
+      const expected = readBossApplicationFilterMultiValues(condition).sort();
+      const actual = (await readBossSelectedCityApplicationFilter(page, frame, deadline)).sort();
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        throw new Error(`Boss direct search postcondition mismatch for city: expected ${expected.join(', ')}, observed ${actual.join(', ') || '(empty)'}.`);
+      }
+      continue;
+    }
+
+    if (condition.fieldId === 'education' || condition.fieldId === 'work_years') {
+      const customRange = readBossCustomSliderRange(condition);
+      const actual = state.inline[condition.fieldId];
+      if (customRange) {
+        const expected = `custom:${customRange.minLabel}-${customRange.maxLabel}`;
+        if (!actual.includes(expected)) {
+          throw new Error(`Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${expected}, observed ${actual.join(', ') || '(empty)'}.`);
+        }
+      } else {
+        const expected = readBossApplicationFilterSingleValue(condition);
+        if (!actual.includes(expected)) {
+          throw new Error(`Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${expected}, observed ${actual.join(', ') || '(empty)'}.`);
+        }
+      }
+      continue;
+    }
+
+    if (condition.fieldId === 'school_nature') {
+      const expected = readBossApplicationFilterMultiValues(condition).sort();
+      const actual = [...state.inline.school_nature].sort();
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        throw new Error(`Boss direct search postcondition mismatch for school_nature: expected ${expected.join(', ')}, observed ${actual.join(', ') || '(empty)'}.`);
+      }
+      continue;
+    }
+
+    if (condition.fieldId === 'age') {
+      const expectedRange = readBossAgeRangeInput(condition);
+      const expectedPreset = buildBossAgePresetLabel(expectedRange);
+      const expected = expectedPreset ?? `custom:${expectedRange.min ?? ''}-${expectedRange.max ?? ''}`;
+      if (!state.inline.age.includes(expected)) {
+        throw new Error(`Boss direct search postcondition mismatch for age: expected ${expected}, observed ${state.inline.age.join(', ') || '(empty)'}.`);
+      }
+      continue;
+    }
+
+    if (condition.fieldId === 'filter_recent_viewed' || condition.fieldId === 'no_colleague_resume_exchange') {
+      const expected = readBossApplicationFilterToggleValue(condition);
+      if (state.toggles[condition.fieldId] !== expected) {
+        throw new Error(`Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${String(expected)}, observed ${String(state.toggles[condition.fieldId])}.`);
+      }
+      continue;
+    }
+
+    if (condition.fieldId === 'company') {
+      const expected = readBossTextApplicationFilterValues(condition).join(' ');
+      if (state.company !== expected) {
+        throw new Error(`Boss direct search postcondition mismatch for company: expected ${expected}, observed ${state.company || '(empty)'}.`);
+      }
+      continue;
+    }
+
+    const label = bossMoreApplicationFilterLabelByFieldId[condition.fieldId];
+    if (label) {
+      const expected = readBossApplicationFilterSingleValue(condition);
+      if (state.more[label] !== expected) {
+        throw new Error(`Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${expected}, observed ${state.more[label] ?? '(unselected)'}.`);
+      }
+    }
+  }
+
+  const candidatePositionRequested = conditions.some((condition) => (
+    isApplicationFilterCondition(condition) && condition.fieldId === 'candidate_position_requirement'
+  ));
+  if (!candidatePositionRequested && state.more['牛人职位要求'] !== undefined) {
+    throw new Error(`Boss direct search postcondition mismatch for candidate_position_requirement: expected unselected, observed ${state.more['牛人职位要求']}.`);
   }
 }
 

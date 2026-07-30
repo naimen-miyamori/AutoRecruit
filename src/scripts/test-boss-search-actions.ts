@@ -8,6 +8,7 @@ import {
   assertBossSearchFilterStateRestorable,
   discoverBossSearchFilters,
   extractBossCandidateList,
+  openBossDirectSearch,
   openBossResumeDetail,
   resetBossSearchFilters,
   snapshotBossSearchFilterState,
@@ -99,6 +100,31 @@ describe('Boss normal-search actions', () => {
       assert.equal(catalog.filters.find((item) => item.key === 'boss-job-status')?.options?.length, 3);
       assert.equal(catalog.filters.find((item) => item.key === 'boss-city')?.options, undefined);
       assert.equal(catalog.filters.find((item) => item.key === 'boss-major')?.options, undefined);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('publishes semantic custom-slider boundaries instead of Boss internal indexes', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody(`<div class="degree-ui"><span class="degree-item active">不限</span><span class="degree-select-custom-label">自定义</span><div class="degree-select-custom-slider"><div class="ui-slider"><input type="hidden" value="1,7"></div></div></div>
+        <div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span><span class="custom">自定义</span><div class="ui-slider"><input type="hidden" value="1,12"></div></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>`),
+    });
+    try {
+      const catalog = await discoverBossSearchFilters(page, { keyword: '', deadline: Date.now() + 10_000 });
+      const education = catalog.filters.find((filter) => filter.key === 'boss-education');
+      const workYears = catalog.filters.find((filter) => filter.key === 'boss-work-years');
+      const educationOptions = education?.options?.find((option) => option.label === '自定义')?.inputSpec?.fields[0]?.options;
+      const workYearsOptions = workYears?.options?.find((option) => option.label === '自定义')?.inputSpec?.fields[0]?.options;
+      assert.deepEqual(educationOptions, ['中专/中技', '高中', '大专', '本科', '硕士', '博士']);
+      assert.equal(workYearsOptions?.at(-1), '10年以上');
+      assert.equal(workYearsOptions?.includes('12'), false);
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
@@ -211,12 +237,12 @@ describe('Boss normal-search actions', () => {
     const { browser, page } = await createSearchFixture({
       body: searchBody(`<span class="reset-btn" ka="search_reset_search_params">清空筛选</span>
         <div class="degree-ui"><span class="degree-item active">不限</span></div><div class="school-ui"><span class="degree-item active">不限</span></div>
-        <div class="experience-select"><span class="exp-item active">不限</span><span class="custom">自定义</span><div class="ui-slider" style="position:relative;width:600px;height:20px"><input type="hidden" value="1,7"><div class="ui-slider-button-wrap" style="position:absolute;left:0;width:12px;height:20px"></div><div class="ui-slider-button-wrap" style="position:absolute;left:588px;width:12px;height:20px"></div></div></div>
+        <div class="experience-select"><span class="exp-item active">不限</span><span class="custom">自定义</span><div class="ui-slider" style="position:relative;width:600px;height:20px"><input type="hidden" value="1,12"><div class="ui-slider-button-wrap" style="position:absolute;left:0;width:12px;height:20px"></div><div class="ui-slider-button-wrap" style="position:absolute;left:588px;width:12px;height:20px"></div></div></div>
         <div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
         <script>
           const slider = document.querySelector('.experience-select .ui-slider'); const input = slider.querySelector('input'); const handles = [...slider.querySelectorAll('.ui-slider-button-wrap')]; let activeHandle = -1;
           handles.forEach((handle, index) => handle.addEventListener('mousedown', () => { activeHandle = index; }));
-          document.addEventListener('mousemove', (event) => { if (activeHandle < 0) return; const rect = slider.getBoundingClientRect(); const value = Math.max(1, Math.min(7, Math.floor(((event.clientX - rect.left) / rect.width) * 6) + 1)); const values = input.value.split(',').map(Number); if (activeHandle === 0) values[0] = Math.min(value, values[1]); else values[1] = Math.max(value, values[0]); input.value = values.join(','); });
+          document.addEventListener('mousemove', (event) => { if (activeHandle < 0) return; const rect = slider.getBoundingClientRect(); const value = Math.max(1, Math.min(12, Math.floor(((event.clientX - rect.left) / rect.width) * 11) + 1)); const values = input.value.split(',').map(Number); if (activeHandle === 0) values[0] = Math.min(value, values[1]); else values[1] = Math.max(value, values[0]); input.value = values.join(','); });
           document.addEventListener('mouseup', () => { activeHandle = -1; });
         </script>`),
     });
@@ -229,6 +255,123 @@ describe('Boss normal-search actions', () => {
       const frame = page.frame({ name: 'searchFrame' });
       assert.ok(frame);
       assert.equal(await frame.locator('.experience-select input[type="hidden"]').inputValue(), '2,5');
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('maps semantic education and work-years boundaries to the Boss slider values and visible ranges', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody(`<span class="reset-btn" ka="search_reset_search_params">清空筛选</span>
+        <div class="degree-ui"><span class="degree-item active">不限</span><span class="degree-select-custom-label">自定义</span><div class="degree-select-custom-slider"><div class="ui-slider" style="position:relative;width:600px;height:20px"><input type="hidden" value="1,7"><div class="ui-slider-button-wrap" style="position:absolute;left:0;width:12px;height:20px"></div><div class="ui-slider-button-wrap" style="position:absolute;left:588px;width:12px;height:20px"></div></div></div><div class="degree-select-custom-content"></div></div>
+        <div class="school-ui"><span class="degree-item active">不限</span></div>
+        <div class="experience-select"><span class="exp-item active">不限</span><span class="custom">自定义</span><div class="ui-slider" style="position:relative;width:600px;height:20px"><input type="hidden" value="1,12"><div class="ui-slider-button-wrap" style="position:absolute;left:0;width:12px;height:20px"></div><div class="ui-slider-button-wrap" style="position:absolute;left:588px;width:12px;height:20px"></div></div><div class="experience-select-custom-content"></div></div>
+        <div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
+        <script>
+          function wireSlider(rootSelector, maximum, labels, outputSelector) {
+            const root = document.querySelector(rootSelector); const slider = root.querySelector('.ui-slider'); const input = slider.querySelector('input'); const handles = [...slider.querySelectorAll('.ui-slider-button-wrap')]; let activeHandle = -1;
+            const render = () => { const values = input.value.split(',').map(Number); root.querySelector(outputSelector).textContent = labels[values[0]] + '-' + labels[values[1]]; };
+            handles.forEach((handle, index) => handle.addEventListener('mousedown', () => { activeHandle = index; }));
+            document.addEventListener('mousemove', (event) => { if (activeHandle < 0) return; const rect = slider.getBoundingClientRect(); const value = Math.max(1, Math.min(maximum, Math.floor(((event.clientX - rect.left) / rect.width) * (maximum - 1)) + 1)); const values = input.value.split(',').map(Number); if (activeHandle === 0) values[0] = Math.min(value, values[1]); else values[1] = Math.max(value, values[0]); input.value = values.join(','); render(); });
+            document.addEventListener('mouseup', () => { activeHandle = -1; });
+          }
+          wireSlider('.degree-ui', 7, ['', '不限', '初中及以下', '高中', '大专', '本科', '硕士', '博士'], '.degree-select-custom-content');
+          wireSlider('.experience-select', 12, ['', '在校/应届', '1年', '2年', '3年', '4年', '5年', '6年', '7年', '8年', '9年', '10年', '10年以上'], '.experience-select-custom-content');
+        </script>`),
+    });
+    try {
+      const deadline = Date.now() + 10_000;
+      const education = await applyBossSearchCondition(page, {
+        kind: 'applicationFilter', fieldId: 'education', label: '学历要求', fieldKind: 'singleSelect',
+        value: { label: '自定义', input: { min: '大专', max: '博士' } },
+      }, deadline);
+      const experience = await applyBossSearchCondition(page, {
+        kind: 'applicationFilter', fieldId: 'work_years', label: '经验要求', fieldKind: 'singleSelect',
+        value: { label: '自定义', input: { min: '10年以上', max: '10年以上' } },
+      }, deadline);
+      assert.equal(education.status, 'applied', education.message);
+      assert.equal(experience.status, 'applied', experience.message);
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.locator('.degree-ui input[type="hidden"]').inputValue(), '4,7');
+      assert.equal(await frame.locator('.degree-select-custom-content').innerText(), '大专-博士');
+      assert.equal(await frame.locator('.experience-select input[type="hidden"]').inputValue(), '12,12');
+      assert.equal(await frame.locator('.experience-select-custom-content').innerText(), '10年以上-10年以上');
+      const state = await snapshotBossSearchFilterState(page, deadline);
+      assert.deepEqual(state.inline.education, ['custom:大专-博士']);
+      assert.deepEqual(state.inline.work_years, ['custom:10年以上-10年以上']);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails a custom slider when its visible range disagrees with the requested semantic boundary', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody(`<div class="degree-ui"><span class="degree-item active">不限</span><span class="degree-select-custom-label">自定义</span><div class="degree-select-custom-slider"><div class="ui-slider" style="position:relative;width:600px;height:20px"><input type="hidden" value="1,7"><div class="ui-slider-button-wrap" style="position:absolute;left:0;width:12px;height:20px"></div><div class="ui-slider-button-wrap" style="position:absolute;left:588px;width:12px;height:20px"></div></div></div><div class="degree-select-custom-content">高中-博士</div></div>
+        <div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
+        <script>
+          const slider = document.querySelector('.degree-ui .ui-slider'); const input = slider.querySelector('input'); const handles = [...slider.querySelectorAll('.ui-slider-button-wrap')]; let activeHandle = -1;
+          handles.forEach((handle, index) => handle.addEventListener('mousedown', () => { activeHandle = index; }));
+          document.addEventListener('mousemove', (event) => { if (activeHandle < 0) return; const rect = slider.getBoundingClientRect(); const value = Math.max(1, Math.min(7, Math.floor(((event.clientX - rect.left) / rect.width) * 6) + 1)); const values = input.value.split(',').map(Number); if (activeHandle === 0) values[0] = Math.min(value, values[1]); else values[1] = Math.max(value, values[0]); input.value = values.join(','); });
+          document.addEventListener('mouseup', () => { activeHandle = -1; });
+        </script>`),
+    });
+    try {
+      const result = await applyBossSearchCondition(page, {
+        kind: 'applicationFilter', fieldId: 'education', label: '学历要求', fieldKind: 'singleSelect',
+        value: { label: '自定义', input: { min: '大专', max: '博士' } },
+      }, Date.now() + 10_000);
+      assert.equal(result.status, 'failed');
+      assert.match(result.message ?? '', /visible value did not match 大专-博士/);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('keeps a semantic custom range in the final direct-search postcondition', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody(`<span class="reset-btn" ka="search_reset_search_params">清空筛选</span>
+        <div class="city-wrap"><div class="city" onclick="document.querySelector('.city-box').style.display='block'">城市</div><div class="city-box" style="display:none"><ul class="dropdown-province"><li data-value="guangdong" onclick="toggleCity(this)"><div class="city-checkbox status0"></div>广东</li><li data-value="zhaoqing" onclick="toggleCity(this)"><div class="city-checkbox status0"></div>肇庆</li></ul><button>清除</button><button onclick="confirmCity()">确认</button></div></div>
+        <div class="degree-ui"><span class="degree-item active">不限</span><span class="degree-select-custom-label">自定义</span><div class="degree-select-custom-slider"><div class="ui-slider ui-slider-range custom-slider-disabled" style="position:relative;width:600px;height:20px"><input type="hidden" value="1,7"><div class="ui-slider-button-wrap" style="position:absolute;left:0;width:12px;height:20px"></div><div class="ui-slider-button-wrap" style="position:absolute;left:588px;width:12px;height:20px"></div></div></div><div class="degree-select-custom-content"></div></div>
+        <div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
+        <script>
+          function toggleCity(item) { const checkbox = item.querySelector('.city-checkbox'); checkbox.classList.toggle('status0'); checkbox.classList.toggle('status1'); }
+          function confirmCity() { const selected = [...document.querySelectorAll('.dropdown-province > li')].find((item) => item.querySelector('.city-checkbox').classList.contains('status1')); document.querySelector('.city-wrap .city').textContent = selected ? selected.textContent.trim() : '城市'; document.querySelector('.city-box').style.display = 'none'; }
+          document.addEventListener('keydown', (event) => { if (event.key === 'Escape') document.querySelector('.city-box').style.display = 'none'; });
+          const slider = document.querySelector('.degree-ui .ui-slider'); const input = slider.querySelector('input'); const handles = [...slider.querySelectorAll('.ui-slider-button-wrap')]; let activeHandle = -1;
+          handles.forEach((handle, index) => handle.addEventListener('mousedown', () => { activeHandle = index; slider.classList.remove('custom-slider-disabled'); }));
+          document.addEventListener('mousemove', (event) => { if (activeHandle < 0) return; const rect = slider.getBoundingClientRect(); const value = Math.max(1, Math.min(7, Math.floor(((event.clientX - rect.left) / rect.width) * 6) + 1)); const values = input.value.split(',').map(Number); if (activeHandle === 0) values[0] = Math.min(value, values[1]); else values[1] = Math.max(value, values[0]); input.value = values.join(','); document.querySelector('.degree-select-custom-content').textContent = ['', '不限', '中专/中技', '高中', '大专', '本科', '硕士', '博士'][values[0]] + '-' + ['', '不限', '中专/中技', '高中', '大专', '本科', '硕士', '博士'][values[1]]; });
+          document.addEventListener('mouseup', () => { activeHandle = -1; });
+        </script>`),
+    });
+    try {
+      await openBossDirectSearch(page, '测试关键词', [{
+        kind: 'applicationFilter', fieldId: 'city', label: '城市', fieldKind: 'multiSelect', value: ['广东'],
+      }, {
+        kind: 'applicationFilter', fieldId: 'education', label: '学历要求', fieldKind: 'singleSelect',
+        value: { label: '自定义', input: { min: '大专', max: '博士' } },
+      }], { deadline: Date.now() + 10_000 });
+      const state = await snapshotBossSearchFilterState(page, Date.now() + 10_000);
+      assert.deepEqual(state.inline.education, ['custom:大专-博士']);
+      assert.equal(await page.frame({ name: 'searchFrame' })?.locator('.city-box').isVisible(), false);
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
