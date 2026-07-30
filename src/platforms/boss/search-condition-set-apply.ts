@@ -1,9 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import type { BrowserSession } from '../../browser/session.js';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from '../../browser/session.js';
-import { config } from '../../config.js';
 import {
   SearchConditionSetService,
   type ResolvedSearchConditionSet,
@@ -15,6 +11,7 @@ import {
   estimateBossDirectSearchTimeoutMs,
   resetBossSearchFilters,
 } from './actions/search-actions.js';
+import { acquireBossSearchLease } from './search-lease.js';
 
 export type BossRecentViewedPolicy = 'exclude' | 'include' | 'condition-set';
 
@@ -68,14 +65,6 @@ export class BossSearchConditionSetApplyError extends Error {
     this.partialStatePossible = input.partialStatePossible ?? false;
   }
 }
-
-type BossSearchConditionSetApplyLock = {
-  token: string;
-  pid: number;
-  startedAt: string;
-};
-
-const lockFileName = 'search-condition-set-apply.lock';
 
 export const ensureAuthenticatedBrowserSessionRef = { fn: ensureAuthenticatedBrowserSession };
 export const closeBrowserSessionRef = { fn: closeBrowserSession };
@@ -153,79 +142,8 @@ function resolveViewedPolicy(
   return includeViewedCandidates;
 }
 
-function lockPath(): string {
-  return path.join(config.dataDir, 'boss', 'runtime', lockFileName);
-}
-
-function processExists(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
-
-async function readLock(filePath: string): Promise<BossSearchConditionSetApplyLock | undefined> {
-  try {
-    const parsed = JSON.parse(await fs.readFile(filePath, 'utf8')) as Partial<BossSearchConditionSetApplyLock>;
-    return typeof parsed.token === 'string' && typeof parsed.pid === 'number' && typeof parsed.startedAt === 'string'
-      ? { token: parsed.token, pid: parsed.pid, startedAt: parsed.startedAt }
-      : undefined;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    return undefined;
-  }
-}
-
-export async function acquireBossSearchConditionSetApplyLock(filePath = lockPath()): Promise<{
-  lock: BossSearchConditionSetApplyLock;
-  release: () => Promise<void>;
-}> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const lock: BossSearchConditionSetApplyLock = {
-    token: randomUUID(),
-    pid: process.pid,
-    startedAt: new Date().toISOString(),
-  };
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await fs.open(filePath, 'wx');
-      await handle.writeFile(`${JSON.stringify(lock)}\n`, 'utf8');
-      await handle.close();
-      return {
-        lock,
-        release: async () => {
-          const current = await readLock(filePath);
-          if (current?.token === lock.token) {
-            await fs.unlink(filePath).catch((error: NodeJS.ErrnoException) => {
-              if (error.code !== 'ENOENT') throw error;
-            });
-          }
-        },
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const current = await readLock(filePath);
-      if (current && processExists(current.pid)) {
-        throw new BossSearchConditionSetApplyError({
-          phase: 'lock',
-          message: `A Boss search-condition-set apply run is already active (pid ${current.pid}, started ${current.startedAt}).`,
-        });
-      }
-      await fs.unlink(filePath).catch((unlinkError: NodeJS.ErrnoException) => {
-        if (unlinkError.code !== 'ENOENT') throw unlinkError;
-      });
-    }
-  }
-
-  throw new BossSearchConditionSetApplyError({
-    phase: 'lock',
-    message: 'Unable to acquire the Boss search-condition-set apply lock.',
-  });
-}
+/** @deprecated Use acquireBossSearchLease for all Boss search workflows. */
+export const acquireBossSearchConditionSetApplyLock = acquireBossSearchLease;
 
 async function recoverBossSearchBaseline(
   session: BrowserSession,
@@ -289,7 +207,7 @@ export async function applyBossSearchConditionSetWorkflow(
   let phase: BossSearchConditionSetApplyError['phase'] = 'lock';
   try {
     throwIfAborted(input.signal);
-    ({ release: releaseLock } = await acquireBossSearchConditionSetApplyLock(input.lockFilePath));
+    ({ release: releaseLock } = await acquireBossSearchLease(input.lockFilePath));
     phase = 'session';
     throwIfAborted(input.signal);
     session = await ensureAuthenticatedBrowserSessionRef.fn('boss');

@@ -1,7 +1,12 @@
 import crypto from 'node:crypto';
 
 import { config } from '../config.js';
+import type { BossCapturePlanStore } from '../platforms/boss/capture-plan.js';
 import { SearchConditionSetService } from '../search/search-condition-sets.js';
+import {
+  snapshotBossCaptureSettings,
+  type BossCapturePlanResolver,
+} from './boss-capture-snapshot.js';
 import { normalizeScheduleCreate, normalizeScheduleUpdate } from './schedule-normalizers.js';
 import { preflightTaskSearchConditionSets } from './search-condition-set-preflight.js';
 import { resolveNextEligibleStart, getWindowState } from './schedule-time.js';
@@ -9,6 +14,7 @@ import { ScheduleStore } from './schedule-store.js';
 import { normalizeSchedulableTask } from './task-normalizers.js';
 import { TaskQueue, type QueueTaskDefinition } from './task-queue.js';
 import type {
+  ResumeCaptureTaskInput,
   ScheduleDefinition,
   ScheduleRunRecord,
   ScheduleSummary,
@@ -21,6 +27,8 @@ interface TaskSchedulerOptions {
   dataDir?: string;
   now?: () => Date;
   searchConditionSetService?: SearchConditionSetService;
+  bossCapturePlanResolver?: BossCapturePlanResolver;
+  bossCapturePlanStore?: BossCapturePlanStore;
 }
 
 function isTerminal(status: TaskDetail['status']): boolean {
@@ -41,6 +49,8 @@ export class TaskScheduler {
   private readonly dataDir: string;
   private readonly now: () => Date;
   private readonly searchConditionSetService: SearchConditionSetService;
+  private readonly bossCapturePlanResolver?: BossCapturePlanResolver;
+  private readonly bossCapturePlanStore?: BossCapturePlanStore;
   private readonly ready: Promise<void>;
   private serial: Promise<void> = Promise.resolve();
   private timer?: NodeJS.Timeout;
@@ -54,6 +64,8 @@ export class TaskScheduler {
     this.now = options.now ?? (() => new Date());
     this.searchConditionSetService = options.searchConditionSetService
       ?? new SearchConditionSetService({ dataDir: this.dataDir });
+    this.bossCapturePlanResolver = options.bossCapturePlanResolver;
+    this.bossCapturePlanStore = options.bossCapturePlanStore;
     this.ready = this.recover();
     this.unsubscribeTaskListener = this.taskQueue.onTaskTerminal(() => {
       this.requestProcess(0);
@@ -332,7 +344,21 @@ export class TaskScheduler {
     }
     const runId = crypto.randomUUID();
     const normalized = await Promise.all(enabledTasks.map(async (template, index) => {
-      const task = await normalizeSchedulableTask(template.kind, template.input, this.dataDir);
+      const baseTask = await normalizeSchedulableTask(template.kind, template.input, this.dataDir);
+      const task = baseTask.kind === 'resume-capture'
+        ? {
+          kind: baseTask.kind,
+          ...await snapshotBossCaptureSettings({
+            input: baseTask.input as ResumeCaptureTaskInput,
+            argv: baseTask.argv,
+            inputSummary: baseTask.inputSummary,
+          }, {
+            ...(this.bossCapturePlanResolver ? { resolveBossCapturePlan: this.bossCapturePlanResolver } : {}),
+            ...(this.bossCapturePlanStore ? { store: this.bossCapturePlanStore } : {}),
+            searchConditionSets: this.searchConditionSetService,
+          }),
+        }
+        : baseTask;
       await preflightTaskSearchConditionSets(task.input, this.searchConditionSetService);
       return {
         kind: task.kind,

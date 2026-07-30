@@ -264,6 +264,20 @@ describe('Boss job/JD synchronization', () => {
         jobKey: buildBossSyncedJobKey('物业电工', 'job-legacy'),
         platform: 'boss',
         searchKeyword: '物业电工',
+        recipientEmail: 'recruiter@example.com',
+        ccEmails: ['manager@example.com'],
+        searchSettings: {
+          source: 'direct',
+          pageKeyword: '电工',
+          conditions: [],
+          conditionSetRef: {
+            conditionSetId: 'scs-electrician',
+            platform: 'boss',
+            revision: 1,
+          },
+          resolution: { selectedFieldsFingerprint: 'fingerprint' },
+        },
+        bossForwarding: { mode: 'colleague', recipient: '招聘同事' },
         rawText: rawJd,
         normalizedJob,
         createdAt: '2026-01-01T00:00:00.000Z',
@@ -296,6 +310,14 @@ describe('Boss job/JD synchronization', () => {
       assert.equal(run.updated, 1);
       assert.deepEqual(savedRecord?.bossPosition?.normalization, BOSS_PAGE_RULES_NORMALIZATION);
       assert.equal(savedRecord?.bossPosition?.sourceHash, hashBossJd(rawJd));
+      assert.equal(savedRecord?.searchSettings?.pageKeyword, '电工');
+      assert.deepEqual(savedRecord?.searchSettings?.conditionSetRef, {
+        conditionSetId: 'scs-electrician',
+        platform: 'boss',
+        revision: 1,
+      });
+      assert.equal(savedRecord?.bossForwarding?.recipient, '招聘同事');
+      assert.equal(savedRecord?.recipientEmail, 'recruiter@example.com');
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;

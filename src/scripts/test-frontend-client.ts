@@ -85,6 +85,39 @@ async function mockApi(page: Page): Promise<void> {
       body = { tasks: [] };
     } else if (pathname === '/api/dashboard/health') {
       body = dashboardHealth();
+    } else if (pathname === '/api/jobs/boss/boss-job-1') {
+      body = {
+        platform: 'boss',
+        jobKey: 'boss-job-1',
+        searchKeyword: '全铝箱包设计',
+        title: '全铝箱包设计',
+        runCount: 0,
+        candidateCount: 0,
+        scoreCount: 0,
+        artifacts: [],
+        jobRecord: {
+          jobKey: 'boss-job-1',
+          platform: 'boss',
+          searchKeyword: '全铝箱包设计',
+          createdAt: '2026-07-30T00:00:00.000Z',
+          rawText: '职位说明',
+          normalizedJob: { title: '全铝箱包设计', majors: [], languageRequirements: [], responsibilities: [], hardRequirements: [], preferredRequirements: [], regionPreferences: [], industryTags: [] },
+          searchSettings: {
+            source: 'direct',
+            conditions: [],
+            conditionSetRef: { conditionSetId: 'scs-boss-1', platform: 'boss', revision: 1 },
+          },
+        },
+      };
+    } else if (pathname === '/api/ops/search-condition-sets/scs-boss-1') {
+      body = {
+        conditionSet: {
+          conditionSetId: 'scs-boss-1', platform: 'boss', revision: 1, name: '全铝箱包设计筛选', defaultKeyword: '铝',
+          status: 'active', fieldCount: 5, createdAt: '2026-07-30T00:00:00.000Z', updatedAt: '2026-07-30T00:00:00.000Z', applicationFilterInput: {},
+        },
+        revisions: [],
+        compatibility: { status: 'compatible' },
+      };
     } else if (pathname === '/api/jobs') {
       body = { jobs: [] };
     } else if (pathname === '/api/talent-mappings') {
@@ -149,7 +182,7 @@ async function mockApi(page: Page): Promise<void> {
     } else if (pathname === '/api/schedules') {
       body = { schedules: [] };
     } else if (pathname === '/api/boss/positions') {
-      body = { positions: [] };
+      body = { positions: [{ bossJobId: 'boss-job-1', name: '全铝箱包设计', status: 'open', jobKey: 'boss-job-1' }] };
     } else if (pathname === '/api/boss/job-sync/runs') {
       body = { runs: [] };
     } else if (pathname === '/api/boss/chat-reviews') {
@@ -241,7 +274,7 @@ describe('frontend client', () => {
     const includeBoss = page.getByLabel('包含 Boss 直聘·直猎邦 Pro', { exact: true });
     await includeBoss.waitFor({ state: 'visible' });
     await includeBoss.check();
-    await page.getByLabel('关键词', { exact: true }).fill('物业电工');
+    await page.getByLabel('岗位名称', { exact: true }).fill('物业电工');
     await page.getByLabel('JD 文本', { exact: true }).fill('负责物业电气维修');
 
     const submitted = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/resume-capture');
@@ -250,6 +283,26 @@ describe('frontend client', () => {
     assert.equal(payload.platform, 'all');
     assert.equal(payload.includeBoss, true);
     assert.equal(payload.keyword, '物业电工');
+    await page.close();
+  });
+
+  it('keeps the selected Boss job identity separate from its page search keyword', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/run`, { waitUntil: 'networkidle' });
+
+    await page.locator('label').filter({ hasText: /^平台/ }).first().locator('select').selectOption('boss');
+    await page.locator('label').filter({ hasText: 'Boss 已同步岗位' }).locator('select').selectOption('boss-job-1');
+    await page.getByText(/条件集默认搜索词：铝；已保存条件集：scs-boss-1@1/).waitFor({ state: 'visible' });
+    assert.equal(await page.getByLabel('岗位名称', { exact: true }).inputValue(), '全铝箱包设计');
+    await page.getByLabel('Boss 页面搜索词（可选覆盖）', { exact: true }).fill('铝制行李箱');
+
+    const submitted = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/resume-capture');
+    await page.getByRole('button', { name: '提交任务', exact: true }).click();
+    const payload = (await submitted).postDataJSON() as Record<string, unknown>;
+    assert.equal(payload.keyword, '全铝箱包设计');
+    assert.equal(payload.bossJobId, 'boss-job-1');
+    assert.equal(payload.bossSearchKeyword, '铝制行李箱');
     await page.close();
   });
 

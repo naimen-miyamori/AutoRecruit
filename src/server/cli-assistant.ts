@@ -77,6 +77,8 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
   'resume-capture': [
     'platform',
     'keyword',
+    'bossJobId',
+    'bossSearchKeyword',
     'jd',
     'jdFile',
     'includeViewed',
@@ -237,7 +239,8 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
     if (!isPresent(input.keyword)) {
       missing.push('keyword');
     }
-    if (!isPresent(input.jd) && !isPresent(input.jdFile)) {
+    const reusesBossJobSettings = input.platform === 'boss' && isPresent(input.bossJobId);
+    if (!reusesBossJobSettings && !isPresent(input.jd) && !isPresent(input.jdFile)) {
       missing.push('jd 或 jdFile');
     }
   }
@@ -579,6 +582,8 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   const argv = ['--platform', String(input.platform ?? '')].filter(Boolean);
   if (kind === 'resume-capture') {
     pushPreview(argv, '--keyword', input.keyword);
+    pushPreview(argv, '--boss-job-id', input.bossJobId);
+    pushPreview(argv, '--boss-search-keyword', input.bossSearchKeyword);
     pushPreview(argv, '--jd', input.jd);
     pushPreview(argv, '--jd-file', input.jdFile);
   }
@@ -699,7 +704,7 @@ function buildSystemPrompt(): string {
     '允许的 kind 只有：resume-capture、batch、talent-mapping、search-subscription、boss-auto-chat、boss-talent-search、boss-greet、boss-chat-operation、boss-job-sync、login-refresh、rag-ops、rag-answer。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
     'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
-    'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。searchConditionSetRefs 是 {平台:{conditionSetId,platform,revision}}，revision 必须固定。',
+    'resume-capture 字段：platform, keyword, bossJobId, bossSearchKeyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。bossJobId 只用于 platform=boss 或 all 且 includeBoss=true 的普通抓取，必须是精确的已同步职位 ID；bossSearchKeyword 只覆盖 Boss 人才页查询词，不改变岗位身份或其他平台关键词。只要 platform=boss 且提供 bossJobId，就可复用岗位已保存 JD/搜索设置而省略 jd 和 jdFile。searchConditionSetRefs 是 {平台:{conditionSetId,platform,revision}}，revision 必须固定。',
     'batch 字段：platform, jobsFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
     'talent-mapping 字段：platform, talentMappingFile, mappingStage, confirmedDetailOpen, mappingRunId；mappingStage 只能 scan、enrich、all，详情阶段必须 confirmedDetailOpen=true；只允许 51job、liepin、zhilian 或 all，不允许 Boss；不与普通抓取、JD、邮件、转发、订阅或 RAG 参数组合。',
     'Boss 转发允许 platform=boss，或 platform=all 且 includeBoss=true；bossForwardMode 只能是 colleague 或 email，出现时必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',

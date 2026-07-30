@@ -121,6 +121,39 @@ function formatConsoleArgs(args: unknown[]): string {
   }).join(' ').slice(0, 8000);
 }
 
+/**
+ * Keep capture output summaries lightweight while making the distinction
+ * between the persisted job and the Boss talent-page query auditable.  The
+ * CLI owns the exact search-execution contract; the queue only projects its
+ * scalar evidence for task list/detail consumers.
+ */
+function summarizeCaptureSearchExecution(output: TaskOutput): Record<string, unknown> {
+  if (!('searchExecution' in output)) {
+    return {};
+  }
+
+  const execution = output.searchExecution;
+  if (!execution || typeof execution !== 'object' || Array.isArray(execution)) {
+    return {};
+  }
+
+  const value = execution as Record<string, unknown>;
+  const summary: Record<string, unknown> = {};
+  for (const field of [
+    'source',
+    'pageKeyword',
+    'keywordSource',
+    'conditionSetRef',
+    'selectedFieldsFingerprint',
+    'includeViewedCandidates',
+  ]) {
+    if (value[field] !== undefined) {
+      summary[field] = value[field];
+    }
+  }
+  return Object.keys(summary).length > 0 ? { searchExecution: summary } : {};
+}
+
 function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
   if ('storageStatePath' in output) {
     return {
@@ -227,6 +260,7 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
       scoredCandidates: output.scoredCandidates,
       failedCandidates: output.failedCandidates,
       resultPath: output.resultPath,
+      ...summarizeCaptureSearchExecution(output),
     };
   }
 

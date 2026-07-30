@@ -8,6 +8,7 @@ import { handleApiRequest } from '../server/routes.js';
 import { TaskQueue } from '../server/task-queue.js';
 import { TaskScheduler } from '../server/task-scheduler.js';
 import type { SearchConditionSetService } from '../search/search-condition-sets.js';
+import type { BossCapturePlanResolver } from '../server/boss-capture-snapshot.js';
 import { JobReadModel } from '../server/job-read-model.js';
 import { bossReceiptArtifact, bossReviewArtifact, bossSyncArtifact, jobExportArtifact } from '../server/artifact-read-model.js';
 import type { ResumeCaptureTaskInput, TaskDetail } from '../server/types.js';
@@ -87,6 +88,25 @@ function acceptingSearchConditionSetService(): SearchConditionSetService {
   return {
     resolve: async () => undefined,
   } as unknown as SearchConditionSetService;
+}
+
+function passthroughBossCapturePlanResolver(overrides: {
+  pageKeyword?: string;
+  conditionSetRef?: { conditionSetId: string; platform: 'boss'; revision: number };
+} = {}): BossCapturePlanResolver {
+  return async (input) => ({
+    platform: 'boss',
+    jobKey: `stable-${input.bossJobId ?? 'legacy'}`,
+    ...(input.bossJobId ? { bossJobId: input.bossJobId } : {}),
+    expectedJobName: input.jobName,
+    search: {
+      source: overrides.conditionSetRef ? 'direct' : input.searchSource ?? 'saved',
+      pageKeyword: overrides.pageKeyword ?? input.bossSearchKeyword ?? input.jobName,
+      keywordSource: overrides.pageKeyword || input.bossSearchKeyword ? 'run-override' : 'legacy-job-keyword',
+      conditions: [],
+      ...(overrides.conditionSetRef ? { conditionSetRef: overrides.conditionSetRef } : {}),
+    },
+  });
 }
 
 describe('console API routes', () => {
@@ -345,6 +365,124 @@ describe('console API routes', () => {
     assert.equal(completed.outputSummary?.jobKey, '优衣库-店长');
   });
 
+  it('keeps the Boss job identity separate from the talent-page query in queued capture tasks', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return {
+          ...buildRunSummary({ jobKey: '全铝箱包设计-boss-position-1' }),
+          searchExecution: {
+            source: 'direct',
+            pageKeyword: '铝',
+            keywordSource: 'condition-set-default',
+            conditionSetRef: {
+              conditionSetId: 'scs-aluminum-luggage',
+              platform: 'boss',
+              revision: 1,
+            },
+          },
+        } as MainRunSummary;
+      },
+    });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver({
+        pageKeyword: '铝',
+        conditionSetRef: {
+          conditionSetId: 'scs-aluminum-luggage',
+          platform: 'boss',
+          revision: 1,
+        },
+      }),
+      body: {
+        platform: 'boss',
+        keyword: '全铝箱包设计',
+        bossJobId: 'boss-position-1',
+        bossSearchKeyword: '铝',
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    assert.equal((queued.input as ResumeCaptureTaskInput).bossJobId, 'boss-position-1');
+    assert.equal((queued.input as ResumeCaptureTaskInput).bossSearchKeyword, '铝');
+    assert.deepStrictEqual((queued.input as ResumeCaptureTaskInput).bossSearchConditionSetRef, {
+      conditionSetId: 'scs-aluminum-luggage',
+      platform: 'boss',
+      revision: 1,
+    });
+    assert.equal(queued.inputSummary.bossJobId, 'boss-position-1');
+    assert.equal(queued.inputSummary.bossSearchKeyword, '铝');
+    assert.equal(queued.inputSummary.bossJobKey, 'stable-boss-position-1');
+    assert.deepStrictEqual(queued.inputSummary.bossConditionSetRef, {
+      conditionSetId: 'scs-aluminum-luggage',
+      platform: 'boss',
+      revision: 1,
+    });
+
+    const completed = await waitForTask(queue, queued.taskId);
+    assert.deepStrictEqual(calls[0], [
+      '--platform', 'boss',
+      '--keyword', '全铝箱包设计',
+      '--boss-job-id', 'boss-position-1',
+      '--boss-search-keyword', '铝',
+      '--boss-search-condition-set', 'scs-aluminum-luggage@1',
+    ]);
+    assert.deepStrictEqual(completed.outputSummary?.searchExecution, {
+      source: 'direct',
+      pageKeyword: '铝',
+      keywordSource: 'condition-set-default',
+      conditionSetRef: {
+        conditionSetId: 'scs-aluminum-luggage',
+        platform: 'boss',
+        revision: 1,
+      },
+    });
+  });
+
+  it('limits Boss capture identity fields to the normal Boss stage and rejects client resolution payloads', async () => {
+    const outsideBoss = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      body: {
+        platform: '51job',
+        keyword: '全铝箱包设计',
+        bossJobId: 'boss-position-1',
+      },
+    });
+    const allWithoutBoss = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      body: {
+        platform: 'all',
+        keyword: '全铝箱包设计',
+        bossSearchKeyword: '铝',
+      },
+    });
+    const forgedResolution = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      body: {
+        platform: 'boss',
+        keyword: '全铝箱包设计',
+        bossCapturePlan: { jobKey: 'forged' },
+      },
+    });
+
+    assert.equal(outsideBoss.statusCode, 400);
+    assert.match(JSON.stringify(outsideBoss.body), /only be used with platform boss/);
+    assert.equal(allWithoutBoss.statusCode, 400);
+    assert.match(JSON.stringify(allWithoutBoss.body), /includeBoss=true/);
+    assert.equal(forgedResolution.statusCode, 400);
+    assert.match(JSON.stringify(forgedResolution.body), /cannot include bossCapturePlan/);
+  });
+
   it('pins reusable search-condition-set revisions in capture task input without retaining filter paths', async () => {
     const taskDir = await makeTempDir();
     const calls: string[][] = [];
@@ -360,6 +498,7 @@ describe('console API routes', () => {
       pathname: '/api/tasks/resume-capture',
       taskQueue: queue,
       searchConditionSetService: acceptingSearchConditionSetService(),
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver(),
       body: {
         platform: 'all',
         includeBoss: true,
@@ -489,6 +628,7 @@ describe('console API routes', () => {
       method: 'POST',
       pathname: '/api/tasks/resume-capture',
       taskQueue: queue,
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver(),
       body: {
         platform: 'boss',
         keyword: '物业电工',
@@ -533,6 +673,7 @@ describe('console API routes', () => {
       method: 'POST',
       pathname: '/api/tasks/resume-capture',
       taskQueue: queue,
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver(),
       body: {
         platform: 'all',
         includeBoss: true,
@@ -1228,6 +1369,7 @@ describe('console API routes', () => {
       method: 'POST',
       pathname: '/api/assistant/confirm',
       taskQueue: queue,
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver(),
       body: {
         draft: {
           kind: 'resume-capture',
@@ -1255,6 +1397,68 @@ describe('console API routes', () => {
       '物业电工',
       '--jd-file',
       './fixtures/jd.txt',
+    ]);
+  });
+
+  it('confirms a Boss saved-settings draft by exact job ID without asking for a duplicate JD', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary({ jobKey: '全铝箱包设计-boss-position-1' });
+      },
+    });
+
+    const validated = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/validate',
+      body: {
+        draft: {
+          kind: 'resume-capture',
+          input: {
+            platform: 'boss',
+            keyword: '全铝箱包设计',
+            bossJobId: 'boss-position-1',
+            bossSearchKeyword: '铝',
+            bossCapturePlan: { jobKey: 'client-forged' },
+          },
+          missingFields: [],
+          warnings: [],
+          argvPreview: [],
+        },
+      },
+    });
+    assert.equal(validated.statusCode, 200);
+    const draft = (validated.body as { draft?: { input?: Record<string, unknown>; missingFields?: string[]; argvPreview?: string[]; warnings?: string[] } }).draft;
+    assert.deepStrictEqual(draft?.missingFields, []);
+    assert.equal(draft?.input?.bossCapturePlan, undefined);
+    assert.ok(draft?.warnings?.some((warning) => warning.includes('bossCapturePlan')));
+    assert.deepStrictEqual(draft?.argvPreview, [
+      '--platform', 'boss',
+      '--keyword', '全铝箱包设计',
+      '--boss-job-id', 'boss-position-1',
+      '--boss-search-keyword', '铝',
+    ]);
+
+    const confirmed = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/confirm',
+      taskQueue: queue,
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver({ pageKeyword: '铝' }),
+      body: { draft },
+    });
+    assert.equal(confirmed.statusCode, 200);
+    const task = (confirmed.body as { task: TaskDetail }).task;
+    assert.equal((task.input as ResumeCaptureTaskInput).bossJobId, 'boss-position-1');
+    assert.equal((task.input as ResumeCaptureTaskInput).bossSearchKeyword, '铝');
+    await waitForTask(queue, task.taskId);
+    assert.deepStrictEqual(calls[0], [
+      '--platform', 'boss',
+      '--keyword', '全铝箱包设计',
+      '--boss-job-id', 'boss-position-1',
+      '--boss-search-keyword', '铝',
     ]);
   });
 

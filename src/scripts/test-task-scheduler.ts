@@ -12,6 +12,7 @@ import { getWindowState, resolveNextEligibleStart } from '../server/schedule-tim
 import { TaskScheduler } from '../server/task-scheduler.js';
 import { TaskQueue } from '../server/task-queue.js';
 import type { SearchConditionSetService } from '../search/search-condition-sets.js';
+import type { BossCapturePlanResolver } from '../server/boss-capture-snapshot.js';
 
 const cardOnlyMappingPath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.card-only.example.json', import.meta.url));
 const detailMappingPath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.example.json', import.meta.url));
@@ -50,6 +51,27 @@ function acceptingSearchConditionSetService(): SearchConditionSetService {
   return {
     resolve: async () => undefined,
   } as unknown as SearchConditionSetService;
+}
+
+function savedBossCapturePlanResolver(getRevision: () => number): BossCapturePlanResolver {
+  return async (input) => ({
+    platform: 'boss',
+    jobKey: '全铝箱包设计-boss-position-1',
+    bossJobId: input.bossJobId ?? 'boss-position-1',
+    expectedJobName: input.jobName,
+    search: {
+      source: 'direct',
+      pageKeyword: '铝',
+      keywordSource: 'condition-set-default',
+      conditions: [],
+      conditionSetRef: {
+        conditionSetId: 'scs-aluminum-luggage',
+        platform: 'boss',
+        revision: getRevision(),
+      },
+      selectedFieldsFingerprint: `catalog-${getRevision()}`,
+    },
+  });
 }
 
 function baseSchedule(tasks: unknown[]) {
@@ -239,9 +261,13 @@ describe('TaskScheduler', () => {
   it('stores fixed condition-set revision mappings in schedules without legacy filter paths', async () => {
     const dataDir = await makeTempDir();
     const resolvedReferences: unknown[] = [];
+    const calls: string[][] = [];
     const queue = new TaskQueue({
       taskDir: path.join(dataDir, 'runtime', 'tasks'),
-      runner: async () => output(),
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return output();
+      },
     });
     const scheduler = new TaskScheduler({
       taskQueue: queue,
@@ -262,6 +288,8 @@ describe('TaskScheduler', () => {
           input: {
             platform: 'boss',
             keyword: '全铝箱包设计',
+            bossJobId: 'boss-position-1',
+            bossSearchKeyword: '铝',
             searchSource: 'direct',
             searchConditionSetRefs: {
               boss: { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 4 },
@@ -274,6 +302,8 @@ describe('TaskScheduler', () => {
       assert.deepStrictEqual(schedule.tasks[0]?.input, {
         platform: 'boss',
         keyword: '全铝箱包设计',
+        bossJobId: 'boss-position-1',
+        bossSearchKeyword: '铝',
         searchSource: 'direct',
         searchConditionSetRefs: {
           boss: { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 4 },
@@ -287,6 +317,94 @@ describe('TaskScheduler', () => {
         return runs.find((run) => run.status === 'succeeded');
       }, 'scheduled condition-set round');
       assert.equal(resolvedReferences.length, 2, 'every scheduled round must recheck the same pinned revision');
+      assert.deepStrictEqual(calls, [[
+        '--platform', 'boss',
+        '--keyword', '全铝箱包设计',
+        '--boss-job-id', 'boss-position-1',
+        '--boss-search-keyword', '铝',
+        '--search-source', 'direct',
+        '--search-condition-set', 'scs-aluminum-luggage@4',
+      ]]);
+    } finally {
+      scheduler.close();
+    }
+  });
+
+  it('resolves reusable Boss settings at each scheduled round into a Boss-only immutable snapshot', async () => {
+    const dataDir = await makeTempDir();
+    const calls: string[][] = [];
+    let revision = 1;
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return output();
+      },
+    });
+    const now = new Date('2026-07-20T02:00:00.000Z');
+    const scheduler = new TaskScheduler({
+      taskQueue: queue,
+      dataDir,
+      now: () => now,
+      searchConditionSetService: acceptingSearchConditionSetService(),
+      bossCapturePlanResolver: savedBossCapturePlanResolver(() => revision),
+    });
+
+    try {
+      const schedule = await scheduler.createSchedule({
+        ...baseSchedule([{
+          taskKey: 'saved-boss-settings',
+          name: '复用 Boss 保存搜索设置',
+          kind: 'resume-capture',
+          input: {
+            platform: 'boss',
+            keyword: '全铝箱包设计',
+            bossJobId: 'boss-position-1',
+          },
+        }]),
+        enabled: false,
+      });
+      assert.deepStrictEqual(schedule.tasks[0]?.input, {
+        platform: 'boss',
+        keyword: '全铝箱包设计',
+        bossJobId: 'boss-position-1',
+      }, 'the mutable saved setting is not frozen at schedule creation');
+
+      await scheduler.startSchedule(schedule.scheduleId);
+      const firstRun = await waitFor(async () => {
+        const runs = await scheduler.listRuns(schedule.scheduleId);
+        return runs.find((run) => run.status === 'succeeded');
+      }, 'first saved-settings round');
+      const firstTask = await queue.getTask(firstRun.taskIds[0]!);
+      assert.deepStrictEqual((firstTask?.input as { bossSearchConditionSetRef?: unknown }).bossSearchConditionSetRef, {
+        conditionSetId: 'scs-aluminum-luggage',
+        platform: 'boss',
+        revision: 1,
+      });
+
+      revision = 2;
+      await scheduler.runScheduleNow(schedule.scheduleId);
+      await waitFor(async () => {
+        const runs = await scheduler.listRuns(schedule.scheduleId);
+        return runs.find((run) => run.status === 'succeeded' && run.runId !== firstRun.runId);
+      }, 'second saved-settings round');
+
+      assert.deepStrictEqual(calls, [
+        [
+          '--platform', 'boss',
+          '--keyword', '全铝箱包设计',
+          '--boss-job-id', 'boss-position-1',
+          '--boss-search-keyword', '铝',
+          '--boss-search-condition-set', 'scs-aluminum-luggage@1',
+        ],
+        [
+          '--platform', 'boss',
+          '--keyword', '全铝箱包设计',
+          '--boss-job-id', 'boss-position-1',
+          '--boss-search-keyword', '铝',
+          '--boss-search-condition-set', 'scs-aluminum-luggage@2',
+        ],
+      ]);
     } finally {
       scheduler.close();
     }

@@ -68,6 +68,22 @@ export interface ResumeCaptureTaskInput {
   platform: ConsolePlatformSelection;
   includeBoss?: boolean;
   keyword: string;
+  /**
+   * Stable Boss position identity for normal capture.  It is deliberately
+   * separate from `keyword`, which remains the expected job name and the
+   * legacy cross-platform input.
+   */
+  bossJobId?: string;
+  /**
+   * Boss talent-page query text.  This never changes the persisted job key or
+   * the job selected by `bossJobId`.
+   */
+  bossSearchKeyword?: string;
+  /**
+   * Server-resolved fixed Boss condition-set revision. This is an internal
+   * queue/scheduler snapshot, never an accepted client request field.
+   */
+  bossSearchConditionSetRef?: SearchConditionSetReference;
   jd?: string;
   jdFile?: string;
   includeViewed?: boolean;

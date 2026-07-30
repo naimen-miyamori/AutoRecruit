@@ -10,6 +10,8 @@ import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listCapturePlatforms, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
 import { forwardBossResume } from './platforms/boss-adapter.js';
+import { resolveBossCapturePlan } from './platforms/boss/capture-plan.js';
+import { acquireBossSearchLease } from './platforms/boss/search-lease.js';
 import { executeBossChatOperation } from './platforms/boss-operations.js';
 import { syncBossPositions } from './platforms/boss-jobs.js';
 import { greetBossTalentCandidate, runBossTalentSearch } from './platforms/boss-talent.js';
@@ -76,6 +78,12 @@ type SearchSource = JobSearchSource;
 
 interface RunnableJobInput extends ReportDeliveryOptions {
   searchKeyword: string;
+  /** Stable Boss position identity for the Boss stage only. */
+  bossJobId?: string;
+  /** Explicit Boss page-query override; never affects core-platform searches. */
+  bossSearchKeyword?: string;
+  /** Fixed Boss-only condition-set override; it never changes core stages. */
+  bossSearchConditionSetRef?: SearchConditionSetReference;
   jobDescriptionText?: string;
   jobDescriptionFilePath?: string;
   includeViewedCandidates: boolean;
@@ -184,6 +192,9 @@ type CliInput = SingleJobCliInput
 interface SinglePlatformCliInput extends ReportDeliveryOptions {
   platform: SupportedPlatform;
   searchKeyword: string;
+  bossJobId?: string;
+  bossSearchKeyword?: string;
+  bossSearchConditionSetRef?: SearchConditionSetReference;
   jobDescriptionText?: string;
   jobDescriptionFilePath?: string;
   includeViewedCandidates: boolean;
@@ -198,6 +209,10 @@ interface SinglePlatformCliInput extends ReportDeliveryOptions {
 
 export interface MainRunSummary {
   jobKey: string;
+  /** Present for Boss capture when resolved from a stable Boss position. */
+  bossJobId?: string;
+  /** Lightweight audit of the effective Boss search. */
+  searchExecution?: RunResult['searchExecution'];
   totalCandidates: number;
   newCandidates: number;
   scoredCandidates: number;
@@ -427,6 +442,25 @@ function parseSearchConditionSetReferences(
   return references;
 }
 
+function parseBossSearchConditionSetReference(value: string | undefined): SearchConditionSetReference | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim();
+  const atIndex = normalized.lastIndexOf('@');
+  const conditionSetId = atIndex > 0 ? normalized.slice(0, atIndex) : '';
+  const revisionValue = atIndex > 0 ? normalized.slice(atIndex + 1) : '';
+  if (!/^scs-[a-z0-9](?:[a-z0-9-]{2,126})$/.test(conditionSetId) || conditionSetId.includes('--')) {
+    throw new Error('--boss-search-condition-set condition-set ID is invalid');
+  }
+  if (!/^[1-9]\d*$/.test(revisionValue)) {
+    throw new Error('--boss-search-condition-set revision must be a positive integer');
+  }
+  return {
+    conditionSetId,
+    platform: 'boss',
+    revision: Number(revisionValue),
+  };
+}
+
 function parseTalentMappingStage(value: string | undefined): TalentMappingStage | undefined {
   if (value === undefined) {
     return undefined;
@@ -569,6 +603,8 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   const jd = parseOptionalString(item.jd, 'jd', itemIndex);
   const jdFile = parseOptionalString(item.jdFile, 'jdFile', itemIndex);
   const email = parseOptionalString(item.email, 'email', itemIndex);
+  const bossJobId = parseOptionalString(item.bossJobId, 'bossJobId', itemIndex)?.trim();
+  const bossSearchKeyword = parseOptionalString(item.bossSearchKeyword, 'bossSearchKeyword', itemIndex)?.trim();
   const itemSearchSourceValue = parseOptionalString(item.searchSource, 'searchSource', itemIndex);
   const itemApplicationFilterInputFile = parseOptionalString(item.applicationFilterInputFile, 'applicationFilterInputFile', itemIndex);
   const itemSearchConditionSetRefs = parseBatchSearchConditionSetReferences(item.searchConditionSets, itemIndex, input);
@@ -591,6 +627,16 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: keyword must be a non-empty string`);
   }
 
+  if (bossJobId !== undefined && !bossJobId) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossJobId must be a non-empty string`);
+  }
+  if (bossSearchKeyword !== undefined && !bossSearchKeyword) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossSearchKeyword must be a non-empty string`);
+  }
+  if ((bossJobId || bossSearchKeyword) && !listSelectedCapturePlatforms(input.platform, input.includeBoss).includes('boss')) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossJobId and bossSearchKeyword require a selected Boss capture stage`);
+  }
+
   if (jd !== undefined && jdFile !== undefined) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: jd and jdFile are mutually exclusive`);
   }
@@ -609,6 +655,8 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   return {
     sourceIndex: itemIndex,
     searchKeyword: keyword,
+    bossJobId,
+    bossSearchKeyword,
     recipientEmail: email ?? input.recipientEmail,
     ccEmails: item.cc === undefined ? input.ccEmails : itemCcEmails,
     jobDescriptionText: jd,
@@ -655,6 +703,18 @@ function listSelectedCapturePlatforms(platform: CliPlatformSelection, includeBos
   return platform === 'all' ? listCapturePlatforms(includeBoss) : [platform];
 }
 
+function assertBossCaptureArgumentsAllowed(input: {
+  platform: CliPlatformSelection;
+  includeBoss: boolean;
+  bossJobId?: string;
+  bossSearchKeyword?: string;
+  bossSearchConditionSetRef?: SearchConditionSetReference;
+}): void {
+  if (!input.bossJobId && !input.bossSearchKeyword && !input.bossSearchConditionSetRef) return;
+  if (input.platform === 'boss' || (input.platform === 'all' && input.includeBoss)) return;
+  throw new Error('--boss-job-id, --boss-search-keyword, and --boss-search-condition-set require --platform boss or --platform all --include-boss true');
+}
+
 function parseArgs(argv: readonly string[]): CliInput {
   const values = new Map<string, string>();
   const flagPresence = new Set<string>();
@@ -699,6 +759,9 @@ function parseArgs(argv: readonly string[]): CliInput {
   const liepinForwardContact = values.get('liepin-forward-contact')?.trim();
   const bossForwardMode = parseBossForwardMode(values.get('boss-forward-mode')?.trim());
   const bossForwardRecipient = values.get('boss-forward-recipient')?.trim();
+  const bossJobId = values.get('boss-job-id')?.trim();
+  const bossSearchKeyword = values.get('boss-search-keyword')?.trim();
+  const bossSearchConditionSetRef = parseBossSearchConditionSetReference(values.get('boss-search-condition-set'));
   const bossAutoChat = flagPresence.has('boss-auto-chat')
     ? parseOptionalBoolean(values.get('boss-auto-chat'), '--boss-auto-chat')
     : false;
@@ -772,6 +835,14 @@ function parseArgs(argv: readonly string[]): CliInput {
 
   if (flagPresence.has('boss-forward-recipient') && !bossForwardRecipient) {
     throw new Error('--boss-forward-recipient must be a non-empty string');
+  }
+
+  if (flagPresence.has('boss-job-id') && !bossJobId) {
+    throw new Error('--boss-job-id must be a non-empty string');
+  }
+
+  if (flagPresence.has('boss-search-keyword') && !bossSearchKeyword) {
+    throw new Error('--boss-search-keyword must be a non-empty string');
   }
 
   if (flagPresence.has('include-boss') && platform !== 'all') {
@@ -977,6 +1048,9 @@ function parseArgs(argv: readonly string[]): CliInput {
       'boss-greet-candidate-id',
       'boss-chat-operation',
       'boss-job-sync',
+      'boss-job-id',
+      'boss-search-keyword',
+      'boss-search-condition-set',
     ].filter((flag) => flagPresence.has(flag));
     if (incompatibleFlags.length > 0) {
       throw new Error(`--boss-auto-chat cannot be combined with ${incompatibleFlags.map((flag) => `--${flag}`).join(', ')}`);
@@ -1017,8 +1091,8 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error('--jd-question must be a non-empty string');
     }
 
-    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || flagPresence.has('search-condition-set') || saveSearchSubscription || searchSubscriptionName) {
-      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, --application-filter-input-file, --search-condition-set, --save-search-subscription, or --search-subscription-name');
+    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || flagPresence.has('search-condition-set') || saveSearchSubscription || searchSubscriptionName) {
+      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --search-source, --application-filter-input-file, --search-condition-set, --save-search-subscription, or --search-subscription-name');
     }
 
     if (jobDescriptionText && jobDescriptionFilePath) {
@@ -1040,8 +1114,8 @@ function parseArgs(argv: readonly string[]): CliInput {
   }
 
   if (searchSubscriptionFilePath) {
-    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
-      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, or --application-filter-input-file');
+    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
+      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --search-source, or --application-filter-input-file');
     }
 
     const searchConditionSetRefs = parseSearchConditionSetReferences(values.get('search-condition-set'), {
@@ -1068,6 +1142,9 @@ function parseArgs(argv: readonly string[]): CliInput {
   if (jobsFilePath) {
     if (flagPresence.has('keyword') || flagPresence.has('jd') || flagPresence.has('jd-file')) {
       throw new Error('--jobs-file cannot be combined with --keyword, --jd, or --jd-file');
+    }
+    if (flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set')) {
+      throw new Error('--boss-job-id, --boss-search-keyword, and --boss-search-condition-set must be specified per jobs-file item as bossJobId, bossSearchKeyword, and searchConditionSets.boss');
     }
 
     const searchConditionSetRefs = parseSearchConditionSetReferences(values.get('search-condition-set'), {
@@ -1119,17 +1196,33 @@ function parseArgs(argv: readonly string[]): CliInput {
   if (applicationFilterInputFilePath && searchConditionSetRefs) {
     throw new Error('--application-filter-input-file and --search-condition-set are mutually exclusive');
   }
+  if (applicationFilterInputFilePath && bossSearchConditionSetRef) {
+    throw new Error('--application-filter-input-file and --boss-search-condition-set are mutually exclusive');
+  }
   if (applicationFilterInputFilePath && searchSource !== 'direct') {
     throw new Error('--application-filter-input-file requires --search-source direct');
   }
   if (searchConditionSetRefs && searchSource !== 'direct') {
     throw new Error('--search-condition-set requires --search-source direct');
   }
+  if (bossSearchConditionSetRef && searchConditionSetRefs?.boss) {
+    throw new Error('--boss-search-condition-set cannot be combined with a Boss entry in --search-condition-set');
+  }
+  assertBossCaptureArgumentsAllowed({
+    platform,
+    includeBoss,
+    bossJobId,
+    bossSearchKeyword,
+    bossSearchConditionSetRef,
+  });
 
   return {
     mode: 'single',
     platform,
     searchKeyword,
+    bossJobId,
+    bossSearchKeyword,
+    bossSearchConditionSetRef,
     recipientEmail,
     ccEmails,
     jobDescriptionText,
@@ -1150,6 +1243,11 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
   return {
     platform,
     searchKeyword: input.searchKeyword,
+    ...(platform === 'boss' && input.bossJobId ? { bossJobId: input.bossJobId } : {}),
+    ...(platform === 'boss' && input.bossSearchKeyword ? { bossSearchKeyword: input.bossSearchKeyword } : {}),
+    ...(platform === 'boss' && input.bossSearchConditionSetRef
+      ? { bossSearchConditionSetRef: input.bossSearchConditionSetRef }
+      : {}),
     recipientEmail: input.recipientEmail,
     ccEmails: input.ccEmails,
     jobDescriptionText: input.jobDescriptionText,
@@ -1161,7 +1259,9 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
     searchSource: input.searchSource,
     searchSourceExplicit: input.searchSourceExplicit,
     applicationFilterInputFilePath: input.applicationFilterInputFilePath,
-    searchConditionSetRef: input.searchConditionSetRefs?.[platform],
+    searchConditionSetRef: platform === 'boss'
+      ? input.bossSearchConditionSetRef ?? input.searchConditionSetRefs?.[platform]
+      : input.searchConditionSetRefs?.[platform],
   };
 }
 
@@ -1721,7 +1821,15 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
   }
 }
 
-export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean; liepinForwardContact?: string; bossForwardMode?: BossForwardMode; bossForwardRecipient?: string; searchSource?: SearchSource; searchConditions?: SearchCondition[] } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
+export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, pageKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: {
+  includeViewedCandidates?: boolean;
+  liepinForwardContact?: string;
+  bossForwardMode?: BossForwardMode;
+  bossForwardRecipient?: string;
+  searchSource?: SearchSource;
+  searchConditions?: SearchCondition[];
+  searchExecution?: Omit<NonNullable<RunResult['searchExecution']>, 'includeViewedCandidates'>;
+} = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
   const searchSource = options.searchSource ?? 'saved';
   const searchConditions = options.searchConditions ?? [];
   const platformEstimatedTimeoutMs = platformAdapter.estimateSearchTimeoutMs?.({
@@ -1748,9 +1856,9 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
         throw new Error(`Platform ${platformAdapter.platform} does not support direct search for resume capture.`);
       }
 
-      return platformAdapter.openDirectSearch(session.page, searchKeyword, searchConditions, searchOptions);
+      return platformAdapter.openDirectSearch(session.page, pageKeyword, searchConditions, searchOptions);
     })()
-    : await platformAdapter.openSubscribeSearch(session.page, searchKeyword, searchOptions);
+    : await platformAdapter.openSubscribeSearch(session.page, pageKeyword, searchOptions);
   session.page = searchPage;
   const { candidates } = platformAdapter.platform === '51job'
     ? await extractCandidateListRef.fn(searchPage, { deadline: searchDeadline })
@@ -1803,6 +1911,12 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
     newCandidateIds: newCandidates.map((candidate) => candidate.candidateId),
     scoredCandidates: scoringResult.scoredCandidates,
     failedCandidates,
+    ...(options.searchExecution ? {
+      searchExecution: {
+        ...options.searchExecution,
+        includeViewedCandidates: options.includeViewedCandidates ?? false,
+      },
+    } : {}),
   };
 
   const resultPath = await store.saveRunResult(platform, jobKey, runResult);
@@ -1865,6 +1979,79 @@ async function resolveResumeCaptureSearchSettings(
   };
 }
 
+interface ResolvedResumeCaptureContext {
+  jobKey: string;
+  existingJobRecord?: JobRecord;
+  searchSettings: NonNullable<JobRecord['searchSettings']>;
+  /** Only this value is sent to a platform search action. */
+  pageKeyword: string;
+  bossJobId?: string;
+  searchExecution?: Omit<NonNullable<RunResult['searchExecution']>, 'includeViewedCandidates'>;
+}
+
+/**
+ * Resolve persistence identity before browser work. Boss has a stable position
+ * identity and an independent page query; all other platforms retain their
+ * existing keyword-as-query behavior.
+ */
+async function resolveResumeCaptureContext(
+  input: SinglePlatformCliInput,
+  store: JobStore,
+): Promise<ResolvedResumeCaptureContext> {
+  if (input.platform !== 'boss') {
+    const jobKey = buildJobKey(input.searchKeyword, '');
+    const existingJobRecord = await store.readJobRecordIfExists(input.platform, jobKey);
+    return {
+      jobKey,
+      ...(existingJobRecord ? { existingJobRecord } : {}),
+      searchSettings: await resolveResumeCaptureSearchSettings(input, existingJobRecord),
+      pageKeyword: input.searchKeyword,
+    };
+  }
+
+  const explicitSearchSettings = input.applicationFilterInputFilePath
+    ? await resolveResumeCaptureSearchSettings(input)
+    : undefined;
+  const plan = await resolveBossCapturePlan({
+    jobName: input.searchKeyword,
+    ...(input.bossJobId ? { bossJobId: input.bossJobId } : {}),
+    ...(input.bossSearchKeyword ? { bossSearchKeyword: input.bossSearchKeyword } : {}),
+    searchSource: input.searchSource,
+    searchSourceExplicit: input.searchSourceExplicit,
+    ...(input.searchConditionSetRef ? { searchConditionSetRef: input.searchConditionSetRef } : {}),
+    ...(explicitSearchSettings ? { explicitSearchSettings } : {}),
+  }, { store });
+  const searchSettings: NonNullable<JobRecord['searchSettings']> = {
+    source: plan.search.source,
+    pageKeyword: plan.search.pageKeyword,
+    ...(plan.search.applicationFilterInput ? { applicationFilterInput: plan.search.applicationFilterInput } : {}),
+    conditions: plan.search.conditions,
+    ...(plan.search.conditionSetRef ? { conditionSetRef: plan.search.conditionSetRef } : {}),
+    ...(plan.search.selectedFieldsFingerprint ? {
+      resolution: { selectedFieldsFingerprint: plan.search.selectedFieldsFingerprint },
+    } : {}),
+  };
+
+  return {
+    jobKey: plan.jobKey,
+    ...(plan.jobRecordWithResolvedSearchSettings ?? plan.jobRecord
+      ? { existingJobRecord: plan.jobRecordWithResolvedSearchSettings ?? plan.jobRecord }
+      : {}),
+    searchSettings,
+    pageKeyword: plan.search.pageKeyword,
+    ...(plan.bossJobId ? { bossJobId: plan.bossJobId } : {}),
+    searchExecution: {
+      source: plan.search.source,
+      pageKeyword: plan.search.pageKeyword,
+      keywordSource: plan.search.keywordSource,
+      ...(plan.search.conditionSetRef ? { conditionSetRef: plan.search.conditionSetRef } : {}),
+      ...(plan.search.selectedFieldsFingerprint ? {
+        selectedFieldsFingerprint: plan.search.selectedFieldsFingerprint,
+      } : {}),
+    },
+  };
+}
+
 function resolveBossForwardingSettings(
   input: SinglePlatformCliInput,
   existingJobRecord?: JobRecord,
@@ -1891,18 +2078,15 @@ async function preflightCaptureRun(
   const checks = inputs.flatMap((input) => platforms.map(async (platform) => {
     try {
       const platformInput = buildSinglePlatformInput(input, platform);
-      const jobKey = buildJobKey(platformInput.searchKeyword, '');
-      const existingJobRecord = await store.readJobRecordIfExists(platform, jobKey);
+      const context = await resolveResumeCaptureContext(platformInput, store);
 
-      if (!existingJobRecord && !platformInput.jobDescriptionText && !platformInput.jobDescriptionFilePath) {
+      if (!context.existingJobRecord && !platformInput.jobDescriptionText && !platformInput.jobDescriptionFilePath) {
         throw new Error('Missing required argument --jd or --jd-file');
       }
 
-      if (!existingJobRecord && platformInput.jobDescriptionFilePath) {
+      if (!context.existingJobRecord && platformInput.jobDescriptionFilePath) {
         await readFile(platformInput.jobDescriptionFilePath, 'utf8');
       }
-
-      await resolveResumeCaptureSearchSettings(platformInput, existingJobRecord);
       return undefined;
     } catch (error) {
       return { keyword: input.searchKeyword, platform, error };
@@ -1932,10 +2116,9 @@ function warnBossCaptureOptIn(): void {
 async function runSinglePlatform(input: SinglePlatformCliInput, options: { printSummary: boolean } = { printSummary: true }): Promise<MainRunSummary> {
   const platformAdapter = resolvePlatformAdapter(input.platform);
   const store = new JobStore();
-  const jobKey = buildJobKey(input.searchKeyword, '');
+  const captureContext = await resolveResumeCaptureContext(input, store);
+  const { jobKey, existingJobRecord, searchSettings, pageKeyword } = captureContext;
   const fetchedAt = new Date().toISOString();
-  const existingJobRecord = await store.readJobRecordIfExists(input.platform, jobKey);
-  const searchSettings = await resolveResumeCaptureSearchSettings(input, existingJobRecord);
   const bossForwarding = resolveBossForwardingSettings(input, existingJobRecord);
 
   if (!existingJobRecord && !input.jobDescriptionText && !input.jobDescriptionFilePath) {
@@ -1952,7 +2135,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
     ? {
       ...existingJobRecord,
       platform: existingJobRecord.platform,
-      searchKeyword: input.searchKeyword,
+      searchKeyword: input.platform === 'boss' ? existingJobRecord.searchKeyword : input.searchKeyword,
       recipientEmail: input.recipientEmail ?? existingJobRecord.recipientEmail,
       ccEmails: input.ccEmails === undefined ? existingJobRecord.ccEmails : input.ccEmails,
       searchSettings,
@@ -2001,14 +2184,18 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
     console.warn('Crawl4AI adapter unavailable at startup; continuing with built-in extraction only.');
   }
 
-  const session = await ensureAuthenticatedBrowserSessionRef.fn(platformAdapter.platform);
+  const bossSearchLease = input.platform === 'boss'
+    ? await acquireBossSearchLease()
+    : undefined;
+  let session: BrowserSession | undefined;
 
   try {
+    session = await ensureAuthenticatedBrowserSessionRef.fn(platformAdapter.platform);
     const { candidates, newCandidates, runResult, resultPath } = await runResumeCaptureFlow(
       input.platform,
       jobKey,
       normalizedJob,
-      input.searchKeyword,
+      pageKeyword,
       store,
       session,
       fetchedAt,
@@ -2020,6 +2207,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
         bossForwardRecipient: bossForwarding?.recipient,
         searchSource: searchSettings.source,
         searchConditions: searchSettings.conditions,
+        searchExecution: captureContext.searchExecution,
       },
     );
 
@@ -2067,6 +2255,10 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       emailSubject: emailSummary?.subject,
       emailError,
       sampleCandidateIds: newCandidates.slice(0, 10).map((candidate) => candidate.candidateId),
+      ...(captureContext.searchExecution ? {
+        searchExecution: runResult.searchExecution,
+        ...(captureContext.bossJobId ? { bossJobId: captureContext.bossJobId } : {}),
+      } : {}),
     };
 
     if (options.printSummary) {
@@ -2075,7 +2267,13 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
 
     return summary;
   } finally {
-    await closeBrowserSessionRef.fn(session);
+    try {
+      if (session) {
+        await closeBrowserSessionRef.fn(session);
+      }
+    } finally {
+      await bossSearchLease?.release();
+    }
   }
 }
 

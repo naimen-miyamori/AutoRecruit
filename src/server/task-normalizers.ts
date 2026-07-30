@@ -41,6 +41,15 @@ export type NormalizedTask<TInput> = {
   inputSummary: Record<string, unknown>;
 };
 
+/**
+ * The public HTTP/assistant shape intentionally cannot provide a resolved
+ * Boss condition-set snapshot. Only the server preflight may opt in after it
+ * has resolved an exact stored revision.
+ */
+export interface NormalizeResumeCaptureTaskOptions {
+  allowBossSearchConditionSetRef?: boolean;
+}
+
 export type NormalizedSchedulableTask = NormalizedTask<TaskInput> & {
   kind: SchedulableTaskKind;
 };
@@ -284,6 +293,32 @@ function normalizeSearchConditionSetRefs(
   return refs;
 }
 
+function normalizeBossSearchConditionSetRef(
+  item: JsonObject,
+  options: NormalizeResumeCaptureTaskOptions,
+): SearchConditionSetReference | undefined {
+  const raw = item.bossSearchConditionSetRef;
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!options.allowBossSearchConditionSetRef) {
+    throw new Error('bossSearchConditionSetRef is reserved for server-resolved Boss capture snapshots');
+  }
+
+  const reference = normalizeJsonObject(raw, 'bossSearchConditionSetRef');
+  const conditionSetId = getRequiredString(reference, 'conditionSetId');
+  assertSafeSearchConditionSetId(conditionSetId);
+  const platform = normalizePlatform(reference.platform);
+  const revision = getOptionalPositiveInteger(reference, 'revision');
+  if (!revision) {
+    throw new Error('bossSearchConditionSetRef.revision is required');
+  }
+  if (platform !== 'boss') {
+    throw new Error('bossSearchConditionSetRef.platform must be boss');
+  }
+  return { conditionSetId, platform, revision };
+}
+
 function serializeSearchConditionSetRefs(
   platform: ConsolePlatformSelection,
   refs: SearchConditionSetReferenceMap | undefined,
@@ -395,11 +430,36 @@ function summarizeText(value: string | undefined, maxLength = 120): string | und
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
-export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<ResumeCaptureTaskInput> {
+export function normalizeResumeCaptureTask(
+  payload: unknown,
+  options: NormalizeResumeCaptureTaskOptions = {},
+): NormalizedTask<ResumeCaptureTaskInput> {
   const item = normalizeJsonObject(payload, 'request body');
+  assertOnlyFields(item, [
+    'platform',
+    'includeBoss',
+    'keyword',
+    'bossJobId',
+    'bossSearchKeyword',
+    ...(options.allowBossSearchConditionSetRef ? ['bossSearchConditionSetRef'] : []),
+    'jd',
+    'jdFile',
+    'includeViewed',
+    'searchSource',
+    'applicationFilterInputFile',
+    'searchConditionSetRefs',
+    'email',
+    'cc',
+    'liepinForwardContact',
+    'bossForwardMode',
+    'bossForwardRecipient',
+  ], 'resume-capture task');
   const platform = normalizePlatformSelection(item.platform);
   const includeBoss = normalizeCaptureIncludeBoss(item, platform);
   const keyword = getRequiredString(item, 'keyword');
+  const bossJobId = getOptionalString(item, 'bossJobId');
+  const bossSearchKeyword = getOptionalString(item, 'bossSearchKeyword');
+  const bossSearchConditionSetRef = normalizeBossSearchConditionSetRef(item, options);
   const jd = getOptionalString(item, 'jd');
   const jdFile = getOptionalString(item, 'jdFile');
   const includeViewed = getOptionalBoolean(item, 'includeViewed');
@@ -415,6 +475,19 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
     throw new Error('jd and jdFile are mutually exclusive');
   }
 
+  if ((bossJobId || bossSearchKeyword || bossSearchConditionSetRef)
+    && platform !== 'boss'
+    && !(platform === 'all' && includeBoss === true)) {
+    throw new Error('bossJobId, bossSearchKeyword, and Boss search snapshots can only be used with platform boss or platform all with includeBoss=true');
+  }
+
+  if (bossSearchConditionSetRef && applicationFilterInputFile) {
+    throw new Error('bossSearchConditionSetRef and applicationFilterInputFile are mutually exclusive');
+  }
+  if (bossSearchConditionSetRef && searchConditionSetRefs?.boss) {
+    throw new Error('bossSearchConditionSetRef and searchConditionSetRefs.boss are mutually exclusive');
+  }
+
   validateDirectConditionInput(searchSource, applicationFilterInputFile, searchConditionSetRefs);
 
   if (liepinForwardContact && platform !== 'liepin' && platform !== 'all') {
@@ -425,6 +498,9 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
     platform,
     includeBoss,
     keyword,
+    bossJobId,
+    bossSearchKeyword,
+    bossSearchConditionSetRef,
     jd,
     jdFile,
     includeViewed,
@@ -439,6 +515,13 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
   };
   const argv = ['--platform', platform, '--keyword', keyword];
   pushOptionalBoolean(argv, '--include-boss', includeBoss);
+  pushOptional(argv, '--boss-job-id', bossJobId);
+  pushOptional(argv, '--boss-search-keyword', bossSearchKeyword);
+  pushOptional(
+    argv,
+    '--boss-search-condition-set',
+    bossSearchConditionSetRef ? `${bossSearchConditionSetRef.conditionSetId}@${bossSearchConditionSetRef.revision}` : undefined,
+  );
   pushOptional(argv, '--jd', jd);
   pushOptional(argv, '--jd-file', jdFile);
   pushOptionalBoolean(argv, '--include-viewed', includeViewed);
@@ -458,6 +541,9 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
       platform,
       includeBoss: includeBoss ?? false,
       keyword,
+      bossJobId,
+      bossSearchKeyword,
+      bossSearchConditionSetRef,
       hasJd: Boolean(jd),
       jdPreview: summarizeText(jd),
       jdFile,
@@ -476,7 +562,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
 
 export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskInput> {
   const item = normalizeJsonObject(payload, 'request body');
-  assertAbsent(item, ['keyword', 'jd', 'jdFile'], 'batch task');
+  assertAbsent(item, ['keyword', 'bossJobId', 'bossSearchKeyword', 'jd', 'jdFile'], 'batch task');
 
   const platform = normalizePlatformSelection(item.platform);
   const includeBoss = normalizeCaptureIncludeBoss(item, platform);
@@ -630,7 +716,7 @@ export function normalizeTalentMappingClassificationTask(
 
 export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTask<SearchSubscriptionTaskInput> {
   const item = normalizeJsonObject(payload, 'request body');
-  assertAbsent(item, ['jd', 'jdFile', 'email', 'cc', 'includeViewed', 'includeBoss', 'liepinForwardContact', 'bossForwardMode', 'bossForwardRecipient', 'searchSource'], 'search-subscription task');
+  assertAbsent(item, ['jd', 'jdFile', 'email', 'cc', 'includeViewed', 'includeBoss', 'bossJobId', 'bossSearchKeyword', 'liepinForwardContact', 'bossForwardMode', 'bossForwardRecipient', 'searchSource'], 'search-subscription task');
 
   const platform = normalizePlatformSelection(item.platform);
   const searchSubscriptionFile = getRequiredString(item, 'searchSubscriptionFile');

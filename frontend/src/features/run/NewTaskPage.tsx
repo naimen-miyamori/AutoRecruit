@@ -27,6 +27,8 @@ interface FormState {
   email: string;
   cc: string;
   liepinForwardContact: string;
+  bossJobId: string;
+  bossSearchKeyword: string;
   bossForwardMode: '' | 'colleague' | 'email';
   bossForwardRecipient: string;
   scoreThreshold: string;
@@ -39,7 +41,7 @@ interface FormState {
 
 const initialForm: FormState = {
   platform: '51job', keyword: '', jd: '', jdFile: '', jobsFile: '', talentMappingFile: '', searchSubscriptionFile: '', searchSubscriptionName: '', saveSearchSubscription: false,
-  includeViewed: false, includeBoss: false, searchSource: '', applicationFilterInputFile: '', searchConditionSetRefs: {}, email: '', cc: '', liepinForwardContact: '', bossForwardMode: '', bossForwardRecipient: '',
+  includeViewed: false, includeBoss: false, searchSource: '', applicationFilterInputFile: '', searchConditionSetRefs: {}, email: '', cc: '', liepinForwardContact: '', bossJobId: '', bossSearchKeyword: '', bossForwardMode: '', bossForwardRecipient: '',
   scoreThreshold: '70', requireAllHardRequirements: true, replyToUnqualifiedCandidates: false, summaryEmail: '', summaryCc: '', syncJobsBeforeReview: false,
 };
 
@@ -95,6 +97,33 @@ export function NewTaskPage() {
   };
   const showFilter = mode === 'search-subscription' || ((mode === 'resume-capture' || mode === 'batch') && form.searchSource === 'direct');
   const selectedPlatforms = targetPlatforms(form, mode);
+  const showBossSavedJob = mode === 'resume-capture' && (form.platform === 'boss' || (form.platform === 'all' && form.includeBoss));
+  const bossPositionsQuery = useQuery({
+    queryKey: queryKeys.bossPositions,
+    queryFn: ({ signal }) => api.listBossPositions(signal),
+    enabled: showBossSavedJob,
+  });
+  const selectedBossPosition = bossPositionsQuery.data?.positions.find((position) => position.bossJobId === form.bossJobId);
+  const selectedBossJobQuery = useQuery({
+    queryKey: queryKeys.job('boss', selectedBossPosition?.jobKey ?? ''),
+    queryFn: ({ signal }) => api.getJob('boss', selectedBossPosition?.jobKey ?? '', signal),
+    enabled: Boolean(selectedBossPosition?.jobKey),
+  });
+  const selectedBossSearchSettings = selectedBossJobQuery.data?.jobRecord?.searchSettings;
+  const savedBossConditionSetQuery = useQuery({
+    queryKey: queryKeys.searchConditionSet(selectedBossSearchSettings?.conditionSetRef?.conditionSetId ?? ''),
+    queryFn: ({ signal }) => api.getSearchConditionSet(selectedBossSearchSettings?.conditionSetRef?.conditionSetId ?? '', signal),
+    enabled: Boolean(selectedBossSearchSettings?.conditionSetRef?.conditionSetId),
+  });
+  const savedBossDefaultKeyword = savedBossConditionSetQuery.data?.conditionSet.defaultKeyword;
+  const selectBossJob = (bossJobId: string) => setForm((current) => {
+    const selected = bossPositionsQuery.data?.positions.find((position) => position.bossJobId === bossJobId);
+    return {
+      ...current,
+      bossJobId,
+      keyword: selected?.name ?? current.keyword,
+    };
+  });
 
   const submit = () => {
     setValidationError(undefined);
@@ -146,11 +175,12 @@ export function NewTaskPage() {
       <Section title="任务参数" description={mode === 'boss-auto-chat' ? 'Boss 是单平台独立模式。' : mode === 'talent-mapping' ? '此入口只执行卡片扫描；详情补全需在人才地图项目页核对精确人数并逐轮确认。' : '全部主平台默认运行 51job、猎聘和智联；普通抓取与批量可显式追加直猎邦。'}>
         <div className="form-grid">
           <label><span>平台</span><select value={form.platform} onChange={(event) => set('platform', event.target.value as PlatformSelection)} disabled={mode === 'boss-auto-chat'}>{(mode === 'boss-auto-chat' ? ['boss'] : mode === 'login-refresh' ? ['51job', 'liepin', 'zhilian', 'boss'] : mode === 'talent-mapping' ? ['51job', 'liepin', 'zhilian', 'all'] : ['51job', 'liepin', 'zhilian', 'boss', 'all']).map((item) => <option value={item} key={item}>{PLATFORM_LABELS[item as keyof typeof PLATFORM_LABELS]}</option>)}</select></label>
-          {(mode === 'resume-capture' || mode === 'search-subscription') && <label><span>关键词</span><input value={form.keyword} onChange={(event) => set('keyword', event.target.value)} placeholder="例如：Java 后端" /></label>}
+          {(mode === 'resume-capture' || mode === 'search-subscription') && <label><span>{showBossSavedJob ? '岗位名称' : '关键词'}</span><input value={form.keyword} onChange={(event) => set('keyword', event.target.value)} placeholder={showBossSavedJob ? '选择已同步 Boss 岗位，或输入新岗位名称' : '例如：Java 后端'} /></label>}
           {mode === 'batch' && <label><span>批量任务文件</span><input value={form.jobsFile} onChange={(event) => set('jobsFile', event.target.value)} placeholder="./jobs.json" /></label>}
           {mode === 'talent-mapping' && <><label className="wide"><span>Talent Mapping 计划文件</span><input value={form.talentMappingFile} onChange={(event) => set('talentMappingFile', event.target.value)} placeholder="./mapping/retail-operations.json" /></label><div className="security-note wide">计划文件必须显式设置批次、候选和详情上限。扫描不会写岗位、seen、评分、邮件或 RAG；完成扫描后从“人才地图”项目页发起详情补全。</div></>}
           {mode === 'search-subscription' && <><label><span>订阅文件</span><input value={form.searchSubscriptionFile} onChange={(event) => set('searchSubscriptionFile', event.target.value)} placeholder="./search-subscription.json" /></label><label><span>订阅名称</span><input value={form.searchSubscriptionName} onChange={(event) => set('searchSubscriptionName', event.target.value)} /></label><label className="checkbox-field"><input type="checkbox" checked={form.saveSearchSubscription} onChange={(event) => set('saveSearchSubscription', event.target.checked)} />保存平台订阅</label></>}
           {mode === 'resume-capture' && <><label className="wide"><span>JD 文本</span><textarea value={form.jd} onChange={(event) => set('jd', event.target.value)} rows={6} /></label><label><span>JD 文件</span><input value={form.jdFile} onChange={(event) => set('jdFile', event.target.value)} placeholder="./jd.txt" /></label></>}
+          {showBossSavedJob && <><label className="wide"><span>Boss 已同步岗位</span>{bossPositionsQuery.isLoading ? <LoadingState label="读取 Boss 职位" /> : <select value={form.bossJobId} onChange={(event) => selectBossJob(event.target.value)}><option value="">不选择（按岗位名匹配或新建）</option>{bossPositionsQuery.data?.positions.filter((position) => Boolean(position.jobKey)).map((position) => <option key={position.bossJobId} value={position.bossJobId}>{position.name} · {position.status} · {position.bossJobId}</option>)}</select>}{bossPositionsQuery.error && <small className="inline-error">无法读取 Boss 已同步岗位：{bossPositionsQuery.error instanceof Error ? bossPositionsQuery.error.message : String(bossPositionsQuery.error)}</small>}</label><label><span>Boss 页面搜索词（可选覆盖）</span><input value={form.bossSearchKeyword} onChange={(event) => set('bossSearchKeyword', event.target.value)} placeholder="默认复用岗位设置或条件集默认关键词" /></label>{form.bossJobId && <div className="security-note wide">{selectedBossJobQuery.isLoading ? '正在读取岗位保存设置…' : selectedBossSearchSettings ? <>复用岗位设置：{selectedBossSearchSettings.source === 'direct' ? '直接搜索' : '已保存搜索'}{selectedBossSearchSettings.pageKeyword ? `；页面搜索词：${selectedBossSearchSettings.pageKeyword}` : savedBossDefaultKeyword ? `；条件集默认搜索词：${savedBossDefaultKeyword}` : '；页面搜索词将使用岗位名称'}{selectedBossSearchSettings.conditionSetRef ? `；已保存条件集：${selectedBossSearchSettings.conditionSetRef.conditionSetId}@${selectedBossSearchSettings.conditionSetRef.revision}` : '；未关联条件集'}。</> : '该职位尚无本地保存设置；请提供 JD 或显式配置搜索来源。'}</div>}</>}
           {(mode === 'resume-capture' || mode === 'batch') && <><label><span>搜索来源</span><select value={form.searchSource} onChange={(event) => set('searchSource', event.target.value as FormState['searchSource'])}><option value="">复用岗位设置</option><option value="saved">已保存搜索</option><option value="direct">直接搜索</option></select></label><label className="checkbox-field"><input type="checkbox" checked={form.includeViewed} onChange={(event) => set('includeViewed', event.target.checked)} />包含已查看候选人</label>{form.platform === 'all' && <label className="checkbox-field"><input type="checkbox" checked={form.includeBoss} onChange={(event) => set('includeBoss', event.target.checked)} />包含 Boss 直聘·直猎邦 Pro</label>}</>}
           {(mode === 'resume-capture' || mode === 'batch') && <><label><span>报告邮箱</span><input type="email" value={form.email} onChange={(event) => set('email', event.target.value)} /></label><label><span>抄送</span><input value={form.cc} onChange={(event) => set('cc', event.target.value)} placeholder="逗号分隔" /></label></>}
           {(form.platform === 'liepin' || form.platform === 'all') && (mode === 'resume-capture' || mode === 'batch') && <label><span>猎聘转发联系人</span><input value={form.liepinForwardContact} onChange={(event) => set('liepinForwardContact', event.target.value)} /></label>}
@@ -190,6 +220,8 @@ function commonBody(form: FormState, mode: 'resume-capture' | 'batch'): Record<s
     email: form.email.trim() || undefined,
     cc: splitList(form.cc),
     liepinForwardContact: form.platform === 'liepin' || form.platform === 'all' ? form.liepinForwardContact.trim() || undefined : undefined,
+    bossJobId: mode === 'resume-capture' && (form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) ? form.bossJobId || undefined : undefined,
+    bossSearchKeyword: mode === 'resume-capture' && (form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) ? form.bossSearchKeyword.trim() || undefined : undefined,
     bossForwardMode: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossForwardMode || undefined : undefined,
     bossForwardRecipient: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossForwardRecipient.trim() || undefined : undefined,
   };

@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { config } from '../config.js';
 import { parsePlatformArg } from '../platforms/registry.js';
 import type { SupportedPlatform } from '../platforms/types.js';
+import type { BossCapturePlanStore } from '../platforms/boss/capture-plan.js';
 import {
   answerCandidateQuestionFromJd,
   type AnswerCandidateQuestionFromJdInput,
@@ -40,6 +41,10 @@ import { TalentMappingReadModel } from './talent-mapping-read-model.js';
 import { TalentMappingConflictError, TalentMappingQualityService } from '../talent-mapping/quality-service.js';
 import { ArtifactReadModel } from './artifact-read-model.js';
 import { TaskScheduler } from './task-scheduler.js';
+import {
+  snapshotBossCaptureSettings,
+  type BossCapturePlanResolver,
+} from './boss-capture-snapshot.js';
 import { preflightTaskSearchConditionSets } from './search-condition-set-preflight.js';
 import { TaskQueue } from './task-queue.js';
 import {
@@ -74,6 +79,7 @@ import type {
   TaskDetail,
   TaskKind,
   TaskInput,
+  ResumeCaptureTaskInput,
 } from './types.js';
 
 export interface ApiResponse<T = unknown> {
@@ -91,6 +97,9 @@ interface RouteDependencies {
   talentMappingQualityService?: TalentMappingQualityService;
   artifactReadModel?: ArtifactReadModel;
   searchConditionSetService?: SearchConditionSetService;
+  /** Injectable only for isolated API tests; normal routes use the pure resolver. */
+  bossCapturePlanResolver?: BossCapturePlanResolver;
+  bossCapturePlanStore?: BossCapturePlanStore;
   dataDir?: string;
   answerQuestion?: (options: AskRagQuestionOptions) => Promise<RagAnswer>;
   answerTemporaryJdQuestion?: (input: AnswerCandidateQuestionFromJdInput) => Promise<JdQuestionAnswer>;
@@ -324,6 +333,24 @@ async function enqueueTaskWithConditionSetPreflight(
   return enqueueTask(queue, kind, normalized);
 }
 
+async function enqueueResumeCaptureTaskWithPreflight(
+  queue: TaskQueue,
+  normalized: NormalizedTask<ResumeCaptureTaskInput>,
+  options: {
+    searchConditionSetService: SearchConditionSetService;
+    bossCapturePlanResolver?: BossCapturePlanResolver;
+    bossCapturePlanStore?: BossCapturePlanStore;
+  },
+): Promise<TaskDetail> {
+  const snapshot = await snapshotBossCaptureSettings(normalized, {
+    ...(options.bossCapturePlanResolver ? { resolveBossCapturePlan: options.bossCapturePlanResolver } : {}),
+    ...(options.bossCapturePlanStore ? { store: options.bossCapturePlanStore } : {}),
+    searchConditionSets: options.searchConditionSetService,
+  });
+  await preflightTaskSearchConditionSets(snapshot.input, options.searchConditionSetService);
+  return enqueueTask(queue, 'resume-capture', snapshot);
+}
+
 async function answerRagRequest(request: RouteDependencies, payload: unknown): Promise<Record<string, unknown>> {
   const item = normalizeJsonObject(payload, 'request body');
   const llmSettings = normalizeModelConfig(item.modelConfig as ModelConfig | undefined);
@@ -384,11 +411,14 @@ async function confirmAssistantDraft(
     case 'resume-capture':
       return {
         kind: draft.kind,
-        task: await enqueueTaskWithConditionSetPreflight(
+        task: await enqueueResumeCaptureTaskWithPreflight(
           taskQueue,
-          draft.kind,
           normalizeResumeCaptureTask(draft.input),
-          searchConditionSetService,
+          {
+            searchConditionSetService,
+            ...(request.bossCapturePlanResolver ? { bossCapturePlanResolver: request.bossCapturePlanResolver } : {}),
+            ...(request.bossCapturePlanStore ? { bossCapturePlanStore: request.bossCapturePlanStore } : {}),
+          },
         ),
       };
     case 'batch':
@@ -466,7 +496,13 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
     ?? new SearchConditionSetService({ dataDir });
   let taskScheduler = request.taskScheduler;
   const getTaskScheduler = () => {
-    taskScheduler ??= new TaskScheduler({ taskQueue, dataDir, searchConditionSetService });
+    taskScheduler ??= new TaskScheduler({
+      taskQueue,
+      dataDir,
+      searchConditionSetService,
+      ...(request.bossCapturePlanResolver ? { bossCapturePlanResolver: request.bossCapturePlanResolver } : {}),
+      ...(request.bossCapturePlanStore ? { bossCapturePlanStore: request.bossCapturePlanStore } : {}),
+    });
     return taskScheduler;
   };
   const jobReadModel = request.jobReadModel ?? new JobReadModel({ dataDir });
@@ -584,11 +620,14 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
     }
 
     if (method === 'POST' && pathname === '/api/tasks/resume-capture') {
-      const task = await enqueueTaskWithConditionSetPreflight(
+      const task = await enqueueResumeCaptureTaskWithPreflight(
         taskQueue,
-        'resume-capture',
         normalizeResumeCaptureTask(request.body),
-        searchConditionSetService,
+        {
+          searchConditionSetService,
+          ...(request.bossCapturePlanResolver ? { bossCapturePlanResolver: request.bossCapturePlanResolver } : {}),
+          ...(request.bossCapturePlanStore ? { bossCapturePlanStore: request.bossCapturePlanStore } : {}),
+        },
       );
       return jsonResponse(202, task);
     }

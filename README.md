@@ -235,6 +235,29 @@ npm run dev -- \
 入队、调度创建、每次调度轮次和浏览器启动前都重新校验当前筛选目录，字段/选项失效或语义变化会失败，绝不
 静默跳过。
 
+#### Boss 复用岗位保存设置
+
+已通过职位同步归档的 Boss 岗位以稳定 Boss Job ID 作为本地身份。普通抓取可只提供岗位名和该 ID，复用保存的
+JD、direct/saved 搜索来源、固定条件集 revision、页面搜索词、转发和报告设置，不需要再次传 JD：
+
+```bash
+npm run dev -- \
+  --platform boss \
+  --keyword "全铝箱包设计" \
+  --boss-job-id 554cbe84c293028b0nJ72NW7FlJV
+```
+
+`--keyword` 是预期岗位名和 legacy 输入；它不再强制等于 Boss 人才页的查询词。复用保存的 direct 条件集时，
+页面搜索词依次采用显式 `--boss-search-keyword`、岗位保存的 `pageKeyword`、固定 revision 的
+`defaultKeyword`、岗位名。例如该岗位会使用条件集默认的“铝”，而简历、seen、评分和报告仍写入带 Boss ID
+的稳定 jobKey。Boss ID 与岗位名不匹配、同名岗位不唯一、固定 revision 失效或条件校验失败都会在浏览器前
+失败；系统不会创建关键词或页面搜索词目录作为替代岗位。
+
+`--boss-search-keyword "铝制行李箱"` 只覆盖 Boss 阶段的页面查询，不影响 `all + --include-boss true` 中的前三
+个平台。批量任务把 `bossJobId` 和可选 `bossSearchKeyword` 写在对应 jobs-file item；它们仅在该 item 实际选择
+Boss 阶段时有效。服务端队列会把复用到的 Boss ID、页面搜索词和固定条件集 revision 固化到该任务，后续修改
+岗位设置不会改变已经排队的任务。
+
 如只需把固定 Boss 条件集应用到当前人才搜索页并取得最终验证结果，不要使用临时浏览器脚本或普通抓取。
 使用以下 Boss-only 命令；它不会读取候选详情、写 seen、评分或发送报告：
 
@@ -293,12 +316,16 @@ npm run dev -- --platform all --include-boss true --jobs-file ./jobs.json
     "keyword": "店长",
     "jdFile": "./jd.txt",
     "searchSource": "direct",
-    "applicationFilterInputFile": "./filters/store-manager.json"
+    "applicationFilterInputFile": "./filters/store-manager.json",
+    "bossJobId": "boss-job-id-for-this-item",
+    "bossSearchKeyword": "门店零售"
   }
 ]
 ```
 
 `--jobs-file` 是批量模式唯一的职位定义来源，不能和单职位的 `--keyword`、`--jd` 或 `--jd-file` 同时使用。相对筛选文件路径按 jobs 文件所在目录解析。
+`bossJobId` 和 `bossSearchKeyword` 只在 `--platform boss` 或 `--platform all --include-boss true` 的该条目中生效；
+不写时按保存岗位设置的唯一名称解析，多个同名 Boss 岗位会要求补充 ID。
 
 批量条目也可使用 `searchConditionSets` 按平台覆盖运行级条件集；每个引用必须有明确 revision：
 

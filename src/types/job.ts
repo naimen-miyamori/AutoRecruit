@@ -128,6 +128,11 @@ export interface JobRecord {
   ccEmails?: string[];
   searchSettings?: {
     source: JobSearchSource;
+    /**
+     * The query used on the platform search page. It is deliberately separate
+     * from searchKeyword, which remains the job's stable display/lookup value.
+     */
+    pageKeyword?: string;
     applicationFilterInput?: Record<string, unknown>;
     conditions: SearchCondition[];
     /** Fixed source revision when direct-search filters came from a reusable condition set. */
@@ -261,6 +266,15 @@ export interface RunResult {
     candidateId: string;
     error: string;
   }>;
+  /** Lightweight evidence of the search that produced this run. */
+  searchExecution?: {
+    source: JobSearchSource;
+    pageKeyword: string;
+    keywordSource: 'run-override' | 'stored-setting' | 'condition-set-default' | 'legacy-job-keyword';
+    conditionSetRef?: SearchConditionSetReference;
+    selectedFieldsFingerprint?: string;
+    includeViewedCandidates: boolean;
+  };
 }
 
 export interface ScoreDimension {

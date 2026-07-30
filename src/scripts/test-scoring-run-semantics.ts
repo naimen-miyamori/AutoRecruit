@@ -16,6 +16,7 @@ import { validateCandidateListExtraction } from '../extraction/extractor.js';
 import { resolveOpenAISettings } from '../llm/openai-client.js';
 import { liepinAdapter } from '../platforms/liepin-adapter.js';
 import { bossAdapter } from '../platforms/boss-adapter.js';
+import { buildBossSyncedJobKey } from '../platforms/boss-jobs.js';
 import { zhilianAdapter } from '../platforms/zhilian-adapter.js';
 import { SearchConditionSetService } from '../search/search-condition-sets.js';
 import { extractCandidateScoreFromTextResponse } from '../scoring/score-resume.js';
@@ -105,6 +106,38 @@ function buildScore() {
     risks: [],
     summary: 'good fit',
   };
+}
+
+async function writeBossApplicationFilterOptions(tempDir: string): Promise<void> {
+  const optionsPath = path.join(tempDir, 'boss', 'filter-catalog', 'application-filter-options.latest.json');
+  await fs.mkdir(path.dirname(optionsPath), { recursive: true });
+  await fs.writeFile(optionsPath, JSON.stringify({
+    platform: 'boss',
+    capturedAt: '2026-07-30T00:00:00.000Z',
+    keyword: '全铝箱包设计',
+    fieldCount: 1,
+    fieldIds: ['education'],
+    fieldIdByLabel: { 学历: 'education' },
+    groups: {
+      singleSelect: ['education'],
+      textInput: [],
+      salaryRange: [],
+      numberRange: [],
+    },
+    fieldsById: {
+      education: {
+        fieldId: 'education',
+        filterKey: 'education',
+        label: '学历',
+        kind: 'singleSelect',
+        restrictInput: true,
+        valueShape: 'string',
+        acceptedInputShapes: ['string'],
+        allowedValues: ['大专及以上'],
+        options: [{ label: '大专及以上', value: '大专及以上', disabled: false, selected: false }],
+      },
+    },
+  }, null, 2), 'utf8');
 }
 
 function assertAllPlatformsSummary(result: MainResult): AllPlatformsRunSummary[] {
@@ -5795,6 +5828,183 @@ describe('scoring run semantics', () => {
       revision: 1,
     });
     assert.equal(storedJob.searchSettings?.resolution?.selectedFieldsFingerprint.length, 64);
+  });
+
+  it('uses a stable Boss job identity with its saved condition set and records the separate page keyword', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const bossJobId = 'boss-position-554c';
+    const jobName = '全铝箱包设计';
+    const jobKey = buildBossSyncedJobKey(jobName, bossJobId);
+    const directCalls: Array<{
+      keyword: string;
+      conditions: import('../types/job.js').SearchCondition[];
+      includeViewedCandidates?: boolean;
+    }> = [];
+
+    await writeBossApplicationFilterOptions(tempDir);
+    const conditionSets = new SearchConditionSetService({ dataDir: tempDir });
+    const conditionSet = await conditionSets.create({
+      platform: 'boss',
+      name: '全铝箱包设计保存设置',
+      defaultKeyword: '铝',
+      applicationFilterInput: { education: '大专及以上' },
+    });
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: jobName,
+      rawText: '职位名称：全铝箱包设计',
+      normalizedJob: { ...buildNormalizedJob(), title: jobName },
+      searchSettings: {
+        source: 'direct',
+        conditions: [],
+        conditionSetRef: {
+          conditionSetId: conditionSet.conditionSetId,
+          platform: 'boss',
+          revision: 1,
+        },
+      },
+      bossPosition: {
+        bossJobId,
+        status: 'open',
+        syncedAt: '2026-07-30T00:00:00.000Z',
+        sourceHash: 'source-hash',
+      },
+      createdAt: '2026-07-30T00:00:00.000Z',
+    });
+
+    stubSuccessfulRun(indexModule);
+    bossAdapter.openSubscribeSearch = (async () => {
+      throw new Error('saved Boss search should not run when saved settings contain a condition set');
+    }) as typeof bossAdapter.openSubscribeSearch;
+    bossAdapter.openDirectSearch = (async (_page, keyword, conditions, options) => {
+      directCalls.push({ keyword, conditions, includeViewedCandidates: options?.includeViewedCandidates });
+      return createSearchPage();
+    }) as NonNullable<typeof bossAdapter.openDirectSearch>;
+
+    const result = await indexModule.main([
+      '--platform', 'boss', '--keyword', jobName, '--boss-job-id', bossJobId,
+    ]) as import('../index.js').MainRunSummary;
+
+    assert.equal(result.jobKey, jobKey);
+    assert.equal(result.bossJobId, bossJobId);
+    assert.equal(result.searchExecution?.pageKeyword, '铝');
+    assert.equal(result.searchExecution?.keywordSource, 'condition-set-default');
+    assert.deepStrictEqual(result.searchExecution?.conditionSetRef, {
+      conditionSetId: conditionSet.conditionSetId,
+      platform: 'boss',
+      revision: 1,
+    });
+    assert.deepStrictEqual(directCalls.map((call) => call.keyword), ['铝']);
+    assert.equal(directCalls[0]?.conditions.length, 1);
+    assert.equal(directCalls[0]?.includeViewedCandidates, false);
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), ['cand-1']);
+    assert.equal(await pathExists(path.join(tempDir, 'boss', 'jobs', jobName)), false);
+    const storedRun = (await store.listRunResults('boss', jobKey)).at(-1)!;
+    assert.equal(storedRun.searchExecution?.pageKeyword, '铝');
+    assert.equal(storedRun.searchExecution?.includeViewedCandidates, false);
+    assert.equal((await store.readJobRecord('boss', jobKey)).searchSettings?.pageKeyword, '铝');
+    assert.equal(await pathExists(path.join(tempDir, 'boss', 'runtime', 'search-lease.lock')), false);
+
+    const explicitConditionSet = await conditionSets.create({
+      platform: 'boss',
+      name: '全铝箱包设计显式覆盖',
+      defaultKeyword: '铝合金',
+      applicationFilterInput: { education: '大专及以上' },
+    });
+    const explicitResult = await indexModule.main([
+      '--platform', 'boss', '--keyword', jobName, '--boss-job-id', bossJobId,
+      '--search-source', 'saved',
+      '--boss-search-condition-set', `${explicitConditionSet.conditionSetId}@1`,
+    ]) as import('../index.js').MainRunSummary;
+    assert.deepStrictEqual(directCalls.map((call) => call.keyword), ['铝', '铝合金']);
+    assert.equal(explicitResult.searchExecution?.source, 'direct');
+    assert.equal(explicitResult.searchExecution?.pageKeyword, '铝合金');
+    assert.deepStrictEqual(explicitResult.searchExecution?.conditionSetRef, {
+      conditionSetId: explicitConditionSet.conditionSetId,
+      platform: 'boss',
+      revision: 1,
+    });
+  });
+
+  it('keeps Boss identity and page-query fields scoped to the Boss stage for all-platform and batch capture', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const bossJobId = 'boss-position-all-batch';
+    const jobName = '全铝箱包设计';
+    const jobKey = buildBossSyncedJobKey(jobName, bossJobId);
+    const directKeywords: string[] = [];
+
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: jobName,
+      rawText: '职位名称：全铝箱包设计',
+      normalizedJob: { ...buildNormalizedJob(), title: jobName },
+      searchSettings: {
+        source: 'direct',
+        pageKeyword: '铝',
+        conditions: [],
+      },
+      bossPosition: {
+        bossJobId,
+        status: 'open',
+        syncedAt: '2026-07-30T00:00:00.000Z',
+        sourceHash: 'source-hash',
+      },
+      createdAt: '2026-07-30T00:00:00.000Z',
+    });
+    stubSuccessfulRun(indexModule);
+    bossAdapter.openDirectSearch = (async (_page, keyword) => {
+      directKeywords.push(keyword);
+      return createSearchPage();
+    }) as NonNullable<typeof bossAdapter.openDirectSearch>;
+
+    const allResult = await indexModule.main([
+      '--platform', 'all', '--include-boss', 'true', '--keyword', jobName,
+      '--jd', '职位名称：全铝箱包设计', '--boss-job-id', bossJobId,
+    ]);
+    const allSummaries = assertAllPlatformsSummary(allResult);
+    assert.deepStrictEqual(allSummaries.map((summary) => summary.platform), ['51job', 'liepin', 'zhilian', 'boss']);
+    assert.equal(allSummaries[3]?.summary.jobKey, jobKey);
+    assert.equal(allSummaries[3]?.summary.searchExecution?.pageKeyword, '铝');
+
+    const jobsFilePath = path.join(tempDir, 'boss-jobs.json');
+    await fs.writeFile(jobsFilePath, JSON.stringify([{
+      keyword: jobName,
+      bossJobId,
+      bossSearchKeyword: '铝合金',
+    }], null, 2), 'utf8');
+    const batchResult = await indexModule.main([
+      '--platform', 'boss', '--jobs-file', jobsFilePath,
+    ]);
+    const batchSummaries = assertBatchSummary(batchResult);
+    assert.equal(batchSummaries[0]?.summary.jobKey, jobKey);
+    assert.equal(batchSummaries[0]?.summary.searchExecution?.pageKeyword, '铝合金');
+    assert.deepStrictEqual(directKeywords, ['铝', '铝合金']);
+    assert.equal(await pathExists(path.join(tempDir, 'boss', 'jobs', jobName)), false);
+  });
+
+  it('rejects an unresolved Boss position ID before browser or capture side effects', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    let browserCalls = 0;
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => {
+      browserCalls += 1;
+      throw new Error('browser must not start for an unresolved Boss position');
+    };
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform', 'boss', '--keyword', '全铝箱包设计', '--boss-job-id', 'missing-boss-position',
+      ]),
+      /Missing stored Boss JD.*missing-boss-position/,
+    );
+    assert.equal(browserCalls, 0);
+    assert.equal(await pathExists(path.join(tempDir, 'boss', 'jobs', '全铝箱包设计')), false);
   });
 
   it('rejects application filter input files unless direct search is selected', async () => {

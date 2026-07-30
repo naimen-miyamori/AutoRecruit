@@ -129,6 +129,7 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
     recipientEmail,
     ccEmails,
     bossForwarding,
+    searchSettings,
     ...rest
   } = jobRecord;
   const normalizedRecipientEmail = recipientEmail?.trim();
@@ -141,12 +142,26 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
       recipient: bossForwarding.recipient.trim(),
     }
     : undefined;
+  const normalizedPageKeyword = searchSettings?.pageKeyword
+    ?.normalize('NFKC')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const normalizedSearchSettings = searchSettings
+    ? {
+      ...searchSettings,
+      ...(normalizedPageKeyword ? { pageKeyword: normalizedPageKeyword } : {}),
+    }
+    : undefined;
+  if (normalizedSearchSettings && !normalizedPageKeyword) {
+    delete normalizedSearchSettings.pageKeyword;
+  }
 
   return {
     ...rest,
     platform: jobRecord.platform ?? '51job',
     ...(normalizedRecipientEmail ? { recipientEmail: normalizedRecipientEmail } : {}),
     ...(normalizedCcEmails ? { ccEmails: normalizedCcEmails } : {}),
+    ...(normalizedSearchSettings ? { searchSettings: normalizedSearchSettings } : {}),
     ...(normalizedBossForwarding ? { bossForwarding: normalizedBossForwarding } : {}),
   };
 }
@@ -221,9 +236,23 @@ export class JobStore {
 
   async saveJobRecord(platform: SupportedPlatform, jobRecord: JobRecord): Promise<void> {
     const paths = await this.initializeJob(platform, jobRecord.jobKey);
+    const normalizedPageKeyword = jobRecord.searchSettings?.pageKeyword
+      ?.normalize('NFKC')
+      .replace(/\s+/gu, ' ')
+      .trim();
+    const searchSettings = jobRecord.searchSettings
+      ? {
+        ...jobRecord.searchSettings,
+        ...(normalizedPageKeyword ? { pageKeyword: normalizedPageKeyword } : {}),
+      }
+      : undefined;
+    if (searchSettings && !normalizedPageKeyword) {
+      delete searchSettings.pageKeyword;
+    }
     await writeJsonIfChanged(paths.jdPath, {
       ...jobRecord,
       platform,
+      ...(searchSettings ? { searchSettings } : {}),
       recipientEmail: jobRecord.recipientEmail?.trim() || undefined,
       ccEmails: jobRecord.ccEmails
         ? [...new Set(jobRecord.ccEmails.map((email) => email.trim()).filter(Boolean))]
