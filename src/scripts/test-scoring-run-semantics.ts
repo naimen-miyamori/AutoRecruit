@@ -1197,6 +1197,56 @@ describe('candidate list readiness', () => {
       { phase: 'extract', deadline: 1000 + config.playwright.searchPageTimeoutMs },
     ]);
   });
+
+  it('uses a platform-owned direct-search estimate without resetting the shared deadline', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const observed: Array<{ phase: string; deadline?: number }> = [];
+    let now = 10_000;
+    const conditions: import('../types/job.js').SearchCondition[] = [{
+      kind: 'applicationFilter', fieldId: 'education', label: '学历要求', fieldKind: 'singleSelect', value: '本科及以上',
+    }];
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      estimateSearchTimeoutMs: (input) => {
+        assert.deepStrictEqual(input, { source: 'direct', conditions, includeViewedCandidates: false });
+        return 90_000;
+      },
+      openDirectSearch: async (_page, _keyword, _conditions, options) => {
+        observed.push({ phase: 'open', deadline: options?.deadline });
+        now += 50;
+        return { id: 'search-page' } as never;
+      },
+      extractCandidateList: async (_page, options) => {
+        observed.push({ phase: 'extract', deadline: options?.deadline });
+        return { candidates: [] };
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    await captureDateNow(async () => {
+      Date.now = () => now;
+      await indexModule.runResumeCaptureFlow(
+        'boss',
+        'job-platform-estimated-search-deadline',
+        {
+          title: 'Test Job', majors: [], languageRequirements: [], responsibilities: [], hardRequirements: [],
+          preferredRequirements: [], regionPreferences: [], industryTags: [],
+        },
+        '铝',
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-05-25T00:00:00.000Z',
+        adapter,
+        { searchSource: 'direct', searchConditions: conditions, includeViewedCandidates: false },
+      );
+    });
+
+    assert.deepStrictEqual(observed, [
+      { phase: 'open', deadline: 100_000 },
+      { phase: 'extract', deadline: 100_000 },
+    ]);
+  });
 });
 
 describe('scoring run semantics', () => {

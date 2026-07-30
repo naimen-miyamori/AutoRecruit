@@ -511,9 +511,14 @@ export async function refreshExpiredLoginSession(platform: SupportedPlatform): P
   });
 }
 
-export async function closeBrowserSession(session: BrowserSession): Promise<void> {
+export async function closeBrowserSession(
+  session: BrowserSession,
+  options: { announceKeptOpen?: boolean } = {},
+): Promise<void> {
   if (session.keepOpenOnExit) {
-    console.log('Browser will stay open. Close it manually when finished.');
+    if (options.announceKeptOpen !== false) {
+      console.log('Browser will stay open. Close it manually when finished.');
+    }
     const cleanupTemporaryUserDataDir = () => {
       if (session.temporaryUserDataDir) {
         void fs.rm(session.temporaryUserDataDir, { recursive: true, force: true }).catch(() => undefined);

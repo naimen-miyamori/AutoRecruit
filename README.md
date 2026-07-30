@@ -235,6 +235,20 @@ npm run dev -- \
 入队、调度创建、每次调度轮次和浏览器启动前都重新校验当前筛选目录，字段/选项失效或语义变化会失败，绝不
 静默跳过。
 
+如只需把固定 Boss 条件集应用到当前人才搜索页并取得最终验证结果，不要使用临时浏览器脚本或普通抓取。
+使用以下 Boss-only 命令；它不会读取候选详情、写 seen、评分或发送报告：
+
+```bash
+npm run boss:apply-search-condition-set -- \
+  --condition-set scs-<id>@1 \
+  --keyword "铝" \
+  --recent-viewed-policy exclude
+```
+
+`--recent-viewed-policy` 取 `exclude`（默认，勾选“过滤近14天查看”）、`include`（取消勾选）或
+`condition-set`（只服从条件集内显式 toggle）。命令只在全部筛选完成业务语义复核并读取稳定结果数后输出
+一条成功 JSON；取消、超时或筛选失败会以非零状态退出，绝不把中途页面状态报告为成功。
+
 抓取完成后发送报告：
 
 ```bash

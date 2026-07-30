@@ -1722,13 +1722,26 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
 }
 
 export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, searchKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: { includeViewedCandidates?: boolean; liepinForwardContact?: string; bossForwardMode?: BossForwardMode; bossForwardRecipient?: string; searchSource?: SearchSource; searchConditions?: SearchCondition[] } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
-  const searchDeadline = Date.now() + config.playwright.searchPageTimeoutMs;
+  const searchSource = options.searchSource ?? 'saved';
+  const searchConditions = options.searchConditions ?? [];
+  const platformEstimatedTimeoutMs = platformAdapter.estimateSearchTimeoutMs?.({
+    source: searchSource,
+    conditions: searchConditions,
+    includeViewedCandidates: options.includeViewedCandidates,
+  });
+  const searchTimeoutMs = Math.max(
+    config.playwright.searchPageTimeoutMs,
+    typeof platformEstimatedTimeoutMs === 'number' && Number.isFinite(platformEstimatedTimeoutMs)
+      ? Math.max(1, platformEstimatedTimeoutMs)
+      : 0,
+  );
+  // This deadline is deliberately created once. It is shared by the platform
+  // search action, its final verification, and candidate-list extraction.
+  const searchDeadline = Date.now() + searchTimeoutMs;
   const searchOptions = {
     deadline: searchDeadline,
     includeViewedCandidates: options.includeViewedCandidates,
   };
-  const searchSource = options.searchSource ?? 'saved';
-  const searchConditions = options.searchConditions ?? [];
   const searchPage = searchSource === 'direct'
     ? await (async () => {
       if (!platformAdapter.openDirectSearch) {

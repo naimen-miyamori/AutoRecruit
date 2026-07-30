@@ -193,6 +193,12 @@ function createSearchDeadline(options?: SearchWaitOptions): number {
   return options?.deadline ?? Date.now() + Math.max(config.playwright.searchPageTimeoutMs, 1);
 }
 
+function throwIfBossSearchAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('Boss search condition application was cancelled.');
+  }
+}
+
 function bossDirectSearchActionUnits(condition: SearchCondition): number {
   if (!isApplicationFilterCondition(condition)) return 1;
   if (condition.fieldId === 'city') return 4;
@@ -202,19 +208,49 @@ function bossDirectSearchActionUnits(condition: SearchCondition): number {
   return 2;
 }
 
+export function estimateBossDirectSearchTimeoutMs(input: {
+  conditions: readonly SearchCondition[];
+  includeViewedCandidates?: boolean;
+}): number {
+  const { conditions, includeViewedCandidates } = input;
+  const pacingUpperBound = Math.max(config.playwright.actionDelayMaxMsByPlatform.boss, 1);
+  // One bounded search deadline must cover intentional pacing as well as page
+  // readiness. A direct search with custom sliders has several paced pointer
+  // operations; the ordinary list-read budget is not sufficient for it.
+  const viewedPolicyActionUnits = includeViewedCandidates === undefined ? 0 : 2;
+  const estimatedMs = 24_000 + (12 + viewedPolicyActionUnits + conditions.reduce((total, condition) => total + bossDirectSearchActionUnits(condition), 0)) * pacingUpperBound;
+  return Math.min(120_000, Math.max(config.playwright.searchPageTimeoutMs, estimatedMs));
+}
+
+export function estimateBossSearchTimeoutMs(input: {
+  source: 'saved' | 'direct';
+  conditions: readonly SearchCondition[];
+  includeViewedCandidates?: boolean;
+}): number {
+  if (input.source === 'direct') {
+    return estimateBossDirectSearchTimeoutMs(input);
+  }
+
+  // Saved search only has keyword/result readiness plus the optional viewed
+  // control. It intentionally keeps the normal list-read budget unless the
+  // policy itself needs a paced toggle and result refresh.
+  const pacingUpperBound = Math.max(config.playwright.actionDelayMaxMsByPlatform.boss, 1);
+  const viewedPolicyActionUnits = input.includeViewedCandidates === undefined ? 0 : 2;
+  return Math.min(120_000, Math.max(
+    config.playwright.searchPageTimeoutMs,
+    24_000 + (4 + viewedPolicyActionUnits) * pacingUpperBound,
+  ));
+}
+
 function createBossDirectSearchDeadline(
   conditions: SearchCondition[],
   options?: SearchWaitOptions,
 ): number {
   if (options?.deadline !== undefined) return options.deadline;
-  const pacingUpperBound = Math.max(config.playwright.actionDelayMaxMsByPlatform.boss, 1);
-  // One bounded search deadline must cover intentional pacing as well as page
-  // readiness. A direct search with custom sliders has several paced pointer
-  // operations; the ordinary 30s list-read budget is not sufficient for it.
-  const viewedPolicyActionUnits = options?.includeViewedCandidates === undefined ? 0 : 2;
-  const estimatedMs = 24_000 + (12 + viewedPolicyActionUnits + conditions.reduce((total, condition) => total + bossDirectSearchActionUnits(condition), 0)) * pacingUpperBound;
-  const boundedMs = Math.min(120_000, estimatedMs);
-  return Date.now() + Math.max(config.playwright.searchPageTimeoutMs, boundedMs);
+  return Date.now() + estimateBossDirectSearchTimeoutMs({
+    conditions,
+    includeViewedCandidates: options?.includeViewedCandidates,
+  });
 }
 
 function createResumeDetailDeadline(): number {
@@ -395,16 +431,24 @@ async function prepareBossSearchConditionPage(page: Page, keyword: string, optio
   return prepareBossSearchPage(page, keyword, deadline);
 }
 
-async function openBossDirectSearch(
+export interface BossDirectSearchApplyResult {
+  page: Page;
+  verification: BossDirectSearchVerificationSummary;
+}
+
+export async function applyBossDirectSearch(
   page: Page,
   keyword: string,
   conditions: SearchCondition[],
   options?: SearchWaitOptions,
-): Promise<Page> {
+): Promise<BossDirectSearchApplyResult> {
+  throwIfBossSearchAborted(options?.signal);
   const deadline = createBossDirectSearchDeadline(conditions, options);
   const resolvedViewedPolicy = resolveBossDirectRecentViewedPolicy(conditions, options?.includeViewedCandidates);
   const searchPage = await prepareBossSearchConditionPage(page, keyword, { ...options, deadline });
+  throwIfBossSearchAborted(options?.signal);
   await resetBossSearchFilters(searchPage, deadline);
+  throwIfBossSearchAborted(options?.signal);
   await selectBossUnrestrictedJob(searchPage, deadline);
   const effectiveConditions = resolvedViewedPolicy.conditions;
   const jobScopeConditions = effectiveConditions.filter((condition) => (
@@ -417,6 +461,7 @@ async function openBossDirectSearch(
     !jobScopeConditions.includes(condition) && !cityConditions.includes(condition)
   ));
   for (const condition of jobScopeConditions) {
+    throwIfBossSearchAborted(options?.signal);
     const result = await applyBossSearchCondition(searchPage, condition, deadline);
     if (result.status !== 'applied') {
       const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
@@ -425,8 +470,10 @@ async function openBossDirectSearch(
       throw new Error(`Boss direct search condition ${condition.kind}${fieldLabel} failed: ${result.message ?? result.status}`);
     }
   }
+  throwIfBossSearchAborted(options?.signal);
   await applyBossSearchKeyword(searchPage, keyword, deadline);
   for (const condition of cityConditions) {
+    throwIfBossSearchAborted(options?.signal);
     const result = await applyBossSearchCondition(searchPage, condition, deadline);
     if (result.status !== 'applied') {
       const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
@@ -436,6 +483,7 @@ async function openBossDirectSearch(
     }
   }
   for (const condition of remainingConditions) {
+    throwIfBossSearchAborted(options?.signal);
     const result = await applyBossSearchCondition(searchPage, condition, deadline);
     if (result.status !== 'applied') {
       const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
@@ -446,10 +494,12 @@ async function openBossDirectSearch(
   }
 
   if (resolvedViewedPolicy.desiredChecked !== undefined) {
+    throwIfBossSearchAborted(options?.signal);
     await applyBossViewedCandidatePolicy(searchPage, !resolvedViewedPolicy.desiredChecked, deadline);
   }
 
-  await assertBossDirectSearchPostcondition(
+  throwIfBossSearchAborted(options?.signal);
+  const verification = await assertBossDirectSearchPostcondition(
     searchPage,
     keyword,
     effectiveConditions,
@@ -457,7 +507,16 @@ async function openBossDirectSearch(
     resolvedViewedPolicy.desiredChecked,
   );
 
-  return searchPage;
+  return { page: searchPage, verification };
+}
+
+async function openBossDirectSearch(
+  page: Page,
+  keyword: string,
+  conditions: SearchCondition[],
+  options?: SearchWaitOptions,
+): Promise<Page> {
+  return (await applyBossDirectSearch(page, keyword, conditions, options)).page;
 }
 
 const bossSelectRangeInputSpecByLabel: Record<string, SearchFilterOptionInputSpec> = {
@@ -3054,20 +3113,71 @@ function assertBossEquivalentSearchFilterState(
   }
 }
 
-async function assertBossDirectSearchPostcondition(
+export interface BossSearchConditionVerification {
+  fieldId: string;
+  expected: unknown;
+  actual: unknown;
+  verified: boolean;
+  evidence: 'keyword-input' | 'active-job-option' | 'selected-city-options' | 'custom-slider' | 'selected-option' | 'age-range' | 'toggle' | 'text-input' | 'unselected';
+  message?: string;
+}
+
+export interface BossDirectSearchVerificationSummary {
+  keyword: string;
+  conditions: BossSearchConditionVerification[];
+  conditionsVerified: number;
+  resultTotal: number;
+  resultTotalSource: 'page';
+}
+
+function sameBossSearchValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function readBossSemanticAge(value: string[]): { min?: number; max?: number } | undefined {
+  const raw = value.find((entry) => entry.startsWith('custom:'))?.slice('custom:'.length) ?? value[0];
+  if (!raw || raw === '不限') return {};
+  const numbers = raw.match(/\d+/g)?.map((entry) => Number.parseInt(entry, 10)) ?? [];
+  if (numbers.length < 2 || numbers.some((entry) => !Number.isFinite(entry))) return undefined;
+  return { min: numbers[0], max: numbers[1] };
+}
+
+function verificationEntry(
+  fieldId: string,
+  expected: unknown,
+  actual: unknown,
+  evidence: BossSearchConditionVerification['evidence'],
+  message: string,
+): BossSearchConditionVerification {
+  const verified = sameBossSearchValue(expected, actual);
+  return { fieldId, expected, actual, verified, evidence, ...(verified ? {} : { message }) };
+}
+
+/**
+ * Read the page's direct-search state as business values. This intentionally
+ * does not expose transient UI tokens such as `custom:35-45` in its result.
+ */
+export async function readBossDirectSearchVerificationSummary(
   page: Page,
   keyword: string,
   conditions: SearchCondition[],
   deadline: number,
   expectedRecentViewed?: boolean,
-): Promise<void> {
+): Promise<BossDirectSearchVerificationSummary> {
   const state = await snapshotBossSearchFilterState(page, deadline);
+  const entries: BossSearchConditionVerification[] = [];
   const expectedKeyword = normalizeText(keyword);
-  if (state.keyword !== expectedKeyword) {
-    throw new Error(`Boss direct search postcondition mismatch for keyword: expected ${expectedKeyword}, observed ${state.keyword || '(empty)'}.`);
-  }
+  entries.push(verificationEntry(
+    'keyword', expectedKeyword, state.keyword, 'keyword-input',
+    `Boss direct search postcondition mismatch for keyword: expected ${expectedKeyword}, observed ${state.keyword || '(empty)'}.`,
+  ));
   if (expectedRecentViewed !== undefined && state.toggles.filter_recent_viewed !== expectedRecentViewed) {
-    throw new Error(`Boss direct search postcondition mismatch for filter_recent_viewed: expected ${String(expectedRecentViewed)}, observed ${String(state.toggles.filter_recent_viewed)}.`);
+    entries.push(verificationEntry(
+      'filter_recent_viewed', expectedRecentViewed, state.toggles.filter_recent_viewed, 'toggle',
+      `Boss direct search postcondition mismatch for filter_recent_viewed: expected ${String(expectedRecentViewed)}, observed ${String(state.toggles.filter_recent_viewed)}.`,
+    ));
+  } else if (expectedRecentViewed !== undefined) {
+    entries.push(verificationEntry('filter_recent_viewed', expectedRecentViewed, state.toggles.filter_recent_viewed, 'toggle', ''));
   }
 
   const frame = await waitForBossSearchFrame(page, deadline);
@@ -3085,34 +3195,44 @@ async function assertBossDirectSearchPostcondition(
           value: normalize(option.getAttribute('data-id')) || normalize(option.getAttribute('data-value')) || normalize(option.getAttribute('ka')),
         };
       });
-      if (!active || (expected !== active.label && expected !== active.value)) {
-        throw new Error(`Boss direct search postcondition mismatch for job_scope: expected ${expected}, observed ${active?.label ?? '(empty)'}.`);
-      }
+      const actual = active && (expected === active.value ? active.value : active.label);
+      entries.push(verificationEntry(
+        condition.fieldId, expected, actual, 'active-job-option',
+        `Boss direct search postcondition mismatch for job_scope: expected ${expected}, observed ${active?.label ?? '(empty)'}.`,
+      ));
       continue;
     }
 
     if (condition.fieldId === 'city') {
       const expected = readBossApplicationFilterMultiValues(condition).sort();
       const actual = (await readBossSelectedCityApplicationFilter(page, frame, deadline)).sort();
-      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-        throw new Error(`Boss direct search postcondition mismatch for city: expected ${expected.join(', ')}, observed ${actual.join(', ') || '(empty)'}.`);
-      }
+      entries.push(verificationEntry(
+        condition.fieldId, expected, actual, 'selected-city-options',
+        `Boss direct search postcondition mismatch for city: expected ${expected.join(', ')}, observed ${actual.join(', ') || '(empty)'}.`,
+      ));
       continue;
     }
 
     if (condition.fieldId === 'education' || condition.fieldId === 'work_years') {
       const customRange = readBossCustomSliderRange(condition);
-      const actual = state.inline[condition.fieldId];
+      const rawActual = state.inline[condition.fieldId];
       if (customRange) {
-        const expected = `custom:${customRange.minLabel}-${customRange.maxLabel}`;
-        if (!actual.includes(expected)) {
-          throw new Error(`Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${expected}, observed ${actual.join(', ') || '(empty)'}.`);
-        }
+        const expected = { min: customRange.minLabel, max: customRange.maxLabel };
+        const customActual = rawActual.find((entry) => entry.startsWith('custom:'))?.slice('custom:'.length).split('-');
+        const actual = customActual && customActual.length === 2
+          ? { min: customActual[0], max: customActual[1] }
+          : rawActual[0];
+        entries.push(verificationEntry(
+          condition.fieldId, expected, actual, 'custom-slider',
+          `Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${expected.min}-${expected.max}, observed ${rawActual.join(', ') || '(empty)'}.`,
+        ));
       } else {
         const expected = readBossApplicationFilterSingleValue(condition);
-        if (!actual.includes(expected)) {
-          throw new Error(`Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${expected}, observed ${actual.join(', ') || '(empty)'}.`);
-        }
+        const actual = rawActual.includes(expected) ? expected : rawActual[0];
+        entries.push(verificationEntry(
+          condition.fieldId, expected, actual, 'selected-option',
+          `Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${expected}, observed ${rawActual.join(', ') || '(empty)'}.`,
+        ));
       }
       continue;
     }
@@ -3120,53 +3240,94 @@ async function assertBossDirectSearchPostcondition(
     if (condition.fieldId === 'school_nature') {
       const expected = readBossApplicationFilterMultiValues(condition).sort();
       const actual = [...state.inline.school_nature].sort();
-      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-        throw new Error(`Boss direct search postcondition mismatch for school_nature: expected ${expected.join(', ')}, observed ${actual.join(', ') || '(empty)'}.`);
-      }
+      entries.push(verificationEntry(
+        condition.fieldId, expected, actual, 'selected-option',
+        `Boss direct search postcondition mismatch for school_nature: expected ${expected.join(', ')}, observed ${actual.join(', ') || '(empty)'}.`,
+      ));
       continue;
     }
 
     if (condition.fieldId === 'age') {
       const expectedRange = readBossAgeRangeInput(condition);
-      const expectedPreset = buildBossAgePresetLabel(expectedRange);
-      const expected = expectedPreset ?? `custom:${expectedRange.min ?? ''}-${expectedRange.max ?? ''}`;
-      if (!state.inline.age.includes(expected)) {
-        throw new Error(`Boss direct search postcondition mismatch for age: expected ${expected}, observed ${state.inline.age.join(', ') || '(empty)'}.`);
-      }
+      const expected = {
+        ...(expectedRange.min === undefined ? {} : { min: expectedRange.min }),
+        ...(expectedRange.max === undefined ? {} : { max: expectedRange.max }),
+      };
+      const actual = readBossSemanticAge(state.inline.age);
+      entries.push(verificationEntry(
+        condition.fieldId, expected, actual, 'age-range',
+        `Boss direct search postcondition mismatch for age: expected ${JSON.stringify(expected)}, observed ${state.inline.age.join(', ') || '(empty)'}.`,
+      ));
       continue;
     }
 
     if (condition.fieldId === 'filter_recent_viewed' || condition.fieldId === 'no_colleague_resume_exchange') {
       const expected = readBossApplicationFilterToggleValue(condition);
-      if (state.toggles[condition.fieldId] !== expected) {
-        throw new Error(`Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${String(expected)}, observed ${String(state.toggles[condition.fieldId])}.`);
-      }
+      entries.push(verificationEntry(
+        condition.fieldId, expected, state.toggles[condition.fieldId], 'toggle',
+        `Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${String(expected)}, observed ${String(state.toggles[condition.fieldId])}.`,
+      ));
       continue;
     }
 
     if (condition.fieldId === 'company') {
       const expected = readBossTextApplicationFilterValues(condition).join(' ');
-      if (state.company !== expected) {
-        throw new Error(`Boss direct search postcondition mismatch for company: expected ${expected}, observed ${state.company || '(empty)'}.`);
-      }
+      entries.push(verificationEntry(
+        condition.fieldId, expected, state.company, 'text-input',
+        `Boss direct search postcondition mismatch for company: expected ${expected}, observed ${state.company || '(empty)'}.`,
+      ));
       continue;
     }
 
     const label = bossMoreApplicationFilterLabelByFieldId[condition.fieldId];
     if (label) {
       const expected = readBossApplicationFilterSingleValue(condition);
-      if (state.more[label] !== expected) {
-        throw new Error(`Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${expected}, observed ${state.more[label] ?? '(unselected)'}.`);
-      }
+      entries.push(verificationEntry(
+        condition.fieldId, expected, state.more[label], 'selected-option',
+        `Boss direct search postcondition mismatch for ${condition.fieldId}: expected ${expected}, observed ${state.more[label] ?? '(unselected)'}.`,
+      ));
     }
   }
 
   const candidatePositionRequested = conditions.some((condition) => (
     isApplicationFilterCondition(condition) && condition.fieldId === 'candidate_position_requirement'
   ));
-  if (!candidatePositionRequested && state.more['牛人职位要求'] !== undefined) {
-    throw new Error(`Boss direct search postcondition mismatch for candidate_position_requirement: expected unselected, observed ${state.more['牛人职位要求']}.`);
+  if (!candidatePositionRequested) {
+    entries.push(verificationEntry(
+      'candidate_position_requirement', undefined, state.more['牛人职位要求'], 'unselected',
+      `Boss direct search postcondition mismatch for candidate_position_requirement: expected unselected, observed ${state.more['牛人职位要求']}.`,
+    ));
   }
+
+  const result = await readBossSearchConditionResultTotal(page, { deadline });
+  return {
+    keyword: expectedKeyword,
+    conditions: entries,
+    conditionsVerified: entries.filter((entry) => entry.verified).length,
+    resultTotal: result.resultTotal,
+    resultTotalSource: result.resultTotalSource,
+  };
+}
+
+async function assertBossDirectSearchPostcondition(
+  page: Page,
+  keyword: string,
+  conditions: SearchCondition[],
+  deadline: number,
+  expectedRecentViewed?: boolean,
+): Promise<BossDirectSearchVerificationSummary> {
+  const summary = await readBossDirectSearchVerificationSummary(
+    page,
+    keyword,
+    conditions,
+    deadline,
+    expectedRecentViewed,
+  );
+  const failed = summary.conditions.find((entry) => !entry.verified);
+  if (failed) {
+    throw new Error(failed.message ?? `Boss direct search postcondition mismatch for ${failed.fieldId}.`);
+  }
+  return summary;
 }
 
 async function resetBossSearchFilters(

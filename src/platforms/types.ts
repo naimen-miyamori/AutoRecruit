@@ -20,6 +20,11 @@ export type BossForwardMode = 'colleague' | 'email';
 export interface SearchWaitOptions {
   deadline?: number;
   includeViewedCandidates?: boolean;
+  /**
+   * A caller-owned cancellation signal. Platform actions must stop before the
+   * next page mutation when it is aborted; they never create their own signal.
+   */
+  signal?: AbortSignal;
 }
 
 export interface CandidatePostOpenActions {
@@ -48,6 +53,15 @@ export interface PlatformAdapter {
   openAuthenticatedHome(page: Page): Promise<Page>;
   assertAuthenticated(page: Page): Promise<void>;
   openSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
+  /**
+   * Optional platform-owned estimate for one whole search budget. The caller
+   * creates the one absolute deadline shared by search entry and extraction.
+   */
+  estimateSearchTimeoutMs?(input: {
+    source: 'saved' | 'direct';
+    conditions: SearchCondition[];
+    includeViewedCandidates?: boolean;
+  }): number;
   openDirectSearch?(page: Page, keyword: string, conditions: SearchCondition[], options?: SearchWaitOptions): Promise<Page>;
   prepareSearchConditionPage?(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
   discoverSearchFilters?(page: Page, options: SearchFilterDiscoveryRunOptions): Promise<SearchFilterCatalog>;
