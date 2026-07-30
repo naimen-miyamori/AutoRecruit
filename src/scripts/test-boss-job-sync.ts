@@ -8,6 +8,8 @@ import { config } from '../config.js';
 import {
   buildBossSyncedJobKey,
   hashBossJd,
+  openAndReadBossPositionDetail,
+  openBossJobList,
   readBossPositionSummaries,
   syncBossPositions,
 } from '../platforms/boss-jobs.js';
@@ -47,6 +49,81 @@ describe('Boss job/JD synchronization', () => {
         { bossJobId: 'job-2', name: '物业电工', status: 'closed', location: undefined },
       ]);
     } finally {
+      await browser.close();
+    }
+  });
+
+  it('reads stable IDs and JD text from the current Boss v2 job-list and edit iframes', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    try {
+      await page.route('**/web/chat/job/list*', async (route) => route.fulfill({
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+        body: `
+          <iframe src="https://www.zhipin.com/web/frame/job_v2/list?jobversion=test"></iframe>
+          <div class="dialog-wrap active" data-type="boss-dialog">
+            <div class="dialog-hunter-daily-task-guide" style="position:fixed;z-index:2">
+              <div class="close-btn" style="width:20px;height:20px" onclick="this.closest('.dialog-wrap').remove()"></div>
+            </div>
+            <div class="boss-layer__wrapper" style="position:fixed;inset:0;z-index:1"></div>
+          </div>
+        `,
+      }));
+      await page.route('**/web/frame/job_v2/list*', async (route) => route.fulfill({
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+        body: `
+          <div id="app"></div>
+          <ul class="job-list-content">
+            <li class="job-item-container"><span class="job-title-box"><span class="job-name">全铝箱包设计</span><span>普</span><span>匿名</span></span><span class="job-area">肇庆</span><span class="status-box status-opening">开放中</span><span class="operate-btn" onclick="parent.location.href='https://www.zhipin.com/web/chat/job/edit?encryptId=job-v2-1'">编辑</span></li>
+            <li class="job-item-container"><span class="job-name">待开放职位</span><span class="status-box status-wait-open">待开放</span></li>
+            <li class="job-item-container"><span class="job-name">失效职位</span><span class="status-box status-invalid">已失效</span></li>
+          </ul>
+          <script>
+            document.getElementById('app').__vue_app__ = { config: { globalProperties: { $pinia: { state: { value: {
+              'job-list-page': { jobList: [
+                { encryptId: 'job-v2-1', encryptJobId: 'job-v2-1', positionName: '全铝箱包设计', locationName: '肇庆' },
+                { encryptId: 'job-v2-2', encryptJobId: 'job-v2-2', positionName: '待开放职位' },
+                { encryptId: 'job-v2-3', encryptJobId: 'job-v2-3', positionName: '失效职位' }
+              ] }
+            } } } } } };
+          </script>
+        `,
+      }));
+      await page.route('**/web/chat/job/edit*', async (route) => route.fulfill({
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+        body: '<iframe src="https://www.zhipin.com/web/frame/job/edit?encryptId=job-v2-1"></iframe>',
+      }));
+      await page.route('**/web/frame/job/edit*', async (route) => route.fulfill({
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+        body: `
+          <input name="jobName" value="全铝箱包设计">
+          <textarea placeholder="请勿填写QQ、微信、电话等联系方式及违反劳动法相关内容"></textarea>
+          <div class="job-department"><input class="job-department-input" value="设计部"></div>
+          <div class="job-address"><input class="ipt" value="肇庆"></div>
+          <script>setTimeout(() => { document.querySelector('textarea').value = '负责全铝箱包产品设计与工艺落地'; }, 100)</script>
+        `,
+      }));
+
+      await page.goto('https://www.zhipin.com/web/chat/job/list');
+      await openBossJobList(page);
+      const positions = await readBossPositionSummaries(page);
+      assert.deepEqual(positions, [
+        { bossJobId: 'job-v2-1', name: '全铝箱包设计', status: 'open', location: '肇庆' },
+        { bossJobId: 'job-v2-2', name: '待开放职位', status: 'pending', location: undefined },
+        { bossJobId: 'job-v2-3', name: '失效职位', status: 'closed', location: undefined },
+      ]);
+      const detail = await openAndReadBossPositionDetail(page, positions[0]!);
+      assert.equal(detail.rawJd, '负责全铝箱包产品设计与工艺落地');
+      assert.equal(detail.department, '设计部');
+      assert.equal(detail.location, '肇庆');
+      assert.match(page.url(), /\/web\/chat\/job\/list/);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
       await browser.close();
     }
   });
