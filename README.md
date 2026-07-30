@@ -246,13 +246,13 @@ npm run dev -- \
   --cc audit@example.com
 ```
 
-默认跳过已查看候选人；只有普通抓取可以使用 `--include-viewed true`。
+默认普通抓取会排除平台页面标记为已查看的候选人；只有普通抓取可以使用 `--include-viewed true`。在 Boss 直猎邦，这一开关控制“过滤近14天查看”：默认勾选以排除平台近 14 天已查看人选，`--include-viewed true` 取消勾选。无论该开关取何值，本地 `seen-ids.json` 都仍会排除已经成功抓取过的候选人。
 
 ### 将直猎邦加入普通抓取
 
 `--include-boss true` 只允许与普通抓取或批量任务的 `--platform all` 组合。系统会在打开第一个浏览器前，核对所有选中平台是否已有岗位 JD（或本次提供可用 JD），并在 direct 搜索时校验同一筛选输入能否被每个平台的 catalog 完整解释；任一项不满足会一次性失败，不会先运行前三个平台。
 
-Boss 阶段复用 `data/boss/`、独立登录态和本地 `seen-ids.json`。直猎邦当前没有与前三个平台等价的页面级“已查看”筛选，因此 `--include-viewed true` 只切换前三个平台的页面筛选；Boss 仍依赖本地 seen 过滤已成功抓取的候选人。若 Boss 岗位已有保存的转发设置，省略本次转发参数时可能复用该设置；显式 `--boss-forward-mode` 和 `--boss-forward-recipient` 也可在 `all + --include-boss true` 中使用，并只作用于 Boss 阶段。
+Boss 阶段复用 `data/boss/`、独立登录态和本地 `seen-ids.json`。普通抓取会将公共 `--include-viewed` 映射到直猎邦的“过滤近14天查看”：默认勾选以排除平台近 14 天已查看人选，传入 `true` 时取消勾选。这个页面筛选不等同于本地历史去重；无论页面开关取何值，`seen-ids.json` 仍会排除已经成功抓取的候选人。若 Boss 岗位已有保存的转发设置，省略本次转发参数时可能复用该设置；显式 `--boss-forward-mode` 和 `--boss-forward-recipient` 也可在 `all + --include-boss true` 中使用，并只作用于 Boss 阶段。
 
 ### 批量职位
 

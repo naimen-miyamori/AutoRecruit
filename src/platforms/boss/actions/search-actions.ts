@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import type { BrowserContext, Frame, Locator, Page } from 'playwright';
-import { moveMouseContinuously, typeBossLocatorSequentially } from '../../../browser/pacing.js';
+import {
+  moveMouseContinuously,
+  typeBossLocatorSequentially,
+  waitPlatformActionPace,
+} from '../../../browser/pacing.js';
 import { config } from '../../../config.js';
 import {
   buildSearchFilterDiscoveryStats,
@@ -207,7 +211,8 @@ function createBossDirectSearchDeadline(
   // One bounded search deadline must cover intentional pacing as well as page
   // readiness. A direct search with custom sliders has several paced pointer
   // operations; the ordinary 30s list-read budget is not sufficient for it.
-  const estimatedMs = 24_000 + (12 + conditions.reduce((total, condition) => total + bossDirectSearchActionUnits(condition), 0)) * pacingUpperBound;
+  const viewedPolicyActionUnits = options?.includeViewedCandidates === undefined ? 0 : 2;
+  const estimatedMs = 24_000 + (12 + viewedPolicyActionUnits + conditions.reduce((total, condition) => total + bossDirectSearchActionUnits(condition), 0)) * pacingUpperBound;
   const boundedMs = Math.min(120_000, estimatedMs);
   return Date.now() + Math.max(config.playwright.searchPageTimeoutMs, boundedMs);
 }
@@ -367,9 +372,7 @@ async function applyBossSearchKeyword(page: Page, keyword: string, deadline: num
   await waitForBossSearchResults(frame, deadline);
 }
 
-async function openBossSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page> {
-  const deadline = createSearchDeadline(options);
-
+async function prepareBossSearchPage(page: Page, keyword: string, deadline: number): Promise<Page> {
   await openBossSearchMenu(page, deadline);
   await closeExistingBossResumeDialog(page, deadline);
   await waitForBossSearchFrame(page, deadline);
@@ -378,8 +381,18 @@ async function openBossSubscribeSearch(page: Page, keyword: string, options?: Se
   return page;
 }
 
+async function openBossSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page> {
+  const deadline = createSearchDeadline(options);
+  const searchPage = await prepareBossSearchPage(page, keyword, deadline);
+  if (options?.includeViewedCandidates !== undefined) {
+    await applyBossViewedCandidatePolicy(searchPage, options.includeViewedCandidates, deadline);
+  }
+  return searchPage;
+}
+
 async function prepareBossSearchConditionPage(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page> {
-  return openBossSubscribeSearch(page, keyword, options);
+  const deadline = createSearchDeadline(options);
+  return prepareBossSearchPage(page, keyword, deadline);
 }
 
 async function openBossDirectSearch(
@@ -389,16 +402,18 @@ async function openBossDirectSearch(
   options?: SearchWaitOptions,
 ): Promise<Page> {
   const deadline = createBossDirectSearchDeadline(conditions, options);
+  const resolvedViewedPolicy = resolveBossDirectRecentViewedPolicy(conditions, options?.includeViewedCandidates);
   const searchPage = await prepareBossSearchConditionPage(page, keyword, { ...options, deadline });
   await resetBossSearchFilters(searchPage, deadline);
   await selectBossUnrestrictedJob(searchPage, deadline);
-  const jobScopeConditions = conditions.filter((condition) => (
+  const effectiveConditions = resolvedViewedPolicy.conditions;
+  const jobScopeConditions = effectiveConditions.filter((condition) => (
     isApplicationFilterCondition(condition) && condition.fieldId === 'job_scope'
   ));
-  const cityConditions = conditions.filter((condition) => (
+  const cityConditions = effectiveConditions.filter((condition) => (
     isApplicationFilterCondition(condition) && condition.fieldId === 'city'
   ));
-  const remainingConditions = conditions.filter((condition) => (
+  const remainingConditions = effectiveConditions.filter((condition) => (
     !jobScopeConditions.includes(condition) && !cityConditions.includes(condition)
   ));
   for (const condition of jobScopeConditions) {
@@ -430,7 +445,17 @@ async function openBossDirectSearch(
     }
   }
 
-  await assertBossDirectSearchPostcondition(searchPage, keyword, conditions, deadline);
+  if (resolvedViewedPolicy.desiredChecked !== undefined) {
+    await applyBossViewedCandidatePolicy(searchPage, !resolvedViewedPolicy.desiredChecked, deadline);
+  }
+
+  await assertBossDirectSearchPostcondition(
+    searchPage,
+    keyword,
+    effectiveConditions,
+    deadline,
+    resolvedViewedPolicy.desiredChecked,
+  );
 
   return searchPage;
 }
@@ -1364,6 +1389,64 @@ function readBossApplicationFilterToggleValue(
   throw new Error(`Boss application filter ${condition.fieldId} requires a boolean value.`);
 }
 
+type BossDirectRecentViewedPolicy = {
+  conditions: SearchCondition[];
+  desiredChecked?: boolean;
+};
+
+function resolveBossDirectRecentViewedPolicy(
+  conditions: SearchCondition[],
+  includeViewedCandidates: boolean | undefined,
+): BossDirectRecentViewedPolicy {
+  const recentViewedConditions = conditions.filter((condition): condition is Extract<SearchCondition, { kind: 'applicationFilter' }> => (
+    isApplicationFilterCondition(condition) && condition.fieldId === 'filter_recent_viewed'
+  ));
+  const requestedValues = recentViewedConditions.map((condition) => readBossApplicationFilterToggleValue(condition));
+  const uniqueRequestedValues = [...new Set(requestedValues)];
+  if (uniqueRequestedValues.length > 1) {
+    throw new Error('Boss direct search received conflicting filter_recent_viewed conditions. Keep one value before opening the search page.');
+  }
+
+  if (includeViewedCandidates === undefined) {
+    if (recentViewedConditions.length <= 1) {
+      return { conditions };
+    }
+    // Repeating the exact same toggle has no business effect. Keep one so
+    // normal direct-filter replay remains deterministic for compatibility callers.
+    let retainedRecentViewedCondition = false;
+    return {
+      conditions: conditions.filter((condition) => {
+        if (!isApplicationFilterCondition(condition) || condition.fieldId !== 'filter_recent_viewed') {
+          return true;
+        }
+        if (retainedRecentViewedCondition) {
+          return false;
+        }
+        retainedRecentViewedCondition = true;
+        return true;
+      }),
+    };
+  }
+
+  const desiredChecked = !includeViewedCandidates;
+  const explicitValue = uniqueRequestedValues[0];
+  if (explicitValue !== undefined && explicitValue !== desiredChecked) {
+    throw new Error(
+      `Boss direct search filter_recent_viewed=${String(explicitValue)} conflicts with --include-viewed ${String(includeViewedCandidates)}. Remove filter_recent_viewed from the direct conditions or align the switch.`,
+    );
+  }
+
+  return {
+    // The public ordinary-capture switch owns the final state. An agreeing
+    // explicit condition is accepted but intentionally replayed only once by
+    // the semantic policy action below.
+    conditions: conditions.filter((condition) => (
+      !isApplicationFilterCondition(condition) || condition.fieldId !== 'filter_recent_viewed'
+    )),
+    desiredChecked,
+  };
+}
+
 function readBossApplicationFilterRangeBoundary(
   condition: Extract<SearchCondition, { kind: 'applicationFilter' }>,
   key: 'min' | 'max',
@@ -1879,6 +1962,60 @@ async function readBossSelectedCityApplicationFilter(
   }
 }
 
+async function clearBossResidualCityApplicationFilter(
+  page: Page,
+  frame: Frame,
+  deadline: number,
+): Promise<void> {
+  const trigger = frame.locator('.city-wrap .city, .city-wrap .square').first();
+  const cityBox = frame.locator('.city-wrap .city-box').first();
+  if (!await cityBox.isVisible().catch(() => false)) {
+    await clickBossLocator(trigger, page, Math.min(remainingTime(deadline), 5000));
+    try {
+      await cityBox.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
+    } catch {
+      // Immediately after the page-level reset, the first pointer interaction
+      // can be consumed while the city picker hydrates. Retry the same narrow
+      // open action once; continuing without an inspectable panel is unsafe.
+      await clickBossLocator(trigger, page, Math.min(remainingTime(deadline), 5000));
+      await cityBox.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
+    }
+  }
+
+  // The page's “清除” action can clear its internal checkmarks while leaving a
+  // stale province summary open. Selecting the native “全国” baseline instead
+  // both removes the geographic restriction and reliably commits/closes it.
+  const options = cityBox.locator('.dropdown-province > li');
+  const nationalIndexes = await options.evaluateAll((items) => items.flatMap((item, index) => (
+    (item.textContent ?? '').replace(/\s+/g, ' ').trim() === '全国' ? [index] : []
+  )));
+  if (nationalIndexes.length !== 1) {
+    throw new Error(`Boss city selector must expose exactly one 全国 baseline option while resetting filters; found ${nationalIndexes.length}.`);
+  }
+  await clickBossLocator(options.nth(nationalIndexes[0]!), page, Math.min(remainingTime(deadline), 5000));
+  await frame.waitForTimeout(Math.min(500, remainingTime(deadline))).catch(() => undefined);
+
+  const nationalSelected = await options.evaluateAll((elements, nationalIndex) => elements.some((element, index) => {
+    const item = element as HTMLElement;
+    const checkbox = item.querySelector<HTMLElement>('.city-checkbox, .mul-checkbox-ui');
+    return index === nationalIndex && (/status1|checked|active/.test(checkbox?.className ?? '')
+      || Boolean(item.querySelector<HTMLInputElement>('input')?.checked));
+  }), nationalIndexes[0]!);
+  if (!nationalSelected) {
+    throw new Error('Boss city selector did not select 全国 while resetting filters.');
+  }
+
+  const confirmIndexes = await cityBox.locator('button').evaluateAll((buttons) => buttons.flatMap((button, index) => (
+    /确定|确认|完成/.test((button.textContent ?? '').replace(/\s+/g, ' ').trim()) ? [index] : []
+  )));
+  if (confirmIndexes.length !== 1) {
+    throw new Error(`Boss city selector must expose exactly one confirmation control while resetting filters; found ${confirmIndexes.length}.`);
+  }
+  await clickBossLocator(cityBox.locator('button').nth(confirmIndexes[0]!), page, Math.min(remainingTime(deadline), 5000));
+  await cityBox.waitFor({ state: 'hidden', timeout: Math.min(remainingTime(deadline), 5000) });
+  await waitForBossFilterSettle(frame, deadline);
+}
+
 async function applyBossJobScopeApplicationFilter(
   page: Page,
   frame: Frame,
@@ -2121,6 +2258,193 @@ async function applyBossToggleApplicationFilter(
     { timeout: Math.min(remainingTime(deadline), 5000), polling: 100 },
   );
   await waitForBossFilterSettle(frame, deadline);
+}
+
+export interface BossViewedCandidatePolicyResult {
+  desiredChecked: boolean;
+  changed: boolean;
+}
+
+async function locateBossRecentViewedToggle(
+  frame: Frame,
+  deadline: number,
+): Promise<{ root: Locator; checked: boolean }> {
+  const selector = bossToggleApplicationFilterSelectorByFieldId.filter_recent_viewed;
+  const roots = frame.locator(selector);
+  const visibleControls = await roots.evaluateAll((elements) => {
+    const isVisible = (element: Element): element is HTMLElement => {
+      if (!(element instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && Number.parseFloat(style.opacity || '1') > 0
+        && rect.width > 0
+        && rect.height > 0;
+    };
+    return elements.flatMap((element, index) => {
+      if (!isVisible(element)) return [];
+      const input = element.querySelector<HTMLInputElement>('input[type="checkbox"]');
+      if (!input) {
+        throw new Error('Boss recent-viewed filter checkbox is missing.');
+      }
+      return [{ index, checked: input.checked, disabled: input.disabled }];
+    });
+  });
+  if (visibleControls.length !== 1) {
+    throw new Error(`Boss recent-viewed filter must expose exactly one visible control; found ${visibleControls.length}.`);
+  }
+  const control = visibleControls[0]!;
+  if (control.disabled) {
+    throw new Error('Boss recent-viewed filter is disabled.');
+  }
+  const root = roots.nth(control.index);
+  await root.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
+  return { root, checked: control.checked };
+}
+
+async function armBossRecentViewedSearchRefresh(frame: Frame): Promise<string> {
+  const token = `boss-recent-viewed-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  await frame.evaluate((nextToken) => {
+    type RefreshState = {
+      token: string;
+      resultMutation: boolean;
+      loadingSeen: boolean;
+      observer: MutationObserver;
+    };
+    const host = window as Window & { __autorecruitBossRecentViewedRefresh?: RefreshState };
+    host.__autorecruitBossRecentViewedRefresh?.observer.disconnect();
+
+    const isRelatedToResults = (node: Node): boolean => {
+      const element = node.nodeType === Node.ELEMENT_NODE
+        ? node as Element
+        : node.parentElement;
+      if (!element) return false;
+      const relatedSelector = '.geek-info-card, [data-boss-search-result-version], .geek-list, .geek-info-list, .geek-list-wrap, .search-result-list';
+      if (element.matches(relatedSelector) || element.closest(relatedSelector)) return true;
+      const className = element instanceof HTMLElement ? element.className : '';
+      return typeof className === 'string'
+        && /(?:geek|search).*(?:result|list|card)|(?:result|list|card).*(?:geek|search)/i.test(className);
+    };
+
+    const state: RefreshState = {
+      token: nextToken,
+      resultMutation: false,
+      loadingSeen: false,
+      observer: new MutationObserver((mutations) => {
+        if (state.resultMutation) return;
+        for (const mutation of mutations) {
+          if (mutation.type === 'attributes' && mutation.attributeName === 'data-boss-search-result-version') {
+            state.resultMutation = true;
+            return;
+          }
+          if (isRelatedToResults(mutation.target)
+            || [...mutation.addedNodes, ...mutation.removedNodes].some(isRelatedToResults)) {
+            state.resultMutation = true;
+            return;
+          }
+        }
+      }),
+    };
+    state.observer.observe(document.body, {
+      attributes: true,
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    host.__autorecruitBossRecentViewedRefresh = state;
+  }, token);
+  return token;
+}
+
+async function clearBossRecentViewedSearchRefresh(frame: Frame, token: string): Promise<void> {
+  await frame.evaluate((expectedToken) => {
+    type RefreshState = { token: string; observer: MutationObserver };
+    const host = window as Window & { __autorecruitBossRecentViewedRefresh?: RefreshState };
+    if (host.__autorecruitBossRecentViewedRefresh?.token === expectedToken) {
+      host.__autorecruitBossRecentViewedRefresh.observer.disconnect();
+      delete host.__autorecruitBossRecentViewedRefresh;
+    }
+  }, token).catch(() => undefined);
+}
+
+async function waitForBossRecentViewedSearchRefresh(
+  frame: Frame,
+  token: string,
+  deadline: number,
+): Promise<void> {
+  try {
+    const observed = await frame.waitForFunction((expectedToken) => {
+      type RefreshState = {
+        token: string;
+        resultMutation: boolean;
+        loadingSeen: boolean;
+      };
+      const host = window as Window & { __autorecruitBossRecentViewedRefresh?: RefreshState };
+      const state = host.__autorecruitBossRecentViewedRefresh;
+      if (!state || state.token !== expectedToken) return undefined;
+
+      const bodyText = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim();
+      const isLoading = /(?:加载中|正在加载|加载资料)/.test(bodyText);
+      state.loadingSeen ||= isLoading;
+      const hasLoadError = /数据加载异常/.test(bodyText);
+      const hasCards = document.querySelectorAll('.geek-info-card').length > 0;
+      const hasExplicitEmpty = /暂无|没有|未找到|无相关|搜索使用方法/.test(bodyText) && !isLoading;
+      if (hasLoadError) return { hasLoadError: true };
+      if (!hasCards && !hasExplicitEmpty) return undefined;
+      return state.resultMutation || (state.loadingSeen && !isLoading)
+        ? { hasLoadError: false }
+        : undefined;
+    }, token, { timeout: remainingTime(deadline), polling: 100 });
+    const result = await observed.jsonValue() as { hasLoadError: boolean };
+    if (result.hasLoadError) {
+      throw new Error('Boss search reported a data-loading error after changing the recent-viewed filter.');
+    }
+  } catch (error) {
+    if (error instanceof Error && /Boss search reported a data-loading error/.test(error.message)) {
+      throw error;
+    }
+    throw new Error('Boss recent-viewed filter changed, but no new search-result refresh was observed before the search deadline.');
+  } finally {
+    await clearBossRecentViewedSearchRefresh(frame, token);
+  }
+}
+
+export async function applyBossViewedCandidatePolicy(
+  page: Page,
+  includeViewedCandidates: boolean,
+  deadline = createSearchDeadline(),
+): Promise<BossViewedCandidatePolicyResult> {
+  const frame = await waitForBossSearchFrame(page, deadline);
+  const desiredChecked = !includeViewedCandidates;
+  const control = await locateBossRecentViewedToggle(frame, deadline);
+  if (control.checked === desiredChecked) {
+    return { desiredChecked, changed: false };
+  }
+
+  // Arm immediately before the pointer click. The pace remains part of this
+  // action, but is performed before observation so background page activity
+  // during the human-like delay cannot be mistaken for this filter refresh.
+  await waitPlatformActionPace(page, 'boss');
+  const refreshToken = await armBossRecentViewedSearchRefresh(frame);
+  try {
+    await clickBossLocator(control.root, page, Math.min(remainingTime(deadline), 5000), { pace: false });
+    await frame.waitForFunction(
+      ({ expected }) => document.querySelector<HTMLInputElement>('.high_search_checkbox[ka="search_change_view_resume"] input[type="checkbox"]')?.checked === expected,
+      { expected: desiredChecked },
+      { timeout: Math.min(remainingTime(deadline), 5000), polling: 100 },
+    );
+    await waitForBossRecentViewedSearchRefresh(frame, refreshToken, deadline);
+  } catch (error) {
+    await clearBossRecentViewedSearchRefresh(frame, refreshToken);
+    throw error;
+  }
+
+  const after = await locateBossRecentViewedToggle(frame, deadline);
+  if (after.checked !== desiredChecked) {
+    throw new Error(`Boss recent-viewed filter did not reach the requested state: ${String(desiredChecked)}.`);
+  }
+  return { desiredChecked, changed: true };
 }
 
 async function clickBossMoreApplicationFilter(
@@ -2735,11 +3059,15 @@ async function assertBossDirectSearchPostcondition(
   keyword: string,
   conditions: SearchCondition[],
   deadline: number,
+  expectedRecentViewed?: boolean,
 ): Promise<void> {
   const state = await snapshotBossSearchFilterState(page, deadline);
   const expectedKeyword = normalizeText(keyword);
   if (state.keyword !== expectedKeyword) {
     throw new Error(`Boss direct search postcondition mismatch for keyword: expected ${expectedKeyword}, observed ${state.keyword || '(empty)'}.`);
+  }
+  if (expectedRecentViewed !== undefined && state.toggles.filter_recent_viewed !== expectedRecentViewed) {
+    throw new Error(`Boss direct search postcondition mismatch for filter_recent_viewed: expected ${String(expectedRecentViewed)}, observed ${String(state.toggles.filter_recent_viewed)}.`);
   }
 
   const frame = await waitForBossSearchFrame(page, deadline);
@@ -2861,6 +3189,10 @@ async function resetBossSearchFilters(
       }
     }
     await waitForBossFilterSettle(frame, deadline);
+    after = await snapshotBossSearchFilterState(page, deadline);
+  }
+  if (after.city || (after.cityOptions?.length ?? 0) > 0) {
+    await clearBossResidualCityApplicationFilter(page, frame, deadline);
     after = await snapshotBossSearchFilterState(page, deadline);
   }
   if (!isBossSearchFilterBaseline(after)) {

@@ -4,12 +4,15 @@ import { chromium, type Browser, type Page } from 'playwright';
 
 import { config } from '../config.js';
 import {
+  applyBossViewedCandidatePolicy,
   applyBossSearchCondition,
   assertBossSearchFilterStateRestorable,
   discoverBossSearchFilters,
   extractBossCandidateList,
   openBossDirectSearch,
   openBossResumeDetail,
+  openBossSubscribeSearch,
+  prepareBossSearchConditionPage,
   resetBossSearchFilters,
   snapshotBossSearchFilterState,
 } from '../platforms/boss/actions/search-actions.js';
@@ -54,7 +57,185 @@ function searchBody(content: string): string {
   </body></html>`;
 }
 
+function recentViewedSearchBody(options: { refreshOnChange?: boolean } = {}): string {
+  const refreshOnChange = options.refreshOnChange !== false;
+  return searchBody(`<span class="reset-btn" ka="search_reset_search_params" onclick="resetSearch()">清空筛选</span>
+    <label class="high_search_checkbox" ka="search_change_view_resume" style="display:block;width:200px;height:24px"><input type="checkbox">过滤近14天查看</label>
+    <label class="high_search_checkbox" ka="search_change_exchange_resume" style="display:block;width:240px;height:24px"><input type="checkbox">近30天未和同事交换简历</label>
+    <section id="boss-results" data-boss-search-result-version="0"><div class="geek-info-card">candidate card</div></section>
+    <script>
+      window.__recentViewedChanges = 0;
+      window.__recentViewedResetCalls = 0;
+      const recentViewedInput = document.querySelector('.high_search_checkbox[ka="search_change_view_resume"] input');
+      function refreshResults() {
+        const results = document.querySelector('#boss-results');
+        results.dataset.bossSearchResultVersion = String(Number(results.dataset.bossSearchResultVersion || '0') + 1);
+        results.innerHTML = '<div class="geek-info-card">candidate card</div>';
+      }
+      recentViewedInput.addEventListener('change', () => {
+        window.__recentViewedChanges += 1;
+        ${refreshOnChange ? 'refreshResults();' : ''}
+      });
+      function resetSearch() {
+        window.__recentViewedResetCalls += 1;
+        recentViewedInput.checked = false;
+        refreshResults();
+      }
+    </script>`);
+}
+
 describe('Boss normal-search actions', () => {
+  it('maps the public viewed switch to the recent-viewed checkbox and proves a refresh without requiring card-count changes', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      const deadline = Date.now() + 10_000;
+      const defaultResult = await applyBossViewedCandidatePolicy(page, false, deadline);
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.deepEqual(defaultResult, { desiredChecked: true, changed: true });
+      assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), true);
+      assert.equal(await frame.locator('.geek-info-card').count(), 1);
+      assert.equal(await frame.locator('#boss-results').getAttribute('data-boss-search-result-version'), '1');
+
+      const includeResult = await applyBossViewedCandidatePolicy(page, true, deadline);
+      assert.deepEqual(includeResult, { desiredChecked: false, changed: true });
+      assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), false);
+      assert.equal(await frame.locator('.geek-info-card').count(), 1);
+      assert.equal(await frame.locator('#boss-results').getAttribute('data-boss-search-result-version'), '2');
+
+      const idempotentResult = await applyBossViewedCandidatePolicy(page, true, deadline);
+      assert.deepEqual(idempotentResult, { desiredChecked: false, changed: false });
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__recentViewedChanges), 2);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('refuses a recent-viewed toggle when no post-click result refresh can be observed', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody({ refreshOnChange: false }) });
+    try {
+      await assert.rejects(
+        () => applyBossViewedCandidatePolicy(page, false, Date.now() + 750),
+        /no new search-result refresh was observed/i,
+      );
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('keeps standalone search-condition preparation isolated from the ordinary-capture viewed policy', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      const deadline = Date.now() + 10_000;
+      await prepareBossSearchConditionPage(page, '测试关键词', { deadline, includeViewedCandidates: false });
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), false);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__recentViewedChanges), 0);
+
+      await openBossSubscribeSearch(page, '测试关键词', { deadline, includeViewedCandidates: false });
+      assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), true);
+
+      await openBossSubscribeSearch(page, '测试关键词', { deadline, includeViewedCandidates: true });
+      assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), false);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('applies the viewed policy after direct-search reset, deduplicates an agreeing condition, and rejects conflicts before page mutation', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    const agreeingCondition = {
+      kind: 'applicationFilter' as const,
+      fieldId: 'filter_recent_viewed',
+      label: '过滤近14天查看',
+      fieldKind: 'toggle' as const,
+      value: true,
+    };
+    try {
+      const deadline = Date.now() + 10_000;
+      await assert.rejects(
+        () => openBossDirectSearch(page, '测试关键词', [{ ...agreeingCondition, value: false }], {
+          deadline,
+          includeViewedCandidates: false,
+        }),
+        /conflicts with --include-viewed false/i,
+      );
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__recentViewedResetCalls), 0);
+
+      await openBossDirectSearch(page, '测试关键词', [agreeingCondition], {
+        deadline,
+        includeViewedCandidates: false,
+      });
+      assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), true);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__recentViewedChanges), 1);
+
+      await openBossDirectSearch(page, '测试关键词', [], {
+        deadline,
+        includeViewedCandidates: true,
+      });
+      assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), false);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('clears a residual city summary after the page reset clears its city checkmarks', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody(`<span class="reset-btn" ka="search_reset_search_params" onclick="resetSearch()">清空筛选</span>
+        <div class="city-wrap"><div class="city" onclick="openCity()">广东</div><div class="city-box" style="display:none"><ul class="dropdown-province"><li onclick="selectNational(this)"><div class="city-checkbox status0"></div>全国</li><li><div class="city-checkbox status1"></div>广东</li></ul><button onclick="confirmCity()">确认</button></div></div>
+        <div class="degree-ui"><span class="degree-item active">不限</span></div><div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div>
+        <label class="high_search_checkbox" ka="search_change_view_resume"><input type="checkbox">过滤近14天查看</label><label class="high_search_checkbox" ka="search_change_exchange_resume"><input type="checkbox">近30天未和同事交换简历</label><div class="geek-info-card">candidate card</div>
+        <script>
+          function openCity() { document.querySelector('.city-box').style.display = 'block'; }
+          function selectNational(item) { document.querySelectorAll('.city-checkbox').forEach((checkbox) => { checkbox.className = 'city-checkbox status0'; }); item.querySelector('.city-checkbox').className = 'city-checkbox status1'; document.querySelector('.city-wrap .city').textContent = '全国'; }
+          function confirmCity() { document.querySelectorAll('.city-checkbox').forEach((checkbox) => { checkbox.className = 'city-checkbox status0'; }); document.querySelector('.city-box').style.display = 'none'; }
+          function resetSearch() { document.querySelectorAll('.city-checkbox').forEach((checkbox) => { checkbox.className = 'city-checkbox status0'; }); document.querySelectorAll('.high_search_checkbox input').forEach((input) => { input.checked = false; }); }
+        </script>`),
+    });
+    try {
+      await resetBossSearchFilters(page, Date.now() + 10_000);
+      const state = await snapshotBossSearchFilterState(page, Date.now() + 10_000);
+      assert.equal(state.city, '');
+      assert.deepEqual(state.cityOptions, []);
+      assert.equal(state.toggles.filter_recent_viewed, false);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
   it('discovers city, job scope, and token-dialog filters as typed controls', async () => {
     const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
     const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
