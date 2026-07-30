@@ -16,6 +16,7 @@ import {
 import type { BossJobSyncRun, BossPositionSummary } from '../types/boss.js';
 import type { JobRecord, NormalizedJob } from '../types/job.js';
 import { JobStore } from '../storage/job-store.js';
+import { BOSS_PAGE_RULES_NORMALIZATION } from '../platforms/boss/parsing/job-parser.js';
 
 const normalizedJob: NormalizedJob = {
   title: '物业电工',
@@ -200,9 +201,10 @@ describe('Boss job/JD synchronization', () => {
           status: 'open',
           syncedAt: '2026-01-01T00:00:00.000Z',
           sourceHash: hashBossJd(rawJd),
+          normalization: BOSS_PAGE_RULES_NORMALIZATION,
         },
       };
-      let parseCalls = 0;
+      let normalizationCalls = 0;
       let saveCalls = 0;
       const runs: BossJobSyncRun[] = [];
       const fakeStore = {
@@ -217,17 +219,83 @@ describe('Boss job/JD synchronization', () => {
 
       const run = await syncBossPositions(page, { platform: 'boss' }, {
         store: fakeStore,
-        parseJd: async () => {
-          parseCalls += 1;
+        normalizeDetail: () => {
+          normalizationCalls += 1;
           return normalizedJob;
         },
         now: () => new Date('2026-07-23T00:00:00.000Z'),
       });
-      assert.equal(parseCalls, 0);
+      assert.equal(normalizationCalls, 0);
       assert.equal(saveCalls, 0);
       assert.equal(run.unchanged, 1);
       assert.equal(run.resultPath, 'run.json');
       assert.equal(runs.length, 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('rebuilds an unchanged historical JD once with deterministic normalization', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    try {
+      await page.route('https://www.zhipin.com/web/chat/job/list', async (route) => route.fulfill({
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+        body: `
+          <div class="job-list">
+            <div class="job-item" data-job-id="job-legacy" onclick="document.querySelector('.job-detail').style.display='block'">
+              <span class="job-name">物业电工</span><span>招聘中</span>
+            </div>
+          </div>
+          <div class="job-detail" data-job-id="job-legacy" style="display:none">
+            <h2 class="job-name">物业电工</h2><div class="job-description">岗位职责：负责设备维护</div>
+            <button class="close" onclick="this.parentElement.style.display='none'">关闭</button>
+          </div>
+        `,
+      }));
+      const rawJd = '岗位职责：负责设备维护';
+      const existing: JobRecord = {
+        jobKey: buildBossSyncedJobKey('物业电工', 'job-legacy'),
+        platform: 'boss',
+        searchKeyword: '物业电工',
+        rawText: rawJd,
+        normalizedJob,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        bossPosition: {
+          bossJobId: 'job-legacy',
+          status: 'open',
+          syncedAt: '2026-01-01T00:00:00.000Z',
+          sourceHash: hashBossJd(rawJd),
+        },
+      };
+      let normalizationCalls = 0;
+      let savedRecord: JobRecord | undefined;
+      const fakeStore = {
+        saveBossPositionSnapshot: async (_positions: readonly BossPositionSummary[]) => 'positions.json',
+        findBossJobRecordByPositionId: async () => existing,
+        saveJobRecord: async (_platform: 'boss', record: JobRecord) => { savedRecord = record; },
+        saveBossJobSyncRun: async () => 'run.json',
+      } as unknown as JobStore;
+
+      const run = await syncBossPositions(page, { platform: 'boss' }, {
+        store: fakeStore,
+        normalizeDetail: () => {
+          normalizationCalls += 1;
+          return normalizedJob;
+        },
+        now: () => new Date('2026-07-30T04:00:00.000Z'),
+      });
+
+      assert.equal(normalizationCalls, 1);
+      assert.equal(run.updated, 1);
+      assert.deepEqual(savedRecord?.bossPosition?.normalization, BOSS_PAGE_RULES_NORMALIZATION);
+      assert.equal(savedRecord?.bossPosition?.sourceHash, hashBossJd(rawJd));
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;

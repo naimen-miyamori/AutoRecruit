@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import type { Page } from 'playwright';
-import { buildJobKey, parseJobDescription } from '../parsers/jd-parser.js';
 import { JobStore } from '../storage/job-store.js';
 import type {
   BossJobSyncInput,
@@ -9,6 +8,7 @@ import type {
   BossPositionDetail,
 } from '../types/boss.js';
 import type { JobRecord, NormalizedJob } from '../types/job.js';
+import { BOSS_PAGE_RULES_NORMALIZATION, normalizeBossPositionDetail } from './boss/parsing/job-parser.js';
 import {
   openAndReadBossPositionDetail,
   openBossJobList,
@@ -22,8 +22,18 @@ export {
   readBossPositionSummaries,
 } from './boss/actions/job-actions.js';
 
+function buildBossJobNameKey(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^\p{Letter}\p{Number}-]+/gu, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
 export function buildBossSyncedJobKey(name: string, bossJobId: string): string {
-  const nameKey = buildJobKey(name, '') || 'boss-job';
+  const nameKey = buildBossJobNameKey(name) || 'boss-job';
   const idKey = bossJobId.replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 64)
     || createHash('sha256').update(bossJobId).digest('hex').slice(0, 16);
   return `${nameKey}-${idKey}`;
@@ -35,8 +45,14 @@ export function hashBossJd(rawJd: string): string {
 
 export interface SyncBossJobsOptions {
   store?: JobStore;
-  parseJd?: (rawJd: string) => Promise<NormalizedJob>;
+  normalizeDetail?: (detail: BossPositionDetail) => NormalizedJob;
   now?: () => Date;
+}
+
+function hasCurrentBossNormalization(existing: JobRecord | undefined): boolean {
+  const normalization = existing?.bossPosition?.normalization;
+  return normalization?.kind === BOSS_PAGE_RULES_NORMALIZATION.kind
+    && normalization.version === BOSS_PAGE_RULES_NORMALIZATION.version;
 }
 
 export async function syncBossPositions(
@@ -45,7 +61,7 @@ export async function syncBossPositions(
   options: SyncBossJobsOptions = {},
 ): Promise<BossJobSyncRun> {
   const store = options.store ?? new JobStore();
-  const parseJd = options.parseJd ?? parseJobDescription;
+  const normalizeDetail = options.normalizeDetail ?? normalizeBossPositionDetail;
   const syncedAt = (options.now ?? (() => new Date()))().toISOString();
   await openBossJobList(page);
   const allPositions = await readBossPositionSummaries(page);
@@ -67,7 +83,7 @@ export async function syncBossPositions(
       detail = await openAndReadBossPositionDetail(page, position);
       const sourceHash = hashBossJd(detail.rawJd);
       const existing = await store.findBossJobRecordByPositionId(position.bossJobId);
-      if (existing?.bossPosition?.sourceHash === sourceHash) {
+      if (existing?.bossPosition?.sourceHash === sourceHash && hasCurrentBossNormalization(existing)) {
         items.push({
           bossJobId: position.bossJobId,
           name: position.name,
@@ -79,7 +95,7 @@ export async function syncBossPositions(
         continue;
       }
 
-      const normalizedJob = await parseJd(detail.rawJd);
+      const normalizedJob = normalizeDetail(detail);
       const jobKey = existing?.jobKey ?? buildBossSyncedJobKey(position.name, position.bossJobId);
       const record: JobRecord = {
         ...(existing ?? {
@@ -98,6 +114,7 @@ export async function syncBossPositions(
           status: position.status,
           syncedAt,
           sourceHash,
+          normalization: BOSS_PAGE_RULES_NORMALIZATION,
         },
       };
       await store.saveJobRecord('boss', record);

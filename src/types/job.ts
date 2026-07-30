@@ -136,6 +136,10 @@ export interface JobRecord {
     status: 'open' | 'pending' | 'closed' | 'unknown';
     syncedAt: string;
     sourceHash: string;
+    normalization?: {
+      kind: 'boss-page-rules';
+      version: number;
+    };
   };
   rawText: string;
   normalizedJob: NormalizedJob;

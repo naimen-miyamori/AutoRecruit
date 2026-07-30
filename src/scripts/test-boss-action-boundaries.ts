@@ -58,4 +58,9 @@ describe('Boss action module boundaries', () => {
       assert.doesNotMatch(source, /TaskQueue|mutationReceipt|chat-operations\/runs|JobStore|saveJobRecord/);
     }
   });
+
+  it('keeps Boss position synchronization independent from LLM JD parsing', async () => {
+    const source = await readSource('platforms/boss-jobs.ts');
+    assert.doesNotMatch(source, /parsers\/jd-parser|parseJobDescription|completeJsonTextFromOpenAI|codex-session-provider/);
+  });
 });
