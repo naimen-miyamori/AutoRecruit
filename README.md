@@ -48,7 +48,7 @@ npm run dev -- --platform 51job --keyword "店长" --jd-file ./jd.txt
 
 - Node.js 24 LTS；项目支持 `>=24 <27`
 - 对应招聘平台的有效账号和登录态
-- 用于 JD 解析和候选人评分的 OpenAI 或兼容 API
+- 用于 JD 解析和候选人评分的 OpenAI 兼容 API，或本机已登录的 Codex/ChatGPT 会话
 - 使用持久化 RAG 时可访问 Qdrant；默认还需要本地 embedding 服务
 
 安装依赖并创建配置：
@@ -58,13 +58,23 @@ npm install
 cp .env.example .env
 ```
 
-编辑 `.env`，至少设置模型服务：
+编辑 `.env`，选择一种模型调用路径。默认路径使用 OpenAI 兼容服务：
 
 ```dotenv
 OPENAI_API_KEY=your-api-key
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=your-model-name
 ```
+
+也可以显式使用当前本机 Codex 的 ChatGPT 登录。先完成 `codex login`，再设置：
+
+```dotenv
+LLM_COMPLETION_ROUTE=codex-session
+# 可选；留空使用该登录账户的默认模型
+# CODEX_SESSION_MODEL=
+```
+
+两条路径严格互斥：`codex-session` 不会读取或调用 OpenAI 兼容服务；默认服务失败时也不会自动转入 Codex。Codex 路径会为每次调用创建隔离、短生命周期、只读的线程，禁止工具、网页搜索、MCP 和文件变更。可用 `npm run llm:route:doctor` 检查当前配置，或附加 `-- --verify true` 进行不含业务数据的连通性验证。
 
 项目默认使用 CloakBrowser。如需改用 Playwright 自带 Chromium：
 
@@ -542,6 +552,9 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 | `PLAYWRIGHT_<PLATFORM>_ACTION_DELAY_MIN_MS/MAX_MS` | 平台网页动作间隔 |
 | `PLAYWRIGHT_<PLATFORM>_CANDIDATE_DELAY_MIN_MS/MAX_MS` | 平台候选人切换间隔 |
 | `PLAYWRIGHT_BOSS_TYPING_DELAY_MIN_MS/MAX_MS` | Boss 搜索关键词、直接聊天文本和备注的逐字间隔，默认 `80-180ms` |
+| `LLM_COMPLETION_ROUTE` | `default`（默认）或 `codex-session`；只选择调用路径，不做失败自动切换 |
+| `CODEX_SESSION_MODEL` | `codex-session` 的可选模型；未设置时使用当前 Codex/ChatGPT 登录的默认模型 |
+| `CODEX_SESSION_TIMEOUT_MS` / `CODEX_SESSION_MAX_CONCURRENCY` | Codex 隔离线程的总超时和并发上限，默认 `120000` / `1` |
 | `TALENT_MAPPING_MODEL` | Mapping 分类建议模型；未设置时回退 `OPENAI_MODEL` |
 | `QDRANT_URL` / `QDRANT_API_KEY` | Qdrant 连接配置 |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | 报告邮件配置 |

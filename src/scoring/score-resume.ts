@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { completeJsonTextFromOpenAI } from '../llm/openai-client.js';
 import { CandidateResume, CandidateScore, NormalizedJob } from '../types/job.js';
 import { buildScorePrompt } from './score-prompt.js';
@@ -30,6 +31,7 @@ export async function scoreResumeAgainstJob(job: NormalizedJob, resume: Candidat
       '只使用输入里明确提供的信息，不要补充或猜测。',
     ].join('\n'),
     maxOutputTokens: 900,
+    outputSchema: z.toJSONSchema(candidateScorePayloadSchema),
   });
 
   return extractCandidateScoreFromTextResponse(responseText);

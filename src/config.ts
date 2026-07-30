@@ -5,6 +5,7 @@ import type { SupportedPlatform } from './platforms/types.js';
 dotenv.config();
 
 export type BrowserEngine = 'cloakbrowser' | 'playwright';
+export type LlmCompletionRoute = 'default' | 'codex-session';
 
 const platformEnvPrefixes: Record<SupportedPlatform, string> = {
   '51job': '51JOB',
@@ -40,6 +41,24 @@ function getNumberEnv(name: string): number | undefined {
 
 function getOptionalNumberEnv(name: string, fallback: number): number {
   return getNumberEnv(name) ?? fallback;
+}
+
+function getPositiveIntegerEnv(name: string, fallback: number): number {
+  const value = getOptionalNumberEnv(name, fallback);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`Environment variable ${name} must be a positive integer`);
+  }
+
+  return value;
+}
+
+export function resolveLlmCompletionRoute(value = process.env.LLM_COMPLETION_ROUTE): LlmCompletionRoute {
+  const normalized = value?.trim().toLowerCase() || 'default';
+  if (normalized === 'default' || normalized === 'codex-session') {
+    return normalized;
+  }
+
+  throw new Error('Environment variable LLM_COMPLETION_ROUTE must be either "default" or "codex-session"');
 }
 
 function getBooleanEnv(name: string): boolean | undefined {
@@ -188,6 +207,12 @@ export const config = {
     apiKey: process.env.OPENAI_API_KEY ?? '',
     baseUrl: process.env.OPENAI_BASE_URL ?? '',
     model: process.env.OPENAI_MODEL ?? '',
+  },
+  llm: {
+    completionRoute: resolveLlmCompletionRoute(),
+    codexSessionModel: process.env.CODEX_SESSION_MODEL?.trim() || undefined,
+    codexSessionTimeoutMs: getPositiveIntegerEnv('CODEX_SESSION_TIMEOUT_MS', 120000),
+    codexSessionMaxConcurrency: getPositiveIntegerEnv('CODEX_SESSION_MAX_CONCURRENCY', 1),
   },
   jdParsing: {
     model: process.env.JD_PARSING_MODEL ?? process.env.OPENAI_MODEL ?? '',

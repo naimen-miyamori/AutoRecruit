@@ -3,6 +3,7 @@ import {
   resolveOpenAISettings,
   type OpenAITextCompletionRequest,
 } from '../llm/openai-client.js';
+import { config } from '../config.js';
 import {
   buildMappingClassificationPromptCandidates,
   createMappingClassificationSuggestion,
@@ -21,6 +22,34 @@ export interface TalentMappingClassificationRunnerOptions {
   model?: string;
   now?: () => Date;
 }
+
+const mappingClassificationOutputSchema: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['suggestions'],
+  properties: {
+    suggestions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['ref', 'rationale', 'evidenceFields'],
+        properties: {
+          ref: { type: 'string' },
+          companyKey: { type: 'string' },
+          roleKey: { type: 'string' },
+          level: { type: 'string' },
+          location: { type: 'string' },
+          rationale: { type: 'string' },
+          evidenceFields: {
+            type: 'array',
+            items: { type: 'string', enum: ['currentCompany', 'currentTitle', 'location'] },
+          },
+        },
+      },
+    },
+  },
+};
 
 function compact(value: string | undefined): string | undefined {
   return value?.trim().slice(0, 240) || undefined;
@@ -58,7 +87,9 @@ export async function runTalentMappingClassificationTask(
   }
 
   const model = configuredModel
-    ?? resolveOpenAISettings('Talent Mapping classification', 'TALENT_MAPPING_MODEL').model;
+    ?? (config.llm.completionRoute === 'codex-session'
+      ? config.llm.codexSessionModel ?? 'codex-session'
+      : resolveOpenAISettings('Talent Mapping classification', 'TALENT_MAPPING_MODEL').model);
   const taxonomy = {
     companies: project.taxonomy.targetCompanies.map((company) => ({
       companyKey: company.companyKey,
@@ -94,6 +125,7 @@ export async function runTalentMappingClassificationTask(
     ].join('\n'),
     input: JSON.stringify(modelInput),
     maxOutputTokens: 4000,
+    outputSchema: mappingClassificationOutputSchema,
     ...(options.model ? { settings: { model: options.model } } : {}),
   });
   const validated = validateMappingClassificationResponse({

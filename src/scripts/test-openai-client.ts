@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { after, describe, it } from 'node:test';
-import { completeJsonTextFromOpenAI } from '../llm/openai-client.js';
+import { after, afterEach, describe, it } from 'node:test';
+import { completeJsonTextFromOpenAI, llmCompletionRouteRef } from '../llm/openai-client.js';
+import { codexSessionCompletionRef } from '../llm/codex-session-provider.js';
+import { resolveLlmCompletionRoute } from '../config.js';
 
 interface RecordedRequest {
   method?: string;
@@ -10,6 +12,13 @@ interface RecordedRequest {
 }
 
 const servers: http.Server[] = [];
+const initialRouteResolver = llmCompletionRouteRef.current;
+const initialCodexCompletion = codexSessionCompletionRef.complete;
+
+afterEach(() => {
+  llmCompletionRouteRef.current = initialRouteResolver;
+  codexSessionCompletionRef.complete = initialCodexCompletion;
+});
 
 async function readRequestJson(request: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -118,5 +127,62 @@ describe('completeJsonTextFromOpenAI', () => {
     } finally {
       await server.close();
     }
+  });
+
+  it('uses only the explicit codex-session route and does not require default-service credentials', async () => {
+    let receivedRequest: unknown;
+    llmCompletionRouteRef.current = () => 'codex-session';
+    codexSessionCompletionRef.complete = async (request) => {
+      receivedRequest = request;
+      return '{"ok":true}';
+    };
+
+    const output = await completeJsonTextFromOpenAI({
+      featureName: 'codex route test',
+      modelEnvName: 'OPENAI_MODEL',
+      input: 'Return JSON.',
+      instructions: 'Only JSON.',
+      maxOutputTokens: 50,
+      outputSchema: { type: 'object' },
+    });
+
+    assert.equal(output, '{"ok":true}');
+    assert.deepEqual(receivedRequest, {
+      featureName: 'codex route test',
+      input: 'Return JSON.',
+      instructions: 'Only JSON.',
+      maxOutputTokens: 50,
+      outputSchema: { type: 'object' },
+    });
+  });
+
+  it('rejects request-level provider overrides in codex-session mode', async () => {
+    let called = false;
+    llmCompletionRouteRef.current = () => 'codex-session';
+    codexSessionCompletionRef.complete = async () => {
+      called = true;
+      return '{}';
+    };
+
+    await assert.rejects(
+      completeJsonTextFromOpenAI({
+        featureName: 'codex route test',
+        modelEnvName: 'OPENAI_MODEL',
+        input: 'Return JSON.',
+        instructions: 'Only JSON.',
+        maxOutputTokens: 50,
+        settings: { model: 'other-model' },
+      }),
+      /cannot use request-level model settings when LLM_COMPLETION_ROUTE=codex-session/,
+    );
+    assert.equal(called, false);
+  });
+});
+
+describe('LLM completion route configuration', () => {
+  it('accepts only the two explicit routes', () => {
+    assert.equal(resolveLlmCompletionRoute('default'), 'default');
+    assert.equal(resolveLlmCompletionRoute(' CODEX-SESSION '), 'codex-session');
+    assert.throws(() => resolveLlmCompletionRoute('auto'), /must be either "default" or "codex-session"/);
   });
 });

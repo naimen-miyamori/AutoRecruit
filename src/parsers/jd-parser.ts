@@ -17,7 +17,7 @@ const ageRangeSchema = z.object({
   raw: z.string().optional(),
 });
 
-const normalizedJobPayloadSchema = z.object({
+export const normalizedJobPayloadSchema = z.object({
   title: z.string(),
   location: z.string().optional(),
   department: z.string().optional(),
@@ -144,7 +144,7 @@ export function extractNormalizedJobFromTextResponse(response: { output_text: st
 }
 
 export async function parseJobDescription(rawText: string): Promise<NormalizedJob> {
-  if (!config.openai.apiKey) {
+  if (config.llm.completionRoute === 'default' && !config.openai.apiKey) {
     throw new Error('Missing required environment variable: OPENAI_API_KEY');
   }
 
@@ -170,6 +170,7 @@ export async function parseJobDescription(rawText: string): Promise<NormalizedJo
       '9. 保留中文原文表达，避免无根据改写。',
     ].join('\n'),
     maxOutputTokens: 1600,
+    outputSchema: z.toJSONSchema(normalizedJobPayloadSchema),
   });
 
   return extractNormalizedJobFromTextResponse({ output_text: responseText });

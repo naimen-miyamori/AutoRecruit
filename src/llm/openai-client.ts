@@ -1,4 +1,6 @@
 import OpenAI from 'openai';
+import { config, type LlmCompletionRoute } from '../config.js';
+import { completeTextFromCodexSession } from './codex-session-provider.js';
 
 export interface OpenAISettings {
   apiKey: string;
@@ -19,9 +21,14 @@ export interface OpenAITextCompletionRequest {
   instructions: string;
   maxOutputTokens: number;
   settings?: OpenAISettingsOverride;
+  outputSchema?: Record<string, unknown>;
 }
 
 let openAIClient: OpenAI | undefined;
+
+export const llmCompletionRouteRef: { current: () => LlmCompletionRoute } = {
+  current: () => config.llm.completionRoute,
+};
 
 export function resolveOpenAISettings(
   featureName: string,
@@ -206,7 +213,11 @@ async function completeJsonTextFromChatCompletions(
   return outputText;
 }
 
-export async function completeJsonTextFromOpenAI(request: OpenAITextCompletionRequest): Promise<string> {
+function hasRequestSettings(overrides: OpenAISettingsOverride | undefined): boolean {
+  return Boolean(overrides?.apiKey?.trim() || overrides?.baseUrl?.trim() || overrides?.model?.trim());
+}
+
+async function completeJsonTextFromDefaultProvider(request: OpenAITextCompletionRequest): Promise<string> {
   const settings = resolveOpenAISettings(request.featureName, request.modelEnvName, request.settings);
   const client = request.settings && (request.settings.apiKey || request.settings.baseUrl)
     ? new OpenAI({
@@ -228,4 +239,22 @@ export async function completeJsonTextFromOpenAI(request: OpenAITextCompletionRe
       throw new Error(`${request.featureName} request failed: ${stringifyOpenAIError(error)}; chat.completions fallback failed: ${stringifyOpenAIError(fallbackError)}`);
     }
   }
+}
+
+export async function completeJsonTextFromOpenAI(request: OpenAITextCompletionRequest): Promise<string> {
+  if (llmCompletionRouteRef.current() === 'codex-session') {
+    if (hasRequestSettings(request.settings)) {
+      throw new Error(`${request.featureName} cannot use request-level model settings when LLM_COMPLETION_ROUTE=codex-session`);
+    }
+
+    return completeTextFromCodexSession({
+      featureName: request.featureName,
+      input: request.input,
+      instructions: request.instructions,
+      maxOutputTokens: request.maxOutputTokens,
+      outputSchema: request.outputSchema,
+    });
+  }
+
+  return completeJsonTextFromDefaultProvider(request);
 }
