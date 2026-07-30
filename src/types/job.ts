@@ -1,4 +1,5 @@
 import type { SupportedPlatform } from '../platforms/types.js';
+import type { SearchConditionSetReference } from '../search/search-condition-sets.js';
 
 export interface SalaryRange {
   min?: number;
@@ -129,6 +130,12 @@ export interface JobRecord {
     source: JobSearchSource;
     applicationFilterInput?: Record<string, unknown>;
     conditions: SearchCondition[];
+    /** Fixed source revision when direct-search filters came from a reusable condition set. */
+    conditionSetRef?: SearchConditionSetReference;
+    /** Catalog evidence captured while resolving the fixed condition-set revision. */
+    resolution?: {
+      selectedFieldsFingerprint: string;
+    };
   };
   bossForwarding?: BossForwardingSettings;
   bossPosition?: {

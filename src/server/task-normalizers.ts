@@ -6,6 +6,7 @@ import { parsePlatformArg } from '../platforms/registry.js';
 import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
 import { isTalentMappingCorePlatform } from '../types/talent-mapping.js';
 import { loadTalentMappingPlanFile } from '../talent-mapping/plan.js';
+import { assertSafeSearchConditionSetId } from '../search/search-condition-set-store.js';
 import type {
   BatchTaskInput,
   BossAutoChatTaskInput,
@@ -21,6 +22,8 @@ import type {
   ResumeCaptureTaskInput,
   SchedulableTaskKind,
   SearchSource,
+  SearchConditionSetReference,
+  SearchConditionSetReferenceMap,
   SearchSubscriptionTaskInput,
   TalentMappingClassificationTaskInput,
   TalentMappingTaskInput,
@@ -219,6 +222,118 @@ function normalizeCaptureIncludeBoss(item: JsonObject, platform: ConsolePlatform
   return includeBoss;
 }
 
+const corePlatformOrder: SupportedPlatform[] = ['51job', 'liepin', 'zhilian'];
+const capturePlatformOrder: SupportedPlatform[] = [...corePlatformOrder, 'boss'];
+
+function selectedPlatforms(
+  platform: ConsolePlatformSelection,
+  includeBoss = false,
+): SupportedPlatform[] {
+  if (platform !== 'all') {
+    return [platform];
+  }
+
+  return includeBoss ? capturePlatformOrder : corePlatformOrder;
+}
+
+function normalizeSearchConditionSetRefs(
+  item: JsonObject,
+  platform: ConsolePlatformSelection,
+  includeBoss = false,
+): SearchConditionSetReferenceMap | undefined {
+  const raw = item.searchConditionSetRefs;
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('searchConditionSetRefs must be an object keyed by platform');
+  }
+
+  const allowedPlatforms = new Set(selectedPlatforms(platform, includeBoss));
+  const refs: SearchConditionSetReferenceMap = {};
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length === 0) {
+    throw new Error('searchConditionSetRefs must contain at least one platform reference');
+  }
+
+  for (const [platformKey, rawReference] of entries) {
+    const referencePlatform = normalizePlatform(platformKey);
+    if (!allowedPlatforms.has(referencePlatform)) {
+      throw new Error(
+        platform === 'all'
+          ? `searchConditionSetRefs.${platformKey} is not selected by this task`
+          : `searchConditionSetRefs can only contain ${platform}`,
+      );
+    }
+
+    const reference = normalizeJsonObject(rawReference, `searchConditionSetRefs.${platformKey}`);
+    const conditionSetId = getRequiredString(reference, 'conditionSetId');
+    assertSafeSearchConditionSetId(conditionSetId);
+    const declaredPlatform = normalizePlatform(reference.platform);
+    const revision = getOptionalPositiveInteger(reference, 'revision');
+    if (!revision) {
+      throw new Error(`searchConditionSetRefs.${platformKey}.revision is required`);
+    }
+    if (declaredPlatform !== referencePlatform) {
+      throw new Error(`searchConditionSetRefs.${platformKey}.platform must match its platform key`);
+    }
+
+    refs[referencePlatform] = { conditionSetId, platform: declaredPlatform, revision };
+  }
+
+  return refs;
+}
+
+function serializeSearchConditionSetRefs(
+  platform: ConsolePlatformSelection,
+  refs: SearchConditionSetReferenceMap | undefined,
+): string | undefined {
+  if (!refs) {
+    return undefined;
+  }
+
+  const ordered = capturePlatformOrder
+    .map((item) => refs[item])
+    .filter((reference): reference is SearchConditionSetReference => Boolean(reference));
+  if (ordered.length === 0) {
+    return undefined;
+  }
+
+  if (platform !== 'all') {
+    const reference = refs[platform];
+    return reference ? `${reference.conditionSetId}@${reference.revision}` : undefined;
+  }
+
+  return ordered.map((reference) => (
+    `${reference.platform}=${reference.conditionSetId}@${reference.revision}`
+  )).join(',');
+}
+
+function summarizeSearchConditionSetRefs(
+  refs: SearchConditionSetReferenceMap | undefined,
+): Array<SearchConditionSetReference> | undefined {
+  if (!refs) {
+    return undefined;
+  }
+
+  return capturePlatformOrder
+    .map((platform) => refs[platform])
+    .filter((reference): reference is SearchConditionSetReference => Boolean(reference));
+}
+
+function validateDirectConditionInput(
+  searchSource: SearchSource | undefined,
+  applicationFilterInputFile: string | undefined,
+  searchConditionSetRefs: SearchConditionSetReferenceMap | undefined,
+): void {
+  if (applicationFilterInputFile && searchConditionSetRefs) {
+    throw new Error('applicationFilterInputFile and searchConditionSetRefs are mutually exclusive');
+  }
+  if ((applicationFilterInputFile || searchConditionSetRefs) && searchSource !== 'direct') {
+    throw new Error('applicationFilterInputFile or searchConditionSetRefs requires searchSource direct');
+  }
+}
+
 function normalizeCc(value: unknown): string[] | undefined {
   if (value === undefined) {
     return undefined;
@@ -290,6 +405,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
   const includeViewed = getOptionalBoolean(item, 'includeViewed');
   const searchSource = normalizeSearchSource(item.searchSource);
   const applicationFilterInputFile = getOptionalString(item, 'applicationFilterInputFile');
+  const searchConditionSetRefs = normalizeSearchConditionSetRefs(item, platform, includeBoss === true);
   const email = getOptionalString(item, 'email');
   const cc = normalizeCc(item.cc);
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
@@ -299,9 +415,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
     throw new Error('jd and jdFile are mutually exclusive');
   }
 
-  if (applicationFilterInputFile && searchSource !== 'direct') {
-    throw new Error('applicationFilterInputFile requires searchSource direct');
-  }
+  validateDirectConditionInput(searchSource, applicationFilterInputFile, searchConditionSetRefs);
 
   if (liepinForwardContact && platform !== 'liepin' && platform !== 'all') {
     throw new Error('liepinForwardContact can only be used with platform liepin or all');
@@ -316,6 +430,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
     includeViewed,
     searchSource,
     applicationFilterInputFile,
+    searchConditionSetRefs,
     email,
     cc,
     liepinForwardContact,
@@ -329,6 +444,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
   pushOptionalBoolean(argv, '--include-viewed', includeViewed);
   pushOptional(argv, '--search-source', searchSource);
   pushOptional(argv, '--application-filter-input-file', applicationFilterInputFile);
+  pushOptional(argv, '--search-condition-set', serializeSearchConditionSetRefs(platform, searchConditionSetRefs));
   pushOptional(argv, '--email', email);
   pushOptional(argv, '--cc', cc?.join(','));
   pushOptional(argv, '--liepin-forward-contact', liepinForwardContact);
@@ -348,6 +464,7 @@ export function normalizeResumeCaptureTask(payload: unknown): NormalizedTask<Res
       includeViewed: includeViewed ?? false,
       searchSource: searchSource ?? 'stored-or-saved',
       applicationFilterInputFile,
+      searchConditionSetRefs: summarizeSearchConditionSetRefs(searchConditionSetRefs),
       email,
       ccCount: cc?.length ?? 0,
       liepinForwardContact,
@@ -367,14 +484,13 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   const includeViewed = getOptionalBoolean(item, 'includeViewed');
   const searchSource = normalizeSearchSource(item.searchSource);
   const applicationFilterInputFile = getOptionalString(item, 'applicationFilterInputFile');
+  const searchConditionSetRefs = normalizeSearchConditionSetRefs(item, platform, includeBoss === true);
   const email = getOptionalString(item, 'email');
   const cc = normalizeCc(item.cc);
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
   const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform, includeBoss === true);
 
-  if (applicationFilterInputFile && searchSource !== 'direct') {
-    throw new Error('applicationFilterInputFile requires searchSource direct');
-  }
+  validateDirectConditionInput(searchSource, applicationFilterInputFile, searchConditionSetRefs);
 
   if (liepinForwardContact && platform !== 'liepin' && platform !== 'all') {
     throw new Error('liepinForwardContact can only be used with platform liepin or all');
@@ -387,6 +503,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
     includeViewed,
     searchSource,
     applicationFilterInputFile,
+    searchConditionSetRefs,
     email,
     cc,
     liepinForwardContact,
@@ -398,6 +515,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   pushOptionalBoolean(argv, '--include-viewed', includeViewed);
   pushOptional(argv, '--search-source', searchSource);
   pushOptional(argv, '--application-filter-input-file', applicationFilterInputFile);
+  pushOptional(argv, '--search-condition-set', serializeSearchConditionSetRefs(platform, searchConditionSetRefs));
   pushOptional(argv, '--email', email);
   pushOptional(argv, '--cc', cc?.join(','));
   pushOptional(argv, '--liepin-forward-contact', liepinForwardContact);
@@ -414,6 +532,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
       includeViewed: includeViewed ?? false,
       searchSource: searchSource ?? 'stored-or-saved',
       applicationFilterInputFile,
+      searchConditionSetRefs: summarizeSearchConditionSetRefs(searchConditionSetRefs),
       email,
       ccCount: cc?.length ?? 0,
       liepinForwardContact,
@@ -517,19 +636,26 @@ export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTas
   const searchSubscriptionFile = getRequiredString(item, 'searchSubscriptionFile');
   const keyword = getOptionalString(item, 'keyword');
   const applicationFilterInputFile = getOptionalString(item, 'applicationFilterInputFile');
+  const searchConditionSetRefs = normalizeSearchConditionSetRefs(item, platform);
   const saveSearchSubscription = getOptionalBoolean(item, 'saveSearchSubscription');
   const searchSubscriptionName = getOptionalString(item, 'searchSubscriptionName');
+
+  if (applicationFilterInputFile && searchConditionSetRefs) {
+    throw new Error('applicationFilterInputFile and searchConditionSetRefs are mutually exclusive');
+  }
 
   const input: SearchSubscriptionTaskInput = {
     platform,
     searchSubscriptionFile,
     keyword,
     applicationFilterInputFile,
+    searchConditionSetRefs,
     saveSearchSubscription,
     searchSubscriptionName,
   };
   const argv = ['--platform', platform, '--search-subscription-file', searchSubscriptionFile];
   pushOptional(argv, '--keyword', keyword);
+  pushOptional(argv, '--search-condition-set', serializeSearchConditionSetRefs(platform, searchConditionSetRefs));
   pushOptionalBoolean(argv, '--save-search-subscription', saveSearchSubscription);
   pushOptional(argv, '--search-subscription-name', searchSubscriptionName);
 
@@ -541,6 +667,7 @@ export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTas
       searchSubscriptionFile,
       keyword,
       applicationFilterInputFile,
+      searchConditionSetRefs: summarizeSearchConditionSetRefs(searchConditionSetRefs),
       saveSearchSubscription: saveSearchSubscription ?? false,
       searchSubscriptionName,
     },

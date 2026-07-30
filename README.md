@@ -217,6 +217,24 @@ npm run dev -- \
   --application-filter-input-file ./filter-input.json
 ```
 
+控制台的“搜索条件集”可把已校验的直接筛选保存成独立、命名且版本固定的本地实体。条件集按平台保存于
+`data/<platform>/search-condition-sets/`，不属于 JD；岗位、任务和调度只引用固定 revision 并保存本次解析快照，
+因此之后编辑条件集不会改变历史运行。CLI 可在 direct 抓取中引用它：
+
+```bash
+npm run dev -- \
+  --platform boss \
+  --keyword "铝" \
+  --jd-file ./jd.txt \
+  --search-source direct \
+  --search-condition-set scs-<id>@1
+```
+
+`--application-filter-input-file` 与 `--search-condition-set` 互斥。`--platform all` 使用逗号分隔的平台映射，
+例如 `51job=scs-<id>@1,liepin=scs-<id>@2,boss=scs-<id>@1`；Boss 引用仍要求 `--include-boss true`。条件集在任务
+入队、调度创建、每次调度轮次和浏览器启动前都重新校验当前筛选目录，字段/选项失效或语义变化会失败，绝不
+静默跳过。
+
 抓取完成后发送报告：
 
 ```bash
@@ -262,6 +280,16 @@ npm run dev -- --platform all --include-boss true --jobs-file ./jobs.json
 ```
 
 `--jobs-file` 是批量模式唯一的职位定义来源，不能和单职位的 `--keyword`、`--jd` 或 `--jd-file` 同时使用。相对筛选文件路径按 jobs 文件所在目录解析。
+
+批量条目也可使用 `searchConditionSets` 按平台覆盖运行级条件集；每个引用必须有明确 revision：
+
+```json
+{
+  "searchConditionSets": {
+    "boss": { "conditionSetId": "scs-<id>", "platform": "boss", "revision": 1 }
+  }
+}
+```
 
 ### Talent Mapping
 

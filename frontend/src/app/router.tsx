@@ -9,6 +9,7 @@ import { JobDetailPage } from '../features/jobs/JobDetailPage';
 import { JobsPage } from '../features/jobs/JobsPage';
 import { KnowledgePage } from '../features/knowledge/KnowledgePage';
 import { SettingsPage } from '../features/settings/SettingsPage';
+import { SearchConditionSetsPage } from '../features/searchConditionSets/SearchConditionSetsPage';
 import { TasksPage } from '../features/tasks/TasksPage';
 import { NewTaskPage } from '../features/run/NewTaskPage';
 import { TalentMappingsPage } from '../features/talentMapping/TalentMappingsPage';
@@ -35,6 +36,7 @@ export const router = createBrowserRouter([
       { path: 'boss/*', element: <BossPage /> },
       { path: 'automation', element: <AutomationPage /> },
       { path: 'knowledge', element: <KnowledgePage /> },
+      { path: 'search-condition-sets', element: <SearchConditionSetsPage /> },
       { path: 'assistant', element: <AssistantPage /> },
       { path: 'run', element: <NewTaskPage /> },
       { path: 'settings', element: <SettingsPage /> },

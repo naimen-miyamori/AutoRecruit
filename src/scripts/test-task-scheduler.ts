@@ -11,6 +11,7 @@ import { ScheduleStore } from '../server/schedule-store.js';
 import { getWindowState, resolveNextEligibleStart } from '../server/schedule-time.js';
 import { TaskScheduler } from '../server/task-scheduler.js';
 import { TaskQueue } from '../server/task-queue.js';
+import type { SearchConditionSetService } from '../search/search-condition-sets.js';
 
 const cardOnlyMappingPath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.card-only.example.json', import.meta.url));
 const detailMappingPath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.example.json', import.meta.url));
@@ -43,6 +44,12 @@ function output(): MainRunSummary {
     emailDelivered: false,
     sampleCandidateIds: [],
   };
+}
+
+function acceptingSearchConditionSetService(): SearchConditionSetService {
+  return {
+    resolve: async () => undefined,
+  } as unknown as SearchConditionSetService;
 }
 
 function baseSchedule(tasks: unknown[]) {
@@ -224,6 +231,62 @@ describe('TaskScheduler', () => {
         ['--platform', 'all', '--keyword', '店长'],
         ['--platform', 'all', '--keyword', '店长', '--include-boss', 'true'],
       ]);
+    } finally {
+      scheduler.close();
+    }
+  });
+
+  it('stores fixed condition-set revision mappings in schedules without legacy filter paths', async () => {
+    const dataDir = await makeTempDir();
+    const resolvedReferences: unknown[] = [];
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async () => output(),
+    });
+    const scheduler = new TaskScheduler({
+      taskQueue: queue,
+      dataDir,
+      searchConditionSetService: {
+        resolve: async (reference: unknown) => {
+          resolvedReferences.push(reference);
+          return undefined;
+        },
+      } as unknown as SearchConditionSetService,
+    });
+    try {
+      const schedule = await scheduler.createSchedule({
+        ...baseSchedule([{
+          taskKey: 'boss-condition-set',
+          name: '固定版 Boss 搜索条件',
+          kind: 'resume-capture',
+          input: {
+            platform: 'boss',
+            keyword: '全铝箱包设计',
+            searchSource: 'direct',
+            searchConditionSetRefs: {
+              boss: { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 4 },
+            },
+          },
+        }]),
+        enabled: false,
+      });
+
+      assert.deepStrictEqual(schedule.tasks[0]?.input, {
+        platform: 'boss',
+        keyword: '全铝箱包设计',
+        searchSource: 'direct',
+        searchConditionSetRefs: {
+          boss: { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 4 },
+        },
+      });
+      assert.equal(resolvedReferences.length, 1, 'schedule creation must preflight the pinned revision');
+
+      await scheduler.startSchedule(schedule.scheduleId);
+      await waitFor(async () => {
+        const runs = await scheduler.listRuns(schedule.scheduleId);
+        return runs.find((run) => run.status === 'succeeded');
+      }, 'scheduled condition-set round');
+      assert.equal(resolvedReferences.length, 2, 'every scheduled round must recheck the same pinned revision');
     } finally {
       scheduler.close();
     }

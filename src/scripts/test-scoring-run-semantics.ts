@@ -17,6 +17,7 @@ import { resolveOpenAISettings } from '../llm/openai-client.js';
 import { liepinAdapter } from '../platforms/liepin-adapter.js';
 import { bossAdapter } from '../platforms/boss-adapter.js';
 import { zhilianAdapter } from '../platforms/zhilian-adapter.js';
+import { SearchConditionSetService } from '../search/search-condition-sets.js';
 import { extractCandidateScoreFromTextResponse } from '../scoring/score-resume.js';
 import { openResumeByUrl } from './capture-resume-dom-snapshot.js';
 import { runManualLoginSessionSave } from './login-and-save-session.js';
@@ -5673,6 +5674,77 @@ describe('scoring run semantics', () => {
       applicationFilterInput: { education: '本科' },
       conditions: directCalls[1]?.conditions,
     });
+  });
+
+  it('pins a reusable condition-set revision in a direct-capture job and reuses its snapshot after later revisions', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const applicationFilterOptionsPath = path.join(tempDir, '51job', 'filter-catalog', 'application-filter-options.latest.json');
+    const keyword = `condition-set-51job-${Date.now()}-${Math.random()}`;
+    const directConditions: import('../types/job.js').SearchCondition[][] = [];
+
+    await fs.mkdir(path.dirname(applicationFilterOptionsPath), { recursive: true });
+    await fs.writeFile(applicationFilterOptionsPath, JSON.stringify({
+      platform: '51job',
+      capturedAt: '2026-07-30T00:00:00.000Z',
+      keyword: 'condition-set',
+      fieldCount: 1,
+      fieldIds: ['education'],
+      fieldIdByLabel: { 学历要求: 'education' },
+      groups: { singleSelect: ['education'], textInput: [], salaryRange: [], numberRange: [] },
+      fieldsById: {
+        education: {
+          fieldId: 'education', filterKey: 'education', label: '学历要求', kind: 'singleSelect', restrictInput: true,
+          valueShape: 'string', acceptedInputShapes: ['string'], allowedValues: ['本科', '硕士'],
+          options: [
+            { label: '本科', value: '本科', disabled: false, selected: false },
+            { label: '硕士', value: '硕士', disabled: false, selected: false },
+          ],
+        },
+      },
+    }, null, 2), 'utf8');
+
+    const conditionSetService = new SearchConditionSetService({ dataDir: tempDir });
+    const conditionSet = await conditionSetService.create({
+      platform: '51job',
+      name: '本科资深设计师',
+      defaultKeyword: '铝',
+      applicationFilterInput: { education: '本科' },
+    });
+
+    stubSuccessfulRun(indexModule);
+    indexModule.openSubscribeSearchRef.fn = (async () => {
+      throw new Error('saved search should not be used after selecting a condition set');
+    }) as typeof indexModule.openSubscribeSearchRef.fn;
+    indexModule.openDirectSearchRef.fn = (async (_page, _keyword, conditions) => {
+      directConditions.push(conditions);
+      return createSearchPage();
+    }) as NonNullable<typeof indexModule.openDirectSearchRef.fn>;
+
+    await captureConsole(async () => {
+      await indexModule.main([
+        '--platform', '51job', '--keyword', keyword, '--jd', '职位名称：条件集直接搜索',
+        '--search-source', 'direct', '--search-condition-set', `${conditionSet.conditionSetId}@1`,
+      ]);
+    });
+
+    await conditionSetService.revise({ platform: '51job', conditionSetId: conditionSet.conditionSetId }, {
+      expectedRevision: 1,
+      applicationFilterInput: { education: '硕士' },
+    });
+    await captureConsole(async () => {
+      await indexModule.main(['--platform', '51job', '--keyword', keyword]);
+    });
+
+    assert.equal(directConditions.length, 2);
+    assert.deepStrictEqual(directConditions.map((conditions) => (conditions[0] as { value?: unknown })?.value), ['本科', '本科']);
+    const storedJob = await new indexModule.JobStore().readJobRecord('51job', buildJobKey(keyword, ''));
+    assert.deepStrictEqual(storedJob.searchSettings?.conditionSetRef, {
+      conditionSetId: conditionSet.conditionSetId,
+      platform: '51job',
+      revision: 1,
+    });
+    assert.equal(storedJob.searchSettings?.resolution?.selectedFieldsFingerprint.length, 64);
   });
 
   it('rejects application filter input files unless direct search is selected', async () => {

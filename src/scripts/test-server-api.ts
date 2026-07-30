@@ -7,9 +7,10 @@ import { describe, it } from 'node:test';
 import { handleApiRequest } from '../server/routes.js';
 import { TaskQueue } from '../server/task-queue.js';
 import { TaskScheduler } from '../server/task-scheduler.js';
+import type { SearchConditionSetService } from '../search/search-condition-sets.js';
 import { JobReadModel } from '../server/job-read-model.js';
 import { bossReceiptArtifact, bossReviewArtifact, bossSyncArtifact, jobExportArtifact } from '../server/artifact-read-model.js';
-import type { TaskDetail } from '../server/types.js';
+import type { ResumeCaptureTaskInput, TaskDetail } from '../server/types.js';
 import type { MainRunSummary } from '../index.js';
 import type { ApplicationFilterOptions } from '../search/filter-application-options.js';
 import type { CandidateResume, CandidateScoreArtifact, JobRecord, RunResult } from '../types/job.js';
@@ -21,6 +22,36 @@ async function makeTempDir(): Promise<string> {
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+function searchConditionSetFilterOptions(): ApplicationFilterOptions {
+  return {
+    platform: '51job',
+    capturedAt: '2026-07-30T08:00:00.000Z',
+    keyword: '设计师',
+    fieldCount: 1,
+    fieldIds: ['education'],
+    fieldIdByLabel: { 学历: 'education' },
+    groups: {
+      singleSelect: ['education'],
+      textInput: [],
+      salaryRange: [],
+      numberRange: [],
+    },
+    fieldsById: {
+      education: {
+        fieldId: 'education',
+        filterKey: '学历',
+        label: '学历',
+        kind: 'singleSelect',
+        restrictInput: true,
+        valueShape: 'string',
+        acceptedInputShapes: ['string'],
+        allowedValues: ['本科'],
+        options: [{ label: '本科', value: '本科', disabled: false, selected: false }],
+      },
+    },
+  };
 }
 
 async function waitForTask(queue: TaskQueue, taskId: string): Promise<TaskDetail> {
@@ -50,6 +81,12 @@ function buildRunSummary(overrides: Partial<MainRunSummary> = {}): MainRunSummar
     sampleCandidateIds: [],
     ...overrides,
   };
+}
+
+function acceptingSearchConditionSetService(): SearchConditionSetService {
+  return {
+    resolve: async () => undefined,
+  } as unknown as SearchConditionSetService;
 }
 
 describe('console API routes', () => {
@@ -306,6 +343,94 @@ describe('console API routes', () => {
       'a@example.com,b@example.com',
     ]);
     assert.equal(completed.outputSummary?.jobKey, '优衣库-店长');
+  });
+
+  it('pins reusable search-condition-set revisions in capture task input without retaining filter paths', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      searchConditionSetService: acceptingSearchConditionSetService(),
+      body: {
+        platform: 'all',
+        includeBoss: true,
+        keyword: '全铝箱包设计',
+        jd: '负责全铝箱包设计',
+        searchSource: 'direct',
+        searchConditionSetRefs: {
+          '51job': { conditionSetId: 'scs-retail-design', platform: '51job', revision: 2 },
+          boss: { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 7 },
+        },
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const queuedInput = queued.input as ResumeCaptureTaskInput;
+    assert.deepStrictEqual(queuedInput.searchConditionSetRefs, {
+      '51job': { conditionSetId: 'scs-retail-design', platform: '51job', revision: 2 },
+      boss: { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 7 },
+    });
+    assert.equal(queuedInput.applicationFilterInputFile, undefined);
+    assert.deepStrictEqual(queued.inputSummary.searchConditionSetRefs, [
+      { conditionSetId: 'scs-retail-design', platform: '51job', revision: 2 },
+      { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 7 },
+    ]);
+
+    await waitForTask(queue, queued.taskId);
+    assert.ok(calls[0]?.includes('--search-condition-set'));
+    assert.ok(calls[0]?.includes('51job=scs-retail-design@2,boss=scs-aluminum-luggage@7'));
+  });
+
+  it('rejects legacy filter files and fixed condition-set refs together or outside the selected direct-search platforms', async () => {
+    const common = {
+      platform: 'all',
+      keyword: '设计师',
+      jd: '岗位 JD',
+      searchSource: 'direct',
+      searchConditionSetRefs: {
+        boss: { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 1 },
+      },
+    };
+    const bossWithoutOptIn = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      body: common,
+    });
+    const mutuallyExclusive = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      body: {
+        ...common,
+        includeBoss: true,
+        applicationFilterInputFile: './legacy-filter.json',
+      },
+    });
+    const notDirect = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      body: {
+        ...common,
+        includeBoss: true,
+        searchSource: 'saved',
+      },
+    });
+
+    assert.equal(bossWithoutOptIn.statusCode, 400);
+    assert.match(JSON.stringify(bossWithoutOptIn.body), /not selected/);
+    assert.equal(mutuallyExclusive.statusCode, 400);
+    assert.match(JSON.stringify(mutuallyExclusive.body), /mutually exclusive/);
+    assert.equal(notDirect.statusCode, 400);
+    assert.match(JSON.stringify(notDirect.body), /requires searchSource direct/);
   });
 
   it('treats blank optional strings as absent when queueing resume-capture tasks', async () => {
@@ -1005,6 +1130,41 @@ describe('console API routes', () => {
     assert.match((response.body as { draft?: { warnings?: string[] } }).draft?.warnings?.join('\n') ?? '', /applicationFilterInputFile/);
   });
 
+  it('keeps a fixed condition-set revision in assistant drafts and previews the controlled CLI reference', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/chat',
+      body: {
+        messages: [{ role: 'user', content: '用已经保存的 Boss 筛选条件直接搜索全铝箱包设计' }],
+      },
+      assistantCompleteJsonText: async () => JSON.stringify({
+        draft: {
+          kind: 'resume-capture',
+          input: {
+            platform: 'boss',
+            keyword: '全铝箱包设计',
+            jd: '负责全铝箱包设计',
+            searchSource: 'direct',
+            searchConditionSetRefs: {
+              boss: { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 3 },
+            },
+          },
+          missingFields: [],
+          warnings: [],
+        },
+        clarificationQuestions: [],
+      }),
+    });
+
+    assert.equal(response.statusCode, 200);
+    const draft = (response.body as { draft?: { input?: Record<string, unknown>; argvPreview?: string[] } }).draft;
+    assert.deepStrictEqual(draft?.input?.searchConditionSetRefs, {
+      boss: { conditionSetId: 'scs-aluminum-luggage', platform: 'boss', revision: 3 },
+    });
+    assert.ok(draft?.argvPreview?.includes('--search-condition-set'));
+    assert.ok(draft?.argvPreview?.includes('scs-aluminum-luggage@3'));
+  });
+
   it('confirms assistant drafts through the task queue normalizer', async () => {
     const taskDir = await makeTempDir();
     const calls: string[][] = [];
@@ -1212,6 +1372,133 @@ describe('console API routes', () => {
     assert.match((bossForwardWithoutRecipient.body as { error?: { message?: string } }).error?.message ?? '', /must be provided together/);
     assert.equal(bossForwardOnOtherPlatform.statusCode, 400);
     assert.match((bossForwardOnOtherPlatform.body as { error?: { message?: string } }).error?.message ?? '', /only be used with platform boss/);
+  });
+
+  it('manages versioned search condition sets through safe CRUD, promotion, and queue preflight routes', async () => {
+    const dataDir = await makeTempDir();
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async () => buildRunSummary(),
+    });
+    await writeJson(
+      path.join(dataDir, '51job', 'filter-catalog', 'application-filter-options.latest.json'),
+      searchConditionSetFilterOptions(),
+    );
+    const create = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/ops/search-condition-sets',
+      dataDir,
+      body: {
+        platform: '51job',
+        name: '广东设计师',
+        defaultKeyword: '铝',
+        applicationFilterInput: { education: '本科' },
+      },
+    });
+
+    assert.equal(create.statusCode, 201);
+    const created = create.body as { conditionSet: { conditionSetId: string; revision: number; fieldCount: number; platform: string } };
+    assert.match(created.conditionSet.conditionSetId, /^scs-/);
+    assert.equal(created.conditionSet.revision, 1);
+    assert.equal(created.conditionSet.fieldCount, 1);
+    assert.equal(created.conditionSet.platform, '51job');
+
+    const list = await handleApiRequest({
+      method: 'GET',
+      pathname: '/api/ops/search-condition-sets',
+      dataDir,
+      searchParams: new URLSearchParams({ platform: '51job', status: 'active' }),
+    });
+    assert.equal(list.statusCode, 200);
+    const listed = (list.body as { conditionSets: Array<{ conditionSetId: string; fieldCount: number; fieldIds?: unknown; name: string }> }).conditionSets;
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0]?.conditionSetId, created.conditionSet.conditionSetId);
+    assert.equal(listed[0]?.name, '广东设计师');
+    assert.equal(listed[0]?.fieldCount, 1);
+    assert.equal(listed[0]?.fieldIds, undefined);
+
+    const revised = await handleApiRequest({
+      method: 'POST',
+      pathname: `/api/ops/search-condition-sets/${created.conditionSet.conditionSetId}/revise`,
+      dataDir,
+      body: {
+        platform: '51job',
+        expectedRevision: 1,
+        name: '广东资深设计师',
+        description: null,
+        applicationFilterInput: { education: '本科' },
+      },
+    });
+    assert.equal(revised.statusCode, 200);
+    assert.equal((revised.body as { conditionSet: { revision: number; name: string } }).conditionSet.revision, 2);
+    assert.equal((revised.body as { conditionSet: { name: string } }).conditionSet.name, '广东资深设计师');
+
+    const stale = await handleApiRequest({
+      method: 'POST',
+      pathname: `/api/ops/search-condition-sets/${created.conditionSet.conditionSetId}/revise`,
+      dataDir,
+      body: {
+        expectedRevision: 1,
+        name: '过期写入',
+      },
+    });
+    assert.equal(stale.statusCode, 409);
+    assert.equal((stale.body as { error: { latest?: { conditionSet?: { revision?: number } } } }).error.latest?.conditionSet?.revision, 2);
+
+    const cloned = await handleApiRequest({
+      method: 'POST',
+      pathname: `/api/ops/search-condition-sets/${created.conditionSet.conditionSetId}/clone`,
+      dataDir,
+      body: { name: '广东设计师副本' },
+    });
+    assert.equal(cloned.statusCode, 201);
+    assert.notEqual((cloned.body as { conditionSet: { conditionSetId: string } }).conditionSet.conditionSetId, created.conditionSet.conditionSetId);
+
+    const promoted = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/ops/search-condition-sets/promote',
+      dataDir,
+      body: {
+        platform: '51job',
+        name: '旧文件提升条件集',
+        applicationFilterInput: { education: '本科' },
+      },
+    });
+    assert.equal(promoted.statusCode, 201);
+
+    const archived = await handleApiRequest({
+      method: 'POST',
+      pathname: `/api/ops/search-condition-sets/${created.conditionSet.conditionSetId}/archive`,
+      dataDir,
+      body: { expectedRevision: 2 },
+    });
+    assert.equal(archived.statusCode, 200);
+    const archivedBody = archived.body as { conditionSet: { revision: number; status: string } };
+    assert.equal(archivedBody.conditionSet.revision, 3);
+    assert.equal(archivedBody.conditionSet.status, 'archived');
+
+    const rejectedQueue = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      dataDir,
+      taskQueue: queue,
+      body: {
+        platform: '51job',
+        keyword: '铝',
+        jd: '岗位 JD',
+        searchSource: 'direct',
+        searchConditionSetRefs: {
+          '51job': {
+            conditionSetId: created.conditionSet.conditionSetId,
+            platform: '51job',
+            revision: 2,
+          },
+        },
+      },
+    });
+    assert.equal(rejectedQueue.statusCode, 400);
+    assert.match(JSON.stringify(rejectedQueue.body), /archived/);
+    assert.deepStrictEqual(await queue.listTasks(), []);
   });
 
   it('reads application filter options and saves validated filter input files', async () => {

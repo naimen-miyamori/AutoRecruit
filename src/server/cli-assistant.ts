@@ -83,6 +83,7 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'includeBoss',
     'searchSource',
     'applicationFilterInputFile',
+    'searchConditionSetRefs',
     'email',
     'cc',
     'liepinForwardContact',
@@ -96,6 +97,7 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'includeBoss',
     'searchSource',
     'applicationFilterInputFile',
+    'searchConditionSetRefs',
     'email',
     'cc',
     'liepinForwardContact',
@@ -110,6 +112,7 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'searchSubscriptionFile',
     'keyword',
     'applicationFilterInputFile',
+    'searchConditionSetRefs',
     'saveSearchSubscription',
     'searchSubscriptionName',
   ],
@@ -383,8 +386,14 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
     warnings.push('风险：该 Boss 原子操作会修改会话状态或联系候选人，必须提供 intentId 并显式确认。');
   }
 
-  if ((kind === 'resume-capture' || kind === 'batch') && isPresent(input.applicationFilterInputFile) && input.searchSource !== 'direct') {
-    warnings.push('校验提示：applicationFilterInputFile 只能和 searchSource=direct 一起使用。');
+  if ((kind === 'resume-capture' || kind === 'batch')
+    && (isPresent(input.applicationFilterInputFile) || isPresent(input.searchConditionSetRefs))
+    && input.searchSource !== 'direct') {
+    warnings.push('校验提示：applicationFilterInputFile 或 searchConditionSetRefs 只能和 searchSource=direct 一起使用。');
+  }
+
+  if (isPresent(input.applicationFilterInputFile) && isPresent(input.searchConditionSetRefs)) {
+    warnings.push('校验提示：applicationFilterInputFile 和 searchConditionSetRefs 不能同时使用。');
   }
 
   if (kind === 'batch') {
@@ -454,6 +463,35 @@ function pushBooleanPreview(argv: string[], flag: string, value: unknown): void 
   if (typeof value === 'boolean') {
     argv.push(flag, String(value));
   }
+}
+
+function previewSearchConditionSetRefs(value: unknown, platform: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .flatMap(([platformKey, reference]) => {
+      if (!reference || typeof reference !== 'object' || Array.isArray(reference)) {
+        return [];
+      }
+      const item = reference as Record<string, unknown>;
+      if (typeof item.conditionSetId !== 'string' || !item.conditionSetId.trim()
+        || typeof item.revision !== 'number' || !Number.isInteger(item.revision) || item.revision <= 0) {
+        return [];
+      }
+      return [{ platformKey, conditionSetId: item.conditionSetId.trim(), revision: item.revision }];
+    });
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  if (typeof platform === 'string' && platform !== 'all') {
+    const reference = entries.find((entry) => entry.platformKey === platform);
+    return reference ? `${reference.conditionSetId}@${reference.revision}` : undefined;
+  }
+
+  return entries.map((entry) => `${entry.platformKey}=${entry.conditionSetId}@${entry.revision}`).join(',');
 }
 
 function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unknown>): string[] {
@@ -556,6 +594,7 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   if (kind === 'search-subscription') {
     pushPreview(argv, '--search-subscription-file', input.searchSubscriptionFile);
     pushPreview(argv, '--keyword', input.keyword);
+    pushPreview(argv, '--search-condition-set', previewSearchConditionSetRefs(input.searchConditionSetRefs, input.platform));
     pushBooleanPreview(argv, '--save-search-subscription', input.saveSearchSubscription);
     pushPreview(argv, '--search-subscription-name', input.searchSubscriptionName);
     return argv;
@@ -565,6 +604,7 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   pushBooleanPreview(argv, '--include-boss', input.includeBoss);
   pushPreview(argv, '--search-source', input.searchSource);
   pushPreview(argv, '--application-filter-input-file', input.applicationFilterInputFile);
+  pushPreview(argv, '--search-condition-set', previewSearchConditionSetRefs(input.searchConditionSetRefs, input.platform));
   pushPreview(argv, '--email', input.email);
   pushPreview(argv, '--cc', Array.isArray(input.cc) ? input.cc.join(',') : input.cc);
   pushPreview(argv, '--liepin-forward-contact', input.liepinForwardContact);
@@ -659,8 +699,8 @@ function buildSystemPrompt(): string {
     '允许的 kind 只有：resume-capture、batch、talent-mapping、search-subscription、boss-auto-chat、boss-talent-search、boss-greet、boss-chat-operation、boss-job-sync、login-refresh、rag-ops、rag-answer。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
     'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
-    'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。',
-    'batch 字段：platform, jobsFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
+    'resume-capture 字段：platform, keyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。searchConditionSetRefs 是 {平台:{conditionSetId,platform,revision}}，revision 必须固定。',
+    'batch 字段：platform, jobsFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
     'talent-mapping 字段：platform, talentMappingFile, mappingStage, confirmedDetailOpen, mappingRunId；mappingStage 只能 scan、enrich、all，详情阶段必须 confirmedDetailOpen=true；只允许 51job、liepin、zhilian 或 all，不允许 Boss；不与普通抓取、JD、邮件、转发、订阅或 RAG 参数组合。',
     'Boss 转发允许 platform=boss，或 platform=all 且 includeBoss=true；bossForwardMode 只能是 colleague 或 email，出现时必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',
     'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, replyToUnqualifiedCandidates, bossForwardMode, bossForwardRecipient, summaryEmail, summaryCc, syncJobsBeforeReview；platform 必须是 boss。replyToUnqualifiedCandidates 默认 false，仅显式设为 true 时才向不合适候选人发送固定拒绝常用语。转发和总结邮件参数可省略以复用已保存配置；syncJobsBeforeReview 默认 false。',
@@ -668,12 +708,12 @@ function buildSystemPrompt(): string {
     'boss-greet 字段：platform, source, candidateId, expectedCandidateName, expectedJobName, bossJobId, intentId, confirmed；必须提供精确候选人 ID、预期姓名、预期职位，confirmed 必须为 true。',
     'boss-chat-operation 字段：platform, action, conversationId, expectedCandidateName, expectedJobName, text, remark, intentId, unreadOnly, confirmed。只读 action 为 list-conversations、open-conversation、read-conversation、read-history、preview-resume；变更 action 为 send-text、remark、mark-not-fit、request-attachment-resume、accept-attachment-resume、exchange-phone、exchange-wechat，变更操作必须提供 intentId 且 confirmed=true。',
     'boss-job-sync 字段：platform, bossJobIds, includeClosed；默认同步全部职位并包含已关闭职位。',
-    'search-subscription 字段：platform, searchSubscriptionFile, keyword, applicationFilterInputFile, saveSearchSubscription, searchSubscriptionName；不要包含 jd、email、includeViewed、searchSource。',
+    'search-subscription 字段：platform, searchSubscriptionFile, keyword, applicationFilterInputFile, searchConditionSetRefs, saveSearchSubscription, searchSubscriptionName；不要包含 jd、email、includeViewed、searchSource。',
     'login-refresh 字段：platform，只允许 51job、liepin、zhilian、boss。',
     'rag-ops 字段：action, platform, jobKey, keyword, question, file, policyFile, reviewer, limit, includeReviewed, failOnIssue；action 只能是 doctor、review、metrics、ops、rebuild。',
     'rag-answer 字段：platform, jobKey, keyword, jd, jdFile, question, topK, autoIndex, logAnswer, metadata。',
     '平台只能是 51job、liepin、zhilian、boss、all；普通抓取或批量任务的 all 在 includeBoss=true 时按 51job、liepin、zhilian、boss 执行，否则仍是前三个平台。其他模式的 all 不包含 boss；rag-answer 和 login-refresh 不能使用 all。',
-    'applicationFilterInputFile 只能用于 direct 普通简历抓取或批量任务，搜索订阅只作为订阅包装输入。',
+    'applicationFilterInputFile 只能用于 direct 普通简历抓取或批量任务，搜索订阅只作为订阅包装输入。searchConditionSetRefs 和 applicationFilterInputFile 不能同时使用；普通抓取/批量使用条件集时 searchSource 必须为 direct，平台映射不得超出任务实际选择的平台。',
     '如果信息不足，把字段名放到 missingFields，并用 clarificationQuestions 给出中文追问。',
   ].join('\n');
 }

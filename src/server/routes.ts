@@ -18,6 +18,15 @@ import {
 import type { RagAnswer } from '../rag/types.js';
 import { validateApplicationFilterInput, type ApplicationFilterOptions } from '../search/filter-application-options.js';
 import {
+  SearchConditionSetConflictError,
+  SearchConditionSetNotFoundError,
+  SearchConditionSetService,
+  SearchConditionSetValidationError,
+  type SearchConditionSetDetail,
+  type SearchConditionSetRevision,
+  type SearchConditionSetSummary,
+} from '../search/search-condition-sets.js';
+import {
   assistantDraftRequiresRiskAcceptance,
   chatWithCliAssistant,
   finalizeAssistantDraft,
@@ -31,6 +40,7 @@ import { TalentMappingReadModel } from './talent-mapping-read-model.js';
 import { TalentMappingConflictError, TalentMappingQualityService } from '../talent-mapping/quality-service.js';
 import { ArtifactReadModel } from './artifact-read-model.js';
 import { TaskScheduler } from './task-scheduler.js';
+import { preflightTaskSearchConditionSets } from './search-condition-set-preflight.js';
 import { TaskQueue } from './task-queue.js';
 import {
   normalizeApplicationFilterInputRequest,
@@ -44,6 +54,9 @@ import {
   normalizeLoginRefreshTask,
   normalizePlatform,
   normalizeJsonObject,
+  getOptionalPositiveInteger,
+  getOptionalString,
+  getRequiredString,
   normalizeRagAnswerRequest,
   normalizeRagOpsTask,
   normalizeResumeCaptureTask,
@@ -77,6 +90,7 @@ interface RouteDependencies {
   talentMappingReadModel?: TalentMappingReadModel;
   talentMappingQualityService?: TalentMappingQualityService;
   artifactReadModel?: ArtifactReadModel;
+  searchConditionSetService?: SearchConditionSetService;
   dataDir?: string;
   answerQuestion?: (options: AskRagQuestionOptions) => Promise<RagAnswer>;
   answerTemporaryJdQuestion?: (input: AnswerCandidateQuestionFromJdInput) => Promise<JdQuestionAnswer>;
@@ -111,6 +125,124 @@ function notFound(message: string): ApiResponse {
       message,
     },
   });
+}
+
+function assertRequestFields(item: Record<string, unknown>, allowedFields: readonly string[], context: string): void {
+  const allowed = new Set(allowedFields);
+  const unsupported = Object.keys(item).filter((fieldName) => !allowed.has(fieldName));
+  if (unsupported.length > 0) {
+    throw new Error(`${context} cannot include ${unsupported.join(', ')}`);
+  }
+}
+
+function getOptionalNullableString(item: Record<string, unknown>, fieldName: string): string | null | undefined {
+  if (item[fieldName] === null) {
+    return null;
+  }
+  return getOptionalString(item, fieldName);
+}
+
+function normalizeSearchConditionSetStatus(value: string | null): 'active' | 'archived' | undefined {
+  if (value === null || value === 'all') {
+    return undefined;
+  }
+  if (value === 'active' || value === 'archived') {
+    return value;
+  }
+  throw new Error('status must be active, archived, or all');
+}
+
+function toApiSearchConditionSetRevision(revision: SearchConditionSetRevision): Record<string, unknown> {
+  const { applicationFilterInput, ...rest } = revision;
+  return {
+    ...rest,
+    applicationFilterInput,
+    fieldCount: Object.keys(applicationFilterInput).length,
+  };
+}
+
+function toApiSearchConditionSetSummary(summary: SearchConditionSetSummary): Record<string, unknown> {
+  const { fieldIds, ...rest } = summary;
+  return {
+    ...rest,
+    fieldCount: fieldIds.length,
+  };
+}
+
+function toApiSearchConditionSetDetail(detail: SearchConditionSetDetail): Record<string, unknown> {
+  return {
+    conditionSet: toApiSearchConditionSetRevision(detail.conditionSet),
+    revisions: detail.revisions.map(toApiSearchConditionSetRevision),
+    compatibility: detail.compatibility,
+  };
+}
+
+function normalizeSearchConditionSetCreateRequest(payload: unknown): {
+  platform: SupportedPlatform;
+  name: string;
+  description?: string;
+  defaultKeyword?: string;
+  applicationFilterInput: Record<string, unknown>;
+} {
+  const item = normalizeJsonObject(payload, 'request body');
+  assertRequestFields(item, ['platform', 'name', 'description', 'defaultKeyword', 'applicationFilterInput'], 'search-condition-set create request');
+  return {
+    platform: normalizePlatform(item.platform),
+    name: getRequiredString(item, 'name'),
+    description: getOptionalString(item, 'description'),
+    defaultKeyword: getOptionalString(item, 'defaultKeyword'),
+    applicationFilterInput: normalizeJsonObject(item.applicationFilterInput, 'applicationFilterInput'),
+  };
+}
+
+function normalizeSearchConditionSetReviseRequest(payload: unknown): {
+  platform?: SupportedPlatform;
+  expectedRevision: number;
+  name?: string;
+  description?: string | null;
+  defaultKeyword?: string | null;
+  applicationFilterInput?: Record<string, unknown>;
+} {
+  const item = normalizeJsonObject(payload, 'request body');
+  assertRequestFields(item, ['platform', 'expectedRevision', 'name', 'description', 'defaultKeyword', 'applicationFilterInput'], 'search-condition-set revise request');
+  const expectedRevision = getOptionalPositiveInteger(item, 'expectedRevision');
+  if (!expectedRevision) {
+    throw new Error('expectedRevision is required');
+  }
+  return {
+    platform: item.platform === undefined ? undefined : normalizePlatform(item.platform),
+    expectedRevision,
+    name: getOptionalString(item, 'name'),
+    description: getOptionalNullableString(item, 'description'),
+    defaultKeyword: getOptionalNullableString(item, 'defaultKeyword'),
+    applicationFilterInput: item.applicationFilterInput === undefined
+      ? undefined
+      : normalizeJsonObject(item.applicationFilterInput, 'applicationFilterInput'),
+  };
+}
+
+function normalizeSearchConditionSetCloneRequest(payload: unknown): {
+  name?: string;
+  description?: string;
+  defaultKeyword?: string;
+} {
+  const item = normalizeJsonObject(payload ?? {}, 'request body');
+  assertRequestFields(item, ['name', 'description', 'defaultKeyword'], 'search-condition-set clone request');
+  return {
+    name: getOptionalString(item, 'name'),
+    description: getOptionalString(item, 'description'),
+    defaultKeyword: getOptionalString(item, 'defaultKeyword'),
+  };
+}
+
+function normalizeSearchConditionSetArchiveRequest(payload: unknown): { expectedRevision: number } {
+  const item = normalizeJsonObject(payload, 'request body');
+  assertRequestFields(item, ['expectedRevision'], 'search-condition-set archive request');
+  const expectedRevision = getOptionalPositiveInteger(item, 'expectedRevision');
+  if (!expectedRevision) {
+    throw new Error('expectedRevision is required');
+  }
+  return { expectedRevision };
 }
 
 function buildApplicationFilterOptionsPath(dataDir: string, platform: SupportedPlatform): string {
@@ -182,6 +314,16 @@ async function enqueueTask(
   });
 }
 
+async function enqueueTaskWithConditionSetPreflight(
+  queue: TaskQueue,
+  kind: TaskKind,
+  normalized: { input: TaskInput; argv: string[]; inputSummary: Record<string, unknown> },
+  searchConditionSetService: SearchConditionSetService,
+): Promise<TaskDetail> {
+  await preflightTaskSearchConditionSets(normalized.input, searchConditionSetService);
+  return enqueueTask(queue, kind, normalized);
+}
+
 async function answerRagRequest(request: RouteDependencies, payload: unknown): Promise<Record<string, unknown>> {
   const item = normalizeJsonObject(payload, 'request body');
   const llmSettings = normalizeModelConfig(item.modelConfig as ModelConfig | undefined);
@@ -222,6 +364,7 @@ async function confirmAssistantDraft(
   request: RouteRequest,
   taskQueue: TaskQueue,
   dataDir: string,
+  searchConditionSetService: SearchConditionSetService,
 ): Promise<AssistantConfirmResponse> {
   const item = normalizeJsonObject(request.body, 'request body');
   if (!item.draft || typeof item.draft !== 'object' || Array.isArray(item.draft)) {
@@ -241,12 +384,22 @@ async function confirmAssistantDraft(
     case 'resume-capture':
       return {
         kind: draft.kind,
-        task: await enqueueTask(taskQueue, draft.kind, normalizeResumeCaptureTask(draft.input)),
+        task: await enqueueTaskWithConditionSetPreflight(
+          taskQueue,
+          draft.kind,
+          normalizeResumeCaptureTask(draft.input),
+          searchConditionSetService,
+        ),
       };
     case 'batch':
       return {
         kind: draft.kind,
-        task: await enqueueTask(taskQueue, draft.kind, normalizeBatchTask(draft.input)),
+        task: await enqueueTaskWithConditionSetPreflight(
+          taskQueue,
+          draft.kind,
+          normalizeBatchTask(draft.input),
+          searchConditionSetService,
+        ),
       };
     case 'talent-mapping':
       return {
@@ -256,7 +409,12 @@ async function confirmAssistantDraft(
     case 'search-subscription':
       return {
         kind: draft.kind,
-        task: await enqueueTask(taskQueue, draft.kind, await prepareSearchSubscriptionTask(draft.input, dataDir)),
+        task: await enqueueTaskWithConditionSetPreflight(
+          taskQueue,
+          draft.kind,
+          await prepareSearchSubscriptionTask(draft.input, dataDir),
+          searchConditionSetService,
+        ),
       };
     case 'boss-auto-chat':
       return {
@@ -304,9 +462,11 @@ async function confirmAssistantDraft(
 export async function handleApiRequest(request: RouteRequest): Promise<ApiResponse> {
   const dataDir = request.dataDir ?? config.dataDir;
   const taskQueue = request.taskQueue ?? new TaskQueue();
+  const searchConditionSetService = request.searchConditionSetService
+    ?? new SearchConditionSetService({ dataDir });
   let taskScheduler = request.taskScheduler;
   const getTaskScheduler = () => {
-    taskScheduler ??= new TaskScheduler({ taskQueue, dataDir });
+    taskScheduler ??= new TaskScheduler({ taskQueue, dataDir, searchConditionSetService });
     return taskScheduler;
   };
   const jobReadModel = request.jobReadModel ?? new JobReadModel({ dataDir });
@@ -420,16 +580,26 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
     }
 
     if (method === 'POST' && pathname === '/api/assistant/confirm') {
-      return jsonResponse(200, await confirmAssistantDraft(request, taskQueue, dataDir));
+      return jsonResponse(200, await confirmAssistantDraft(request, taskQueue, dataDir, searchConditionSetService));
     }
 
     if (method === 'POST' && pathname === '/api/tasks/resume-capture') {
-      const task = await enqueueTask(taskQueue, 'resume-capture', normalizeResumeCaptureTask(request.body));
+      const task = await enqueueTaskWithConditionSetPreflight(
+        taskQueue,
+        'resume-capture',
+        normalizeResumeCaptureTask(request.body),
+        searchConditionSetService,
+      );
       return jsonResponse(202, task);
     }
 
     if (method === 'POST' && pathname === '/api/tasks/batch') {
-      const task = await enqueueTask(taskQueue, 'batch', normalizeBatchTask(request.body));
+      const task = await enqueueTaskWithConditionSetPreflight(
+        taskQueue,
+        'batch',
+        normalizeBatchTask(request.body),
+        searchConditionSetService,
+      );
       return jsonResponse(202, task);
     }
 
@@ -448,7 +618,12 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
     }
 
     if (method === 'POST' && pathname === '/api/tasks/search-subscription') {
-      const task = await enqueueTask(taskQueue, 'search-subscription', await prepareSearchSubscriptionTask(request.body, dataDir));
+      const task = await enqueueTaskWithConditionSetPreflight(
+        taskQueue,
+        'search-subscription',
+        await prepareSearchSubscriptionTask(request.body, dataDir),
+        searchConditionSetService,
+      );
       return jsonResponse(202, task);
     }
 
@@ -691,6 +866,102 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
       return jsonResponse(200, await readApplicationFilterOptions(dataDir, platform));
     }
 
+    if (method === 'GET' && pathname === '/api/ops/search-condition-sets') {
+      const platformValue = searchParams.get('platform');
+      const platform = !platformValue || platformValue === 'all' ? undefined : normalizePlatform(platformValue);
+      const status = normalizeSearchConditionSetStatus(searchParams.get('status'));
+      const conditionSets = await searchConditionSetService.list({ platform, status });
+      return jsonResponse(200, {
+        conditionSets: conditionSets.map(toApiSearchConditionSetSummary),
+      });
+    }
+
+    if (method === 'POST' && pathname === '/api/ops/search-condition-sets') {
+      const created = await searchConditionSetService.create(normalizeSearchConditionSetCreateRequest(request.body));
+      return jsonResponse(201, toApiSearchConditionSetDetail(await searchConditionSetService.get(created)));
+    }
+
+    // Promotion accepts the already-read canonical filter input, never an
+    // arbitrary server-side filename.  It has the same safe persistence path
+    // as create and lets a caller explicitly promote a legacy UI/file value.
+    if (method === 'POST' && pathname === '/api/ops/search-condition-sets/promote') {
+      const created = await searchConditionSetService.create(normalizeSearchConditionSetCreateRequest(request.body));
+      return jsonResponse(201, toApiSearchConditionSetDetail(await searchConditionSetService.get(created)));
+    }
+
+    if (method === 'GET'
+      && segments[0] === 'api'
+      && segments[1] === 'ops'
+      && segments[2] === 'search-condition-sets'
+      && segments[3]
+      && segments.length === 4) {
+      const platformValue = searchParams.get('platform');
+      const platform = !platformValue || platformValue === 'all' ? undefined : normalizePlatform(platformValue);
+      return jsonResponse(200, toApiSearchConditionSetDetail(
+        await searchConditionSetService.getById(segments[3], platform),
+      ));
+    }
+
+    if (method === 'POST'
+      && segments[0] === 'api'
+      && segments[1] === 'ops'
+      && segments[2] === 'search-condition-sets'
+      && segments[3]
+      && segments[4] === 'revise'
+      && segments.length === 5) {
+      const revise = normalizeSearchConditionSetReviseRequest(request.body);
+      const current = await searchConditionSetService.getById(segments[3]);
+      if (revise.platform && revise.platform !== current.conditionSet.platform) {
+        throw new Error('platform must match the condition set platform');
+      }
+      const { platform: _platform, ...input } = revise;
+      const revised = await searchConditionSetService.revise({
+        conditionSetId: current.conditionSet.conditionSetId,
+        platform: current.conditionSet.platform,
+      }, input);
+      return jsonResponse(200, toApiSearchConditionSetDetail(await searchConditionSetService.get(revised)));
+    }
+
+    if (method === 'POST'
+      && segments[0] === 'api'
+      && segments[1] === 'ops'
+      && segments[2] === 'search-condition-sets'
+      && segments[3]
+      && segments[4] === 'clone'
+      && segments.length === 5) {
+      const clone = normalizeSearchConditionSetCloneRequest(request.body);
+      if (!clone.name) {
+        throw new Error('name is required to clone a search condition set');
+      }
+      const current = await searchConditionSetService.getById(segments[3]);
+      const cloned = await searchConditionSetService.clone({
+        source: {
+          conditionSetId: current.conditionSet.conditionSetId,
+          platform: current.conditionSet.platform,
+          revision: current.conditionSet.revision,
+        },
+        ...clone,
+        name: clone.name,
+      });
+      return jsonResponse(201, toApiSearchConditionSetDetail(await searchConditionSetService.get(cloned)));
+    }
+
+    if (method === 'POST'
+      && segments[0] === 'api'
+      && segments[1] === 'ops'
+      && segments[2] === 'search-condition-sets'
+      && segments[3]
+      && segments[4] === 'archive'
+      && segments.length === 5) {
+      const archive = normalizeSearchConditionSetArchiveRequest(request.body);
+      const current = await searchConditionSetService.getById(segments[3]);
+      const archived = await searchConditionSetService.archive({
+        conditionSetId: current.conditionSet.conditionSetId,
+        platform: current.conditionSet.platform,
+      }, archive);
+      return jsonResponse(200, toApiSearchConditionSetDetail(await searchConditionSetService.get(archived)));
+    }
+
     if (method === 'POST' && pathname === '/api/ops/filter-inputs') {
       const result = await saveApplicationFilterInputFile({
         dataDir,
@@ -709,6 +980,30 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
 
     return notFound(`No route for ${method} ${pathname}`);
   } catch (error) {
+    if (error instanceof SearchConditionSetConflictError) {
+      const latest = await searchConditionSetService.get(error.reference)
+        .then(toApiSearchConditionSetDetail)
+        .catch(() => undefined);
+      return jsonResponse(409, {
+        error: {
+          code: 'conflict',
+          message: error.message,
+          latest,
+        },
+      });
+    }
+    if (error instanceof SearchConditionSetNotFoundError) {
+      return notFound(error.message);
+    }
+    if (error instanceof SearchConditionSetValidationError) {
+      return jsonResponse(400, {
+        error: {
+          code: 'bad_request',
+          message: error.message,
+          errors: error.fieldErrors,
+        },
+      });
+    }
     if (error instanceof TalentMappingConflictError) {
       return jsonResponse(409, {
         error: {

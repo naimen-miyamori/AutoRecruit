@@ -1,13 +1,22 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { RefreshCw, Save, X } from 'lucide-react';
-import { useMemo, useState } from 'react';
-import type { Platform } from '../../api/contracts';
+import { useEffect, useMemo, useState } from 'react';
+import type { Platform, SearchConditionSetRef, SearchConditionSetRevision } from '../../api/contracts';
 import { api } from '../../api/client';
 import { EmptyState, ErrorState, IconButton, LoadingState, Section, SuccessNotice } from '../../components/ui';
 
 type CustomSelection = { label: string; input: Record<string, string> };
 type BuilderValue = string | string[] | boolean | { min?: string; max?: string } | { value: string; pathLabels: string[] } | CustomSelection;
 type BuilderValues = Record<string, BuilderValue>;
+
+export interface FilterBuilderInitialValue {
+  conditionSetId: string;
+  expectedRevision: number;
+  name: string;
+  description?: string;
+  defaultKeyword?: string;
+  applicationFilterInput: Record<string, unknown>;
+}
 
 function isCustomSelection(value: BuilderValue | undefined): value is CustomSelection {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && 'label' in value && 'input' in value;
@@ -26,31 +35,92 @@ function hasBuilderValue(value: BuilderValue): boolean {
   return Object.values(value).some(Boolean);
 }
 
-export function FilterBuilder({ platform, onSaved }: { platform?: Platform; onSaved: (path: string) => void }) {
-  const [values, setValues] = useState<BuilderValues>({});
+function asBuilderValues(input?: Record<string, unknown>): BuilderValues {
+  return input && typeof input === 'object' && !Array.isArray(input) ? input as BuilderValues : {};
+}
+
+function toRef(result: SearchConditionSetRevision): SearchConditionSetRef {
+  return { conditionSetId: result.conditionSetId, platform: result.platform, revision: result.revision };
+}
+
+export function FilterBuilder({
+  platform,
+  onSaved,
+  initialValue,
+  title = '可视化筛选',
+}: {
+  platform?: Platform;
+  onSaved?: (reference: SearchConditionSetRef) => void;
+  initialValue?: FilterBuilderInitialValue;
+  title?: string;
+}) {
+  const [values, setValues] = useState<BuilderValues>(() => asBuilderValues(initialValue?.applicationFilterInput));
+  const [name, setName] = useState(initialValue?.name ?? '');
+  const [description, setDescription] = useState(initialValue?.description ?? '');
+  const [defaultKeyword, setDefaultKeyword] = useState(initialValue?.defaultKeyword ?? '');
+  const [validationError, setValidationError] = useState<string>();
   const query = useQuery({
     queryKey: ['application-filter-options', platform],
     queryFn: ({ signal }) => api.getApplicationFilterOptions(platform!, signal),
     enabled: Boolean(platform),
   });
-  const fields = useMemo(() => query.data ? query.data.fieldIds.map((id) => query.data!.fieldsById[id]).filter(Boolean) : [], [query.data]);
+
+  useEffect(() => {
+    setValues(asBuilderValues(initialValue?.applicationFilterInput));
+    setName(initialValue?.name ?? '');
+    setDescription(initialValue?.description ?? '');
+    setDefaultKeyword(initialValue?.defaultKeyword ?? '');
+    setValidationError(undefined);
+  }, [initialValue?.conditionSetId, initialValue?.expectedRevision]);
+
+  const fields = useMemo(() => query.data?.fieldIds?.map((id) => query.data.fieldsById[id]).filter(Boolean) ?? [], [query.data]);
   const payload = useMemo(() => Object.fromEntries(Object.entries(values).filter(([, value]) => hasBuilderValue(value))), [values]);
   const mutation = useMutation({
-    mutationFn: () => api.saveApplicationFilterInput({ platform, label: `client-${platform}`, applicationFilterInput: payload }),
-    onSuccess: (result) => onSaved(result.path),
+    mutationFn: (): Promise<SearchConditionSetRevision> => {
+      if (!platform) return Promise.reject(new Error('请选择平台后保存条件集'));
+      const createBody = {
+        platform,
+        name: name.trim(),
+        description: description.trim() || undefined,
+        defaultKeyword: defaultKeyword.trim() || undefined,
+        applicationFilterInput: payload,
+      };
+      return initialValue
+        ? api.reviseSearchConditionSet(initialValue.conditionSetId, {
+          ...createBody,
+          description: description.trim() || null,
+          defaultKeyword: defaultKeyword.trim() || null,
+          expectedRevision: initialValue.expectedRevision,
+        }).then((result) => result.conditionSet)
+        : api.createSearchConditionSet(createBody).then((result) => result.conditionSet);
+    },
+    onSuccess: (result) => {
+      setValidationError(undefined);
+      onSaved?.(toRef(result));
+    },
   });
   const setValue = (fieldId: string, value: BuilderValue | undefined) => setValues((current) => {
     const next = { ...current };
     if (value === undefined || value === '' || (Array.isArray(value) && value.length === 0)) delete next[fieldId]; else next[fieldId] = value;
     return next;
   });
+  const save = () => {
+    setValidationError(undefined);
+    if (!name.trim()) return setValidationError('条件集名称必填');
+    if (Object.keys(payload).length === 0 && !defaultKeyword.trim()) return setValidationError('至少选择一个筛选字段，或填写默认关键词');
+    mutation.mutate();
+  };
 
-  if (!platform) return <Section title="可视化筛选"><EmptyState title="选择单个平台后构建筛选" description="全部平台不能共用一份平台筛选文件。" /></Section>;
+  if (!platform) return <Section title={title}><EmptyState title="选择单个平台后构建条件集" description="条件集按平台隔离；全部平台必须分别选择或创建。" /></Section>;
+  const compatibility = mutation.data?.compatibility;
   return (
-    <Section title="可视化筛选" description="读取平台最新 application-filter-options，并生成经过服务端校验的筛选文件。" actions={<IconButton label="刷新筛选目录" onClick={() => void query.refetch()}><RefreshCw size={16} /></IconButton>}>
+    <Section title={title} description={initialValue ? `编辑将创建 ${initialValue.conditionSetId} 的新 revision；已有任务仍固定在原版本。` : '读取平台最新筛选目录并保存为可复用、版本固定的命名条件集。'} actions={<IconButton label="刷新筛选目录" onClick={() => void query.refetch()}><RefreshCw size={16} /></IconButton>}>
       {query.isLoading && <LoadingState label="读取筛选选项" />}
       {query.error && <ErrorState error={query.error} onRetry={() => void query.refetch()} />}
       <div className="form-grid">
+        <label><span>条件集名称</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：广东资深设计师" /></label>
+        <label><span>默认关键词（可选）</span><input value={defaultKeyword} onChange={(event) => setDefaultKeyword(event.target.value)} placeholder="岗位关键词可覆盖此值" /></label>
+        <label><span>说明（可选）</span><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="适用岗位或用途" /></label>
         {fields.map((field) => {
           const current = values[field.fieldId];
           if (field.kind === 'singleSelect') {
@@ -82,9 +152,10 @@ export function FilterBuilder({ platform, onSaved }: { platform?: Platform; onSa
           return <div className="filter-range" key={field.fieldId}><span>{field.label}</span><div><input list={`min-${field.fieldId}`} value={range.min ?? ''} onChange={(event) => setValue(field.fieldId, { ...range, min: event.target.value })} placeholder={field.minLabel} /><input list={`max-${field.fieldId}`} value={range.max ?? ''} onChange={(event) => setValue(field.fieldId, { ...range, max: event.target.value })} placeholder={field.maxLabel} /><button className="icon-button" type="button" aria-label={`清除${field.label}`} onClick={() => setValue(field.fieldId, undefined)}><X size={15} /></button></div><datalist id={`min-${field.fieldId}`}>{field.minOptions.map((item) => <option key={item} value={item} />)}</datalist><datalist id={`max-${field.fieldId}`}>{field.maxOptions.map((item) => <option key={item} value={item} />)}</datalist></div>;
         })}
       </div>
-      {fields.length > 0 && <div className="form-actions"><span>{Object.keys(payload).length} 个已选字段</span><button className="primary-button" type="button" disabled={mutation.isPending || Object.keys(payload).length === 0} onClick={() => mutation.mutate()}><Save size={16} />生成筛选文件</button></div>}
+      {!query.isLoading && !query.error && <div className="form-actions"><span>{Object.keys(payload).length} 个已选字段</span><button className="primary-button" type="button" disabled={mutation.isPending} onClick={save}><Save size={16} />{mutation.isPending ? '保存中' : initialValue ? '保存新版本' : '保存条件集'}</button></div>}
+      {validationError && <ErrorState error={new Error(validationError)} />}
       {mutation.error && <ErrorState error={mutation.error} />}
-      {mutation.data && <SuccessNotice>已生成 {mutation.data.path}</SuccessNotice>}
+      {mutation.data && <SuccessNotice>已保存为条件集 {mutation.data.name} · revision {mutation.data.revision}{compatibility?.status === 'drifted' ? '；目录存在可复核变化。' : ''}</SuccessNotice>}
     </Section>
   );
 }

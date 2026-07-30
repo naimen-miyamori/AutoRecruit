@@ -27,6 +27,10 @@ import type { BossForwardMode, CandidatePostOpenActions, PlatformAdapter, Suppor
 import { answerCandidateQuestionFromJd, toJdRagSources, type JdRagSource } from './rag/jd-question-answering.js';
 import { answerQuestionWithRag } from './rag/service.js';
 import { buildApplicationFilterConditions, loadApplicationFilterInputFile, loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
+import {
+  SearchConditionSetService,
+  type SearchConditionSetReference,
+} from './search/search-condition-sets.js';
 import { scoreResumeAgainstJob } from './scoring/score-resume.js';
 import { evaluatePropertyElectricianHardRequirements } from './scoring/boss-chat-hard-requirements.js';
 import { sendBossChatSummary } from './reporting/boss-chat-summary.js';
@@ -82,6 +86,7 @@ interface RunnableJobInput extends ReportDeliveryOptions {
   searchSource: SearchSource;
   searchSourceExplicit: boolean;
   applicationFilterInputFilePath?: string;
+  searchConditionSetRefs?: Partial<Record<SupportedPlatform, SearchConditionSetReference>>;
 }
 
 interface SingleJobCliInput extends RunnableJobInput {
@@ -101,6 +106,7 @@ interface BatchCliInput extends ReportDeliveryOptions {
   searchSource: SearchSource;
   searchSourceExplicit: boolean;
   applicationFilterInputFilePath?: string;
+  searchConditionSetRefs?: Partial<Record<SupportedPlatform, SearchConditionSetReference>>;
 }
 
 interface SearchSubscriptionCliInput {
@@ -110,6 +116,7 @@ interface SearchSubscriptionCliInput {
   filePath: string;
   save: boolean;
   savedSearchName?: string;
+  searchConditionSetRefs?: Partial<Record<SupportedPlatform, SearchConditionSetReference>>;
 }
 
 interface TalentMappingCliInput {
@@ -186,6 +193,7 @@ interface SinglePlatformCliInput extends ReportDeliveryOptions {
   searchSource: SearchSource;
   searchSourceExplicit: boolean;
   applicationFilterInputFilePath?: string;
+  searchConditionSetRef?: SearchConditionSetReference;
 }
 
 export interface MainRunSummary {
@@ -346,6 +354,79 @@ function parseSearchSource(value: string | undefined, argumentName: string): Sea
   throw new Error(`${argumentName} must be saved or direct`);
 }
 
+function parseSearchConditionSetReferences(
+  value: string | undefined,
+  options: {
+    platform: CliPlatformSelection;
+    includeBoss: boolean;
+    argumentName: string;
+  },
+): Partial<Record<SupportedPlatform, SearchConditionSetReference>> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const entries = value.split(',').map((item) => item.trim()).filter(Boolean);
+  if (entries.length === 0) {
+    throw new Error(`${options.argumentName} must contain at least one condition-set reference`);
+  }
+
+  const allowedPlatforms = new Set(
+    options.platform === 'all'
+      ? listCapturePlatforms(options.includeBoss)
+      : [options.platform],
+  );
+  const references: Partial<Record<SupportedPlatform, SearchConditionSetReference>> = {};
+
+  for (const entry of entries) {
+    const equalsIndex = entry.indexOf('=');
+    let platform: SupportedPlatform;
+    let referenceValue: string;
+
+    if (options.platform === 'all') {
+      if (equalsIndex <= 0) {
+        throw new Error(`${options.argumentName} requires platform=<conditionSetId>@<revision> entries when --platform all`);
+      }
+      platform = parsePlatformArg(entry.slice(0, equalsIndex));
+      referenceValue = entry.slice(equalsIndex + 1);
+    } else if (equalsIndex > 0) {
+      platform = parsePlatformArg(entry.slice(0, equalsIndex));
+      referenceValue = entry.slice(equalsIndex + 1);
+    } else {
+      platform = options.platform;
+      referenceValue = entry;
+    }
+
+    if (!allowedPlatforms.has(platform)) {
+      const bossHint = platform === 'boss' && options.platform === 'all'
+        ? '; Boss requires --include-boss true'
+        : '';
+      throw new Error(`${options.argumentName} platform ${platform} is not selected${bossHint}`);
+    }
+
+    const atIndex = referenceValue.lastIndexOf('@');
+    const conditionSetId = atIndex > 0 ? referenceValue.slice(0, atIndex) : '';
+    const revisionValue = atIndex > 0 ? referenceValue.slice(atIndex + 1) : '';
+    if (!/^scs-[a-z0-9](?:[a-z0-9-]{2,126})$/.test(conditionSetId) || conditionSetId.includes('--')) {
+      throw new Error(`${options.argumentName} condition-set ID is invalid for ${platform}`);
+    }
+    if (!/^[1-9]\d*$/.test(revisionValue)) {
+      throw new Error(`${options.argumentName} revision must be a positive integer for ${platform}`);
+    }
+    if (references[platform]) {
+      throw new Error(`${options.argumentName} contains duplicate platform ${platform}`);
+    }
+
+    references[platform] = {
+      conditionSetId,
+      platform,
+      revision: Number(revisionValue),
+    };
+  }
+
+  return references;
+}
+
 function parseTalentMappingStage(value: string | undefined): TalentMappingStage | undefined {
   if (value === undefined) {
     return undefined;
@@ -434,6 +515,50 @@ function parseOptionalString(value: unknown, fieldName: string, itemIndex: numbe
   return value;
 }
 
+function parseBatchSearchConditionSetReferences(
+  value: unknown,
+  itemIndex: number,
+  input: BatchCliInput,
+): Partial<Record<SupportedPlatform, SearchConditionSetReference>> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: searchConditionSets must be an object`);
+  }
+
+  const allowedPlatforms = new Set(listSelectedCapturePlatforms(input.platform, input.includeBoss));
+  const references: Partial<Record<SupportedPlatform, SearchConditionSetReference>> = {};
+  for (const [platformKey, rawReference] of Object.entries(value)) {
+    const platform = parsePlatformArg(platformKey);
+    if (!allowedPlatforms.has(platform)) {
+      throw new Error(`Invalid jobs-file item at index ${itemIndex}: searchConditionSets.${platform} is not selected`);
+    }
+    if (!rawReference || typeof rawReference !== 'object' || Array.isArray(rawReference)) {
+      throw new Error(`Invalid jobs-file item at index ${itemIndex}: searchConditionSets.${platform} must be an object`);
+    }
+    const reference = rawReference as Record<string, unknown>;
+    const conditionSetId = typeof reference.conditionSetId === 'string' ? reference.conditionSetId.trim() : '';
+    const revision = reference.revision;
+    if (!/^scs-[a-z0-9](?:[a-z0-9-]{2,126})$/.test(conditionSetId) || conditionSetId.includes('--')) {
+      throw new Error(`Invalid jobs-file item at index ${itemIndex}: searchConditionSets.${platform}.conditionSetId is invalid`);
+    }
+    if (!Number.isSafeInteger(revision) || (revision as number) < 1) {
+      throw new Error(`Invalid jobs-file item at index ${itemIndex}: searchConditionSets.${platform}.revision must be a positive integer`);
+    }
+    if (reference.platform !== undefined && reference.platform !== platform) {
+      throw new Error(`Invalid jobs-file item at index ${itemIndex}: searchConditionSets.${platform}.platform must match its key`);
+    }
+    references[platform] = {
+      conditionSetId,
+      platform,
+      revision: revision as number,
+    };
+  }
+
+  return references;
+}
+
 function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInput): BatchRunnableJobInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: item must be an object`);
@@ -446,6 +571,7 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   const email = parseOptionalString(item.email, 'email', itemIndex);
   const itemSearchSourceValue = parseOptionalString(item.searchSource, 'searchSource', itemIndex);
   const itemApplicationFilterInputFile = parseOptionalString(item.applicationFilterInputFile, 'applicationFilterInputFile', itemIndex);
+  const itemSearchConditionSetRefs = parseBatchSearchConditionSetReferences(item.searchConditionSets, itemIndex, input);
   const itemCcEmails = parseBatchCcEmails(item.cc, itemIndex);
   const searchSource = parseSearchSource(itemSearchSourceValue, `jobs-file item ${itemIndex}.searchSource`);
   const hasItemSearchSource = item.searchSource !== undefined;
@@ -454,6 +580,12 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   const effectiveApplicationFilterInputFilePath = itemApplicationFilterInputFile
     ? path.resolve(path.dirname(path.resolve(input.jobsFilePath)), itemApplicationFilterInputFile)
     : (hasItemSearchSource && effectiveSearchSource === 'saved' ? undefined : input.applicationFilterInputFilePath);
+  const effectiveSearchConditionSetRefs = hasItemSearchSource && effectiveSearchSource === 'saved'
+    ? undefined
+    : {
+      ...input.searchConditionSetRefs,
+      ...itemSearchConditionSetRefs,
+    };
 
   if (!keyword) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: keyword must be a non-empty string`);
@@ -465,6 +597,13 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
 
   if (effectiveApplicationFilterInputFilePath && effectiveSearchSource !== 'direct') {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: applicationFilterInputFile requires searchSource direct`);
+  }
+  const hasEffectiveSearchConditionSetRefs = Object.keys(effectiveSearchConditionSetRefs ?? {}).length > 0;
+  if (effectiveApplicationFilterInputFilePath && hasEffectiveSearchConditionSetRefs) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: applicationFilterInputFile and searchConditionSets are mutually exclusive`);
+  }
+  if (hasEffectiveSearchConditionSetRefs && effectiveSearchSource !== 'direct') {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: searchConditionSets requires searchSource direct`);
   }
 
   return {
@@ -482,6 +621,9 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     searchSource: effectiveSearchSource,
     searchSourceExplicit: effectiveSearchSourceExplicit,
     applicationFilterInputFilePath: effectiveApplicationFilterInputFilePath,
+    searchConditionSetRefs: hasEffectiveSearchConditionSetRefs
+      ? effectiveSearchConditionSetRefs
+      : undefined,
   };
 }
 
@@ -825,6 +967,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       'liepin-forward-contact',
       'search-source',
       'application-filter-input-file',
+      'search-condition-set',
       'search-subscription-file',
       'save-search-subscription',
       'search-subscription-name',
@@ -874,8 +1017,8 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error('--jd-question must be a non-empty string');
     }
 
-    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || saveSearchSubscription || searchSubscriptionName) {
-      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, --application-filter-input-file, --save-search-subscription, or --search-subscription-name');
+    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || flagPresence.has('search-condition-set') || saveSearchSubscription || searchSubscriptionName) {
+      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, --application-filter-input-file, --search-condition-set, --save-search-subscription, or --search-subscription-name');
     }
 
     if (jobDescriptionText && jobDescriptionFilePath) {
@@ -901,6 +1044,12 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --search-source, or --application-filter-input-file');
     }
 
+    const searchConditionSetRefs = parseSearchConditionSetReferences(values.get('search-condition-set'), {
+      platform,
+      includeBoss: false,
+      argumentName: '--search-condition-set',
+    });
+
     return {
       mode: 'search-subscription',
       platform,
@@ -908,6 +1057,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       filePath: searchSubscriptionFilePath,
       save: saveSearchSubscription,
       savedSearchName: searchSubscriptionName,
+      searchConditionSetRefs,
     };
   }
 
@@ -920,8 +1070,19 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error('--jobs-file cannot be combined with --keyword, --jd, or --jd-file');
     }
 
+    const searchConditionSetRefs = parseSearchConditionSetReferences(values.get('search-condition-set'), {
+      platform,
+      includeBoss,
+      argumentName: '--search-condition-set',
+    });
+    if (applicationFilterInputFilePath && searchConditionSetRefs) {
+      throw new Error('--application-filter-input-file and --search-condition-set are mutually exclusive');
+    }
     if (applicationFilterInputFilePath && searchSource !== 'direct') {
       throw new Error('--application-filter-input-file requires --search-source direct');
+    }
+    if (searchConditionSetRefs && searchSource !== 'direct') {
+      throw new Error('--search-condition-set requires --search-source direct');
     }
 
     return {
@@ -938,6 +1099,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       searchSource,
       searchSourceExplicit,
       applicationFilterInputFilePath,
+      searchConditionSetRefs,
     };
   }
 
@@ -949,8 +1111,19 @@ function parseArgs(argv: readonly string[]): CliInput {
     throw new Error('Arguments --jd and --jd-file are mutually exclusive');
   }
 
+  const searchConditionSetRefs = parseSearchConditionSetReferences(values.get('search-condition-set'), {
+    platform,
+    includeBoss,
+    argumentName: '--search-condition-set',
+  });
+  if (applicationFilterInputFilePath && searchConditionSetRefs) {
+    throw new Error('--application-filter-input-file and --search-condition-set are mutually exclusive');
+  }
   if (applicationFilterInputFilePath && searchSource !== 'direct') {
     throw new Error('--application-filter-input-file requires --search-source direct');
+  }
+  if (searchConditionSetRefs && searchSource !== 'direct') {
+    throw new Error('--search-condition-set requires --search-source direct');
   }
 
   return {
@@ -969,6 +1142,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     searchSource,
     searchSourceExplicit,
     applicationFilterInputFilePath,
+    searchConditionSetRefs,
   };
 }
 
@@ -987,6 +1161,7 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
     searchSource: input.searchSource,
     searchSourceExplicit: input.searchSourceExplicit,
     applicationFilterInputFilePath: input.applicationFilterInputFilePath,
+    searchConditionSetRef: input.searchConditionSetRefs?.[platform],
   };
 }
 
@@ -1626,6 +1801,22 @@ async function resolveResumeCaptureSearchSettings(
   input: SinglePlatformCliInput,
   existingJobRecord?: JobRecord,
 ): Promise<NonNullable<JobRecord['searchSettings']>> {
+  if (input.searchConditionSetRef) {
+    if (input.searchConditionSetRef.platform !== input.platform) {
+      throw new Error(`Search condition set ${input.searchConditionSetRef.conditionSetId} belongs to ${input.searchConditionSetRef.platform}, not ${input.platform}`);
+    }
+    const resolved = await new SearchConditionSetService().resolve(input.searchConditionSetRef);
+    return {
+      source: 'direct',
+      applicationFilterInput: resolved.applicationFilterInput,
+      conditions: resolved.conditions,
+      conditionSetRef: resolved.reference,
+      resolution: {
+        selectedFieldsFingerprint: resolved.catalogEvidence.selectedFieldsFingerprint,
+      },
+    };
+  }
+
   if (input.applicationFilterInputFilePath) {
     const applicationFilterInput = await loadApplicationFilterInputFile(input.applicationFilterInputFilePath);
     return {
@@ -1636,6 +1827,22 @@ async function resolveResumeCaptureSearchSettings(
   }
 
   if (!input.searchSourceExplicit && existingJobRecord?.searchSettings) {
+    if (existingJobRecord.searchSettings.conditionSetRef) {
+      const reference = existingJobRecord.searchSettings.conditionSetRef;
+      if (reference.platform !== input.platform) {
+        throw new Error(`Stored search condition set ${reference.conditionSetId} belongs to ${reference.platform}, not ${input.platform}`);
+      }
+      const resolved = await new SearchConditionSetService().resolve(reference);
+      return {
+        source: 'direct',
+        applicationFilterInput: resolved.applicationFilterInput,
+        conditions: resolved.conditions,
+        conditionSetRef: resolved.reference,
+        resolution: {
+          selectedFieldsFingerprint: resolved.catalogEvidence.selectedFieldsFingerprint,
+        },
+      };
+    }
     return existingJobRecord.searchSettings;
   }
 
@@ -1884,18 +2091,31 @@ async function runBatchJobs(input: BatchCliInput): Promise<BatchJobRunSummary[]>
 
 async function runSearchSubscription(input: SearchSubscriptionCliInput): Promise<SearchSubscriptionSummary | SearchSubscriptionSummary[]> {
   const summaries: SearchSubscriptionSummary[] = [];
+  const conditionSetService = input.searchConditionSetRefs ? new SearchConditionSetService() : undefined;
 
   for (const platform of listSelectedCorePlatforms(input.platform)) {
     const adapter = resolvePlatformAdapter(platform);
+    const conditionSet = input.searchConditionSetRefs?.[platform]
+      ? await conditionSetService!.resolve(input.searchConditionSetRefs[platform]!)
+      : undefined;
     const plan = await loadSearchConditionPlanFile(input.filePath, {
       platform,
-      keywordOverride: input.keyword,
+      keywordOverride: input.keyword ?? conditionSet?.revision.defaultKeyword,
       savedSearchNameOverride: input.savedSearchName,
     });
+    if (conditionSet && plan.conditions.some((condition) => condition.kind === 'applicationFilter')) {
+      throw new Error(`--search-subscription-file cannot include applicationFilter conditions when --search-condition-set is selected for ${platform}`);
+    }
+    const resolvedPlan = conditionSet
+      ? {
+        ...plan,
+        conditions: [...plan.conditions, ...conditionSet.conditions],
+      }
+      : plan;
     const session = await ensureAuthenticatedBrowserSessionRef.fn(adapter.platform);
 
     try {
-      summaries.push(await runSearchSubscriptionWorkflowRef.fn(adapter, session.page, plan, {
+      summaries.push(await runSearchSubscriptionWorkflowRef.fn(adapter, session.page, resolvedPlan, {
         save: input.save,
         savedSearchName: input.savedSearchName,
       }));

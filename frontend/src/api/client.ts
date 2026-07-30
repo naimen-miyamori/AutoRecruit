@@ -20,6 +20,10 @@ import type {
   RagAnswer,
   RunResultView,
   SavedFilterInput,
+  SearchConditionSetDetail,
+  SearchConditionSetRef,
+  SearchConditionSetStatus,
+  SearchConditionSetSummary,
   ScheduleDefinition,
   ScheduleRunRecord,
   ScheduleSummary,
@@ -190,6 +194,18 @@ export const api = {
 
   listFilterCatalogs: (platform?: string, signal?: AbortSignal) => requestJson<{ catalogs: FilterCatalog[] }>(`/ops/filter-catalogs${platform && platform !== 'all' ? `?platform=${encodeURIComponent(platform)}` : ''}`, { signal }),
   getApplicationFilterOptions: (platform: Platform, signal?: AbortSignal) => requestJson<ApplicationFilterOptions>(`/ops/application-filter-options?platform=${encodeURIComponent(platform)}`, { signal }),
+  listSearchConditionSets: (platform?: Platform, status: SearchConditionSetStatus | 'all' = 'active', signal?: AbortSignal) => {
+    const params = new URLSearchParams();
+    if (platform) params.set('platform', platform);
+    if (status !== 'all') params.set('status', status);
+    const query = params.size ? `?${params.toString()}` : '';
+    return requestJson<{ conditionSets: SearchConditionSetSummary[] }>(`/ops/search-condition-sets${query}`, { signal });
+  },
+  getSearchConditionSet: (conditionSetId: string, signal?: AbortSignal) => requestJson<SearchConditionSetDetail>(`/ops/search-condition-sets/${encodeURIComponent(conditionSetId)}`, { signal }),
+  createSearchConditionSet: (body: Record<string, unknown>) => postJson<SearchConditionSetDetail>('/ops/search-condition-sets', body),
+  reviseSearchConditionSet: (conditionSetId: string, body: Record<string, unknown>) => postJson<SearchConditionSetDetail>(`/ops/search-condition-sets/${encodeURIComponent(conditionSetId)}/revise`, body),
+  cloneSearchConditionSet: (conditionSetId: string, body: Record<string, unknown> = {}) => postJson<SearchConditionSetDetail>(`/ops/search-condition-sets/${encodeURIComponent(conditionSetId)}/clone`, body),
+  archiveSearchConditionSet: (conditionSetId: string, expectedRevision: number) => postJson<SearchConditionSetDetail>(`/ops/search-condition-sets/${encodeURIComponent(conditionSetId)}/archive`, { expectedRevision }),
   saveApplicationFilterInput: (body: Record<string, unknown>) => postJson<SavedFilterInput>('/ops/filter-inputs', body),
 };
 
@@ -220,4 +236,6 @@ export const queryKeys = {
   bossReviews: ['boss', 'reviews'] as const,
   bossReceipts: ['boss', 'receipts'] as const,
   filterCatalogs: (platform?: string) => ['filter-catalogs', platform ?? 'all'] as const,
+  searchConditionSets: (platform?: Platform, status: SearchConditionSetStatus | 'all' = 'active') => ['search-condition-sets', platform ?? 'all', status] as const,
+  searchConditionSet: (conditionSetId: string) => ['search-condition-sets', conditionSetId] as const,
 };

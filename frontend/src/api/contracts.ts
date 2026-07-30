@@ -114,3 +114,51 @@ export interface SavedFilterInput {
     errors: Array<{ fieldId: string; code: string; message: string }>;
   };
 }
+
+/**
+ * A reusable filter set is deliberately separate from a job and from legacy
+ * filter-input files.  A reference always names an immutable revision so a
+ * task can be reviewed without following a mutable "latest" pointer.
+ */
+export interface SearchConditionSetRef {
+  conditionSetId: string;
+  platform: Platform;
+  revision: number;
+}
+
+export type SearchConditionSetStatus = 'active' | 'archived';
+export type SearchConditionSetCompatibilityStatus = 'compatible' | 'drifted' | 'incompatible' | 'unknown';
+
+export interface SearchConditionSetCompatibility {
+  status: SearchConditionSetCompatibilityStatus;
+  message?: string;
+  selectedFieldsFingerprint?: string;
+  checkedAt?: string;
+  errors?: Array<{ fieldId?: string; code?: string; message: string }>;
+}
+
+export interface SearchConditionSetSummary extends SearchConditionSetRef {
+  name: string;
+  description?: string;
+  defaultKeyword?: string;
+  status: SearchConditionSetStatus;
+  fieldCount: number;
+  createdAt: string;
+  updatedAt: string;
+  compatibility?: SearchConditionSetCompatibility;
+}
+
+export interface SearchConditionSetRevision extends SearchConditionSetSummary {
+  applicationFilterInput: Record<string, unknown>;
+  compiledConditions?: unknown[];
+  catalogEvidence?: {
+    capturedAt?: string;
+    selectedFieldsFingerprint?: string;
+  };
+}
+
+export interface SearchConditionSetDetail {
+  conditionSet: SearchConditionSetRevision;
+  revisions: SearchConditionSetRevision[];
+  compatibility: SearchConditionSetCompatibility;
+}

@@ -1,5 +1,6 @@
 import type { MainResult } from '../index.js';
 import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
+import type { SearchConditionSetReference } from '../search/search-condition-sets.js';
 import type {
   CandidateResume,
   CandidateScoreArtifact,
@@ -47,6 +48,16 @@ export type ScheduleStatus = 'enabled' | 'paused' | 'stop_requested' | 'stopped'
 export type ScheduleRunStatus = 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'stopped' | 'interrupted' | 'skipped';
 export type WorkflowFailurePolicy = 'stop-round' | 'continue';
 
+/**
+ * A condition-set revision is resolved before it enters the queue or a
+ * schedule.  The reference deliberately carries no filesystem path or
+ * mutable "latest" pointer: a queued task must keep using the revision that
+ * was selected when it was created.
+ */
+export type { SearchConditionSetReference } from '../search/search-condition-sets.js';
+
+export type SearchConditionSetReferenceMap = Partial<Record<SupportedPlatform, SearchConditionSetReference>>;
+
 export interface TaskLogEntry {
   at: string;
   level: TaskLogLevel;
@@ -62,6 +73,7 @@ export interface ResumeCaptureTaskInput {
   includeViewed?: boolean;
   searchSource?: SearchSource;
   applicationFilterInputFile?: string;
+  searchConditionSetRefs?: SearchConditionSetReferenceMap;
   email?: string;
   cc?: string[];
   liepinForwardContact?: string;
@@ -76,6 +88,7 @@ export interface BatchTaskInput {
   includeViewed?: boolean;
   searchSource?: SearchSource;
   applicationFilterInputFile?: string;
+  searchConditionSetRefs?: SearchConditionSetReferenceMap;
   email?: string;
   cc?: string[];
   liepinForwardContact?: string;
@@ -101,6 +114,7 @@ export interface SearchSubscriptionTaskInput {
   searchSubscriptionFile: string;
   keyword?: string;
   applicationFilterInputFile?: string;
+  searchConditionSetRefs?: SearchConditionSetReferenceMap;
   saveSearchSubscription?: boolean;
   searchSubscriptionName?: string;
 }

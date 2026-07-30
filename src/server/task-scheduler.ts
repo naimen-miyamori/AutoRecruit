@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 
 import { config } from '../config.js';
+import { SearchConditionSetService } from '../search/search-condition-sets.js';
 import { normalizeScheduleCreate, normalizeScheduleUpdate } from './schedule-normalizers.js';
+import { preflightTaskSearchConditionSets } from './search-condition-set-preflight.js';
 import { resolveNextEligibleStart, getWindowState } from './schedule-time.js';
 import { ScheduleStore } from './schedule-store.js';
 import { normalizeSchedulableTask } from './task-normalizers.js';
@@ -18,6 +20,7 @@ interface TaskSchedulerOptions {
   store?: ScheduleStore;
   dataDir?: string;
   now?: () => Date;
+  searchConditionSetService?: SearchConditionSetService;
 }
 
 function isTerminal(status: TaskDetail['status']): boolean {
@@ -37,6 +40,7 @@ export class TaskScheduler {
   private readonly store: ScheduleStore;
   private readonly dataDir: string;
   private readonly now: () => Date;
+  private readonly searchConditionSetService: SearchConditionSetService;
   private readonly ready: Promise<void>;
   private serial: Promise<void> = Promise.resolve();
   private timer?: NodeJS.Timeout;
@@ -48,6 +52,8 @@ export class TaskScheduler {
     this.store = options.store ?? new ScheduleStore(options.dataDir ?? config.dataDir);
     this.dataDir = options.dataDir ?? config.dataDir;
     this.now = options.now ?? (() => new Date());
+    this.searchConditionSetService = options.searchConditionSetService
+      ?? new SearchConditionSetService({ dataDir: this.dataDir });
     this.ready = this.recover();
     this.unsubscribeTaskListener = this.taskQueue.onTaskTerminal(() => {
       this.requestProcess(0);
@@ -327,6 +333,7 @@ export class TaskScheduler {
     const runId = crypto.randomUUID();
     const normalized = await Promise.all(enabledTasks.map(async (template, index) => {
       const task = await normalizeSchedulableTask(template.kind, template.input, this.dataDir);
+      await preflightTaskSearchConditionSets(task.input, this.searchConditionSetService);
       return {
         kind: task.kind,
         input: task.input,
@@ -439,6 +446,7 @@ export class TaskScheduler {
   private async normalizeTemplates(schedule: ScheduleDefinition): Promise<ScheduleDefinition['tasks']> {
     return Promise.all(schedule.tasks.map(async (template) => {
       const normalized = await normalizeSchedulableTask(template.kind, template.input, this.dataDir);
+      await preflightTaskSearchConditionSets(normalized.input, this.searchConditionSetService);
       return {
         ...template,
         input: serialize(normalized.input),
