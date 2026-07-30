@@ -76,7 +76,11 @@ function resolvedConditionSet(input: {
   } as const;
 }
 
-function installSuccessfulRun(options: { verified?: boolean } = {}): {
+function installSuccessfulRun(options: {
+  verified?: boolean;
+  changedFields?: string[];
+  alreadySatisfiedFields?: string[];
+} = {}): {
   directCalls: Array<{ keyword: string; conditions: SearchCondition[]; includeViewedCandidates?: boolean }>;
   getCloseCount: () => number;
 } {
@@ -101,6 +105,8 @@ function installSuccessfulRun(options: { verified?: boolean } = {}): {
         resultTotal: 15,
         resultTotalSource: 'page' as const,
       },
+      changedFields: options.changedFields ?? ['city'],
+      alreadySatisfiedFields: options.alreadySatisfiedFields ?? ['keyword'],
     };
   };
   return { directCalls, getCloseCount: () => closeCount };
@@ -130,6 +136,8 @@ describe('Boss search-condition-set apply workflow', () => {
     assert.equal(summary.conditionSet, `${reference.conditionSetId}@1`);
     assert.equal(summary.conditionsVerified, 1);
     assert.equal(summary.resultTotal, 15);
+    assert.deepEqual(summary.changedFields, ['city']);
+    assert.deepEqual(summary.alreadySatisfiedFields, ['keyword']);
     assert.equal(run.getCloseCount(), 1);
     await assert.rejects(fs.access(path.join(tempDir, 'apply.lock')));
   });

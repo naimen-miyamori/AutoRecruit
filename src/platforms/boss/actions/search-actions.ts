@@ -313,6 +313,32 @@ async function readBossSelectedJob(page: Page, deadline: number): Promise<string
   }));
 }
 
+type BossActiveJobScopeOption = {
+  label: string;
+  value: string;
+};
+
+async function readBossActiveJobScopeOption(frame: Frame): Promise<BossActiveJobScopeOption | undefined> {
+  return frame.locator('.search-job-list-C .ui-dropmenu-list li').evaluateAll((options) => {
+    const active = options.find((element) => /\bactive\b/.test(element.className));
+    if (!active) return undefined;
+    const normalize = (value: string | null | undefined): string => (value ?? '').replace(/\s+/g, ' ').trim();
+    const label = normalize(active.textContent);
+    const value = normalize(active.getAttribute('data-id'))
+      || normalize(active.getAttribute('data-value'))
+      || normalize(active.getAttribute('ka'))
+      || label;
+    return label ? { label, value } : undefined;
+  });
+}
+
+function bossActiveJobScopeMatchesValue(
+  active: BossActiveJobScopeOption | undefined,
+  expected: string,
+): boolean {
+  return Boolean(active && (active.label === expected || active.value === expected));
+}
+
 async function selectBossUnrestrictedJob(page: Page, deadline: number): Promise<void> {
   const frame = await waitForBossSearchFrame(page, deadline);
   const currentJob = await readBossSelectedJob(page, deadline).catch(() => '');
@@ -349,11 +375,6 @@ async function readBossSearchKeyword(page: Page, deadline: number): Promise<stri
   }).catch(() => '')));
 }
 
-async function countBossCandidateCards(page: Page, deadline: number): Promise<number> {
-  const frame = await waitForBossSearchFrame(page, deadline);
-  return frame.locator('.geek-info-card').count().catch(() => 0);
-}
-
 async function waitForBossSearchResults(frame: Frame, deadline: number): Promise<void> {
   await frame.waitForFunction(
     () => {
@@ -383,8 +404,7 @@ async function applyBossSearchKeyword(page: Page, keyword: string, deadline: num
 
   const frame = await waitForBossSearchFrame(page, deadline);
   const currentKeyword = await readBossSearchKeyword(page, deadline);
-  const currentCardCount = await countBossCandidateCards(page, deadline);
-  if (currentKeyword === normalizedKeyword && currentCardCount > 0) {
+  if (currentKeyword === normalizedKeyword) {
     return;
   }
 
@@ -428,12 +448,26 @@ async function openBossSubscribeSearch(page: Page, keyword: string, options?: Se
 
 async function prepareBossSearchConditionPage(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page> {
   const deadline = createSearchDeadline(options);
-  return prepareBossSearchPage(page, keyword, deadline);
+  // Direct-condition replay must establish only the reusable search surface
+  // before comparing the requested target with the current page. Selecting the
+  // default job or re-submitting the keyword here would be a mutation before
+  // the action has established that either value is actually different.
+  void keyword;
+  await openBossSearchMenu(page, deadline);
+  await closeExistingBossResumeDialog(page, deadline);
+  await waitForBossSearchFrame(page, deadline);
+  return page;
 }
 
 export interface BossDirectSearchApplyResult {
   page: Page;
   verification: BossDirectSearchVerificationSummary;
+  /** Fields that required a UI mutation during this replay. */
+  changedFields?: string[];
+  /** Fields whose semantic target was already present on the page. */
+  alreadySatisfiedFields?: string[];
+  /** Present only when a whole-page reset was the sole safe recovery path. */
+  resetReason?: string;
 }
 
 export async function applyBossDirectSearch(
@@ -447,10 +481,24 @@ export async function applyBossDirectSearch(
   const resolvedViewedPolicy = resolveBossDirectRecentViewedPolicy(conditions, options?.includeViewedCandidates);
   const searchPage = await prepareBossSearchConditionPage(page, keyword, { ...options, deadline });
   throwIfBossSearchAborted(options?.signal);
-  await resetBossSearchFilters(searchPage, deadline);
-  throwIfBossSearchAborted(options?.signal);
-  await selectBossUnrestrictedJob(searchPage, deadline);
   const effectiveConditions = resolvedViewedPolicy.conditions;
+  const changedFields: string[] = [];
+  const alreadySatisfiedFields: string[] = [];
+
+  // Resetting every run made an otherwise correct province look as though it
+  // had been selected repeatedly. Prefer field-local repair and reserve reset
+  // for residual state that the action cannot clear safely and exactly.
+  let initialState = await snapshotBossSearchFilterState(searchPage, deadline);
+  const resetReason = bossDirectSearchResetReason(
+    initialState,
+    effectiveConditions,
+  );
+  if (resetReason) {
+    await resetBossSearchFilters(searchPage, deadline);
+    changedFields.push('reset');
+    initialState = await snapshotBossSearchFilterState(searchPage, deadline);
+  }
+
   const jobScopeConditions = effectiveConditions.filter((condition) => (
     isApplicationFilterCondition(condition) && condition.fieldId === 'job_scope'
   ));
@@ -460,42 +508,99 @@ export async function applyBossDirectSearch(
   const remainingConditions = effectiveConditions.filter((condition) => (
     !jobScopeConditions.includes(condition) && !cityConditions.includes(condition)
   ));
-  for (const condition of jobScopeConditions) {
-    throwIfBossSearchAborted(options?.signal);
-    const result = await applyBossSearchCondition(searchPage, condition, deadline);
-    if (result.status !== 'applied') {
-      const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
-        ? ` ${condition.fieldId}`
-        : '';
-      throw new Error(`Boss direct search condition ${condition.kind}${fieldLabel} failed: ${result.message ?? result.status}`);
+
+  if (jobScopeConditions.length === 0) {
+    if (initialState.jobScope === bossUnrestrictedJobName) {
+      alreadySatisfiedFields.push('job_scope');
+    } else {
+      await selectBossUnrestrictedJob(searchPage, deadline);
+      changedFields.push('job_scope');
     }
   }
+
+  for (const condition of jobScopeConditions) {
+    throwIfBossSearchAborted(options?.signal);
+    await applyBossDirectSearchConditionIfNeeded(
+      searchPage,
+      condition,
+      deadline,
+      changedFields,
+      alreadySatisfiedFields,
+    );
+  }
   throwIfBossSearchAborted(options?.signal);
-  await applyBossSearchKeyword(searchPage, keyword, deadline);
+  const stateBeforeKeyword = await snapshotBossSearchFilterState(searchPage, deadline);
+  if (stateBeforeKeyword.keyword === normalizeText(keyword)) {
+    alreadySatisfiedFields.push('keyword');
+  } else {
+    await applyBossSearchKeyword(searchPage, keyword, deadline);
+    changedFields.push('keyword');
+  }
+
+  // A job or keyword change can make the iframe redraw its city control.
+  // Read the closed state again immediately before deciding whether the city
+  // requires its one allowed open/select/confirm chain.
+  const stateBeforeCity = await snapshotBossSearchFilterState(searchPage, deadline);
   for (const condition of cityConditions) {
     throwIfBossSearchAborted(options?.signal);
-    const result = await applyBossSearchCondition(searchPage, condition, deadline);
-    if (result.status !== 'applied') {
-      const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
-        ? ` ${condition.fieldId}`
-        : '';
-      throw new Error(`Boss direct search condition ${condition.kind}${fieldLabel} failed: ${result.message ?? result.status}`);
-    }
+    await applyBossDirectSearchConditionIfNeeded(
+      searchPage,
+      condition,
+      deadline,
+      changedFields,
+      alreadySatisfiedFields,
+    );
+  }
+  if (cityConditions.length === 0 && (stateBeforeCity.city || stateBeforeCity.cityOptions?.length)) {
+    const frame = await waitForBossSearchFrame(searchPage, deadline);
+    await clearBossResidualCityApplicationFilter(searchPage, frame, deadline);
+    changedFields.push('city');
+  } else if (cityConditions.length === 0) {
+    alreadySatisfiedFields.push('city');
   }
   for (const condition of remainingConditions) {
     throwIfBossSearchAborted(options?.signal);
-    const result = await applyBossSearchCondition(searchPage, condition, deadline);
-    if (result.status !== 'applied') {
-      const fieldLabel = condition.kind === 'applicationFilter' && typeof condition.fieldId === 'string'
-        ? ` ${condition.fieldId}`
-        : '';
-      throw new Error(`Boss direct search condition ${condition.kind}${fieldLabel} failed: ${result.message ?? result.status}`);
-    }
+    await applyBossDirectSearchConditionIfNeeded(
+      searchPage,
+      condition,
+      deadline,
+      changedFields,
+      alreadySatisfiedFields,
+    );
   }
 
   if (resolvedViewedPolicy.desiredChecked !== undefined) {
     throwIfBossSearchAborted(options?.signal);
-    await applyBossViewedCandidatePolicy(searchPage, !resolvedViewedPolicy.desiredChecked, deadline);
+    const stateBeforeViewedPolicy = await snapshotBossSearchFilterState(searchPage, deadline);
+    if (stateBeforeViewedPolicy.toggles.filter_recent_viewed === resolvedViewedPolicy.desiredChecked) {
+      alreadySatisfiedFields.push('filter_recent_viewed');
+    } else {
+      await applyBossViewedCandidatePolicy(searchPage, !resolvedViewedPolicy.desiredChecked, deadline);
+      changedFields.push('filter_recent_viewed');
+    }
+  } else if (!effectiveConditions.some((condition) => (
+    isApplicationFilterCondition(condition) && condition.fieldId === 'filter_recent_viewed'
+  ))) {
+    const stateBeforeViewedPolicy = await snapshotBossSearchFilterState(searchPage, deadline);
+    if (stateBeforeViewedPolicy.toggles.filter_recent_viewed) {
+      await applyBossViewedCandidatePolicy(searchPage, true, deadline);
+      changedFields.push('filter_recent_viewed');
+    } else {
+      alreadySatisfiedFields.push('filter_recent_viewed');
+    }
+  }
+
+  if (!effectiveConditions.some((condition) => (
+    isApplicationFilterCondition(condition) && condition.fieldId === 'no_colleague_resume_exchange'
+  ))) {
+    const stateBeforeExchangePolicy = await snapshotBossSearchFilterState(searchPage, deadline);
+    if (stateBeforeExchangePolicy.toggles.no_colleague_resume_exchange) {
+      const frame = await waitForBossSearchFrame(searchPage, deadline);
+      await applyBossToggleApplicationFilter(searchPage, frame, 'no_colleague_resume_exchange', false, deadline);
+      changedFields.push('no_colleague_resume_exchange');
+    } else {
+      alreadySatisfiedFields.push('no_colleague_resume_exchange');
+    }
   }
 
   throwIfBossSearchAborted(options?.signal);
@@ -507,7 +612,14 @@ export async function applyBossDirectSearch(
     resolvedViewedPolicy.desiredChecked,
   );
 
-  return { page: searchPage, verification };
+  return {
+    page: searchPage,
+    verification,
+    changedFields: uniqueStrings(changedFields),
+    alreadySatisfiedFields: uniqueStrings(alreadySatisfiedFields)
+      .filter((fieldId) => !changedFields.includes(fieldId)),
+    ...(resetReason ? { resetReason } : {}),
+  };
 }
 
 async function openBossDirectSearch(
@@ -1886,28 +1998,170 @@ async function applyBossCustomSliderApplicationFilter(
   }
 }
 
+type BossProvinceOption = {
+  label: string;
+  value: string;
+};
+
+type BossProvinceSelectionState = {
+  /** Province selections; 全国 is normalized to the unrestricted empty set. */
+  provinces: string[];
+  /** Selected province labels paired with their stable option values. */
+  provinceOptions: BossProvinceOption[];
+  /** The visible city summary, normalized so placeholders and 全国 are empty. */
+  summary: string;
+  panelVisible: boolean;
+  /** A contradiction between the closed summary and the province checkmarks. */
+  evidenceConflict: boolean;
+};
+
+type BossCityApplicationFilterResult = {
+  status: 'applied' | 'alreadySatisfied';
+  provinces: string[];
+  subdivisionPolicy: 'all';
+};
+
+function sameBossStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const normalizedLeft = [...left].sort();
+  const normalizedRight = [...right].sort();
+  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
+}
+
+function bossProvinceSelectionMatchesValues(
+  provinceOptions: readonly BossProvinceOption[],
+  desiredValues: readonly string[],
+): boolean {
+  if (provinceOptions.length !== desiredValues.length) {
+    return false;
+  }
+  const unmatched = [...provinceOptions];
+  for (const desired of desiredValues) {
+    const index = unmatched.findIndex((option) => option.label === desired || option.value === desired);
+    if (index < 0) {
+      return false;
+    }
+    unmatched.splice(index, 1);
+  }
+  return unmatched.length === 0;
+}
+
+function bossProvinceSummaryMatchesLabels(summary: string, labels: readonly string[]): boolean {
+  if (labels.length === 0) {
+    return !summary;
+  }
+  if (!summary) {
+    return false;
+  }
+  const summarizedLabels = summary.split(/[、,，]/u).map((entry) => normalizeText(entry)).filter(Boolean);
+  return sameBossStringSet(summarizedLabels, labels);
+}
+
+function bossProvinceSelectionStateMatchesValues(
+  selection: BossProvinceSelectionState,
+  desiredValues: readonly string[],
+): boolean {
+  return selection.provinceOptions.length > 0
+    ? bossProvinceSelectionMatchesValues(selection.provinceOptions, desiredValues)
+    : bossProvinceSummaryMatchesLabels(selection.summary, desiredValues);
+}
+
+/**
+ * Read province selections from the existing city DOM without opening or
+ * confirming the picker. A selected province always means all of its child
+ * cities; this action deliberately never reads or clicks the child list.
+ */
+async function readBossProvinceSelectionState(frame: Frame): Promise<BossProvinceSelectionState> {
+  return frame.evaluate(() => {
+    const normalize = (value: string | null | undefined): string => (value ?? '').replace(/\s+/g, ' ').trim();
+    const cityBox = document.querySelector<HTMLElement>('.city-wrap .city-box');
+    const citySummary = document.querySelector<HTMLElement>('.city-wrap .city');
+    const cityInput = document.querySelector<HTMLInputElement>('.city-wrap .search-city-kw input');
+    const isVisible = (element: HTMLElement | null): boolean => {
+      if (!element) return false;
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const selectedOptions = Array.from(document.querySelectorAll<HTMLElement>('.city-wrap .dropdown-province > li')).flatMap((item) => {
+      const checkbox = item.querySelector<HTMLElement>('.city-checkbox, .mul-checkbox-ui');
+      const checked = /status1|checked|active/.test(checkbox?.className ?? '')
+        || Boolean(item.querySelector<HTMLInputElement>('input')?.checked);
+      const label = normalize(item.textContent);
+      const value = normalize(item.getAttribute('data-value')) || normalize(item.getAttribute('data-id')) || label;
+      return checked && label ? [{ label, value }] : [];
+    });
+    const selected = selectedOptions.map((option) => option.label);
+    if (new Set(selected).size !== selected.length) {
+      throw new Error('Boss city selector contains duplicate selected province labels.');
+    }
+    const hasNational = selected.includes('全国');
+    if (hasNational && selected.length > 1) {
+      throw new Error('Boss city selector selected 全国 together with a province.');
+    }
+    const provinces = hasNational ? [] : selected;
+    const rawSummary = normalize(citySummary?.textContent) || normalize(cityInput?.value);
+    const summary = /^(?:城市|请选择|全国)$/.test(rawSummary) ? '' : rawSummary;
+    // The summary is cross-check evidence only. Multi-province summaries vary
+    // between live page versions, while a single different province is an
+    // actionable contradiction that must not be papered over by reopening.
+    // Some live page versions discard the hidden checkbox state as the panel
+    // closes while retaining the committed province summary. In that closed
+    // summary-only state the summary is the read-only fallback evidence; it is
+    // not a contradiction. A populated option set with a different summary is.
+    const evidenceConflict = (provinces.length === 1 && Boolean(summary)
+        && !summary.includes(provinces[0]!) && !provinces[0]!.includes(summary));
+    return {
+      provinces,
+      provinceOptions: hasNational ? [] : selectedOptions,
+      summary,
+      panelVisible: isVisible(cityBox),
+      evidenceConflict,
+    };
+  });
+}
+
 async function applyBossCityApplicationFilter(
   page: Page,
   frame: Frame,
   values: string[],
   deadline: number,
-): Promise<void> {
-  const desired = new Set(values);
+): Promise<BossCityApplicationFilterResult> {
+  const desiredValues = uniqueStrings(values);
+  const desired = new Set(desiredValues);
   if (desired.size === 0 || desired.has('不限')) {
     throw new Error('Boss city application filter requires one or more explicit city options.');
   }
-  await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
+  if (desired.has('全国')) {
+    throw new Error('Boss city application filter uses province selections only; omit 全国 for the unrestricted baseline.');
+  }
+
+  const closedState = await readBossProvinceSelectionState(frame);
+  if (closedState.evidenceConflict) {
+    throw new Error(`Boss closed city state has conflicting summary and province evidence (summary: ${closedState.summary || '(empty)'}, provinces: ${closedState.provinces.join('、') || '(none)'}).`);
+  }
+  if (bossProvinceSelectionStateMatchesValues(closedState, desiredValues)) {
+    return {
+      status: 'alreadySatisfied',
+      provinces: [...closedState.provinces].sort(),
+      subdivisionPolicy: 'all',
+    };
+  }
+
   const trigger = frame.locator('.city-wrap .city, .city-wrap .square').first();
   const cityBox = frame.locator('.city-wrap .city-box').first();
-  await clickBossLocator(trigger, page, Math.min(remainingTime(deadline), 5000));
-  try {
-    await cityBox.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
-  } catch {
-    // The panel occasionally misses the first pointer event while a reset is
-    // settling. Retry its one semantic open action; do not continue without a
-    // visible, inspectable panel.
+  if (!closedState.panelVisible) {
     await clickBossLocator(trigger, page, Math.min(remainingTime(deadline), 5000));
-    await cityBox.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
+    try {
+      await cityBox.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
+    } catch {
+      // A narrow compatibility retry is allowed only after the required panel
+      // postcondition failed. It is never used for an already-satisfied city.
+      await clickBossLocator(trigger, page, Math.min(remainingTime(deadline), 5000));
+      await cityBox.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
+    }
   }
   // Confirmed selections are hydrated into the panel asynchronously after it
   // opens. Read the settled state so a prior city is removed before applying
@@ -1929,6 +2183,7 @@ async function applyBossCityApplicationFilter(
     }).filter((item) => item.label);
   });
   const desiredIndexes = new Set<number>();
+  const desiredProvinceLabels = new Set<string>();
   for (const value of desired) {
     const matches = states.filter((item) => item.label === value || item.value === value);
     if (matches.length !== 1) {
@@ -1938,6 +2193,7 @@ async function applyBossCityApplicationFilter(
       throw new Error(`Boss city option is disabled: ${value}`);
     }
     desiredIndexes.add(matches[0]!.index);
+    desiredProvinceLabels.add(matches[0]!.label);
   }
   for (const option of states) {
     const shouldSelect = desired.has(option.label) || desired.has(option.value);
@@ -1984,41 +2240,16 @@ async function applyBossCityApplicationFilter(
   }
   await clickBossLocator(cityBox.locator('button').nth(confirmIndex), page, Math.min(remainingTime(deadline), 5000));
   await waitForBossFilterSettle(frame, deadline);
-}
-
-async function readBossSelectedCityApplicationFilter(
-  page: Page,
-  frame: Frame,
-  deadline: number,
-): Promise<string[]> {
-  const trigger = frame.locator('.city-wrap .city, .city-wrap .square').first();
-  const cityBox = frame.locator('.city-wrap .city-box').first();
-  const initiallyVisible = await cityBox.isVisible().catch(() => false);
-  if (!initiallyVisible) {
-    await clickBossLocator(trigger, page, Math.min(remainingTime(deadline), 5000));
-    await cityBox.waitFor({ state: 'visible', timeout: Math.min(remainingTime(deadline), 5000) });
-    await frame.waitForTimeout(Math.min(500, remainingTime(deadline))).catch(() => undefined);
+  await cityBox.waitFor({ state: 'hidden', timeout: Math.min(remainingTime(deadline), 5000) });
+  const confirmed = await readBossProvinceSelectionState(frame);
+  if (confirmed.panelVisible || confirmed.evidenceConflict || !bossProvinceSelectionStateMatchesValues(confirmed, [...desiredProvinceLabels])) {
+    throw new Error(`Boss city selection did not match the requested province set after confirmation (expected: ${[...desiredProvinceLabels].join('、')}; observed: ${confirmed.provinces.join('、') || '(none)'}).`);
   }
-  try {
-    return await cityBox.locator('.dropdown-province > li').evaluateAll((elements) => elements.flatMap((element) => {
-      const item = element as HTMLElement;
-      const checkbox = item.querySelector<HTMLElement>('.city-checkbox, .mul-checkbox-ui');
-      const selected = /status1|checked|active/.test(checkbox?.className ?? '') || Boolean(item.querySelector<HTMLInputElement>('input')?.checked);
-      const label = (item.textContent ?? '').replace(/\s+/g, ' ').trim();
-      return selected && label ? [label] : [];
-    }));
-  } finally {
-    // The live city panel does not reliably close for Escape or outside clicks.
-    // Re-submit its already verified selection through the native confirmation
-    // button so a direct-search action always returns a stable, collapsed page.
-    const confirmationIndex = await cityBox.locator('button').evaluateAll((buttons) => buttons.findIndex((button) => /确定|确认|完成/.test((button.textContent ?? '').replace(/\s+/g, ' ').trim())));
-    if (confirmationIndex < 0) {
-      throw new Error('Boss city selector confirmation button is unavailable during postcondition verification.');
-    }
-    await clickBossLocator(cityBox.locator('button').nth(confirmationIndex), page, Math.min(remainingTime(deadline), 5000));
-    await waitForBossFilterSettle(frame, deadline);
-    await cityBox.waitFor({ state: 'hidden', timeout: Math.min(remainingTime(deadline), 5000) });
-  }
+  return {
+    status: 'applied',
+    provinces: [...confirmed.provinces].sort(),
+    subdivisionPolicy: 'all',
+  };
 }
 
 async function clearBossResidualCityApplicationFilter(
@@ -3028,7 +3259,12 @@ async function snapshotBossSearchFilterState(
       },
     };
   }, { moreLabels: bossMoreApplicationFilterLabelsInOrder, customSliderLabels });
-  return snapshot;
+  const provinceSelection = await readBossProvinceSelectionState(frame);
+  return {
+    ...snapshot,
+    city: provinceSelection.summary,
+    cityOptions: provinceSelection.provinces,
+  };
 }
 
 function isBossSearchFilterBaseline(state: BossSearchFilterState): boolean {
@@ -3044,6 +3280,165 @@ function isBossSearchFilterBaseline(state: BossSearchFilterState): boolean {
     && (state.cityOptions?.length ?? 0) === 0
     && !state.company
     && moreValues.every((value) => value === '不限');
+}
+
+function isBossUnlimitedFilterValue(values: readonly string[]): boolean {
+  return values.length === 0 || (values.length === 1 && values[0] === '不限');
+}
+
+function bossRequestedApplicationFilterFieldIds(conditions: readonly SearchCondition[]): Set<string> {
+  return new Set(conditions.flatMap((condition) => (
+    isApplicationFilterCondition(condition) ? [condition.fieldId] : []
+  )));
+}
+
+/**
+ * Return a reason only for residual state that cannot be removed through the
+ * typed, field-local actions. Job scope, province selection, and toggles have
+ * safe incremental clear paths and therefore never force a reset themselves.
+ */
+function bossDirectSearchResetReason(
+  state: BossSearchFilterState,
+  conditions: readonly SearchCondition[],
+): string | undefined {
+  const requested = bossRequestedApplicationFilterFieldIds(conditions);
+  if (!requested.has('company') && state.company) {
+    return 'unrequested company text cannot be cleared safely by a field-local Boss action';
+  }
+
+  for (const fieldId of ['education', 'school_nature', 'work_years', 'age'] as const) {
+    if (!requested.has(fieldId) && !isBossUnlimitedFilterValue(state.inline[fieldId])) {
+      return `unrequested ${fieldId} filter is not at its unrestricted baseline`;
+    }
+  }
+
+  const requestedMoreLabels = new Set(
+    [...requested]
+      .map((fieldId) => bossMoreApplicationFilterLabelByFieldId[fieldId])
+      .filter((label): label is string => Boolean(label)),
+  );
+  for (const [label, value] of Object.entries(state.more)) {
+    if (!requestedMoreLabels.has(label) && value && value !== '不限') {
+      return `unrequested ${label} filter cannot be cleared safely by a field-local Boss action`;
+    }
+  }
+
+  return undefined;
+}
+
+function isBossApplicationFilterSatisfiedByState(
+  state: BossSearchFilterState,
+  condition: Extract<SearchCondition, { kind: 'applicationFilter' }>,
+): boolean {
+  if (condition.fieldId === 'job_scope') {
+    return state.jobScope === readBossApplicationFilterSingleValue(condition);
+  }
+  if (condition.fieldId === 'city') {
+    return sameBossStringSet(state.cityOptions ?? [], readBossApplicationFilterMultiValues(condition));
+  }
+  if (condition.fieldId === 'education' || condition.fieldId === 'work_years') {
+    const customRange = readBossCustomSliderRange(condition);
+    if (customRange) {
+      const actual = state.inline[condition.fieldId]
+        .find((entry) => entry.startsWith('custom:'))
+        ?.slice('custom:'.length)
+        .split('-');
+      return actual?.length === 2
+        && actual[0] === customRange.minLabel
+        && actual[1] === customRange.maxLabel;
+    }
+    return sameBossStringSet(state.inline[condition.fieldId], [readBossApplicationFilterSingleValue(condition)]);
+  }
+  if (condition.fieldId === 'school_nature') {
+    return sameBossStringSet(state.inline.school_nature, readBossApplicationFilterMultiValues(condition));
+  }
+  if (condition.fieldId === 'age') {
+    const input = readBossAgeRangeInput(condition);
+    const expected = {
+      ...(input.min === undefined ? {} : { min: input.min }),
+      ...(input.max === undefined ? {} : { max: input.max }),
+    };
+    return sameBossSearchValue(expected, readBossSemanticAge(state.inline.age));
+  }
+  if (condition.fieldId === 'filter_recent_viewed' || condition.fieldId === 'no_colleague_resume_exchange') {
+    return state.toggles[condition.fieldId] === readBossApplicationFilterToggleValue(condition);
+  }
+  if (condition.fieldId === 'company') {
+    return state.company === readBossTextApplicationFilterValues(condition).join(' ');
+  }
+
+  const label = bossMoreApplicationFilterLabelByFieldId[condition.fieldId];
+  if (!label) {
+    return false;
+  }
+  if (condition.fieldId === 'expected_salary') {
+    const expected = readBossExpectedSalaryRangeInput(condition);
+    const actual = normalizeText(state.more[label]).replace(/\s+/g, '');
+    const normalizedExpected = `${expected.min}-${expected.max}`.replace(/\s+/g, '');
+    return actual === normalizedExpected;
+  }
+  if (condition.fieldId === 'major') {
+    return state.more[label] === readBossTextApplicationFilterValues(condition).join(' ');
+  }
+  return state.more[label] === readBossApplicationFilterSingleValue(condition);
+}
+
+async function isBossApplicationFilterSatisfied(
+  page: Page,
+  state: BossSearchFilterState,
+  condition: Extract<SearchCondition, { kind: 'applicationFilter' }>,
+  deadline: number,
+): Promise<boolean> {
+  if (condition.fieldId === 'job_scope') {
+    const frame = await waitForBossSearchFrame(page, deadline);
+    return bossActiveJobScopeMatchesValue(
+      await readBossActiveJobScopeOption(frame),
+      readBossApplicationFilterSingleValue(condition),
+    );
+  }
+  if (condition.fieldId !== 'city') {
+    return isBossApplicationFilterSatisfiedByState(state, condition);
+  }
+  const frame = await waitForBossSearchFrame(page, deadline);
+  const selection = await readBossProvinceSelectionState(frame);
+  if (selection.evidenceConflict) {
+    throw new Error(`Boss closed city state has conflicting summary and province evidence (summary: ${selection.summary || '(empty)'}, provinces: ${selection.provinces.join('、') || '(none)'}).`);
+  }
+  return bossProvinceSelectionStateMatchesValues(
+    selection,
+    readBossApplicationFilterMultiValues(condition),
+  );
+}
+
+async function applyBossDirectSearchConditionIfNeeded(
+  page: Page,
+  condition: SearchCondition,
+  deadline: number,
+  changedFields: string[],
+  alreadySatisfiedFields: string[],
+): Promise<void> {
+  const fieldId = isApplicationFilterCondition(condition) ? condition.fieldId : condition.kind;
+  if (isApplicationFilterCondition(condition)) {
+    const before = await snapshotBossSearchFilterState(page, deadline);
+    if (await isBossApplicationFilterSatisfied(page, before, condition, deadline)) {
+      alreadySatisfiedFields.push(fieldId);
+      return;
+    }
+  }
+
+  const result = await applyBossSearchCondition(page, condition, deadline);
+  if (result.status !== 'applied') {
+    const fieldLabel = isApplicationFilterCondition(condition) ? ` ${condition.fieldId}` : '';
+    throw new Error(`Boss direct search condition ${condition.kind}${fieldLabel} failed: ${result.message ?? result.status}`);
+  }
+
+  if (isApplicationFilterCondition(condition)) {
+    const after = await snapshotBossSearchFilterState(page, deadline);
+    if (!await isBossApplicationFilterSatisfied(page, after, condition, deadline)) {
+      throw new Error(`Boss direct search condition ${condition.fieldId} did not reach its requested postcondition.`);
+    }
+  }
+  changedFields.push(fieldId);
 }
 
 export function assertBossSearchFilterStateRestorable(state: BossSearchFilterState): void {
@@ -3181,6 +3576,13 @@ export async function readBossDirectSearchVerificationSummary(
   }
 
   const frame = await waitForBossSearchFrame(page, deadline);
+  const provinceSelection = await readBossProvinceSelectionState(frame);
+  if (provinceSelection.evidenceConflict) {
+    throw new Error(`Boss direct-search verification found conflicting city summary and province evidence (summary: ${provinceSelection.summary || '(empty)'}, provinces: ${provinceSelection.provinces.join('、') || '(none)'}).`);
+  }
+  if (provinceSelection.panelVisible) {
+    throw new Error('Boss direct-search verification requires the city panel to remain collapsed.');
+  }
   for (const condition of conditions) {
     if (!isApplicationFilterCondition(condition)) continue;
 
@@ -3205,7 +3607,9 @@ export async function readBossDirectSearchVerificationSummary(
 
     if (condition.fieldId === 'city') {
       const expected = readBossApplicationFilterMultiValues(condition).sort();
-      const actual = (await readBossSelectedCityApplicationFilter(page, frame, deadline)).sort();
+      const actual = bossProvinceSelectionStateMatchesValues(provinceSelection, expected)
+        ? expected
+        : [...provinceSelection.provinces].sort();
       entries.push(verificationEntry(
         condition.fieldId, expected, actual, 'selected-city-options',
         `Boss direct search postcondition mismatch for city: expected ${expected.join(', ')}, observed ${actual.join(', ') || '(empty)'}.`,

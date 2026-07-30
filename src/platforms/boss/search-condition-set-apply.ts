@@ -39,6 +39,12 @@ export interface BossSearchConditionSetApplySummary {
   conditionsVerified: number;
   resultTotal: number;
   resultTotalSource: 'page';
+  /** Fields that required a page mutation in this replay. */
+  changedFields: string[];
+  /** Fields already at their requested semantic state. */
+  alreadySatisfiedFields: string[];
+  /** Why one baseline reset was required, when incremental reconciliation was unsafe. */
+  resetReason?: string;
   startedAt: string;
   finishedAt: string;
 }
@@ -311,6 +317,9 @@ export async function applyBossSearchConditionSetWorkflow(
       conditionsVerified: resolved.conditions.length,
       resultTotal: verification.resultTotal,
       resultTotalSource: verification.resultTotalSource,
+      changedFields: applied.changedFields ?? [],
+      alreadySatisfiedFields: applied.alreadySatisfiedFields ?? [],
+      ...(applied.resetReason ? { resetReason: applied.resetReason } : {}),
       startedAt,
       finishedAt: new Date().toISOString(),
     };

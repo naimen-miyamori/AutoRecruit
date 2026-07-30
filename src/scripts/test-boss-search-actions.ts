@@ -4,6 +4,7 @@ import { chromium, type Browser, type Page } from 'playwright';
 
 import { config } from '../config.js';
 import {
+  applyBossDirectSearch,
   applyBossViewedCandidatePolicy,
   applyBossSearchCondition,
   assertBossSearchFilterStateRestorable,
@@ -13,6 +14,7 @@ import {
   openBossResumeDetail,
   openBossSubscribeSearch,
   prepareBossSearchConditionPage,
+  readBossDirectSearchVerificationSummary,
   resetBossSearchFilters,
   snapshotBossSearchFilterState,
 } from '../platforms/boss/actions/search-actions.js';
@@ -523,6 +525,65 @@ describe('Boss normal-search actions', () => {
     }
   });
 
+  it('selects a province once, leaves its secondary cities at the default all scope, and does not reopen it for replay or verification', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody(`<div class="city-wrap"><div class="city" onclick="openCity()">城市</div><div class="city-box" style="display:none"><ul class="dropdown-province"><li data-value="guangdong" onclick="selectProvince(this)"><div class="city-checkbox status0"></div>广东</li><li data-value="zhejiang" onclick="selectProvince(this)"><div class="city-checkbox status0"></div>浙江</li></ul><div class="dropdown-city"><button type="button" onclick="window.__secondaryCityClicks += 1">肇庆</button></div><button type="button" onclick="confirmCity()">确认</button></div></div>
+        <div class="degree-ui"><span class="degree-item active" onclick="selectEducation(this)">不限</span><span class="degree-item" onclick="selectEducation(this)">本科及以上</span></div><div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
+        <script>
+          window.__cityPanelOpens = 0; window.__provinceClicks = 0; window.__cityConfirmations = 0; window.__secondaryCityClicks = 0;
+          function openCity() { window.__cityPanelOpens += 1; document.querySelector('.city-box').style.display = 'block'; }
+          function selectProvince(item) { window.__provinceClicks += 1; const checkbox = item.querySelector('.city-checkbox'); checkbox.className = 'city-checkbox status1'; [...document.querySelectorAll('.dropdown-province > li')].filter((entry) => entry !== item).forEach((entry) => { entry.querySelector('.city-checkbox').className = 'city-checkbox status0'; }); }
+          function confirmCity() { window.__cityConfirmations += 1; const selected = [...document.querySelectorAll('.dropdown-province > li')].find((entry) => entry.querySelector('.city-checkbox').classList.contains('status1')); document.querySelector('.city-wrap .city').textContent = selected ? selected.textContent.trim() : '城市'; document.querySelectorAll('.city-checkbox').forEach((checkbox) => { checkbox.className = 'city-checkbox status0'; }); document.querySelector('.city-box').style.display = 'none'; }
+          function selectEducation(item) { document.querySelectorAll('.degree-ui .degree-item').forEach((entry) => entry.classList.remove('active')); item.classList.add('active'); }
+        </script>`),
+    });
+    const condition = {
+      kind: 'applicationFilter' as const, fieldId: 'city', label: '城市', fieldKind: 'multiSelect' as const, value: ['广东'],
+    };
+    try {
+      const deadline = Date.now() + 10_000;
+      const first = await applyBossDirectSearch(page, '测试关键词', [condition], { deadline });
+      assert.equal(first.verification.conditions.find((entry) => entry.fieldId === 'city')?.verified, true);
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__cityPanelOpens), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__provinceClicks), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__cityConfirmations), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__secondaryCityClicks), 0);
+      assert.equal(await frame.locator('.city-box').isVisible(), false);
+
+      const verification = await readBossDirectSearchVerificationSummary(page, '测试关键词', [condition], Date.now() + 10_000);
+      assert.equal(verification.conditions.find((entry) => entry.fieldId === 'city')?.verified, true);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__cityPanelOpens), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__cityConfirmations), 1);
+
+      const conditionsWithIndependentEducation = [condition, {
+        kind: 'applicationFilter' as const, fieldId: 'education', label: '学历要求', fieldKind: 'singleSelect' as const, value: '本科及以上',
+      }];
+      const independentRepair = await applyBossDirectSearch(page, '测试关键词', conditionsWithIndependentEducation, { deadline: Date.now() + 10_000 });
+      assert.deepEqual(independentRepair.changedFields, ['education']);
+      assert.ok(independentRepair.alreadySatisfiedFields?.includes('city'));
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__cityPanelOpens), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__cityConfirmations), 1);
+
+      const second = await applyBossDirectSearch(page, '测试关键词', conditionsWithIndependentEducation, { deadline: Date.now() + 10_000 });
+      assert.equal(second.verification.conditions.find((entry) => entry.fieldId === 'city')?.verified, true);
+      assert.deepEqual(second.changedFields, []);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__cityPanelOpens), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__provinceClicks), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__cityConfirmations), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__secondaryCityClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
   it('keeps a semantic custom range in the final direct-search postcondition', async () => {
     const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
     const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
@@ -567,9 +628,9 @@ describe('Boss normal-search actions', () => {
     config.playwright.actionDelayMaxMsByPlatform.boss = 0;
     const { browser, page } = await createSearchFixture({
       body: searchBody(`<span class="reset-btn" ka="search_reset_search_params">清空筛选</span>
-        <div class="city-wrap"><div class="city">城市</div><div class="city-box"><ul class="dropdown-province"><li data-value="a" onclick="toggleCity(this)"><div class="city-checkbox status0"></div>甲</li><li data-value="b" onclick="toggleCity(this)"><div class="city-checkbox status0"></div>乙</li></ul><button>取消</button><button>确定</button></div></div>
+        <div class="city-wrap"><div class="city">城市</div><div class="city-box"><ul class="dropdown-province"><li data-value="a" onclick="toggleCity(this)"><div class="city-checkbox status0"></div>甲</li><li data-value="b" onclick="toggleCity(this)"><div class="city-checkbox status0"></div>乙</li></ul><button>取消</button><button onclick="confirmCity()">确定</button></div></div>
         <div class="degree-ui"><span class="degree-item active">不限</span></div><div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
-        <script>function toggleCity(item) { const checkbox = item.querySelector('.city-checkbox'); checkbox.classList.toggle('status0'); checkbox.classList.toggle('status1'); }</script>`),
+        <script>function toggleCity(item) { const checkbox = item.querySelector('.city-checkbox'); checkbox.classList.toggle('status0'); checkbox.classList.toggle('status1'); } function confirmCity() { document.querySelector('.city-box').style.display = 'none'; }</script>`),
     });
     try {
       const result = await applyBossSearchCondition(page, {
@@ -639,6 +700,11 @@ describe('Boss normal-search actions', () => {
       assert.ok(frame);
       assert.equal(await frame.locator('.ui-dropmenu-list li.active').first().getAttribute('data-value'), 'target');
       assert.equal(await frame.locator('.search-current-job').innerText(), '不限职位');
+      const direct = await applyBossDirectSearch(page, '测试关键词', [{
+        kind: 'applicationFilter', fieldId: 'job_scope', label: '职位范围', fieldKind: 'singleSelect', value: 'target',
+      }], { deadline: Date.now() + 10_000 });
+      assert.equal(direct.verification.conditions.find((entry) => entry.fieldId === 'job_scope')?.verified, true);
+      assert.ok(direct.alreadySatisfiedFields?.includes('job_scope'));
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
