@@ -44,6 +44,7 @@ export interface SearchFilterOptionInputField {
   valueType: SearchFilterOptionInputValueType;
   label?: string;
   placeholder?: string;
+  options?: string[];
 }
 
 export interface SearchFilterOptionInputSpec {
@@ -121,6 +122,8 @@ export interface SearchFilterDiscoveryRunOptions {
   slowClick?: boolean;
   includeRemoteProbes?: boolean;
   remoteProbeValues?: string[];
+  /** Limits platform-owned expandable controls during resumable live discovery. */
+  filterKeys?: string[];
 }
 
 export interface SearchFilterControlSnapshot {

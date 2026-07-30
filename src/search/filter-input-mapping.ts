@@ -103,6 +103,7 @@ const knownFieldIdByLabel: Record<string, string> = {
   学校名称: 'school_name',
   专业: 'major',
   专业名称: 'major',
+  资格证书: 'qualification',
 };
 
 const knownSemanticKindByLabel: Record<string, SearchFilterTextInputSemanticKind> = {
@@ -135,6 +136,7 @@ const knownSemanticKindByLabel: Record<string, SearchFilterTextInputSemanticKind
   学校名称: 'other',
   专业: 'major',
   专业名称: 'major',
+  资格证书: 'other',
 };
 
 const knownScopeByLabel: Record<string, SearchFilterTextInputScope> = {
@@ -167,6 +169,7 @@ const knownScopeByLabel: Record<string, SearchFilterTextInputScope> = {
   学校名称: 'education',
   专业: 'education',
   专业名称: 'education',
+  资格证书: 'other',
 };
 
 const freeTextFieldIds = new Set([

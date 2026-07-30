@@ -33,6 +33,29 @@ export interface ApplicationFilterSingleSelectField {
   };
 }
 
+export interface ApplicationFilterMultiSelectField {
+  fieldId: string;
+  filterKey: string;
+  label: string;
+  kind: 'multiSelect';
+  restrictInput: true;
+  valueShape: 'string[]';
+  acceptedInputShapes: ['string[]'];
+  allowedValues: string[];
+  options: ApplicationFilterOption[];
+}
+
+export interface ApplicationFilterToggleField {
+  fieldId: string;
+  filterKey: string;
+  label: string;
+  kind: 'toggle';
+  restrictInput: true;
+  valueShape: 'boolean';
+  acceptedInputShapes: ['boolean'];
+  defaultValue: boolean;
+}
+
 export interface ApplicationFilterTextInputField {
   fieldId: string;
   filterKey: string;
@@ -103,6 +126,8 @@ export interface ApplicationFilterNumberRangeField {
 
 export type ApplicationFilterField =
   | ApplicationFilterSingleSelectField
+  | ApplicationFilterMultiSelectField
+  | ApplicationFilterToggleField
   | ApplicationFilterTextInputField
   | ApplicationFilterSalaryRangeField
   | ApplicationFilterNumberRangeField;
@@ -116,6 +141,8 @@ export interface ApplicationFilterOptions {
   fieldIdByLabel: Record<string, string>;
   groups: {
     singleSelect: string[];
+    multiSelect?: string[];
+    toggle?: string[];
     textInput: string[];
     salaryRange: string[];
     numberRange: string[];
@@ -350,6 +377,40 @@ function toApplicationOption(option: {
   };
 }
 
+const supplementalFieldIdByLabel: Record<string, string> = {
+  城市: 'city',
+  院校要求: 'school_nature',
+  过滤近14天查看: 'filter_recent_viewed',
+  近30天未和同事交换简历: 'no_colleague_resume_exchange',
+  公司: 'company',
+  专业: 'major',
+  资格证书: 'qualification',
+};
+
+function slugifyApplicationFieldLabel(label: string): string {
+  return normalizeValue(label)
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'unknown_application_filter';
+}
+
+function inferSupplementalFieldId(label: string): string {
+  return supplementalFieldIdByLabel[normalizeValue(label)] ?? slugifyApplicationFieldLabel(label);
+}
+
+function toApplicationOptions(filter: SearchFilterCatalog['filters'][number]): ApplicationFilterOption[] {
+  return (filter.options ?? []).map((option) => toApplicationOption({
+    label: option.label,
+    value: normalizeValue(option.value) || option.label,
+    depth: option.depth,
+    disabled: Boolean(option.disabled),
+    selected: Boolean(option.selected),
+    parentPathLabels: option.parentPathLabels,
+    pathLabels: option.pathLabels,
+    inputSpec: option.inputSpec,
+  }));
+}
+
 export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): ApplicationFilterOptions {
   const singleSelectMapping = buildSingleSelectApplicationMapping(catalog);
   const textInputMapping = buildTextInputApplicationMapping(catalog);
@@ -360,6 +421,8 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
   const fieldsById: Record<string, ApplicationFilterField> = {};
   const groups: ApplicationFilterOptions['groups'] = {
     singleSelect: [],
+    multiSelect: [],
+    toggle: [],
     textInput: [],
     salaryRange: [],
     numberRange: [],
@@ -397,6 +460,62 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
     };
   }
 
+  for (const filter of catalog.filters) {
+    if (filter.controlType !== 'multiSelect' || filter.valueShape !== 'string[]') {
+      continue;
+    }
+
+    const fieldId = inferSupplementalFieldId(filter.label);
+    if (fieldsById[fieldId]) {
+      continue;
+    }
+
+    const options = toApplicationOptions(filter);
+    if (options.length === 0) {
+      continue;
+    }
+
+    fieldIds.push(fieldId);
+    fieldIdByLabel[filter.label] = fieldId;
+    groups.multiSelect?.push(fieldId);
+    fieldsById[fieldId] = {
+      fieldId,
+      filterKey: filter.key,
+      label: filter.label,
+      kind: 'multiSelect',
+      restrictInput: true,
+      valueShape: 'string[]',
+      acceptedInputShapes: ['string[]'],
+      allowedValues: buildAllowedValues(options),
+      options,
+    };
+  }
+
+  for (const filter of catalog.filters) {
+    if (filter.controlType !== 'toggle' || filter.valueShape !== 'boolean') {
+      continue;
+    }
+
+    const fieldId = inferSupplementalFieldId(filter.label);
+    if (fieldsById[fieldId]) {
+      continue;
+    }
+
+    fieldIds.push(fieldId);
+    fieldIdByLabel[filter.label] = fieldId;
+    groups.toggle?.push(fieldId);
+    fieldsById[fieldId] = {
+      fieldId,
+      filterKey: filter.key,
+      label: filter.label,
+      kind: 'toggle',
+      restrictInput: true,
+      valueShape: 'boolean',
+      acceptedInputShapes: ['boolean'],
+      defaultValue: Boolean(filter.options?.find((option) => option.selected)?.selected),
+    };
+  }
+
   for (const fieldId of textInputMapping.fieldIds) {
     const field = textInputMapping.fieldsById[fieldId];
     if (!field) {
@@ -423,6 +542,38 @@ export function buildApplicationFilterOptions(catalog: SearchFilterCatalog): App
         values: [...entry.values],
       })),
       tree: field.tree.map((node) => ({ ...node })),
+    };
+  }
+
+  for (const filter of catalog.filters) {
+    if (filter.controlType !== 'textInput') {
+      continue;
+    }
+    if (textInputMapping.fieldIdByLabel[filter.label]) {
+      continue;
+    }
+    const fieldId = inferSupplementalFieldId(filter.label);
+    if (fieldsById[fieldId]) {
+      continue;
+    }
+    const options = toApplicationOptions(filter);
+    fieldIds.push(fieldId);
+    fieldIdByLabel[filter.label] = fieldId;
+    groups.textInput.push(fieldId);
+    fieldsById[fieldId] = {
+      fieldId,
+      filterKey: filter.key,
+      label: filter.label,
+      kind: 'textInput',
+      semanticKind: fieldId === 'major' ? 'major' : 'other',
+      scope: fieldId === 'major' ? 'education' : 'other',
+      restrictInput: false,
+      valueShape: 'string|string[]',
+      acceptedInputShapes: ['string', 'string[]', '{ value: string; pathLabels: string[] }', '{ value: string; pathLabels: string[] }[]'],
+      allowedValues: options.filter((option) => !option.disabled).map((option) => option.value || option.label),
+      rootValues: [],
+      valuesByDepth: [],
+      tree: [],
     };
   }
 
@@ -696,14 +847,23 @@ function validateCustomInput(
   const numbers: Record<string, number> = {};
   for (const inputField of customInput.inputSpec.fields) {
     const inputValue = value.input[inputField.key];
+    const normalizedInput = normalizeStringOrNumberValue(inputValue);
     if (inputField.valueType === 'string') {
-      if (!normalizeStringOrNumberValue(inputValue)) {
+      if (!normalizedInput) {
         errors.push({
           fieldId: field.fieldId,
           code: 'invalid_custom_string',
           message: `${field.label} 的 ${inputField.key} 必须是非空文本。`,
         });
+      } else if (inputField.options && !inputField.options.includes(normalizedInput)) {
+        errors.push({
+          fieldId: field.fieldId,
+          code: 'invalid_custom_option',
+          message: `${field.label} 的 ${inputField.key} 必须选择页面提供的边界。`,
+        });
       }
+      const numeric = Number(normalizedInput);
+      if (Number.isInteger(numeric)) numbers[inputField.key] = numeric;
       continue;
     }
 
@@ -771,6 +931,55 @@ function validateSingleSelectField(
     fieldId: field.fieldId,
     code: 'invalid_value_shape',
     message: `${field.label} 需要字符串，或自定义输入对象。`,
+  }];
+}
+
+function validateMultiSelectField(
+  field: ApplicationFilterMultiSelectField,
+  value: unknown,
+): ValidateApplicationFilterInputError[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    return [{
+      fieldId: field.fieldId,
+      code: 'invalid_multi_select_shape',
+      message: `${field.label} 需要至少一个已采集的选项。`,
+    }];
+  }
+
+  const normalizedValues = value.map(normalizeValue);
+  if (normalizedValues.some((item) => !item)) {
+    return [{
+      fieldId: field.fieldId,
+      code: 'invalid_multi_select_value',
+      message: `${field.label} 的选项必须是非空文本。`,
+    }];
+  }
+
+  const duplicate = new Set(normalizedValues).size !== normalizedValues.length;
+  if (duplicate) {
+    return [{
+      fieldId: field.fieldId,
+      code: 'duplicate_multi_select_value',
+      message: `${field.label} 不能重复选择同一选项。`,
+    }];
+  }
+
+  const unsupported = normalizedValues.filter((item) => !field.allowedValues.includes(item));
+  return unsupported.length === 0 ? [] : [{
+    fieldId: field.fieldId,
+    code: 'invalid_multi_select_option',
+    message: `${field.label} 只能选择已采集的选项：${unsupported.join('、')}。`,
+  }];
+}
+
+function validateToggleField(
+  field: ApplicationFilterToggleField,
+  value: unknown,
+): ValidateApplicationFilterInputError[] {
+  return typeof value === 'boolean' ? [] : [{
+    fieldId: field.fieldId,
+    code: 'invalid_toggle_value',
+    message: `${field.label} 只能为 true 或 false。`,
   }];
 }
 
@@ -975,6 +1184,16 @@ export function validateApplicationFilterInput(
 
     if (field.kind === 'singleSelect') {
       errors.push(...validateSingleSelectField(field, value));
+      continue;
+    }
+
+    if (field.kind === 'multiSelect') {
+      errors.push(...validateMultiSelectField(field, value));
+      continue;
+    }
+
+    if (field.kind === 'toggle') {
+      errors.push(...validateToggleField(field, value));
       continue;
     }
 

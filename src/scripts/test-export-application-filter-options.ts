@@ -407,8 +407,8 @@ function createBossCatalog(): SearchFilterCatalog {
       {
         key: 'boss-school-nature',
         label: '院校要求',
-        controlType: 'singleSelect',
-        valueShape: 'string',
+        controlType: 'multiSelect',
+        valueShape: 'string[]',
         status: 'optionsExtracted',
         selectorHints: [{ kind: 'text', value: '院校要求' }],
         options: [
@@ -529,6 +529,24 @@ function createBossCatalog(): SearchFilterCatalog {
           { label: '仅从事过此职位', value: '仅从事过此职位' },
           { label: '牛人期望此职位', value: '牛人期望此职位' },
         ],
+      },
+      {
+        key: 'boss-filter-recent-viewed',
+        label: '过滤近14天查看',
+        controlType: 'toggle',
+        valueShape: 'boolean',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '过滤近14天查看' }],
+        options: [{ label: 'enabled', value: 'true', selected: false }],
+      },
+      {
+        key: 'boss-no-colleague-resume-exchange',
+        label: '近30天未和同事交换简历',
+        controlType: 'toggle',
+        valueShape: 'boolean',
+        status: 'optionsExtracted',
+        selectorHints: [{ kind: 'text', value: '近30天未和同事交换简历' }],
+        options: [{ label: 'enabled', value: 'true', selected: false }],
       },
     ],
     failures: [],
@@ -772,19 +790,20 @@ test('export application filter options normalizes Boss search filters', () => {
   assert.equal(options.platform, 'boss');
   assert.deepEqual(options.fieldIds, [
     'education',
-    'school_nature',
     'work_years',
     'gender',
     'recent_activity_time',
     'job_hopping_count',
     'job_status',
     'candidate_position_requirement',
+    'school_nature',
+    'filter_recent_viewed',
+    'no_colleague_resume_exchange',
     'age',
     'expected_salary',
   ]);
   assert.deepEqual(options.groups.singleSelect, [
     'education',
-    'school_nature',
     'work_years',
     'gender',
     'recent_activity_time',
@@ -792,6 +811,8 @@ test('export application filter options normalizes Boss search filters', () => {
     'job_status',
     'candidate_position_requirement',
   ]);
+  assert.deepEqual(options.groups.multiSelect, ['school_nature']);
+  assert.deepEqual(options.groups.toggle, ['filter_recent_viewed', 'no_colleague_resume_exchange']);
   assert.deepEqual(options.groups.numberRange, ['age']);
   assert.deepEqual(options.groups.salaryRange, ['expected_salary']);
   assert.equal(options.fieldIdByLabel.牛人活跃度, 'recent_activity_time');
@@ -806,7 +827,7 @@ test('export application filter options normalizes Boss search filters', () => {
   assert.deepEqual(salary.minOptions, ['1K', '5K', '10K']);
   assert.deepEqual(validateApplicationFilterInput(options, {
     education: '本科及以上',
-    school_nature: '统招本科',
+    school_nature: ['统招本科', '985院校'],
     work_years: '1-3年',
     gender: '女',
     recent_activity_time: '今日活跃',
@@ -821,6 +842,8 @@ test('export application filter options normalizes Boss search filters', () => {
       min: '1K',
       max: '10K',
     },
+    filter_recent_viewed: true,
+    no_colleague_resume_exchange: false,
   }), {
     ok: true,
     errors: [],

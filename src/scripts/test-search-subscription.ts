@@ -8,6 +8,7 @@ import type { BrowserContext, Page } from 'playwright';
 
 import type { PlatformAdapter } from '../platforms/types.js';
 import {
+  buildApplicationFilterConditions,
   loadSearchConditionPlanFile,
   runSearchSubscriptionWorkflow,
 } from '../search/search-subscription.js';
@@ -662,6 +663,53 @@ describe('search subscription workflow', () => {
       assert.equal(summary.resultTotal, 12);
       assert.equal(summary.saved, true);
       assert.equal(summary.savedSearchName, '保存的订阅名');
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('builds multi-select and toggle application conditions without coercing their values', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-search-subscription-boss-filter-kinds-'));
+    const optionsPath = path.join(tempDir, 'application-filter-options.json');
+    try {
+      await fs.writeFile(optionsPath, JSON.stringify({
+        platform: 'boss',
+        capturedAt: '2026-07-29T00:00:00.000Z',
+        keyword: 'test',
+        fieldCount: 2,
+        fieldIds: ['school_nature', 'filter_recent_viewed'],
+        fieldIdByLabel: { 院校要求: 'school_nature', 过滤近14天查看: 'filter_recent_viewed' },
+        groups: { singleSelect: [], multiSelect: ['school_nature'], toggle: ['filter_recent_viewed'], textInput: [], salaryRange: [], numberRange: [] },
+        fieldsById: {
+          school_nature: {
+            fieldId: 'school_nature', filterKey: 'boss-school-nature', label: '院校要求', kind: 'multiSelect', restrictInput: true,
+            valueShape: 'string[]', acceptedInputShapes: ['string[]'], allowedValues: ['统招本科', '985院校'],
+            options: [
+              { label: '统招本科', value: '统招本科', disabled: false, selected: false },
+              { label: '985院校', value: '985院校', disabled: false, selected: false },
+            ],
+          },
+          filter_recent_viewed: {
+            fieldId: 'filter_recent_viewed', filterKey: 'boss-filter-recent-viewed', label: '过滤近14天查看', kind: 'toggle', restrictInput: true,
+            valueShape: 'boolean', acceptedInputShapes: ['boolean'], defaultValue: false,
+          },
+        },
+      }), 'utf8');
+
+      const conditions = await buildApplicationFilterConditions('boss', {
+        school_nature: ['统招本科', '985院校'],
+        filter_recent_viewed: false,
+      }, { platform: 'boss', applicationFilterOptionsPath: optionsPath });
+      assert.deepEqual(conditions, [
+        {
+          kind: 'applicationFilter', fieldId: 'school_nature', label: '院校要求', fieldKind: 'multiSelect',
+          value: ['统招本科', '985院校'], values: [{ value: '统招本科' }, { value: '985院校' }],
+        },
+        {
+          kind: 'applicationFilter', fieldId: 'filter_recent_viewed', label: '过滤近14天查看', fieldKind: 'toggle',
+          value: false, values: [{ value: 'false' }],
+        },
+      ]);
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }

@@ -79,6 +79,7 @@ const knownFieldIdByLabel: Record<string, string> = {
   企业规模: 'company_size',
   融资阶段: 'financing_stage',
   牛人职位要求: 'candidate_position_requirement',
+  职位范围: 'job_scope',
 };
 
 const zhilianCustomInputSpecByLabel: Record<string, SearchFilterOptionInputSpec> = {

@@ -494,7 +494,21 @@ export function buildLiepinApplicationFilterOptionVerificationCases(
       continue;
     }
 
-    cases.push(...listRangeCases(field, input));
+    if (field.kind === 'salaryRange' || field.kind === 'numberRange') {
+      cases.push(...listRangeCases(field, input));
+      continue;
+    }
+
+    const unsupported = createCase(
+      field,
+      'unsupported-field-kind',
+      field.kind === 'multiSelect' ? [] : false,
+      0,
+      input,
+    );
+    if (unsupported) {
+      cases.push(unsupported);
+    }
   }
 
   return cases;

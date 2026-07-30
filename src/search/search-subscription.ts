@@ -157,6 +157,28 @@ function toApplicationFilterCondition(
     };
   }
 
+  if (field.kind === 'multiSelect' && Array.isArray(value)) {
+    return {
+      kind: 'applicationFilter',
+      fieldId: field.fieldId,
+      label: field.label,
+      fieldKind: field.kind,
+      value: [...value],
+      values: value.map((item) => ({ value: normalizeInputValue(item) })),
+    };
+  }
+
+  if (field.kind === 'toggle' && typeof value === 'boolean') {
+    return {
+      kind: 'applicationFilter',
+      fieldId: field.fieldId,
+      label: field.label,
+      fieldKind: field.kind,
+      value,
+      values: [{ value: String(value) }],
+    };
+  }
+
   if (field.kind === 'salaryRange' && isPlainObject(value)) {
     return {
       kind: 'applicationFilter',
