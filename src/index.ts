@@ -2169,17 +2169,6 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
 
   await store.saveJobRecord(input.platform, jobRecord);
 
-  if (input.platform === 'boss' && input.bossForwardMode && input.bossForwardRecipient) {
-    const storedAutomationSettings = await store.readBossAutomationSettings();
-    await store.saveBossAutomationSettings({
-      ...storedAutomationSettings,
-      forwarding: {
-        mode: input.bossForwardMode,
-        recipient: input.bossForwardRecipient,
-      },
-    });
-  }
-
   if (!isCrawl4aiAdapterAvailable()) {
     console.warn('Crawl4AI adapter unavailable at startup; continuing with built-in extraction only.');
   }

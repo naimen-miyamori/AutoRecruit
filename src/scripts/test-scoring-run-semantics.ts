@@ -5066,6 +5066,70 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), ['boss-seen', 'boss-new']);
   });
 
+  it('keeps normal Boss capture forwarding job-scoped without changing auto-chat defaults', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const keyword = `Boss岗位级转发-${Date.now()}-${Math.random()}`;
+    const jobKey = buildJobKey(keyword, '');
+    const forwardingCalls: Array<{ mode?: string; recipient?: string }> = [];
+    const originalAfterResumeDetailOpened = bossAdapter.afterResumeDetailOpened;
+
+    await store.saveBossAutomationSettings({
+      forwarding: {
+        mode: 'email',
+        recipient: 'auto-chat-default@example.com',
+      },
+      summaryDelivery: {
+        recipientEmail: 'summary@example.com',
+      },
+    });
+    stubSuccessfulRun(indexModule);
+    bossAdapter.afterResumeDetailOpened = async (_page, _candidate, actions) => {
+      forwardingCalls.push({
+        mode: actions.bossForwardMode,
+        recipient: actions.bossForwardRecipient,
+      });
+    };
+
+    try {
+      await captureConsole(async () => {
+        await indexModule.main([
+          '--platform',
+          'boss',
+          '--keyword',
+          keyword,
+          '--jd',
+          '职位名称：工业设计师',
+          '--boss-forward-mode',
+          'email',
+          '--boss-forward-recipient',
+          'job-specific@example.com',
+        ]);
+      });
+    } finally {
+      bossAdapter.afterResumeDetailOpened = originalAfterResumeDetailOpened;
+    }
+
+    assert.deepStrictEqual(forwardingCalls, [{
+      mode: 'email',
+      recipient: 'job-specific@example.com',
+    }]);
+    assert.deepStrictEqual((await store.readJobRecord('boss', jobKey)).bossForwarding, {
+      mode: 'email',
+      recipient: 'job-specific@example.com',
+    });
+    assert.deepStrictEqual(await store.readBossAutomationSettings(), {
+      forwarding: {
+        mode: 'email',
+        recipient: 'auto-chat-default@example.com',
+      },
+      summaryDelivery: {
+        recipientEmail: 'summary@example.com',
+      },
+    });
+  });
+
   it('uses platform candidate pacing between every pair of new candidates', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);

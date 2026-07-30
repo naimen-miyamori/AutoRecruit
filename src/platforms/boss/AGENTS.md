@@ -30,7 +30,8 @@ scheduled work.
 - Normal capture reuses the current search page. Boss forwarding mode and recipient appear together
   and only on Boss; they include the stable candidate ID and select exactly one colleague or fill
   the email recipient. Forward before parsing or seen marking; a pre-capture failure remains
-  retryable.
+  retryable. Explicit normal-capture forwarding persists only on that Boss job record; it must not
+  rewrite the auto-chat platform default. Only explicit auto-chat input may update the latter.
 
 ## Talent Discovery and Atomic Conversations
 

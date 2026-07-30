@@ -30,6 +30,7 @@
     "test:experimental:zhilian": "node --import ./scripts/node-ts-hooks.mjs --test src/scripts/test-zhilian-adapter.ts",
     "score:stored": "node --import ./scripts/node-ts-hooks.mjs src/scripts/score-stored-resumes.ts",
     "export:results": "node --import ./scripts/node-ts-hooks.mjs src/scripts/export-job-results.ts",
+    "email:report": "node --import ./scripts/node-ts-hooks.mjs src/scripts/send-job-report-email.ts",
     "export:resume-docx": "node --import ./scripts/node-ts-hooks.mjs src/scripts/export-resume-docx.ts",
     "migrate:platform-storage": "node --import ./scripts/node-ts-hooks.mjs src/scripts/migrate-platform-storage.ts",
     "start": "node dist/index.js",

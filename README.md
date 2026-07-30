@@ -243,13 +243,13 @@ JD、direct/saved 搜索来源、固定条件集 revision、页面搜索词、�
 ```bash
 npm run dev -- \
   --platform boss \
-  --keyword "全铝箱包设计" \
-  --boss-job-id 554cbe84c293028b0nJ72NW7FlJV
+  --keyword "工业设计师" \
+  --boss-job-id boss-job-id-123
 ```
 
 `--keyword` 是预期岗位名和 legacy 输入；它不再强制等于 Boss 人才页的查询词。复用保存的 direct 条件集时，
 页面搜索词依次采用显式 `--boss-search-keyword`、岗位保存的 `pageKeyword`、固定 revision 的
-`defaultKeyword`、岗位名。例如该岗位会使用条件集默认的“铝”，而简历、seen、评分和报告仍写入带 Boss ID
+`defaultKeyword`、岗位名。例如岗位可使用条件集中的细分品类词，而简历、seen、评分和报告仍写入带 Boss ID
 的稳定 jobKey。Boss ID 与岗位名不匹配、同名岗位不唯一、固定 revision 失效或条件校验失败都会在浏览器前
 失败；系统不会创建关键词或页面搜索词目录作为替代岗位。
 
@@ -277,7 +277,7 @@ npm run boss:apply-search-condition-set -- \
 二级城市默认全部，不会点击肇庆等二级选项。最终复核只读取关闭状态下的页面证据，不会为了复核再次展开
 或确认城市面板；只有存在无法安全增量清除的残留筛选时才会执行一次基线 reset，并在输出中给出 `resetReason`。
 
-抓取完成后发送报告：
+抓取时同时发送评分总结报告：
 
 ```bash
 npm run dev -- \
@@ -288,6 +288,16 @@ npm run dev -- \
   --cc audit@example.com
 ```
 
+如果抓取和评分已经完成，只补发最新一次运行的评分报告，使用独立入口：
+
+```bash
+npm run email:report -- boss "工业设计师-boss-job-id-123" recruiter@example.com audit@example.com
+```
+
+参数依次为 `platform`、`jobKey`、收件人和可选的逗号分隔抄送列表。该命令只读取最新 run 与对应评分产物并通过
+SMTP 发送，不打开浏览器、不重新抓取、不转发候选人简历，也不修改 seen。这里的收件人仅覆盖本次补发；如需
+后续普通抓取持续发送报告，应在普通抓取中配置 `--email`。
+
 默认普通抓取会排除平台页面标记为已查看的候选人；只有普通抓取可以使用 `--include-viewed true`。在 Boss 直猎邦，这一开关控制“过滤近14天查看”：默认勾选以排除平台近 14 天已查看人选，`--include-viewed true` 取消勾选。无论该开关取何值，本地 `seen-ids.json` 都仍会排除已经成功抓取过的候选人。
 
 ### 将直猎邦加入普通抓取
@@ -295,6 +305,10 @@ npm run dev -- \
 `--include-boss true` 只允许与普通抓取或批量任务的 `--platform all` 组合。系统会在打开第一个浏览器前，核对所有选中平台是否已有岗位 JD（或本次提供可用 JD），并在 direct 搜索时校验同一筛选输入能否被每个平台的 catalog 完整解释；任一项不满足会一次性失败，不会先运行前三个平台。
 
 Boss 阶段复用 `data/boss/`、独立登录态和本地 `seen-ids.json`。普通抓取会将公共 `--include-viewed` 映射到直猎邦的“过滤近14天查看”：默认勾选以排除平台近 14 天已查看人选，传入 `true` 时取消勾选。这个页面筛选不等同于本地历史去重；无论页面开关取何值，`seen-ids.json` 仍会排除已经成功抓取的候选人。若 Boss 岗位已有保存的转发设置，省略本次转发参数时可能复用该设置；显式 `--boss-forward-mode` 和 `--boss-forward-recipient` 也可在 `all + --include-boss true` 中使用，并只作用于 Boss 阶段。
+
+Boss 的两个邮件字段用途不同：`--boss-forward-recipient` 在候选人详情阶段逐份转发简历，`--email` 在本轮评分和
+导出完成后发送汇总报告，配置其中一个不会自动启用另一个。普通抓取显式提供的 Boss 转发目标只保存到当前岗位，
+不会改写 Boss 自动沟通的全局默认；只有 `--boss-auto-chat true` 自身显式提供转发参数时才更新该全局设置。
 
 ### 批量职位
 
