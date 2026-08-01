@@ -36,6 +36,54 @@ export interface SmtpConfig {
   from: string;
 }
 
+const EMAIL_ADDRESS_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const RESERVED_EMAIL_DOMAINS = new Set([
+  'example.com',
+  'example.net',
+  'example.org',
+  'invalid',
+  'localhost',
+]);
+
+function isReservedEmailDomain(domain: string): boolean {
+  const normalized = domain.toLowerCase();
+  return RESERVED_EMAIL_DOMAINS.has(normalized)
+    || normalized.endsWith('.example.com')
+    || normalized.endsWith('.example.net')
+    || normalized.endsWith('.example.org')
+    || normalized.endsWith('.invalid')
+    || normalized.endsWith('.test')
+    || normalized.endsWith('.localhost');
+}
+
+/**
+ * Rejects malformed and documentation/test mailbox addresses immediately
+ * before SMTP delivery. Configuration persistence still accepts test values
+ * for offline fixtures, but production delivery must fail closed instead of
+ * generating a bounce for a known placeholder domain.
+ */
+export function assertDeliverableEmailAddress(value: string, label = 'email address'): void {
+  const normalized = value.trim();
+  if (!normalized || !EMAIL_ADDRESS_PATTERN.test(normalized)) {
+    throw new Error(`Invalid ${label}: ${JSON.stringify(value)}`);
+  }
+
+  const atIndex = normalized.lastIndexOf('@');
+  const domain = normalized.slice(atIndex + 1);
+  if (isReservedEmailDomain(domain)) {
+    throw new Error(
+      `Refusing to send ${label} ${JSON.stringify(value)}: reserved/test email domain ${JSON.stringify(domain)}`,
+    );
+  }
+}
+
+function assertDeliverableRecipients(recipient: string, ccEmails?: string[]): void {
+  assertDeliverableEmailAddress(recipient, 'recipient');
+  for (const [index, ccEmail] of (ccEmails ?? []).entries()) {
+    assertDeliverableEmailAddress(ccEmail, `cc[${index}]`);
+  }
+}
+
 function getSmtpConfig(): SmtpConfig {
   const { host, port, user, pass, from } = config.smtp;
 
@@ -88,11 +136,15 @@ export function buildNoNewCandidatesEmailBody(
 
 export async function sendJobReportEmail(
   params: SendJobReportEmailParams,
-  transport: MailTransport = createSmtpTransport(),
-  smtp: SmtpConfig = getSmtpConfig(),
+  transport?: MailTransport,
+  smtp?: SmtpConfig,
 ): Promise<SendJobReportEmailResult> {
-  await transport.sendMail({
-    from: smtp.from,
+  assertDeliverableRecipients(params.recipient, params.ccEmails);
+  const resolvedTransport = transport ?? createSmtpTransport();
+  const resolvedSmtp = smtp ?? getSmtpConfig();
+
+  await resolvedTransport.sendMail({
+    from: resolvedSmtp.from,
     to: params.recipient,
     ...(params.ccEmails?.length ? { cc: params.ccEmails } : {}),
     subject: params.subject,

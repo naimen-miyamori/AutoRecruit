@@ -42,6 +42,7 @@ import { TalentMappingConflictError, TalentMappingQualityService } from '../tale
 import { ArtifactReadModel } from './artifact-read-model.js';
 import { TaskScheduler } from './task-scheduler.js';
 import {
+  snapshotBossBatchCaptureSettings,
   snapshotBossCaptureSettings,
   type BossCapturePlanResolver,
 } from './boss-capture-snapshot.js';
@@ -74,6 +75,7 @@ import type {
   AssistantChatRequest,
   AssistantConfirmResponse,
   AssistantDraft,
+  BatchTaskInput,
   DashboardHealth,
   ModelConfig,
   TaskDetail,
@@ -337,18 +339,40 @@ async function enqueueResumeCaptureTaskWithPreflight(
   queue: TaskQueue,
   normalized: NormalizedTask<ResumeCaptureTaskInput>,
   options: {
+    dataDir: string;
     searchConditionSetService: SearchConditionSetService;
     bossCapturePlanResolver?: BossCapturePlanResolver;
     bossCapturePlanStore?: BossCapturePlanStore;
   },
 ): Promise<TaskDetail> {
   const snapshot = await snapshotBossCaptureSettings(normalized, {
+    dataDir: options.dataDir,
     ...(options.bossCapturePlanResolver ? { resolveBossCapturePlan: options.bossCapturePlanResolver } : {}),
     ...(options.bossCapturePlanStore ? { store: options.bossCapturePlanStore } : {}),
     searchConditionSets: options.searchConditionSetService,
   });
   await preflightTaskSearchConditionSets(snapshot.input, options.searchConditionSetService);
   return enqueueTask(queue, 'resume-capture', snapshot);
+}
+
+async function enqueueBatchTaskWithPreflight(
+  queue: TaskQueue,
+  normalized: NormalizedTask<BatchTaskInput>,
+  options: {
+    dataDir: string;
+    searchConditionSetService: SearchConditionSetService;
+    bossCapturePlanResolver?: BossCapturePlanResolver;
+    bossCapturePlanStore?: BossCapturePlanStore;
+  },
+): Promise<TaskDetail> {
+  const snapshot = await snapshotBossBatchCaptureSettings(normalized, {
+    dataDir: options.dataDir,
+    ...(options.bossCapturePlanResolver ? { resolveBossCapturePlan: options.bossCapturePlanResolver } : {}),
+    ...(options.bossCapturePlanStore ? { store: options.bossCapturePlanStore } : {}),
+    searchConditionSets: options.searchConditionSetService,
+  });
+  await preflightTaskSearchConditionSets(snapshot.input, options.searchConditionSetService);
+  return enqueueTask(queue, 'batch', snapshot);
 }
 
 async function answerRagRequest(request: RouteDependencies, payload: unknown): Promise<Record<string, unknown>> {
@@ -415,6 +439,7 @@ async function confirmAssistantDraft(
           taskQueue,
           normalizeResumeCaptureTask(draft.input),
           {
+            dataDir,
             searchConditionSetService,
             ...(request.bossCapturePlanResolver ? { bossCapturePlanResolver: request.bossCapturePlanResolver } : {}),
             ...(request.bossCapturePlanStore ? { bossCapturePlanStore: request.bossCapturePlanStore } : {}),
@@ -424,11 +449,15 @@ async function confirmAssistantDraft(
     case 'batch':
       return {
         kind: draft.kind,
-        task: await enqueueTaskWithConditionSetPreflight(
+        task: await enqueueBatchTaskWithPreflight(
           taskQueue,
-          draft.kind,
           normalizeBatchTask(draft.input),
-          searchConditionSetService,
+          {
+            dataDir,
+            searchConditionSetService,
+            ...(request.bossCapturePlanResolver ? { bossCapturePlanResolver: request.bossCapturePlanResolver } : {}),
+            ...(request.bossCapturePlanStore ? { bossCapturePlanStore: request.bossCapturePlanStore } : {}),
+          },
         ),
       };
     case 'talent-mapping':
@@ -624,6 +653,7 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
         taskQueue,
         normalizeResumeCaptureTask(request.body),
         {
+          dataDir,
           searchConditionSetService,
           ...(request.bossCapturePlanResolver ? { bossCapturePlanResolver: request.bossCapturePlanResolver } : {}),
           ...(request.bossCapturePlanStore ? { bossCapturePlanStore: request.bossCapturePlanStore } : {}),
@@ -633,11 +663,15 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
     }
 
     if (method === 'POST' && pathname === '/api/tasks/batch') {
-      const task = await enqueueTaskWithConditionSetPreflight(
+      const task = await enqueueBatchTaskWithPreflight(
         taskQueue,
-        'batch',
         normalizeBatchTask(request.body),
-        searchConditionSetService,
+        {
+          dataDir,
+          searchConditionSetService,
+          ...(request.bossCapturePlanResolver ? { bossCapturePlanResolver: request.bossCapturePlanResolver } : {}),
+          ...(request.bossCapturePlanStore ? { bossCapturePlanStore: request.bossCapturePlanStore } : {}),
+        },
       );
       return jsonResponse(202, task);
     }

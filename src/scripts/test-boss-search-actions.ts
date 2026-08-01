@@ -17,7 +17,15 @@ import {
   readBossDirectSearchVerificationSummary,
   resetBossSearchFilters,
   snapshotBossSearchFilterState,
+  visitBossSeenCandidateDetail,
 } from '../platforms/boss/actions/search-actions.js';
+import {
+  assertBossResumeTarget,
+  BossForwardPreConfirmationError,
+  BossForwardUncertainError,
+  closeBossResumeDetailStrict,
+  forwardBossResumeAction,
+} from '../platforms/boss/actions/resume-detail-actions.js';
 
 type SearchFixtureOptions = {
   body: string;
@@ -39,7 +47,14 @@ async function createSearchFixture(options: SearchFixtureOptions): Promise<{ bro
   await page.route('https://www.zhipin.com/web/frame/c-resume/', async (route) => {
     await route.fulfill({
       contentType: 'text/html; charset=utf-8',
-      body: '<!doctype html><html><body><canvas id="resume" width="320" height="480"></canvas></body></html>',
+      body: '<!doctype html><html><body><canvas id="resume" width="320" height="480"></canvas><script src="/wapi/zpitem/web/boss/search/geek/info?expectId=boss-candidate-1"></script><script>void fetch("/wapi/zpitem/web/boss/search/geek/info?expectId=boss-candidate-1");</script></body></html>',
+    });
+  });
+  await page.route('https://www.zhipin.com/wapi/zpitem/web/boss/search/geek/info**', async (route) => {
+    const expectId = new URL(route.request().url()).searchParams.get('expectId') ?? 'boss-candidate-1';
+    await route.fulfill({
+      contentType: 'application/json; charset=utf-8',
+      body: JSON.stringify({ code: 0, zpData: { expectId }, geek: { expectId } }),
     });
   });
   await page.goto('https://www.zhipin.com/web/chat/search');
@@ -50,6 +65,19 @@ function searchBody(content: string): string {
   return `<!doctype html><html><body>
     <div class="search-job-list-C"><span class="search-current-job">不限职位</span></div>
     <input class="search-input" value="测试关键词" />
+    <button type="button" class="search-btn" aria-label="搜索">搜索</button>
+    <div class="search-result-list" id="boss-search-submit-epoch" data-boss-search-result-version="0"></div>
+    <script>
+      window.__bossSearchClicks = 0;
+      window.__bossSearchEnterPresses = 0;
+      const bossSearchSubmitButton = document.querySelector('.search-btn');
+      document.querySelector('.search-input')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') window.__bossSearchEnterPresses += 1; });
+      bossSearchSubmitButton?.addEventListener('click', () => {
+        window.__bossSearchClicks += 1;
+        const epoch = document.querySelector('#boss-search-submit-epoch');
+        if (epoch) epoch.setAttribute('data-boss-search-result-version', String(Number(epoch.getAttribute('data-boss-search-result-version') || '0') + 1));
+      });
+    </script>
     <script>
       function openResume() {
         parent.document.body.insertAdjacentHTML('beforeend', '<div class="dialog-wrap active" data-type="boss-dialog"><button class="boss-popup__close" onclick="this.parentElement.remove()"></button><iframe src="https://www.zhipin.com/web/frame/c-resume/"></iframe></div>');
@@ -86,7 +114,239 @@ function recentViewedSearchBody(options: { refreshOnChange?: boolean } = {}): st
     </script>`);
 }
 
+async function installForwardReceiptFixture(page: Page, mode: 'success' | 'uncertain' | 'pre-confirmation'): Promise<void> {
+  await page.evaluate((fixtureMode) => {
+    const detail = document.createElement('div');
+    detail.className = 'dialog-wrap active';
+    detail.dataset.type = 'boss-dialog';
+    const iframe = document.createElement('iframe');
+    iframe.src = 'https://www.zhipin.com/web/frame/c-resume/';
+    detail.appendChild(iframe);
+    const forwardButton = document.createElement('button');
+    forwardButton.className = 'btn-coop-forward';
+    forwardButton.style.cssText = 'display:block;width:120px;height:24px';
+    forwardButton.addEventListener('click', () => {
+      const share = document.createElement('div');
+      share.className = 'c-share-box';
+      share.style.cssText = 'display:block;width:480px;height:240px';
+      share.innerHTML = '<div class="nav-list"><span class="item cur">邮件转发</span></div><input placeholder="请输入收件人邮箱"><textarea placeholder="请输入留言"></textarea><a ka="geek_coop_forward" style="display:block;width:80px;height:24px">转发</a>';
+      const confirm = share.querySelector<HTMLAnchorElement>('a[ka="geek_coop_forward"]')!;
+      confirm.addEventListener('click', () => {
+        share.style.display = 'none';
+        if (fixtureMode === 'success') {
+          const success = document.createElement('div');
+          success.dataset.bossForwardSuccess = 'true';
+          success.textContent = '转发成功';
+          success.style.cssText = 'display:block;width:80px;height:20px';
+          document.body.appendChild(success);
+        }
+      });
+      detail.appendChild(share);
+      if (fixtureMode === 'pre-confirmation') {
+        document.addEventListener('mousemove', () => {
+          if (confirm.isConnected) confirm.remove();
+        }, { once: true });
+      }
+    });
+    detail.appendChild(forwardButton);
+    document.body.appendChild(detail);
+  }, mode);
+}
+
 describe('Boss normal-search actions', () => {
+  it('rejects CC for colleague forwarding before touching the page', async () => {
+    await assert.rejects(() => forwardBossResumeAction({} as Page, {
+      candidateId: 'candidate-colleague-cc',
+      mode: 'colleague',
+      recipient: '招聘同事',
+      ccEmails: ['audit@example.com'],
+      actionMode: 'prepare-only',
+      deadline: Date.now() + 1_000,
+    }), /CC is only supported for email forwarding/);
+  });
+
+  it('reopens the recipient-only dialog for each deduplicated copy and writes the candidate ID to every message', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await page.evaluate(() => {
+        (window as unknown as { __bossForwardDialogOpenCount: number }).__bossForwardDialogOpenCount = 0;
+        (window as unknown as { __bossForwards: Array<{ recipient: string; message: string }> }).__bossForwards = [];
+        (window as unknown as { __bossContactClicks: number }).__bossContactClicks = 0;
+        (window as unknown as { __bossPurchaseCloses: number }).__bossPurchaseCloses = 0;
+        const detail = document.createElement('div');
+        detail.className = 'dialog-wrap active';
+        detail.dataset.type = 'boss-dialog';
+        const iframe = document.createElement('iframe');
+        iframe.src = 'https://www.zhipin.com/web/frame/c-resume/';
+        detail.appendChild(iframe);
+        const forwardButton = document.createElement('button');
+        forwardButton.className = 'btn-coop-forward';
+        forwardButton.style.cssText = 'display:block;width:120px;height:24px';
+        forwardButton.addEventListener('click', () => {
+          (window as unknown as { __bossForwardDialogOpenCount: number }).__bossForwardDialogOpenCount += 1;
+          const share = document.createElement('div');
+          share.className = 'c-share-box';
+          share.style.cssText = 'display:block;width:480px;height:240px';
+          share.innerHTML = '<div class="nav-list"><span class="item cur">邮件转发</span></div><input placeholder="请输入收件人邮箱"><textarea placeholder="请输入留言"></textarea><a ka="geek_coop_forward" style="display:block;width:80px;height:24px">转发</a>';
+          share.querySelector('a[ka="geek_coop_forward"]')!.addEventListener('click', () => {
+            const recipient = (share.querySelector('input[placeholder="请输入收件人邮箱"]') as HTMLInputElement).value;
+            const message = (share.querySelector('textarea[placeholder="请输入留言"]') as HTMLTextAreaElement).value;
+            (window as unknown as { __bossForwards: Array<{ recipient: string; message: string }> }).__bossForwards.push({ recipient, message });
+            share.style.display = 'none';
+            const success = document.createElement('div');
+            success.dataset.bossForwardSuccess = 'true';
+            success.textContent = '转发成功';
+            success.style.cssText = 'display:block;width:80px;height:20px';
+            document.body.appendChild(success);
+          });
+          detail.appendChild(share);
+        });
+        detail.appendChild(forwardButton);
+        const contactButton = document.createElement('button');
+        contactButton.textContent = '联系Ta';
+        contactButton.style.cssText = 'display:block;width:120px;height:24px';
+        contactButton.addEventListener('click', () => {
+          (window as unknown as { __bossContactClicks: number }).__bossContactClicks += 1;
+        });
+        detail.appendChild(contactButton);
+        document.body.appendChild(detail);
+
+      });
+      await forwardBossResumeAction(page, {
+        candidateId: 'candidate-cc-1',
+        mode: 'email',
+        recipient: 'Primary@example.com',
+        ccEmails: [' primary@example.com ', ' cc-one@example.com ', 'CC-ONE@example.com', 'cc-two@example.com'],
+        actionMode: 'confirm',
+        deadline: Date.now() + 10_000,
+      });
+      const forwarded = await page.evaluate(() => ({
+        openCount: (window as unknown as { __bossForwardDialogOpenCount: number }).__bossForwardDialogOpenCount,
+        deliveries: (window as unknown as { __bossForwards: Array<{ recipient: string; message: string }> }).__bossForwards,
+        contactClicks: (window as unknown as { __bossContactClicks: number }).__bossContactClicks,
+        purchaseCloses: (window as unknown as { __bossPurchaseCloses: number }).__bossPurchaseCloses,
+      }));
+      assert.equal(forwarded.openCount, 3);
+      assert.deepStrictEqual(forwarded.deliveries, [
+        { recipient: 'Primary@example.com', message: 'candidate-cc-1' },
+        { recipient: 'cc-one@example.com', message: 'candidate-cc-1' },
+        { recipient: 'cc-two@example.com', message: 'candidate-cc-1' },
+      ]);
+      assert.equal(forwarded.contactClicks, 0);
+      assert.equal(forwarded.purchaseCloses, 0);
+      assert.equal(await page.locator('.dialog-wrap.active:visible').filter({ hasText: /搜索畅聊卡|立即购买/ }).count(), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('closes and fails safely when the forward action opens a search-chat-card purchase dialog', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await page.evaluate(() => {
+        (window as unknown as { __bossPurchaseCloses: number }).__bossPurchaseCloses = 0;
+        const detail = document.createElement('div');
+        detail.className = 'dialog-wrap active';
+        detail.dataset.type = 'boss-dialog';
+        const iframe = document.createElement('iframe');
+        iframe.src = 'https://www.zhipin.com/web/frame/c-resume/';
+        detail.appendChild(iframe);
+        const forwardButton = document.createElement('button');
+        forwardButton.className = 'btn-coop-forward';
+        forwardButton.style.cssText = 'display:block;width:120px;height:24px';
+        forwardButton.addEventListener('click', () => {
+          const purchase = document.createElement('div');
+          purchase.className = 'dialog-wrap active';
+          purchase.style.cssText = 'display:block;width:360px;height:180px';
+          purchase.innerHTML = '<p>热搜牛人需购买搜索畅聊卡</p><div class="boss-popup__close" style="display:block;width:24px;height:24px"></div>';
+          purchase.querySelector('.boss-popup__close')!.addEventListener('click', () => {
+            (window as unknown as { __bossPurchaseCloses: number }).__bossPurchaseCloses += 1;
+            purchase.style.display = 'none';
+          });
+          document.body.appendChild(purchase);
+        });
+        detail.appendChild(forwardButton);
+        document.body.appendChild(detail);
+      });
+
+      await assert.rejects(() => forwardBossResumeAction(page, {
+        candidateId: 'candidate-purchase-guard',
+        mode: 'email',
+        recipient: 'primary@example.com',
+        actionMode: 'confirm',
+        deadline: Date.now() + 10_000,
+      }), /opened the search-chat-card purchase dialog.*no forwarding confirmation was attempted/);
+      assert.equal(await page.evaluate(() => (window as unknown as { __bossPurchaseCloses: number }).__bossPurchaseCloses), 1);
+      assert.equal(await page.locator('.c-share-box').count(), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('classifies a confirmation control detached before click dispatch as retryable pre-confirmation failure', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installForwardReceiptFixture(page, 'pre-confirmation');
+      await assert.rejects(
+        () => forwardBossResumeAction(page, {
+          candidateId: 'candidate-pre-confirmation',
+          mode: 'email',
+          recipient: 'primary@example.com',
+          actionMode: 'confirm',
+          deadline: Date.now() + 3_000,
+        }),
+        (error: unknown) => error instanceof BossForwardPreConfirmationError
+          && /did not dispatch|changed before/.test(error.message),
+      );
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('classifies a dispatched confirmation without success evidence as uncertain', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installForwardReceiptFixture(page, 'uncertain');
+      await assert.rejects(
+        () => forwardBossResumeAction(page, {
+          candidateId: 'candidate-uncertain',
+          mode: 'email',
+          recipient: 'primary@example.com',
+          actionMode: 'confirm',
+          deadline: Date.now() + 1_000,
+        }),
+        (error: unknown) => error instanceof BossForwardUncertainError
+          && /success evidence|completion is uncertain/.test(error.message),
+      );
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
   it('maps the public viewed switch to the recent-viewed checkbox and proves a refresh without requiring card-count changes', async () => {
     const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
     const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
@@ -137,6 +397,152 @@ describe('Boss normal-search actions', () => {
     }
   });
 
+  it('submits exactly once when every direct-search condition is already satisfied', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      const first = await applyBossDirectSearch(page, '测试关键词', [], { deadline: Date.now() + 5_000 });
+      assert.deepEqual(first.changedFields, []);
+      assert.ok(first.submission?.submitted);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+
+      const second = await applyBossDirectSearch(page, '测试关键词', [], { deadline: Date.now() + 5_000 });
+      assert.deepEqual(second.changedFields, []);
+      assert.ok(second.submission?.submitted);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 2);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('sets a changed keyword without Enter and submits through the final search button', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: searchBody('<div class="geek-info-card">candidate card</div>') });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-input').evaluate((input) => { (input as HTMLInputElement).value = '旧关键词'; });
+      await openBossSubscribeSearch(page, '新关键词', { deadline: Date.now() + 5_000 });
+      assert.equal(await frame.locator('.search-input').inputValue(), '新关键词');
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchEnterPresses), 0);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails closed before clicking when the final search control is missing or ambiguous', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const missing = await createSearchFixture({ body: searchBody('<div class="geek-info-card">candidate card</div><script>document.querySelector(".search-btn")?.remove();</script>') });
+    try {
+      const frame = missing.page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await assert.rejects(
+        () => openBossSubscribeSearch(missing.page, '测试关键词', { deadline: Date.now() + 2_000 }),
+        /submit control was not found/i,
+      );
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 0);
+    } finally {
+      await missing.browser.close();
+    }
+
+    const ambiguous = await createSearchFixture({ body: searchBody('<div class="geek-info-card">candidate card</div><script>document.body.insertAdjacentHTML("beforeend", "<button class=\\"search-btn\\">搜索</button>");</script>') });
+    try {
+      const frame = ambiguous.page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await assert.rejects(
+        () => openBossSubscribeSearch(ambiguous.page, '测试关键词', { deadline: Date.now() + 2_000 }),
+        /submit control is ambiguous/i,
+      );
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await ambiguous.browser.close();
+    }
+  });
+
+  it('does not treat an unrelated global search icon as the final Boss submit control', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<style>.search-btn{display:none !important}</style><div class="geek-info-card">candidate card</div><script>document.body.insertAdjacentHTML("beforeend", "<button class=\"icon-search\" style=\"display:block;width:120px;height:24px\">无关图标</button>"); window.__unrelatedIconClicks = 0; document.querySelector(".icon-search")?.addEventListener("click", () => { window.__unrelatedIconClicks += 1; });</script>'),
+    });
+    try {
+      await assert.rejects(
+        () => openBossSubscribeSearch(page, '测试关键词', { deadline: Date.now() + 2_000 }),
+        /submit control was not found/i,
+      );
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__unrelatedIconClicks ?? 0), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('does not click again when the first submit has no new result-cycle evidence', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card">candidate card</div><script>document.querySelector("#boss-search-submit-epoch")?.remove();</script>'),
+    });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await assert.rejects(
+        () => openBossSubscribeSearch(page, '测试关键词', { deadline: Date.now() + 900 }),
+        /no observable new result cycle/i,
+      );
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('accepts an explicit empty result only after the final submit cycle', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: searchBody('<p>暂无相关人才</p>') });
+    try {
+      const result = await applyBossDirectSearch(page, '测试关键词', [], { deadline: Date.now() + 5_000 });
+      assert.equal(result.verification.resultTotal, 0);
+      assert.equal(result.submission?.evidence, 'result-mutation');
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
   it('keeps standalone search-condition preparation isolated from the ordinary-capture viewed policy', async () => {
     const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
     const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
@@ -153,9 +559,11 @@ describe('Boss normal-search actions', () => {
 
       await openBossSubscribeSearch(page, '测试关键词', { deadline, includeViewedCandidates: false });
       assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), true);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
 
       await openBossSubscribeSearch(page, '测试关键词', { deadline, includeViewedCandidates: true });
       assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), false);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 2);
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
@@ -188,6 +596,7 @@ describe('Boss normal-search actions', () => {
       const frame = page.frame({ name: 'searchFrame' });
       assert.ok(frame);
       assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__recentViewedResetCalls), 0);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 0);
 
       await openBossDirectSearch(page, '测试关键词', [agreeingCondition], {
         deadline,
@@ -195,12 +604,14 @@ describe('Boss normal-search actions', () => {
       });
       assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), true);
       assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__recentViewedChanges), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
 
       await openBossDirectSearch(page, '测试关键词', [], {
         deadline,
         includeViewedCandidates: true,
       });
       assert.equal(await frame.locator('.high_search_checkbox[ka="search_change_view_resume"] input').isChecked(), false);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 2);
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
@@ -525,19 +936,19 @@ describe('Boss normal-search actions', () => {
     }
   });
 
-  it('selects a province once, leaves its secondary cities at the default all scope, and does not reopen it for replay or verification', async () => {
+  it('keeps a stable province value when the closed city summary omits the display suffix', async () => {
     const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
     const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
     config.playwright.actionDelayMinMsByPlatform.boss = 0;
     config.playwright.actionDelayMaxMsByPlatform.boss = 0;
     const { browser, page } = await createSearchFixture({
-      body: searchBody(`<div class="city-wrap"><div class="city" onclick="openCity()">城市</div><div class="city-box" style="display:none"><ul class="dropdown-province"><li data-value="guangdong" onclick="selectProvince(this)"><div class="city-checkbox status0"></div>广东</li><li data-value="zhejiang" onclick="selectProvince(this)"><div class="city-checkbox status0"></div>浙江</li></ul><div class="dropdown-city"><button type="button" onclick="window.__secondaryCityClicks += 1">肇庆</button></div><button type="button" onclick="confirmCity()">确认</button></div></div>
+      body: searchBody(`<div class="city-wrap"><div class="city" onclick="openCity()">城市</div><div class="city-box" style="display:none"><ul class="dropdown-province"><li data-value="广东" onclick="selectProvince(this)"><div class="city-checkbox status0"></div>广东省</li><li data-value="浙江" onclick="selectProvince(this)"><div class="city-checkbox status0"></div>浙江省</li></ul><div class="dropdown-city"><button type="button" onclick="window.__secondaryCityClicks += 1">肇庆</button></div><button type="button" onclick="confirmCity()">确认</button></div></div>
         <div class="degree-ui"><span class="degree-item active" onclick="selectEducation(this)">不限</span><span class="degree-item" onclick="selectEducation(this)">本科及以上</span></div><div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
         <script>
           window.__cityPanelOpens = 0; window.__provinceClicks = 0; window.__cityConfirmations = 0; window.__secondaryCityClicks = 0;
           function openCity() { window.__cityPanelOpens += 1; document.querySelector('.city-box').style.display = 'block'; }
           function selectProvince(item) { window.__provinceClicks += 1; const checkbox = item.querySelector('.city-checkbox'); checkbox.className = 'city-checkbox status1'; [...document.querySelectorAll('.dropdown-province > li')].filter((entry) => entry !== item).forEach((entry) => { entry.querySelector('.city-checkbox').className = 'city-checkbox status0'; }); }
-          function confirmCity() { window.__cityConfirmations += 1; const selected = [...document.querySelectorAll('.dropdown-province > li')].find((entry) => entry.querySelector('.city-checkbox').classList.contains('status1')); document.querySelector('.city-wrap .city').textContent = selected ? selected.textContent.trim() : '城市'; document.querySelectorAll('.city-checkbox').forEach((checkbox) => { checkbox.className = 'city-checkbox status0'; }); document.querySelector('.city-box').style.display = 'none'; }
+          function confirmCity() { window.__cityConfirmations += 1; const selected = [...document.querySelectorAll('.dropdown-province > li')].find((entry) => entry.querySelector('.city-checkbox').classList.contains('status1')); const summary = selected ? selected.getAttribute('data-value') : '城市'; document.querySelectorAll('.city-checkbox').forEach((checkbox) => { checkbox.className = 'city-checkbox status0'; }); document.querySelector('.city-box').style.display = 'none'; setTimeout(() => { document.querySelector('.city-wrap .city').textContent = summary; }, 700); }
           function selectEducation(item) { document.querySelectorAll('.degree-ui .degree-item').forEach((entry) => entry.classList.remove('active')); item.classList.add('active'); }
         </script>`),
     });
@@ -580,6 +991,30 @@ describe('Boss normal-search actions', () => {
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('accepts a closed city summary label when the requested province uses a stable code', async () => {
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="city-wrap"><div class="city">广东省</div><div class="city-box" style="display:none"><ul class="dropdown-province"><li data-value="guangdong"><div class="city-checkbox status0"></div>广东省</li></ul></div></div><div class="geek-info-card">candidate card</div>'),
+    });
+    try {
+      const condition = {
+        kind: 'applicationFilter' as const,
+        fieldId: 'city',
+        label: '城市',
+        fieldKind: 'multiSelect' as const,
+        value: ['guangdong'],
+      };
+      const verification = await readBossDirectSearchVerificationSummary(
+        page,
+        '测试关键词',
+        [condition],
+        Date.now() + 3_000,
+      );
+      assert.equal(verification.conditions.find((entry) => entry.fieldId === 'city')?.verified, true);
+    } finally {
       await browser.close();
     }
   });
@@ -687,7 +1122,8 @@ describe('Boss normal-search actions', () => {
     const { browser, page } = await createSearchFixture({
       body: `<!doctype html><html><body>
         <div class="search-job-list-C"><div class="ui-dropmenu"><div class="ui-dropmenu-label"><span class="search-current-job">不限职位</span></div><ul class="ui-dropmenu-list"><li class="active" data-value="all" onclick="selectJob(this)">不限职位</li><li data-value="target" onclick="selectJob(this)">职位B</li></ul></div></div>
-        <input class="search-input" value="测试关键词" /><div class="degree-ui"><span class="degree-item active">不限</span></div><div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
+        <input class="search-input" value="测试关键词" /><button type="button" class="search-btn">搜索</button><div class="search-result-list" data-boss-search-result-version="0"></div><div class="degree-ui"><span class="degree-item active">不限</span></div><div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
+        <script>document.querySelector('.search-btn')?.addEventListener('click', () => document.querySelector('.search-result-list')?.setAttribute('data-boss-search-result-version', String(Date.now())));</script>
         <script>function selectJob(item) { document.querySelectorAll('.ui-dropmenu-list li').forEach((entry) => entry.classList.remove('active')); item.classList.add('active'); }</script>
       </body></html>`,
     });
@@ -752,6 +1188,45 @@ describe('Boss normal-search actions', () => {
     }
   });
 
+  it('bounds the raw Boss card window before parsing and never promotes card 21', async () => {
+    const cards = Array.from({ length: 21 }, (_, index) => `<div class="geek-info-card"><a ka="search_click_open_resume" data-expect="candidate-${index + 1}" href="#resume"><div class="geek-info-detail">候选人${index + 1}</div></a></div>`).join('');
+    const { browser, page } = await createSearchFixture({ body: searchBody(cards) });
+    try {
+      const result = await extractBossCandidateList(page, { deadline: Date.now() + 3_000 });
+      assert.equal(result.candidates.length, 20);
+      assert.equal(result.candidates.at(-1)?.candidateId, 'candidate-20');
+      assert.equal(result.candidates.some((candidate) => candidate.candidateId === 'candidate-21'), false);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('fails closed on duplicate or missing stable IDs inside the raw first-twenty window', async () => {
+    const duplicateCards = [
+      '<div class="geek-info-card"><a data-expect="duplicate-candidate" href="#resume">甲</a></div>',
+      '<div class="geek-info-card"><a data-expect="duplicate-candidate" href="#resume">乙</a></div>',
+    ].join('');
+    const { browser: duplicateBrowser, page: duplicatePage } = await createSearchFixture({ body: searchBody(duplicateCards) });
+    try {
+      await assert.rejects(
+        () => extractBossCandidateList(duplicatePage, { deadline: Date.now() + 3_000 }),
+        /duplicate stable IDs inside the first twenty/i,
+      );
+    } finally {
+      await duplicateBrowser.close();
+    }
+
+    const { browser: missingBrowser, page: missingPage } = await createSearchFixture({ body: searchBody('<div class="geek-info-card"><a href="#resume">没有稳定 ID</a></div>') });
+    try {
+      await assert.rejects(
+        () => extractBossCandidateList(missingPage, { deadline: Date.now() + 3_000 }),
+        /no stable candidate identity/i,
+      );
+    } finally {
+      await missingBrowser.close();
+    }
+  });
+
   it('refuses to treat an unresolved search iframe as an empty result', async () => {
     const originalTimeout = config.playwright.searchPageTimeoutMs;
     config.playwright.searchPageTimeoutMs = 50;
@@ -808,5 +1283,143 @@ describe('Boss normal-search actions', () => {
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
       await browser.close();
     }
+  });
+
+  it('closes an unexpected purchase dialog after a detail click and reports a fatal page-safety failure', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card"><a ka="search_click_open_resume" data-expect="boss-candidate-1" href="#resume" onclick="openPurchase(); return false"><div class="geek-info-detail" style="display:block;width:120px;height:80px">候选人甲</div></a></div><script>parent.__purchaseCloses = 0; function openPurchase() { const root = parent.document; const purchase = root.createElement("div"); purchase.className = "dialog-wrap active"; purchase.style.cssText = "display:block;width:360px;height:180px"; purchase.innerHTML = "<p>购买搜索畅聊卡</p><button class=\\"boss-popup__close\\" style=\\"display:block;width:24px;height:24px\\"></button>"; purchase.querySelector(".boss-popup__close")?.addEventListener("click", () => { parent.__purchaseCloses += 1; purchase.style.display = "none"; }); root.body.appendChild(purchase); }</script>'),
+    });
+    try {
+      await assert.rejects(
+        () => visitBossSeenCandidateDetail(page, {
+          candidateId: 'boss-candidate-1',
+          sourceText: 'data-expect="boss-candidate-1"',
+        }, { deadline: Date.now() + 10_000 }),
+        (error: unknown) => error instanceof Error
+          && error.name === 'BossSeenCandidateDetailError'
+          && (error as { fatalCloseFailure?: boolean }).fatalCloseFailure === true
+          && /purchase dialog|畅聊卡/i.test(error.message),
+      );
+      assert.equal(await page.evaluate(() => (window as unknown as { __purchaseCloses: number }).__purchaseCloses), 1);
+      assert.equal(await page.locator('.dialog-wrap.active:visible').filter({ hasText: /搜索畅聊卡|立即购买/ }).count(), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('opens, verifies, and closes an already-seen card without invoking contact or forwarding', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card"><a ka="search_click_open_resume" data-expect="boss-candidate-1" href="#resume" onclick="openResume(); return false"><div class="geek-info-detail" style="display:block;width:120px;height:80px">候选人甲</div><button type="button" class="contact" onclick="window.__contactClicks=(window.__contactClicks||0)+1; return false">联系Ta</button></a></div>'),
+    });
+    try {
+      const receipt = await visitBossSeenCandidateDetail(page, {
+        candidateId: 'boss-candidate-1',
+        sourceText: 'data-expect="boss-candidate-1"',
+      }, { deadline: Date.now() + 10_000 });
+      assert.deepEqual(receipt, {
+        candidateId: 'boss-candidate-1',
+        detailOpened: true,
+        detailIdentityVerified: true,
+        detailClosed: true,
+      });
+      assert.equal(await page.locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])').count(), 0);
+      assert.equal(await page.evaluate(() => (window as unknown as { __contactClicks?: number }).__contactClicks ?? 0), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('closes a history detail after identity mismatch and reports a retryable verification failure', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card"><a ka="search_click_open_resume" data-expect="other-candidate" href="#resume" onclick="openResume(); return false"><div class="geek-info-detail" style="display:block;width:120px;height:80px">候选人乙</div></a></div>'),
+    });
+    try {
+      await assert.rejects(
+        () => visitBossSeenCandidateDetail(page, {
+          candidateId: 'other-candidate',
+          sourceText: 'data-expect="other-candidate"',
+        }, { deadline: Date.now() + 10_000 }),
+        (error: unknown) => error instanceof Error
+          && error.name === 'BossSeenCandidateDetailError'
+          && error.message.includes('does not match requested candidate other-candidate')
+          && (error as { stage?: string }).stage === 'identity-verify'
+          && (error as { fatalCloseFailure?: boolean }).fatalCloseFailure === false,
+      );
+      assert.equal(await page.locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])').count(), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails closed when the resume detail modal cannot be closed', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await page.evaluate(() => {
+        const detail = document.createElement('div');
+        detail.className = 'dialog-wrap active';
+        detail.dataset.type = 'boss-dialog';
+        detail.style.cssText = 'display:block;width:480px;height:360px';
+        detail.innerHTML = '<button class="boss-popup__close" style="display:block;width:24px;height:24px"></button><iframe src="https://www.zhipin.com/web/frame/c-resume/"></iframe>';
+        document.body.appendChild(detail);
+      });
+      await assert.rejects(
+        () => closeBossResumeDetailStrict(page, Date.now() + 10_000, { pace: false }),
+        /remained visible after the close action/,
+      );
+      assert.equal(await page.locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])').count(), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails closed when the detail API identity is missing or belongs to another candidate', () => {
+    const candidate = {
+      candidateId: 'boss-candidate-1',
+      sourceText: 'data-expect=boss-candidate-1 data-jid=boss-candidate-1',
+    };
+    assert.equal(assertBossResumeTarget({ code: 0, zpData: { expectId: 'boss-candidate-1' } }, candidate), 'boss-candidate-1');
+    assert.throws(
+      () => assertBossResumeTarget({ code: 0, zpData: {} }, candidate),
+      /detail API omitted expectId/,
+    );
+    assert.throws(
+      () => assertBossResumeTarget({ code: 0, zpData: { expectId: 'other-candidate' } }, candidate),
+      /does not match requested candidate boss-candidate-1/,
+    );
+  });
+
+  it('parses quoted Boss card identity attributes when verifying detail targets', () => {
+    const candidate = {
+      candidateId: 'boss-candidate-quoted',
+      sourceText: '<a data-expect="boss-candidate-quoted" data-jid=\'boss-candidate-quoted\'>',
+    };
+    assert.equal(
+      assertBossResumeTarget({ code: 0, zpData: { expectId: 'boss-candidate-quoted' } }, candidate),
+      'boss-candidate-quoted',
+    );
   });
 });

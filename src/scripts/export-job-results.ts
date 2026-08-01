@@ -20,17 +20,18 @@ function assertCurrentRunArtifactsFound(
   filteredArtifacts: CandidateScoreArtifact[],
   latestRun: RunResult,
 ): void {
-  if (filteredArtifacts.length > 0) {
+  const expectedCandidateIds = getRunCandidateIds(latestRun);
+  if (expectedCandidateIds.length === 0) {
     return;
   }
 
-  const allowedCandidateIds = getRunCandidateIds(latestRun);
-
-  if (allowedCandidateIds.length === 0) {
+  const actualCandidateIds = new Set(filteredArtifacts.map((artifact) => artifact.candidateId));
+  const missingCandidateIds = expectedCandidateIds.filter((candidateId) => !actualCandidateIds.has(candidateId));
+  if (missingCandidateIds.length === 0) {
     return;
   }
 
-  throw new Error(buildMissingArtifactsMessage(latestRun));
+  throw new Error(`${buildMissingArtifactsMessage(latestRun)} Missing artifacts: ${missingCandidateIds.join(', ')}`);
 }
 
 async function loadExportInputs(platform: SupportedPlatform, jobKey: string): Promise<{
@@ -45,11 +46,14 @@ async function loadExportInputs(platform: SupportedPlatform, jobKey: string): Pr
     store.listRunResults(platform, jobKey),
   ]);
 
-  if (scoreArtifacts.length === 0) {
+  if (scoreArtifacts.length === 0 && runResults.length === 0) {
     throw new Error(`No score artifacts found for job key ${jobKey}`);
   }
 
   const latestRun = getLatestRunResult(runResults, jobKey);
+  if (scoreArtifacts.length === 0 && getRunCandidateIds(latestRun).length > 0) {
+    throw new Error(`No score artifacts found for job key ${jobKey}`);
+  }
   const currentRunArtifacts = filterArtifactsForRun(scoreArtifacts, latestRun);
   assertCurrentRunArtifactsFound(currentRunArtifacts, latestRun);
 

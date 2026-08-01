@@ -8,6 +8,7 @@ import { ErrorState, LoadingState, PageHeader, PLATFORM_LABELS, Section, Success
 import { FilterBuilder } from './FilterBuilder';
 
 type Mode = 'resume-capture' | 'batch' | 'talent-mapping' | 'search-subscription' | 'boss-auto-chat' | 'login-refresh';
+type BossScreeningChoice = 'inherit' | 'enabled' | 'disabled';
 
 interface FormState {
   platform: PlatformSelection;
@@ -26,11 +27,25 @@ interface FormState {
   searchConditionSetRefs: Partial<Record<Platform, SearchConditionSetRef>>;
   email: string;
   cc: string;
+  clearCc: boolean;
   liepinForwardContact: string;
   bossJobId: string;
   bossSearchKeyword: string;
   bossForwardMode: '' | 'colleague' | 'email';
   bossForwardRecipient: string;
+  bossForwardCc: string;
+  clearBossForwardCc: boolean;
+  /** undefined preserves the selected Boss job's saved setting. */
+  bossScreeningEnabled?: boolean;
+  bossScreeningChoice: BossScreeningChoice;
+  bossScreeningPolicyFile: string;
+  bossSecondaryForwardMode: '' | 'colleague' | 'email';
+  bossSecondaryForwardRecipient: string;
+  bossSecondaryForwardCc: string;
+  clearBossSecondaryForwardCc: boolean;
+  bossSecondaryEmail: string;
+  bossSecondaryCc: string;
+  clearBossSecondaryCc: boolean;
   scoreThreshold: string;
   requireAllHardRequirements: boolean;
   replyToUnqualifiedCandidates: boolean;
@@ -41,7 +56,7 @@ interface FormState {
 
 const initialForm: FormState = {
   platform: '51job', keyword: '', jd: '', jdFile: '', jobsFile: '', talentMappingFile: '', searchSubscriptionFile: '', searchSubscriptionName: '', saveSearchSubscription: false,
-  includeViewed: false, includeBoss: false, searchSource: '', applicationFilterInputFile: '', searchConditionSetRefs: {}, email: '', cc: '', liepinForwardContact: '', bossJobId: '', bossSearchKeyword: '', bossForwardMode: '', bossForwardRecipient: '',
+  includeViewed: false, includeBoss: false, searchSource: '', applicationFilterInputFile: '', searchConditionSetRefs: {}, email: '', cc: '', clearCc: false, liepinForwardContact: '', bossJobId: '', bossSearchKeyword: '', bossForwardMode: '', bossForwardRecipient: '', bossForwardCc: '', clearBossForwardCc: false, bossScreeningEnabled: undefined, bossScreeningChoice: 'inherit', bossScreeningPolicyFile: '', bossSecondaryForwardMode: '', bossSecondaryForwardRecipient: '', bossSecondaryForwardCc: '', clearBossSecondaryForwardCc: false, bossSecondaryEmail: '', bossSecondaryCc: '', clearBossSecondaryCc: false,
   scoreThreshold: '70', requireAllHardRequirements: true, replyToUnqualifiedCandidates: false, summaryEmail: '', summaryCc: '', syncJobsBeforeReview: false,
 };
 
@@ -82,6 +97,11 @@ export function NewTaskPage() {
   const [validationError, setValidationError] = useState<string>();
   const mutation = useMutation({ mutationFn: ({ kind, body }: { kind: TaskKind; body: Record<string, unknown> }) => api.submitTask(kind, body) });
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((current) => ({ ...current, [key]: value }));
+  const setBossScreeningChoice = (choice: BossScreeningChoice) => setForm((current) => ({
+    ...current,
+    bossScreeningChoice: choice,
+    bossScreeningEnabled: choice === 'inherit' ? undefined : choice === 'enabled',
+  }));
   const setConditionSetReference = (platform: Platform, value?: SearchConditionSetRef) => setForm((current) => {
     const refs = { ...current.searchConditionSetRefs };
     if (value) refs[platform] = value; else delete refs[platform];
@@ -98,6 +118,8 @@ export function NewTaskPage() {
   const showFilter = mode === 'search-subscription' || ((mode === 'resume-capture' || mode === 'batch') && form.searchSource === 'direct');
   const selectedPlatforms = targetPlatforms(form, mode);
   const showBossSavedJob = mode === 'resume-capture' && (form.platform === 'boss' || (form.platform === 'all' && form.includeBoss));
+  const showBossCaptureSettings = (mode === 'resume-capture' || mode === 'batch')
+    && (form.platform === 'boss' || (form.platform === 'all' && form.includeBoss));
   const bossPositionsQuery = useQuery({
     queryKey: queryKeys.bossPositions,
     queryFn: ({ signal }) => api.listBossPositions(signal),
@@ -134,6 +156,10 @@ export function NewTaskPage() {
       if (!form.keyword.trim()) return setValidationError('关键词必填');
       if (form.jd && form.jdFile) return setValidationError('JD 文本和 JD 文件不能同时填写');
       if ((form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && Boolean(form.bossForwardMode) !== Boolean(form.bossForwardRecipient.trim())) return setValidationError('Boss 转发方式和收件人必须同时填写');
+      if ((form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && !form.clearBossForwardCc && form.bossForwardCc.trim() && form.bossForwardMode === 'colleague') return setValidationError('Boss 转发抄送仅适用于邮件转发');
+      if (showBossCaptureSettings && Boolean(form.bossSecondaryForwardMode) !== Boolean(form.bossSecondaryForwardRecipient.trim())) return setValidationError('Boss 副转发方式和收件人必须同时填写');
+      if (showBossCaptureSettings && !form.clearBossSecondaryForwardCc && form.bossSecondaryForwardCc.trim() && form.bossSecondaryForwardMode === 'colleague') return setValidationError('Boss 副转发抄送仅适用于邮件转发');
+      if (showBossCaptureSettings && form.bossSecondaryCc.trim() && !form.bossSecondaryEmail.trim()) return setValidationError('Boss 副报告抄送需要副报告邮箱');
       body = commonBody(form, mode);
       body.keyword = form.keyword.trim();
       body.jd = form.jd.trim() || undefined;
@@ -141,6 +167,10 @@ export function NewTaskPage() {
     } else if (mode === 'batch') {
       if (!form.jobsFile.trim()) return setValidationError('批量任务文件必填');
       if ((form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && Boolean(form.bossForwardMode) !== Boolean(form.bossForwardRecipient.trim())) return setValidationError('Boss 转发方式和收件人必须同时填写');
+      if ((form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && !form.clearBossForwardCc && form.bossForwardCc.trim() && form.bossForwardMode === 'colleague') return setValidationError('Boss 转发抄送仅适用于邮件转发');
+      if (showBossCaptureSettings && Boolean(form.bossSecondaryForwardMode) !== Boolean(form.bossSecondaryForwardRecipient.trim())) return setValidationError('Boss 副转发方式和收件人必须同时填写');
+      if (showBossCaptureSettings && !form.clearBossSecondaryForwardCc && form.bossSecondaryForwardCc.trim() && form.bossSecondaryForwardMode === 'colleague') return setValidationError('Boss 副转发抄送仅适用于邮件转发');
+      if (showBossCaptureSettings && form.bossSecondaryCc.trim() && !form.bossSecondaryEmail.trim()) return setValidationError('Boss 副报告抄送需要副报告邮箱');
       body = { ...commonBody(form, mode), jobsFile: form.jobsFile.trim() };
     } else if (mode === 'talent-mapping') {
       if (!form.talentMappingFile.trim()) return setValidationError('Talent Mapping 计划文件必填');
@@ -159,7 +189,8 @@ export function NewTaskPage() {
       };
     } else if (mode === 'boss-auto-chat') {
       if (Boolean(form.bossForwardMode) !== Boolean(form.bossForwardRecipient.trim())) return setValidationError('Boss 转发方式和收件人必须同时填写');
-      body = { platform: 'boss', scoreThreshold: Number(form.scoreThreshold), requireAllHardRequirements: form.requireAllHardRequirements, replyToUnqualifiedCandidates: form.replyToUnqualifiedCandidates, bossForwardMode: form.bossForwardMode || undefined, bossForwardRecipient: form.bossForwardRecipient.trim() || undefined, summaryEmail: form.summaryEmail.trim() || undefined, summaryCc: splitList(form.summaryCc), syncJobsBeforeReview: form.syncJobsBeforeReview };
+      if (!form.clearBossForwardCc && form.bossForwardCc.trim() && form.bossForwardMode === 'colleague') return setValidationError('Boss 转发抄送仅适用于邮件转发');
+      body = { platform: 'boss', scoreThreshold: Number(form.scoreThreshold), requireAllHardRequirements: form.requireAllHardRequirements, replyToUnqualifiedCandidates: form.replyToUnqualifiedCandidates, bossForwardMode: form.bossForwardMode || undefined, bossForwardRecipient: form.bossForwardRecipient.trim() || undefined, bossForwardCc: form.clearBossForwardCc ? [] : splitList(form.bossForwardCc), summaryEmail: form.summaryEmail.trim() || undefined, summaryCc: splitList(form.summaryCc), syncJobsBeforeReview: form.syncJobsBeforeReview };
     } else {
       body = { platform: form.platform };
     }
@@ -182,9 +213,10 @@ export function NewTaskPage() {
           {mode === 'resume-capture' && <><label className="wide"><span>JD 文本</span><textarea value={form.jd} onChange={(event) => set('jd', event.target.value)} rows={6} /></label><label><span>JD 文件</span><input value={form.jdFile} onChange={(event) => set('jdFile', event.target.value)} placeholder="./jd.txt" /></label></>}
           {showBossSavedJob && <><label className="wide"><span>Boss 已同步岗位</span>{bossPositionsQuery.isLoading ? <LoadingState label="读取 Boss 职位" /> : <select value={form.bossJobId} onChange={(event) => selectBossJob(event.target.value)}><option value="">不选择（按岗位名匹配或新建）</option>{bossPositionsQuery.data?.positions.filter((position) => Boolean(position.jobKey)).map((position) => <option key={position.bossJobId} value={position.bossJobId}>{position.name} · {position.status} · {position.bossJobId}</option>)}</select>}{bossPositionsQuery.error && <small className="inline-error">无法读取 Boss 已同步岗位：{bossPositionsQuery.error instanceof Error ? bossPositionsQuery.error.message : String(bossPositionsQuery.error)}</small>}</label><label><span>Boss 页面搜索词（可选覆盖）</span><input value={form.bossSearchKeyword} onChange={(event) => set('bossSearchKeyword', event.target.value)} placeholder="默认复用岗位设置或条件集默认关键词" /></label>{form.bossJobId && <div className="security-note wide">{selectedBossJobQuery.isLoading ? '正在读取岗位保存设置…' : selectedBossSearchSettings ? <>复用岗位设置：{selectedBossSearchSettings.source === 'direct' ? '直接搜索' : '已保存搜索'}{selectedBossSearchSettings.pageKeyword ? `；页面搜索词：${selectedBossSearchSettings.pageKeyword}` : savedBossDefaultKeyword ? `；条件集默认搜索词：${savedBossDefaultKeyword}` : '；页面搜索词将使用岗位名称'}{selectedBossSearchSettings.conditionSetRef ? `；已保存条件集：${selectedBossSearchSettings.conditionSetRef.conditionSetId}@${selectedBossSearchSettings.conditionSetRef.revision}` : '；未关联条件集'}。</> : '该职位尚无本地保存设置；请提供 JD 或显式配置搜索来源。'}</div>}</>}
           {(mode === 'resume-capture' || mode === 'batch') && <><label><span>搜索来源</span><select value={form.searchSource} onChange={(event) => set('searchSource', event.target.value as FormState['searchSource'])}><option value="">复用岗位设置</option><option value="saved">已保存搜索</option><option value="direct">直接搜索</option></select></label><label className="checkbox-field"><input type="checkbox" checked={form.includeViewed} onChange={(event) => set('includeViewed', event.target.checked)} />包含已查看候选人</label>{form.platform === 'all' && <label className="checkbox-field"><input type="checkbox" checked={form.includeBoss} onChange={(event) => set('includeBoss', event.target.checked)} />包含 Boss 直聘·直猎邦 Pro</label>}</>}
-          {(mode === 'resume-capture' || mode === 'batch') && <><label><span>报告邮箱</span><input type="email" value={form.email} onChange={(event) => set('email', event.target.value)} /></label><label><span>抄送</span><input value={form.cc} onChange={(event) => set('cc', event.target.value)} placeholder="逗号分隔" /></label></>}
+          {(mode === 'resume-capture' || mode === 'batch') && <><label><span>{showBossCaptureSettings && form.bossScreeningEnabled ? '主报告邮箱' : '报告邮箱'}</span><input type="email" value={form.email} onChange={(event) => set('email', event.target.value)} /></label><label><span>{showBossCaptureSettings && form.bossScreeningEnabled ? '主报告抄送' : '抄送'}</span><input value={form.cc} onChange={(event) => set('cc', event.target.value)} placeholder="逗号分隔" disabled={form.clearCc} /></label>{showBossCaptureSettings && <label className="checkbox-field"><input type="checkbox" checked={form.clearCc} onChange={(event) => set('clearCc', event.target.checked)} />清除主报告已保存抄送</label>}</>}
           {(form.platform === 'liepin' || form.platform === 'all') && (mode === 'resume-capture' || mode === 'batch') && <label><span>猎聘转发联系人</span><input value={form.liepinForwardContact} onChange={(event) => set('liepinForwardContact', event.target.value)} /></label>}
-          {(form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && (mode === 'resume-capture' || mode === 'batch' || mode === 'boss-auto-chat') && <><label><span>Boss 转发方式</span><select value={form.bossForwardMode} onChange={(event) => set('bossForwardMode', event.target.value as FormState['bossForwardMode'])}><option value="">不转发</option><option value="colleague">站内同事</option><option value="email">邮件</option></select></label><label><span>Boss 转发收件人</span><input value={form.bossForwardRecipient} onChange={(event) => set('bossForwardRecipient', event.target.value)} /></label></>}
+          {(form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && (mode === 'resume-capture' || mode === 'batch' || mode === 'boss-auto-chat') && <><label><span>{showBossCaptureSettings && form.bossScreeningEnabled ? 'Boss 主转发方式' : 'Boss 转发方式'}</span><select value={form.bossForwardMode} onChange={(event) => set('bossForwardMode', event.target.value as FormState['bossForwardMode'])}><option value="">复用已保存配置（新岗位不设置）</option><option value="colleague">站内同事</option><option value="email">邮件</option></select></label><label><span>{showBossCaptureSettings && form.bossScreeningEnabled ? 'Boss 主转发收件人' : 'Boss 转发收件人'}</span><input value={form.bossForwardRecipient} onChange={(event) => set('bossForwardRecipient', event.target.value)} /></label><label><span>{showBossCaptureSettings && form.bossScreeningEnabled ? 'Boss 主转发抄送（独立二次转发）' : 'Boss 转发抄送（独立二次转发）'}</span><input value={form.bossForwardCc} onChange={(event) => set('bossForwardCc', event.target.value)} placeholder="每个地址独立转发，逗号分隔" disabled={form.clearBossForwardCc} /></label><label className="checkbox-field"><input type="checkbox" checked={form.clearBossForwardCc} onChange={(event) => set('clearBossForwardCc', event.target.checked)} />清除已保存转发抄送</label></>}
+          {showBossCaptureSettings && <><label className="wide"><span>Boss 评分后模型要求分流</span><select value={form.bossScreeningChoice} onChange={(event) => setBossScreeningChoice(event.target.value as BossScreeningChoice)}><option value="inherit">复用岗位设置（不写回）</option><option value="enabled">本次启用并保存</option><option value="disabled">本次停用并保存</option></select></label><label className="checkbox-field wide"><input type="checkbox" checked={form.bossScreeningChoice === 'enabled'} onChange={(event) => setBossScreeningChoice(event.target.checked ? 'enabled' : 'disabled')} />启用 Boss 评分后模型要求分流</label><small className="wide">“复用岗位设置”不会覆盖岗位配置；选择启用或停用会生成明确的岗位写回意图，避免把未勾选误当成继承。</small>{form.bossScreeningEnabled === true && <><div className="security-note wide">候选人会先评分再转发：明确满足和需复核者发给主受众，需复核者发给主受众；模型明确判断要求缺失者发给副受众。只有主受众为空时才跳过主报告。</div><label className="wide"><span>模型要求策略文件（可选，留空复用岗位已保存策略）</span><input value={form.bossScreeningPolicyFile} onChange={(event) => set('bossScreeningPolicyFile', event.target.value)} placeholder="./boss-model-requirements.json" /></label><label><span>Boss 副转发方式</span><select value={form.bossSecondaryForwardMode} onChange={(event) => set('bossSecondaryForwardMode', event.target.value as FormState['bossSecondaryForwardMode'])}><option value="">复用岗位配置</option><option value="colleague">站内同事</option><option value="email">邮件</option></select></label><label><span>Boss 副转发收件人</span><input value={form.bossSecondaryForwardRecipient} onChange={(event) => set('bossSecondaryForwardRecipient', event.target.value)} /></label><label><span>Boss 副转发抄送（独立二次转发）</span><input value={form.bossSecondaryForwardCc} onChange={(event) => set('bossSecondaryForwardCc', event.target.value)} placeholder="每个地址独立转发，逗号分隔" disabled={form.clearBossSecondaryForwardCc} /></label><label className="checkbox-field"><input type="checkbox" checked={form.clearBossSecondaryForwardCc} onChange={(event) => set('clearBossSecondaryForwardCc', event.target.checked)} />清除副转发已保存抄送</label><label><span>副报告邮箱</span><input type="email" value={form.bossSecondaryEmail} onChange={(event) => set('bossSecondaryEmail', event.target.value)} /></label><label><span>副报告抄送</span><input value={form.bossSecondaryCc} onChange={(event) => set('bossSecondaryCc', event.target.value)} placeholder="逗号分隔" disabled={form.clearBossSecondaryCc} /></label><label className="checkbox-field"><input type="checkbox" checked={form.clearBossSecondaryCc} onChange={(event) => set('clearBossSecondaryCc', event.target.checked)} />清除副报告已保存抄送</label></>}</>}
           {form.platform === 'all' && form.includeBoss && (mode === 'resume-capture' || mode === 'batch') && <div className="security-note wide">直猎邦会作为第 4 个阶段运行并打开候选人详情；如该岗位已保存 Boss 转发配置，省略本次参数时可能复用该配置。深度搜索、打招呼、聊天和职位同步不会执行。</div>}
           {mode === 'boss-auto-chat' && <><label className="checkbox-field"><input type="checkbox" checked={form.requireAllHardRequirements} onChange={(event) => set('requireAllHardRequirements', event.target.checked)} />所有硬性要求必须满足</label>{!form.requireAllHardRequirements && <label><span>评分线</span><input type="number" min="0" max="100" value={form.scoreThreshold} onChange={(event) => set('scoreThreshold', event.target.value)} /></label>}<label className="checkbox-field"><input type="checkbox" checked={form.replyToUnqualifiedCandidates} onChange={(event) => set('replyToUnqualifiedCandidates', event.target.checked)} />回复不合适候选人</label><label className="checkbox-field"><input type="checkbox" checked={form.syncJobsBeforeReview} onChange={(event) => set('syncJobsBeforeReview', event.target.checked)} />审查前同步职位/JD</label><label><span>总结邮件</span><input type="email" value={form.summaryEmail} onChange={(event) => set('summaryEmail', event.target.value)} /></label><label><span>总结抄送</span><input value={form.summaryCc} onChange={(event) => set('summaryCc', event.target.value)} /></label></>}
         </div>
@@ -218,11 +250,21 @@ function commonBody(form: FormState, mode: 'resume-capture' | 'batch'): Record<s
     applicationFilterInputFile: form.searchSource === 'direct' && !searchConditionSetRefs ? form.applicationFilterInputFile.trim() || undefined : undefined,
     searchConditionSetRefs,
     email: form.email.trim() || undefined,
-    cc: splitList(form.cc),
+    cc: form.clearCc ? [] : splitList(form.cc),
     liepinForwardContact: form.platform === 'liepin' || form.platform === 'all' ? form.liepinForwardContact.trim() || undefined : undefined,
     bossJobId: mode === 'resume-capture' && (form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) ? form.bossJobId || undefined : undefined,
     bossSearchKeyword: mode === 'resume-capture' && (form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) ? form.bossSearchKeyword.trim() || undefined : undefined,
     bossForwardMode: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossForwardMode || undefined : undefined,
     bossForwardRecipient: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossForwardRecipient.trim() || undefined : undefined,
+    bossForwardCc: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? (form.clearBossForwardCc ? [] : splitList(form.bossForwardCc)) : undefined,
+    bossScreeningEnabled: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)
+      ? (form.bossScreeningChoice === 'inherit' ? undefined : form.bossScreeningChoice === 'enabled')
+      : undefined,
+    bossScreeningPolicyFile: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossScreeningPolicyFile.trim() || undefined : undefined,
+    bossSecondaryForwardMode: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossSecondaryForwardMode || undefined : undefined,
+    bossSecondaryForwardRecipient: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossSecondaryForwardRecipient.trim() || undefined : undefined,
+    bossSecondaryForwardCc: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? (form.clearBossSecondaryForwardCc ? [] : splitList(form.bossSecondaryForwardCc)) : undefined,
+    bossSecondaryEmail: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? form.bossSecondaryEmail.trim() || undefined : undefined,
+    bossSecondaryCc: form.platform === 'boss' || (form.platform === 'all' && form.includeBoss) ? (form.clearBossSecondaryCc ? [] : splitList(form.bossSecondaryCc)) : undefined,
   };
 }

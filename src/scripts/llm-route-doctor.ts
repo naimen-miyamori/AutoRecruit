@@ -53,6 +53,8 @@ async function main(): Promise<void> {
   console.log(JSON.stringify({
     route: config.llm.completionRoute,
     model: modelDescription() ?? (config.llm.completionRoute === 'codex-session' ? 'account-default' : undefined),
+    scoringRoute: config.scoring.completionRoute,
+    scoringModel: config.scoring.model,
     verified: args.verify,
     autoFallback: false,
   }, null, 2));

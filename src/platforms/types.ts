@@ -32,7 +32,10 @@ export interface CandidatePostOpenActions {
   liepinForwardContactMode?: 'confirm' | 'select-only';
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+  bossForwardCcEmails?: string[];
   bossForwardActionMode?: 'confirm' | 'prepare-only';
+  /** Internal capture seam: the workflow owns the durable pre-capture outbox. */
+  bossForwardTransactionManaged?: boolean;
 }
 
 export interface CandidatePostOpenResult {
@@ -41,6 +44,7 @@ export interface CandidatePostOpenResult {
 
 export interface CandidateProfileDetailOptions {
   deadline: number;
+  cleanupReserveMs?: number;
 }
 
 export interface PlatformAdapter {
@@ -73,9 +77,9 @@ export interface PlatformAdapter {
   saveSearchCondition?(page: Page, savedSearchName: string, options?: SearchWaitOptions): Promise<void>;
   extractCandidateList(page: Page, options?: SearchWaitOptions): Promise<{ candidates: CandidateListItem[] }>;
   openResumeDetail(context: BrowserContext, searchPage: Page, candidate: CandidateListItem, options?: CandidateProfileDetailOptions): Promise<Page>;
-  afterResumeDetailOpened?(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions): Promise<void | CandidatePostOpenResult>;
-  parseResumeDetail(page: Page, candidate: CandidateListItem): Promise<CandidateResume>;
-  closeResumeDetail?(searchPage: Page, detailPage: Page, candidate: CandidateListItem): Promise<void>;
+  afterResumeDetailOpened?(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions, options?: CandidateProfileDetailOptions): Promise<void | CandidatePostOpenResult>;
+  parseResumeDetail(page: Page, candidate: CandidateListItem, options?: CandidateProfileDetailOptions): Promise<CandidateResume>;
+  closeResumeDetail?(searchPage: Page, detailPage: Page, candidate: CandidateListItem, options?: CandidateProfileDetailOptions): Promise<void>;
   readCurrentCandidateBatch?(page: Page, options: SearchWaitOptions): Promise<CandidateResultBatch>;
   advanceToNextCandidateBatch?(page: Page, input: AdvanceCandidateBatchInput): Promise<AdvanceCandidateBatchResult>;
   readCandidateProfileDetail?(

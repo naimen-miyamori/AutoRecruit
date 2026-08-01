@@ -42,6 +42,253 @@ export type JobSearchSource = 'saved' | 'direct';
 export interface BossForwardingSettings {
   mode: 'colleague' | 'email';
   recipient: string;
+  /**
+   * Copy recipients used only by Boss email resume forwarding. The live Boss
+   * dialog has no native CC field, so each address receives an independent
+   * second forwarding action after the primary recipient.
+   */
+  ccEmails?: string[];
+}
+
+/**
+ * Boss screening is expressed as positive model requirements. A requirement
+ * is a negative routing match only when the model explicitly says the full
+ * structured resume does not satisfy it. This avoids treating a generic
+ * keyword as proof of a domain-specific capability.
+ */
+export interface BossModelRequirement {
+  id: string;
+  enabled: boolean;
+  kind: 'modelRequirement';
+  requirement: string;
+  criteria: string[];
+  insufficientEvidence: string[];
+  label?: string;
+}
+
+export type BossModelRequirementOutcome = 'satisfied' | 'missing' | 'unknown';
+
+export interface BossModelRequirementEvaluation {
+  requirementId: string;
+  outcome: BossModelRequirementOutcome;
+  evidence: string[];
+  missingCriteria: string[];
+  reason: string;
+}
+
+/**
+ * The policy rejects when any enabled model requirement is missing. Secondary
+ * settings stay optional at the type level so an explicitly disabled saved
+ * policy can retain partial delivery configuration; enabled execution
+ * validates all required delivery targets before opening a browser.
+ */
+export interface BossScreeningSettings {
+  enabled: boolean;
+  policyVersion: 2;
+  decisionMode: 'reject-on-any-missing';
+  requirements: BossModelRequirement[];
+  secondaryForwarding?: BossForwardingSettings;
+  secondaryDelivery?: ReportDeliveryOptions & {
+    recipientEmail: string;
+  };
+}
+
+/** The portable JSON shape accepted by --boss-screening-policy-file. */
+export interface BossScreeningPolicyFile {
+  version: 2;
+  decisionMode: 'reject-on-any-missing';
+  requirements: BossModelRequirement[];
+}
+
+/**
+ * Immutable Boss delivery/screening settings resolved at an HTTP or scheduler
+ * queue boundary. Empty CC arrays are intentional and mean "send no CC";
+ * omitted forwarding/screening objects mean those capabilities were absent in
+ * the confirmed snapshot and must not be inherited later at execution time.
+ */
+export interface BossCaptureSettingsSnapshot {
+  version: 2;
+  resolvedAt: string;
+  sourceJobKey?: string;
+  primaryForwarding?: BossForwardingSettings & { ccEmails: string[] };
+  primaryDelivery: {
+    recipientEmail?: string;
+    ccEmails: string[];
+  };
+  screening?: BossScreeningSettings;
+  settingsHash: string;
+}
+
+/**
+ * Explicit, field-level changes requested for a Boss capture.  Undefined
+ * means that the caller did not ask to change the persisted value; null (or
+ * an empty array) is an intentional clear.  The distinction is important for
+ * queued tasks because a stale full JobRecord must never recreate a cleared
+ * CC list.
+ */
+export interface BossCaptureCanonicalPatch {
+  recipientEmail?: string | null;
+  ccEmails?: string[];
+  bossForwarding?: BossForwardingSettings | null;
+  bossScreening?: BossScreeningSettings | null;
+  searchSource?: JobSearchSource;
+  pageKeyword?: string | null;
+  applicationFilterInput?: Record<string, unknown> | null;
+  conditions?: SearchCondition[];
+  conditionSetRef?: SearchConditionSetReference | null;
+  selectedFieldsFingerprint?: string | null;
+}
+
+/** Field-level JobRecord patch applied with a source revision/CAS check. */
+export type JobConfigPatch = BossCaptureCanonicalPatch;
+
+/**
+ * Immutable server-side facts captured before a Boss task enters the queue.
+ * `BossCaptureSettingsSnapshot` remains the CLI-compatible delivery payload;
+ * this wrapper additionally pins the job identity, complete search plan and
+ * source revision so the execution stage cannot silently consult a newer job
+ * record.  It is never accepted from a public HTTP/assistant request.
+ */
+export interface BossCaptureTaskSnapshot {
+  version: 3;
+  resolvedAt: string;
+  sourceJobKey: string;
+  sourceJobRevision?: number;
+  sourceJobsFile?: string;
+  sourceItemIndex?: number;
+  jobIdentity: {
+    bossJobId?: string;
+    expectedJobName: string;
+  };
+  searchPlan: {
+    source: JobSearchSource;
+    pageKeyword: string;
+    keywordSource: string;
+    conditionSetRef?: SearchConditionSetReference;
+    selectedFieldsFingerprint?: string;
+    applicationFilterInput?: Record<string, unknown>;
+    conditions: SearchCondition[];
+  };
+  deliveryAndScreening: {
+    primaryForwarding?: BossForwardingSettings & { ccEmails: string[] };
+    primaryDelivery: {
+      recipientEmail?: string;
+      ccEmails: string[];
+    };
+    screening?: BossScreeningSettings;
+  };
+  canonicalPatch?: BossCaptureCanonicalPatch;
+  /** SHA-256 of the canonical snapshot excluding this field. */
+  snapshotHash: string;
+}
+
+export type BossRoutingClassification = 'qualified' | 'review' | 'rejected';
+export type BossRoutingAudience = 'primary' | 'secondary';
+
+export interface BossRoutingDecision {
+  classification: BossRoutingClassification;
+  audience: BossRoutingAudience;
+  matchedRequirementIds: string[];
+  unknownRequirementIds: string[];
+  reason: string;
+}
+
+export type BossForwardingStatus = 'pending' | 'sending' | 'sent' | 'retryable-failed' | 'uncertain' | 'superseded';
+
+export interface BossForwardingDeliveryState {
+  role: 'recipient' | 'cc';
+  recipient: string;
+  status: BossForwardingStatus;
+  attemptedAt?: string;
+  completedAt?: string;
+  error?: string;
+}
+
+export interface BossForwardingState {
+  status: BossForwardingStatus;
+  mode: BossForwardingSettings['mode'];
+  recipient: string;
+  ccEmails?: string[];
+  /** Per-recipient receipts prevent a successful primary send from being repeated when a copy send fails. */
+  deliveries?: BossForwardingDeliveryState[];
+  attemptedAt?: string;
+  completedAt?: string;
+  error?: string;
+}
+
+/**
+ * Immutable routing decision written before the external Boss forwarding
+ * mutation. It intentionally remains separate from the score artifact.
+ */
+export interface BossCandidateRoutingArtifact {
+  /** Stable id used for idempotent recovery of a routing decision. */
+  routingDecisionId?: string;
+  candidateId: string;
+  fetchedAt: string;
+  scoredAt?: string;
+  decidedAt: string;
+  policyHash: string;
+  scoreStatus: CandidateScoreArtifact['status'];
+  scoreError?: string;
+  classification: BossRoutingClassification;
+  audience: BossRoutingAudience;
+  requirementEvaluations: BossModelRequirementEvaluation[];
+  matchedRequirementIds: string[];
+  unknownRequirementIds: string[];
+  reason: string;
+  forwarding: BossForwardingState;
+}
+
+/** Current, mutable forwarding state used for recovery without rewriting history. */
+export interface BossForwardingOutboxEntry {
+  candidateId: string;
+  /**
+   * Identifies which capture lifecycle owns this immutable target set.  Older
+   * outbox files omit the field and are treated as post-score screening
+   * entries by the compatibility reader.
+   */
+  workflow?: 'pre-capture' | 'post-score';
+  /** Deterministic immutable decision identity for post-score recovery. */
+  routingDecisionId?: string;
+  /**
+   * The decision payload required to rebuild a missing routing artifact after
+   * an interruption between outbox and artifact writes. It intentionally
+   * excludes mutable forwarding delivery status.
+   */
+  routingFacts?: {
+    candidateId: string;
+    fetchedAt: string;
+    scoredAt?: string;
+    decidedAt: string;
+    policyHash: string;
+    scoreStatus: CandidateScoreArtifact['status'];
+    scoreError?: string;
+    classification: BossRoutingClassification;
+    audience: BossRoutingAudience;
+    requirementEvaluations: BossModelRequirementEvaluation[];
+    matchedRequirementIds: string[];
+    unknownRequirementIds: string[];
+    reason: string;
+  };
+  policyHash: string;
+  classification: BossRoutingClassification;
+  audience: BossRoutingAudience;
+  createdAt: string;
+  updatedAt: string;
+  forwarding: BossForwardingState;
+}
+
+/**
+ * Durable hand-off between a saved/seen Boss resume and its first routing
+ * decision. File presence means scoring has not yet produced a durable outbox;
+ * it is removed once that outbox exists.
+ */
+export interface BossScreeningWorkItem {
+  candidateId: string;
+  /** Policy hash captured before model work; absent only on pre-v2 legacy work items. */
+  policyHash?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface BossAutomationSettings {
@@ -123,6 +370,8 @@ export function resolveReportDelivery(
 export interface JobRecord {
   jobKey: string;
   platform: SupportedPlatform;
+  /** Monotonic revision for field-level configuration CAS. Legacy records normalize to 1. */
+  revision?: number;
   searchKeyword: string;
   recipientEmail?: string;
   ccEmails?: string[];
@@ -143,6 +392,8 @@ export interface JobRecord {
     };
   };
   bossForwarding?: BossForwardingSettings;
+  /** Optional Boss-only post-score negative-condition routing policy. */
+  bossScreening?: BossScreeningSettings;
   bossPosition?: {
     bossJobId: string;
     status: 'open' | 'pending' | 'closed' | 'unknown';
@@ -255,17 +506,85 @@ export interface CandidateResume {
   certificates: string[];
 }
 
+export type CaptureFailureStage = 'detail-open' | 'identity-verify' | 'forward' | 'parse' | 'persist';
+export type ProcessingFailureStage = 'score' | 'routing' | 'forward';
+
+export interface RunCaptureFailure {
+  candidateId: string;
+  stage: CaptureFailureStage;
+  detailVerified: boolean;
+  error: string;
+}
+
+export interface RunProcessingFailure {
+  candidateId: string;
+  stage: ProcessingFailureStage;
+  error: string;
+}
+
+export type BossSeenViewSyncFailureStage = 'card-resolve' | 'detail-open' | 'identity-verify' | 'detail-close';
+
+export interface BossSeenViewSyncFailure {
+  candidateId: string;
+  stage: BossSeenViewSyncFailureStage;
+  detailOpened: boolean;
+  detailIdentityVerified: boolean;
+  detailClosed: boolean;
+  error: string;
+}
+
+/** Lightweight audit of the first-twenty history-card open/verify/close pass. */
+export interface BossSeenViewSyncResult {
+  /** All already-seen IDs in the bounded card window, including active work. */
+  eligibleCandidateIds: string[];
+  /** Seen IDs that required a dedicated view-only action this run. */
+  attemptedCandidateIds: string[];
+  /** View-only IDs whose detail identity was verified and dialog was closed. */
+  completedCandidateIds: string[];
+  /** Seen IDs whose normal retry/capture lifecycle already opened and closed detail. */
+  coveredByProcessingCandidateIds: string[];
+  failures: BossSeenViewSyncFailure[];
+}
+
 export interface RunResult {
   jobKey: string;
   platform: SupportedPlatform;
   fetchedAt: string;
   totalCandidates: number;
-  newCandidateIds: string[];
+  /** Version 2 writes capturedCandidateIds; absent means a legacy run file. */
+  runResultVersion?: 2;
+  /**
+   * Legacy v1 field. New v2 runs intentionally omit it because the old name
+   * described list/detail attempts rather than successfully captured resumes.
+   */
+  newCandidateIds?: string[];
+  /** IDs whose detail identity was verified and whose resume was persisted. */
+  capturedCandidateIds?: string[];
+  /** Number of candidates sent through the capture/detail path in this run. */
+  captureAttemptCount?: number;
+  /** Number of detail opens, including history-view actions and forwarding-only recovery retries. */
+  detailAttemptCount?: number;
+  captureFailures?: RunCaptureFailure[];
+  processingFailures?: RunProcessingFailure[];
+  /** Boss-only first-twenty history-card view synchronisation audit. */
+  bossSeenViewSync?: BossSeenViewSyncResult;
   scoredCandidates: string[];
   failedCandidates: Array<{
     candidateId: string;
     error: string;
   }>;
+  /** Lightweight Boss-only routing index for one enabled screening run. */
+  bossRouting?: {
+    enabled: true;
+    policyHash: string;
+    /** Immutable report destinations captured for this run. */
+    reportDelivery?: Partial<Record<BossRoutingAudience, ReportDeliveryOptions>>;
+    delivery?: Partial<Record<BossRoutingAudience, ReportDeliveryOptions>>;
+    qualifiedCandidateIds: string[];
+    reviewCandidateIds: string[];
+    rejectedCandidateIds: string[];
+    forwardingStatusCounts: Record<string, number>;
+  };
   /** Lightweight evidence of the search that produced this run. */
   searchExecution?: {
     source: JobSearchSource;
@@ -275,6 +594,17 @@ export interface RunResult {
     selectedFieldsFingerprint?: string;
     includeViewedCandidates: boolean;
   };
+}
+
+export function getRunCapturedCandidateIds(run: Pick<RunResult, 'runResultVersion' | 'capturedCandidateIds' | 'newCandidateIds'>): string[] {
+  return run.runResultVersion === 2
+    ? run.capturedCandidateIds ?? []
+    : [];
+}
+
+/** Legacy v1 IDs are attempts only and must never be counted as captured. */
+export function getRunLegacyAttemptIds(run: Pick<RunResult, 'runResultVersion' | 'newCandidateIds'>): string[] {
+  return run.runResultVersion === 2 ? [] : [...new Set(run.newCandidateIds ?? [])];
 }
 
 export interface ScoreDimension {
@@ -446,6 +776,8 @@ export interface CandidateScoreArtifactBase {
   candidateShareUrl?: string;
   model: string;
   scoredAt: string;
+  /** Boss screening records the exact canonical resume input used for model evaluation. */
+  resumeInputHash?: string;
 }
 
 export interface CandidateScoreSuccessArtifact extends CandidateScoreArtifactBase {

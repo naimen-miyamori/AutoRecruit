@@ -5,6 +5,7 @@ import { parsePlatformArg } from '../platforms/registry.js';
 import { SUPPORTED_PLATFORMS, type SupportedPlatform } from '../platforms/types.js';
 import type { SearchFilterCatalog } from '../search/filter-catalog.js';
 import { normalizeFailureMessage, summarizeFailureMessage } from './failure-summary.js';
+import { getRunCapturedCandidateIds } from '../types/job.js';
 import type {
   CandidateResume,
   CandidateScoreArtifact,
@@ -425,7 +426,12 @@ export class JobReadModel {
       return {
         platform: currentPlatform,
         totalCandidates: allRuns.reduce((sum, run) => sum + run.totalCandidates, 0),
-        newCandidates: allRuns.reduce((sum, run) => sum + run.newCandidateIds.length, 0),
+        // History-card view synchronisation contributes to detailAttemptCount
+        // but is not a capture attempt. Prefer the explicit v2 capture count
+        // so dashboard funnel ratios remain about resume capture only.
+        captureAttempts: allRuns.reduce((sum, run) => sum + (run.captureAttemptCount ?? run.newCandidateIds?.length ?? 0), 0),
+        capturedCandidates: allRuns.reduce((sum, run) => sum + getRunCapturedCandidateIds(run).length, 0),
+        newCandidates: allRuns.reduce((sum, run) => sum + getRunCapturedCandidateIds(run).length, 0),
         capturedResumes: jobs.reduce((sum, job) => sum + job.candidateCount, 0),
         scoredCandidates: allRuns.reduce((sum, run) => sum + run.scoredCandidates.length, 0),
         failedCandidates: allRuns.reduce((sum, run) => sum + run.failedCandidates.length, 0),

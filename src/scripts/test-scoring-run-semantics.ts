@@ -15,10 +15,16 @@ import { BrowserSession, closeBrowserSessionRef, createFreshBrowserSessionRef, c
 import { validateCandidateListExtraction } from '../extraction/extractor.js';
 import { resolveOpenAISettings } from '../llm/openai-client.js';
 import { liepinAdapter } from '../platforms/liepin-adapter.js';
-import { bossAdapter } from '../platforms/boss-adapter.js';
+import {
+  BossForwardPreConfirmationError,
+  BossForwardUncertainError,
+  BossUnexpectedContactDialogError,
+  bossAdapter,
+} from '../platforms/boss-adapter.js';
 import { buildBossSyncedJobKey } from '../platforms/boss-jobs.js';
 import { zhilianAdapter } from '../platforms/zhilian-adapter.js';
 import { SearchConditionSetService } from '../search/search-condition-sets.js';
+import { hashBossScreeningPolicy } from '../scoring/boss-screening.js';
 import { extractCandidateScoreFromTextResponse } from '../scoring/score-resume.js';
 import { openResumeByUrl } from './capture-resume-dom-snapshot.js';
 import { runManualLoginSessionSave } from './login-and-save-session.js';
@@ -63,7 +69,20 @@ async function loadIndexModule(tempDir: string): Promise<typeof import('../index
   process.argv = ['node', 'test-index'];
   const scriptPath = fileURLToPath(new URL('../index.ts', import.meta.url));
   const moduleUrl = `${pathToFileURL(scriptPath).href}?test=${Date.now()}-${Math.random()}`;
-  return import(moduleUrl);
+  const module = await import(moduleUrl);
+  // Browser-facing history visits have dedicated action tests. Orchestration
+  // tests use this seam so their lightweight page doubles do not need DOM
+  // selectors, while still asserting which IDs were scheduled for viewing.
+  module.visitBossSeenCandidateDetailRef.fn = async (
+    _page: never,
+    candidate: { candidateId: string },
+  ) => ({
+    candidateId: candidate.candidateId,
+    detailOpened: true,
+    detailIdentityVerified: true,
+    detailClosed: true,
+  });
+  return module;
 }
 
 function buildNormalizedJob() {
@@ -105,6 +124,42 @@ function buildScore() {
     },
     risks: [],
     summary: 'good fit',
+  };
+}
+
+function buildModelScreeningSettings() {
+  return {
+    enabled: true as const,
+    policyVersion: 2 as const,
+    decisionMode: 'reject-on-any-missing' as const,
+    requirements: [{
+      id: 'must-have-model-requirement',
+      enabled: true,
+      kind: 'modelRequirement' as const,
+      requirement: '候选人明确满足测试岗位要求。',
+      criteria: ['简历存在明确证据。'],
+      insufficientEvidence: ['缺少明确证据。'],
+    }],
+    secondaryForwarding: {
+      mode: 'email' as const,
+      recipient: 'secondary@example.com',
+    },
+    secondaryDelivery: {
+      recipientEmail: 'secondary-report@example.com',
+    },
+  };
+}
+
+function buildModelRequirementEvaluation(
+  outcome: 'satisfied' | 'missing' | 'unknown',
+  candidateId = 'candidate',
+) {
+  return {
+    requirementId: 'must-have-model-requirement',
+    outcome,
+    evidence: outcome === 'unknown' ? [] : [candidateId],
+    missingCriteria: outcome === 'missing' ? ['简历存在明确证据。'] : [],
+    reason: `screening:${outcome}`,
   };
 }
 
@@ -935,8 +990,8 @@ function stubSuccessfulRun(indexModule: Awaited<ReturnType<typeof loadIndexModul
   indexModule.extractionBoundary.extractCandidateListFromPage = async () => ({
     candidates: [{ candidateId: 'cand-1' }],
   });
-  indexModule.extractCandidateListWithAdapterRef.fn = async () => ({
-    candidates: [{ candidateId: 'cand-1' }],
+  indexModule.extractCandidateListWithAdapterRef.fn = async (adapter) => ({
+    candidates: [{ candidateId: adapter.platform === 'boss' ? 'boss-cand-1' : 'cand-1' }],
   });
   indexModule.openSubscribeSearchRef.fn = (async () => createSearchPage()) as typeof indexModule.openSubscribeSearchRef.fn;
   indexModule.openDirectSearchRef.fn = (async () => createSearchPage()) as NonNullable<typeof indexModule.openDirectSearchRef.fn>;
@@ -1385,6 +1440,32 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(saved.failedCandidates, [
       { candidateId: 'cand-failed', error: 'Scoring timed out' },
     ]);
+  });
+
+  it('persists v2 captured history without the legacy new-candidate alias', async () => {
+    const JobStore = await makeIsolatedStore();
+    const store = new JobStore();
+    const jobKey = 'job-run-result-v2';
+    const resultPath = await store.saveRunResult('boss', jobKey, {
+      jobKey,
+      platform: 'boss',
+      fetchedAt: '2026-04-20T12:34:57.000Z',
+      totalCandidates: 2,
+      runResultVersion: 2,
+      capturedCandidateIds: ['cand-captured'],
+      newCandidateIds: ['legacy-attempt-id'],
+      scoredCandidates: ['cand-captured'],
+      failedCandidates: [],
+    });
+
+    const saved = JSON.parse(await fs.readFile(resultPath, 'utf8')) as {
+      runResultVersion: number;
+      capturedCandidateIds: string[];
+      newCandidateIds?: string[];
+    };
+    assert.equal(saved.runResultVersion, 2);
+    assert.deepStrictEqual(saved.capturedCandidateIds, ['cand-captured']);
+    assert.equal('newCandidateIds' in saved, false);
   });
 
   it('opens subscription search without extra fixed waits once the target page is ready', async () => {
@@ -5013,6 +5094,7 @@ describe('scoring run semantics', () => {
     const callOrder: string[] = [];
     const detailPage = createDetailPage();
 
+    await store.saveCandidateResume('boss', jobKey, buildResume('boss-seen'));
     await store.saveSeenIds('boss', jobKey, ['boss-seen']);
 
     const adapter = {
@@ -5029,7 +5111,7 @@ describe('scoring run semantics', () => {
         return detailPage;
       },
       afterResumeDetailOpened: async (_page, candidate, actions) => {
-        callOrder.push(`forward:${candidate.candidateId}:${actions.bossForwardMode ?? ''}:${actions.bossForwardRecipient ?? ''}`);
+        callOrder.push(`forward:${candidate.candidateId}:${actions.bossForwardMode ?? ''}:${actions.bossForwardRecipient ?? ''}:${actions.bossForwardCcEmails?.join(',') ?? ''}`);
       },
       parseResumeDetail: async (_page, candidate) => {
         callOrder.push(`parse:${candidate.candidateId}`);
@@ -5052,18 +5134,1161 @@ describe('scoring run semantics', () => {
       fetchedAt,
       adapter,
       {
-        bossForwardMode: 'colleague',
-        bossForwardRecipient: '王经理',
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary@example.com',
+        bossForwardCc: ['primary-audit@example.com'],
       },
     );
 
     assert.deepStrictEqual(callOrder, [
       'open:boss-new',
-      'forward:boss-new:colleague:王经理',
+      'forward:boss-new:email:primary@example.com:primary-audit@example.com',
       'parse:boss-new',
     ]);
     assert.deepStrictEqual(result.newCandidates.map((candidate) => candidate.candidateId), ['boss-new']);
     assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), ['boss-seen', 'boss-new']);
+  });
+
+  it('limits ordinary Boss capture to the first twenty extracted resumes before seen filtering or actions', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-first-twenty-limit';
+    const candidates = Array.from({ length: 22 }, (_, index) => ({
+      candidateId: `boss-cap-${String(index + 1).padStart(2, '0')}`,
+    }));
+    const openedCandidateIds: string[] = [];
+    const forwardedCandidateIds: string[] = [];
+    const parsedCandidateIds: string[] = [];
+    const scoredCandidateIds: string[] = [];
+    const historyViewedCandidateIds: string[] = [];
+
+    await store.saveCandidateResume('boss', jobKey, buildResume(candidates[0]!.candidateId));
+    await store.saveSeenIds('boss', jobKey, [candidates[0]!.candidateId]);
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates }),
+      openResumeDetail: async (_context, _searchPage, candidate) => {
+        openedCandidateIds.push(candidate.candidateId);
+        return createDetailPage();
+      },
+      afterResumeDetailOpened: async (_page, candidate) => {
+        forwardedCandidateIds.push(candidate.candidateId);
+      },
+      parseResumeDetail: async (_page, candidate) => {
+        parsedCandidateIds.push(candidate.candidateId);
+        return buildResume(candidate.candidateId);
+      },
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.visitBossSeenCandidateDetailRef.fn = async (_page, candidate) => {
+      historyViewedCandidateIds.push(candidate.candidateId);
+      return {
+        candidateId: candidate.candidateId,
+        detailOpened: true,
+        detailIdentityVerified: true,
+        detailClosed: true,
+      };
+    };
+    indexModule.scoreResumeAgainstJobRef.fn = async (_job, resume) => {
+      scoredCandidateIds.push(resume.candidateId);
+      return buildScore();
+    };
+
+    const result = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      {
+        page: { id: 'root-page' },
+        context: { id: 'browser-context' },
+      } as never,
+      '2026-08-01T12:34:56.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary@example.com',
+      },
+    );
+
+    const firstTwentyIds = candidates.slice(0, 20).map((candidate) => candidate.candidateId);
+    const newIdsWithinLimit = firstTwentyIds.slice(1);
+    assert.deepStrictEqual(result.candidates.map((candidate) => candidate.candidateId), firstTwentyIds);
+    assert.deepStrictEqual(result.newCandidates.map((candidate) => candidate.candidateId), newIdsWithinLimit);
+    assert.equal(result.runResult.totalCandidates, 20);
+    assert.deepStrictEqual(result.runResult.capturedCandidateIds, newIdsWithinLimit);
+    assert.equal('newCandidateIds' in result.runResult, false);
+    assert.deepStrictEqual(openedCandidateIds, newIdsWithinLimit);
+    assert.deepStrictEqual(historyViewedCandidateIds, [firstTwentyIds[0]]);
+    assert.deepStrictEqual(forwardedCandidateIds, newIdsWithinLimit);
+    assert.deepStrictEqual(parsedCandidateIds, newIdsWithinLimit);
+    assert.deepStrictEqual(scoredCandidateIds, newIdsWithinLimit);
+    assert.deepStrictEqual(result.runResult.bossSeenViewSync, {
+      eligibleCandidateIds: [firstTwentyIds[0]],
+      attemptedCandidateIds: [firstTwentyIds[0]],
+      completedCandidateIds: [firstTwentyIds[0]],
+      coveredByProcessingCandidateIds: [],
+      failures: [],
+    });
+    assert.deepStrictEqual(
+      (await store.listStoredResumes('boss', jobKey)).map((resume) => resume.candidateId).sort(),
+      [...firstTwentyIds].sort(),
+    );
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), firstTwentyIds);
+  });
+
+  it('views every historical card inside the first twenty without parsing, scoring, forwarding, or rewriting history', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-all-seen-view-sync';
+    const candidates = Array.from({ length: 20 }, (_, index) => ({
+      candidateId: `boss-seen-only-${String(index + 1).padStart(2, '0')}`,
+    }));
+    const viewedIds: string[] = [];
+    let adapterOpenCalls = 0;
+    let parseCalls = 0;
+    let scoreCalls = 0;
+    await Promise.all(candidates.map(async (candidate) => {
+      await store.saveCandidateResume('boss', jobKey, buildResume(candidate.candidateId));
+    }));
+    await store.saveSeenIds('boss', jobKey, candidates.map((candidate) => candidate.candidateId));
+    const beforeSeen = await store.readSeenIds('boss', jobKey);
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates }),
+      openResumeDetail: async () => {
+        adapterOpenCalls += 1;
+        throw new Error('ordinary adapter detail must not run for view-only history cards');
+      },
+      parseResumeDetail: async () => {
+        parseCalls += 1;
+        throw new Error('view-only history must not parse');
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.visitBossSeenCandidateDetailRef.fn = async (_page, candidate) => {
+      viewedIds.push(candidate.candidateId);
+      return {
+        candidateId: candidate.candidateId,
+        detailOpened: true,
+        detailIdentityVerified: true,
+        detailClosed: true,
+      };
+    };
+    indexModule.scoreResumeAgainstJobRef.fn = async () => {
+      scoreCalls += 1;
+      return buildScore();
+    };
+
+    const result = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T12:34:56.000Z',
+      adapter,
+    );
+
+    assert.deepStrictEqual(viewedIds, candidates.map((candidate) => candidate.candidateId));
+    assert.equal(adapterOpenCalls, 0);
+    assert.equal(parseCalls, 0);
+    assert.equal(scoreCalls, 0);
+    assert.deepStrictEqual(result.newCandidates, []);
+    assert.deepStrictEqual(result.capturedCandidateIds, []);
+    assert.equal(result.runResult.captureAttemptCount, 0);
+    assert.equal(result.runResult.detailAttemptCount, 20);
+    assert.deepStrictEqual(result.runResult.bossSeenViewSync, {
+      eligibleCandidateIds: candidates.map((candidate) => candidate.candidateId),
+      attemptedCandidateIds: candidates.map((candidate) => candidate.candidateId),
+      completedCandidateIds: candidates.map((candidate) => candidate.candidateId),
+      coveredByProcessingCandidateIds: [],
+      failures: [],
+    });
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), beforeSeen);
+  });
+
+  it('fails closed when the bounded Boss card snapshot repeats a stable candidate ID', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-duplicate-bounded-id';
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [{ candidateId: 'duplicate-id' }, { candidateId: 'duplicate-id' }] }),
+      openResumeDetail: async () => {
+        throw new Error('duplicate snapshot must fail before detail operations');
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    await assert.rejects(
+      () => indexModule.runResumeCaptureFlow(
+        'boss',
+        jobKey,
+        buildNormalizedJob(),
+        '物业电工',
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-01T12:34:56.000Z',
+        adapter,
+      ),
+      /duplicate stable IDs inside the first twenty: duplicate-id/,
+    );
+  });
+
+  it('does not recover or mutate Boss outbox entries beyond the first twenty cards', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-cap-outbox';
+    const candidates = Array.from({ length: 22 }, (_, index) => ({
+      candidateId: `boss-cap-outbox-${String(index + 1).padStart(2, '0')}`,
+    }));
+    const firstTwentyIds = candidates.slice(0, 20).map((candidate) => candidate.candidateId);
+    const screening = buildModelScreeningSettings();
+    const policyHash = hashBossScreeningPolicy(screening);
+
+    await Promise.all(firstTwentyIds.map(async (candidateId) => {
+      await store.saveCandidateResume('boss', jobKey, buildResume(candidateId));
+    }));
+    await store.saveSeenIds('boss', jobKey, firstTwentyIds);
+    await store.saveBossForwardingOutboxEntry('boss', jobKey, {
+      candidateId: candidates[21]!.candidateId,
+      policyHash,
+      classification: 'qualified',
+      audience: 'primary',
+      createdAt: '2026-08-01T12:00:00.000Z',
+      updatedAt: '2026-08-01T12:00:01.000Z',
+      forwarding: {
+        status: 'sending',
+        mode: 'email',
+        recipient: 'primary@example.com',
+      },
+    });
+
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates }),
+      openResumeDetail: async () => {
+        throw new Error('No detail should open for seen candidates in this cap test');
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    const result = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T12:00:02.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary@example.com',
+        bossScreening: screening,
+      },
+    );
+
+    const outbox = await store.readBossForwardingOutboxEntry('boss', jobKey, candidates[21]!.candidateId);
+    assert.equal(result.runResult.totalCandidates, 20);
+    assert.equal(result.runResult.detailAttemptCount, 20);
+    assert.deepStrictEqual(result.runResult.bossSeenViewSync?.attemptedCandidateIds, firstTwentyIds);
+    assert.deepStrictEqual(result.runResult.bossSeenViewSync?.completedCandidateIds, firstTwentyIds);
+    assert.equal(outbox?.forwarding.status, 'sending');
+    assert.equal(outbox?.updatedAt, '2026-08-01T12:00:01.000Z');
+  });
+
+  it('does not persist history when a parsed detail returns another candidate identity', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-detail-identity-mismatch';
+    const candidate = { candidateId: 'boss-card-candidate' };
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [candidate] }),
+      openResumeDetail: async () => createDetailPage(),
+      parseResumeDetail: async () => buildResume('different-candidate'),
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.scoreResumeAgainstJobRef.fn = async () => {
+      throw new Error('identity mismatch must not reach scoring');
+    };
+
+    const result = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T12:34:56.000Z',
+      adapter,
+    );
+
+    assert.deepEqual(result.capturedCandidateIds, []);
+    assert.deepEqual(await store.readSeenIds('boss', jobKey), []);
+    assert.deepEqual(await store.listStoredResumes('boss', jobKey), []);
+    assert.deepEqual(result.runResult.captureFailures, [{
+      candidateId: candidate.candidateId,
+      stage: 'identity-verify',
+      detailVerified: false,
+      error: 'Parsed resume identity different-candidate does not match candidate boss-card-candidate.',
+    }]);
+    assert.deepEqual(result.runResult.scoredCandidates, []);
+  });
+
+  it('routes enabled Boss screening after parse, seen, and scoring without using the legacy forwarding hook', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-post-score-routing';
+    const fetchedAt = '2026-07-31T12:34:56.000Z';
+    const callOrder: string[] = [];
+    const detailPage = createDetailPage();
+    const originalMarkCapturedCandidatesSeen = store.markCapturedCandidatesSeen.bind(store);
+
+    store.markCapturedCandidatesSeen = async (platform, key, candidateIds) => {
+      callOrder.push(`seen:${candidateIds.at(-1)}`);
+      return originalMarkCapturedCandidatesSeen(platform, key, candidateIds);
+    };
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({
+        candidates: [
+          { candidateId: 'boss-qualified' },
+          { candidateId: 'boss-review' },
+          { candidateId: 'boss-rejected' },
+          { candidateId: 'boss-score-failed' },
+        ],
+      }),
+      openResumeDetail: async (_context, _searchPage, candidate) => {
+        callOrder.push(`open:${candidate.candidateId}`);
+        return detailPage;
+      },
+      afterResumeDetailOpened: async () => {
+        callOrder.push('legacy-forward');
+      },
+      parseResumeDetail: async (_page, candidate) => {
+        callOrder.push(`parse:${candidate.candidateId}`);
+        return {
+          ...buildResume(candidate.candidateId),
+          pr: [candidate.candidateId],
+        };
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async ({ resume }) => {
+      callOrder.push(`score:${resume.candidateId}`);
+      if (resume.candidateId === 'boss-score-failed') {
+        throw new Error('screening model unavailable');
+      }
+      const outcome = resume.candidateId === 'boss-rejected'
+        ? 'missing'
+        : resume.candidateId === 'boss-review'
+          ? 'unknown'
+          : 'satisfied';
+      return {
+        score: buildScore(),
+        evaluations: [buildModelRequirementEvaluation(outcome, resume.candidateId)],
+      };
+    };
+    indexModule.forwardBossResumeRef.fn = async (_page, candidate, mode, recipient, _actionMode, ccEmails) => {
+      callOrder.push(`forward:${candidate.candidateId}:${mode}:${recipient}:${ccEmails?.join(',') ?? ''}`);
+    };
+
+    const result = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      {
+        page: { id: 'root-page' },
+        context: { id: 'browser-context' },
+      } as never,
+      fetchedAt,
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary-forward@example.com',
+        bossForwardCc: ['primary-forward-audit@example.com'],
+        bossScreening: {
+          ...buildModelScreeningSettings(),
+          secondaryForwarding: {
+            ...buildModelScreeningSettings().secondaryForwarding,
+            ccEmails: ['secondary-forward-audit@example.com'],
+          },
+        },
+      },
+    );
+
+    assert.deepStrictEqual(callOrder, [
+      'open:boss-qualified',
+      'parse:boss-qualified',
+      'seen:boss-qualified',
+      'score:boss-qualified',
+      'forward:boss-qualified:email:primary-forward@example.com:',
+      'forward:boss-qualified:email:primary-forward-audit@example.com:',
+      'open:boss-review',
+      'parse:boss-review',
+      'seen:boss-review',
+      'score:boss-review',
+      'forward:boss-review:email:primary-forward@example.com:',
+      'forward:boss-review:email:primary-forward-audit@example.com:',
+      'open:boss-rejected',
+      'parse:boss-rejected',
+      'seen:boss-rejected',
+      'score:boss-rejected',
+      'forward:boss-rejected:email:secondary@example.com:',
+      'forward:boss-rejected:email:secondary-forward-audit@example.com:',
+      'open:boss-score-failed',
+      'parse:boss-score-failed',
+      'seen:boss-score-failed',
+      'score:boss-score-failed',
+      'forward:boss-score-failed:email:primary-forward@example.com:',
+      'forward:boss-score-failed:email:primary-forward-audit@example.com:',
+    ]);
+    assert.equal(callOrder.includes('legacy-forward'), false);
+    assert.deepStrictEqual(result.runResult.bossRouting, {
+      enabled: true,
+      policyHash: result.runResult.bossRouting?.policyHash,
+      qualifiedCandidateIds: ['boss-qualified'],
+      reviewCandidateIds: ['boss-review', 'boss-score-failed'],
+      rejectedCandidateIds: ['boss-rejected'],
+      forwardingStatusCounts: { sent: 4 },
+    });
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), [
+      'boss-qualified',
+      'boss-review',
+      'boss-rejected',
+      'boss-score-failed',
+    ]);
+    const artifacts = await store.listBossCandidateRoutingArtifacts('boss', jobKey);
+    assert.deepStrictEqual(artifacts.map((artifact) => [artifact.candidateId, artifact.classification, artifact.audience]), [
+      ['boss-qualified', 'qualified', 'primary'],
+      ['boss-review', 'review', 'primary'],
+      ['boss-rejected', 'rejected', 'secondary'],
+      ['boss-score-failed', 'review', 'primary'],
+    ]);
+    assert.deepStrictEqual(result.runResult.failedCandidates, [{
+      candidateId: 'boss-score-failed',
+      error: 'screening model unavailable',
+    }]);
+  });
+
+  it('persists disabled-screening Boss deliveries per address and resumes only the failed copy before capture', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-pre-capture-per-delivery';
+    const candidate = { candidateId: 'boss-pre-capture-per-delivery' };
+    const detailPage = createDetailPage();
+    const forwardRecipients: string[] = [];
+    let failCopy = true;
+    let parseCalls = 0;
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [candidate] }),
+      openResumeDetail: async () => detailPage,
+      parseResumeDetail: async () => {
+        parseCalls += 1;
+        return buildResume(candidate.candidateId);
+      },
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.scoreResumeAgainstJobRef.fn = async () => buildScore();
+    indexModule.forwardBossResumeRef.fn = async (_page, _candidate, _mode, recipient) => {
+      forwardRecipients.push(recipient);
+      if (recipient === 'copy@example.com' && failCopy) {
+        throw new Error('copy delivery unavailable before confirmation');
+      }
+    };
+
+    const first = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      'disabled screening',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T13:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary@example.com',
+        bossForwardCc: ['copy@example.com'],
+      },
+    );
+    assert.deepStrictEqual(forwardRecipients, ['primary@example.com', 'copy@example.com']);
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), []);
+    assert.equal(first.capturedCandidateIds.length, 0);
+    const firstOutbox = await store.readBossForwardingOutboxEntry('boss', jobKey, candidate.candidateId);
+    assert.equal(firstOutbox?.workflow, 'pre-capture');
+    assert.deepStrictEqual(firstOutbox?.forwarding.deliveries?.map((delivery) => [delivery.recipient, delivery.status]), [
+      ['primary@example.com', 'sent'],
+      ['copy@example.com', 'retryable-failed'],
+    ]);
+
+    failCopy = false;
+    const second = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      'disabled screening',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T14:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'changed-primary@example.com',
+        bossForwardCc: ['changed-copy@example.com'],
+      },
+    );
+    assert.deepStrictEqual(forwardRecipients, [
+      'primary@example.com',
+      'copy@example.com',
+      'copy@example.com',
+    ]);
+    assert.equal(parseCalls, 1);
+    assert.deepStrictEqual(second.capturedCandidateIds, [candidate.candidateId]);
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), [candidate.candidateId]);
+    const secondOutbox = await store.readBossForwardingOutboxEntry('boss', jobKey, candidate.candidateId);
+    assert.deepStrictEqual(secondOutbox?.forwarding.deliveries?.map((delivery) => [delivery.recipient, delivery.status]), [
+      ['primary@example.com', 'sent'],
+      ['copy@example.com', 'sent'],
+    ]);
+  });
+
+  it('stops Boss capture immediately when detail close cannot be verified', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-close-fatal';
+    const opened: string[] = [];
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [
+        { candidateId: 'boss-close-first' },
+        { candidateId: 'boss-close-second' },
+      ] }),
+      openResumeDetail: async (_context, _page, candidate) => {
+        opened.push(candidate.candidateId);
+        return createDetailPage();
+      },
+      parseResumeDetail: async (_page, candidate) => buildResume(candidate.candidateId),
+      closeResumeDetail: async () => {
+        throw new Error('detail modal remained visible');
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    await assert.rejects(
+      () => indexModule.runResumeCaptureFlow(
+        'boss',
+        jobKey,
+        buildNormalizedJob(),
+        'close safety',
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-01T15:00:00.000Z',
+        adapter,
+      ),
+      /detail modal remained visible/,
+    );
+    assert.deepStrictEqual(opened, ['boss-close-first']);
+  });
+
+  it('stops Boss capture after an unexpected contact purchase dialog without recording the candidate', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-contact-dialog-fatal';
+    const opened: string[] = [];
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [
+        { candidateId: 'boss-contact-first' },
+        { candidateId: 'boss-contact-second' },
+      ] }),
+      openResumeDetail: async (_context, _page, candidate) => {
+        opened.push(candidate.candidateId);
+        throw new BossUnexpectedContactDialogError(
+          'Boss opened a search-chat-card purchase dialog after the detail click; no forwarding confirmation was attempted and no contact action was attempted.',
+        );
+      },
+      parseResumeDetail: async () => {
+        throw new Error('unexpected contact dialog must stop before parsing');
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.scoreResumeAgainstJobRef.fn = async () => {
+      throw new Error('unexpected contact dialog must stop before scoring');
+    };
+
+    await assert.rejects(
+      () => indexModule.runResumeCaptureFlow(
+        'boss',
+        jobKey,
+        buildNormalizedJob(),
+        'contact safety',
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-01T15:30:00.000Z',
+        adapter,
+      ),
+      /purchase dialog.*no forwarding confirmation was attempted/i,
+    );
+    assert.deepStrictEqual(opened, ['boss-contact-first']);
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), []);
+    assert.deepStrictEqual(await store.listStoredResumes('boss', jobKey), []);
+    assert.deepStrictEqual(await store.listBossCandidateRoutingArtifacts('boss', jobKey), []);
+    assert.equal(await store.readBossForwardingOutboxEntry('boss', jobKey, 'boss-contact-first'), undefined);
+  });
+
+  it('rebuilds a missing Boss routing artifact from the outbox without rescoring', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-outbox-first-recovery';
+    const candidate = { candidateId: 'boss-outbox-first-recovery' };
+    const detailPage = createDetailPage();
+    const forwardRecipients: string[] = [];
+    let scoreCalls = 0;
+    let failArtifactWrite = true;
+    const originalSaveArtifact = store.saveBossCandidateRoutingArtifact.bind(store);
+    store.saveBossCandidateRoutingArtifact = async (...args) => {
+      if (failArtifactWrite) throw new Error('simulated routing artifact interruption');
+      return originalSaveArtifact(...args);
+    };
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [candidate] }),
+      openResumeDetail: async () => detailPage,
+      parseResumeDetail: async () => buildResume(candidate.candidateId),
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    const screeningSettings = buildModelScreeningSettings();
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async () => {
+      scoreCalls += 1;
+      return {
+        score: buildScore(),
+        evaluations: [buildModelRequirementEvaluation('satisfied', '明确证据')],
+      };
+    };
+    indexModule.forwardBossResumeRef.fn = async (_page, _candidate, _mode, recipient) => {
+      forwardRecipients.push(recipient);
+    };
+
+    const first = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      'outbox-first',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T16:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary@example.com',
+        bossScreening: screeningSettings,
+      },
+    );
+    assert.equal(scoreCalls, 1);
+    assert.deepStrictEqual(forwardRecipients, []);
+    assert.match(first.runResult.failedCandidates.at(-1)?.error ?? '', /routing artifact interruption/);
+    const pending = await store.readBossForwardingOutboxEntry('boss', jobKey, candidate.candidateId);
+    assert.equal(pending?.routingDecisionId !== undefined, true);
+    assert.equal(pending?.routingFacts?.candidateId, candidate.candidateId);
+    assert.equal((await store.listBossCandidateRoutingArtifacts('boss', jobKey)).length, 0);
+
+    failArtifactWrite = false;
+    const second = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      'outbox-first',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T16:01:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'changed-primary@example.com',
+        bossScreening: screeningSettings,
+      },
+    );
+    assert.equal(scoreCalls, 1);
+    assert.deepStrictEqual(forwardRecipients, ['primary@example.com']);
+    assert.deepStrictEqual(second.runResult.bossRouting?.qualifiedCandidateIds, [candidate.candidateId]);
+    assert.equal((await store.listBossCandidateRoutingArtifacts('boss', jobKey)).length, 1);
+  });
+
+  it('retries a known pre-confirmation Boss forwarding failure from outbox without rescoring a seen candidate', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-forward-retry';
+    const candidate = { candidateId: 'boss-forward-retry' };
+    const detailPage = createDetailPage();
+    let scoreCalls = 0;
+    const forwardRecipients: string[] = [];
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [candidate] }),
+      openResumeDetail: async () => detailPage,
+      parseResumeDetail: async () => buildResume(candidate.candidateId),
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    const screeningSettings = buildModelScreeningSettings();
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async () => {
+      scoreCalls += 1;
+      return {
+        score: buildScore(),
+        evaluations: [buildModelRequirementEvaluation('satisfied', '明确证据')],
+      };
+    };
+    indexModule.forwardBossResumeRef.fn = async (_page, _candidate, _mode, recipient) => {
+      forwardRecipients.push(recipient);
+      if (recipient === 'primary-copy@example.com'
+        && forwardRecipients.filter((value) => value === recipient).length === 1) {
+        throw new BossForwardPreConfirmationError('copy forward dialog was unavailable before confirmation');
+      }
+    };
+
+    const first = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T01:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary@example.com',
+        bossForwardCc: ['primary-copy@example.com'],
+        bossScreening: screeningSettings,
+      },
+    );
+    assert.equal(first.runResult.bossRouting?.forwardingStatusCounts['retryable-failed'], 1);
+    assert.match(first.runResult.failedCandidates.at(-1)?.error ?? '', /Boss forwarding retryable-failed/);
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), [candidate.candidateId]);
+    const partiallyCompletedOutbox = await store.readBossForwardingOutboxEntry('boss', jobKey, candidate.candidateId);
+    assert.deepStrictEqual(partiallyCompletedOutbox?.forwarding.deliveries?.map((delivery) => [delivery.recipient, delivery.status]), [
+      ['primary@example.com', 'sent'],
+      ['primary-copy@example.com', 'retryable-failed'],
+    ]);
+
+    const second = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T02:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'changed-primary@example.com',
+        bossForwardCc: ['changed-copy@example.com'],
+        bossScreening: screeningSettings,
+      },
+    );
+
+    assert.equal(scoreCalls, 1);
+    assert.deepStrictEqual(forwardRecipients, [
+      'primary@example.com',
+      'primary-copy@example.com',
+      'primary-copy@example.com',
+    ]);
+    assert.deepStrictEqual(second.newCandidates, []);
+    assert.deepStrictEqual(second.runResult.bossRouting?.qualifiedCandidateIds, []);
+    assert.equal(second.runResult.bossRouting?.forwardingStatusCounts.sent, 1);
+    assert.deepStrictEqual(second.runResult.bossSeenViewSync?.coveredByProcessingCandidateIds, [candidate.candidateId]);
+    assert.deepStrictEqual(second.runResult.bossSeenViewSync?.attemptedCandidateIds, []);
+    assert.deepStrictEqual(second.runResult.failedCandidates, []);
+    const completedOutbox = await store.readBossForwardingOutboxEntry('boss', jobKey, candidate.candidateId);
+    assert.equal(completedOutbox?.forwarding.status, 'sent');
+    assert.equal(completedOutbox?.forwarding.recipient, 'primary@example.com');
+    assert.deepStrictEqual(completedOutbox?.forwarding.deliveries?.map((delivery) => [delivery.recipient, delivery.status]), [
+      ['primary@example.com', 'sent'],
+      ['primary-copy@example.com', 'sent'],
+    ]);
+    assert.equal(completedOutbox?.policyHash, first.runResult.bossRouting?.policyHash);
+
+    await store.saveSeenIds('boss', jobKey, []);
+    const third = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T03:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'another-target@example.com',
+        bossForwardCc: ['another-copy@example.com'],
+        bossScreening: screeningSettings,
+      },
+    );
+    assert.deepStrictEqual(third.newCandidates, []);
+    assert.equal(scoreCalls, 1);
+    assert.equal(forwardRecipients.length, 3);
+  });
+
+  it('continues pending copy deliveries without repeating sent or uncertain Boss targets', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-forward-uncertain-copy';
+    const candidate = { candidateId: 'boss-forward-uncertain-copy' };
+    const detailPage = createDetailPage();
+    const forwardRecipients: string[] = [];
+    let scoreCalls = 0;
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [candidate] }),
+      openResumeDetail: async () => detailPage,
+      parseResumeDetail: async () => buildResume(candidate.candidateId),
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    const screeningSettings = buildModelScreeningSettings();
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async () => {
+      scoreCalls += 1;
+      return {
+        score: buildScore(),
+        evaluations: [buildModelRequirementEvaluation('satisfied', '明确证据')],
+      };
+    };
+    indexModule.forwardBossResumeRef.fn = async (_page, _candidate, _mode, recipient) => {
+      forwardRecipients.push(recipient);
+      if (recipient === 'uncertain-copy@example.com') {
+        throw new BossForwardUncertainError('confirmation result was not observable');
+      }
+    };
+
+    const first = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T04:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary@example.com',
+        bossForwardCc: ['uncertain-copy@example.com', 'pending-copy@example.com'],
+        bossScreening: screeningSettings,
+      },
+    );
+    assert.equal(first.runResult.bossRouting?.forwardingStatusCounts.uncertain, 1);
+    assert.deepStrictEqual(forwardRecipients, ['primary@example.com', 'uncertain-copy@example.com']);
+    const firstOutbox = await store.readBossForwardingOutboxEntry('boss', jobKey, candidate.candidateId);
+    assert.deepStrictEqual(firstOutbox?.forwarding.deliveries?.map((delivery) => [delivery.recipient, delivery.status]), [
+      ['primary@example.com', 'sent'],
+      ['uncertain-copy@example.com', 'uncertain'],
+      ['pending-copy@example.com', 'pending'],
+    ]);
+
+    const second = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T05:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'changed@example.com',
+        bossForwardCc: ['changed-copy@example.com'],
+        bossScreening: screeningSettings,
+      },
+    );
+    assert.equal(scoreCalls, 1);
+    assert.deepStrictEqual(forwardRecipients, [
+      'primary@example.com',
+      'uncertain-copy@example.com',
+      'pending-copy@example.com',
+    ]);
+    assert.equal(second.runResult.bossRouting?.forwardingStatusCounts.uncertain, 1);
+    assert.equal(second.runResult.failedCandidates.filter((failure) => failure.candidateId === candidate.candidateId).length, 1);
+    const completedOutbox = await store.readBossForwardingOutboxEntry('boss', jobKey, candidate.candidateId);
+    assert.deepStrictEqual(completedOutbox?.forwarding.deliveries?.map((delivery) => [delivery.recipient, delivery.status]), [
+      ['primary@example.com', 'sent'],
+      ['uncertain-copy@example.com', 'uncertain'],
+      ['pending-copy@example.com', 'sent'],
+    ]);
+  });
+
+  it('migrates a legacy pre-confirmation Boss outbox and delivers each stored target once', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-forward-legacy-retry';
+    const candidate = { candidateId: 'boss-forward-legacy-retry' };
+    const timestamp = '2026-08-01T06:00:00.000Z';
+    const screeningSettings = buildModelScreeningSettings();
+    const policyHash = hashBossScreeningPolicy(screeningSettings);
+    const scoreArtifact = {
+      candidateId: candidate.candidateId,
+      model: 'test-model',
+      scoredAt: timestamp,
+      status: 'success' as const,
+      score: buildScore(),
+    };
+    await store.saveCandidateScoreArtifact('boss', jobKey, scoreArtifact);
+    await store.saveBossCandidateRoutingArtifact('boss', jobKey, {
+      candidateId: candidate.candidateId,
+      fetchedAt: '2026-08-01T05:59:00.000Z',
+      scoredAt: timestamp,
+      decidedAt: timestamp,
+      policyHash,
+      scoreStatus: 'success',
+      classification: 'qualified',
+      audience: 'primary',
+      requirementEvaluations: [buildModelRequirementEvaluation('satisfied', '明确证据')],
+      matchedRequirementIds: [],
+      unknownRequirementIds: [],
+      reason: '所有模型要求均满足',
+      forwarding: {
+        status: 'retryable-failed',
+        mode: 'email',
+        recipient: 'stored-primary@example.com',
+        ccEmails: ['stored-copy@example.com'],
+        error: 'legacy dialog had no native CC field before confirmation',
+      },
+    });
+    await store.saveBossForwardingOutboxEntry('boss', jobKey, {
+      candidateId: candidate.candidateId,
+      policyHash,
+      classification: 'qualified',
+      audience: 'primary',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      forwarding: {
+        status: 'retryable-failed',
+        mode: 'email',
+        recipient: 'stored-primary@example.com',
+        ccEmails: ['stored-copy@example.com'],
+        attemptedAt: timestamp,
+        error: 'legacy dialog had no native CC field before confirmation',
+      },
+    });
+    await store.saveCandidateResume('boss', jobKey, buildResume(candidate.candidateId));
+    await store.saveSeenIds('boss', jobKey, [candidate.candidateId]);
+    const forwardRecipients: string[] = [];
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [candidate] }),
+      openResumeDetail: async () => createDetailPage(),
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.forwardBossResumeRef.fn = async (_page, _candidate, _mode, recipient) => {
+      forwardRecipients.push(recipient);
+    };
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async () => {
+      throw new Error('legacy forwarding recovery must not rescore');
+    };
+
+    const result = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T07:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'current-primary@example.com',
+        bossScreening: screeningSettings,
+      },
+    );
+    assert.deepStrictEqual(forwardRecipients, ['stored-primary@example.com', 'stored-copy@example.com']);
+    assert.equal(result.runResult.bossRouting?.forwardingStatusCounts.sent, 1);
+    assert.deepStrictEqual(result.runResult.bossRouting?.qualifiedCandidateIds, [candidate.candidateId]);
+    assert.deepStrictEqual(result.runResult.scoredCandidates, [candidate.candidateId]);
+    const outbox = await store.readBossForwardingOutboxEntry('boss', jobKey, candidate.candidateId);
+    assert.deepStrictEqual(outbox?.forwarding.deliveries?.map((delivery) => [delivery.recipient, delivery.status]), [
+      ['stored-primary@example.com', 'sent'],
+      ['stored-copy@example.com', 'sent'],
+    ]);
+  });
+
+  it('migrates a legacy in-flight Boss outbox to uncertain without repeating any target', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-forward-legacy-sending';
+    const candidate = { candidateId: 'boss-forward-legacy-sending' };
+    const timestamp = '2026-08-01T08:00:00.000Z';
+    await store.saveBossForwardingOutboxEntry('boss', jobKey, {
+      candidateId: candidate.candidateId,
+      policyHash: 'legacy-policy-hash',
+      classification: 'qualified',
+      audience: 'primary',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      forwarding: {
+        status: 'sending',
+        mode: 'email',
+        recipient: 'stored-primary@example.com',
+        ccEmails: ['stored-copy@example.com'],
+        attemptedAt: timestamp,
+      },
+    });
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [candidate] }),
+      openResumeDetail: async () => {
+        throw new Error('uncertain legacy forwarding must not reopen the resume');
+      },
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    let forwardCalls = 0;
+    indexModule.forwardBossResumeRef.fn = async () => {
+      forwardCalls += 1;
+    };
+
+    const result = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T09:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'current-primary@example.com',
+        bossScreening: buildModelScreeningSettings(),
+      },
+    );
+    assert.equal(forwardCalls, 0);
+    assert.equal(result.runResult.bossRouting?.forwardingStatusCounts.uncertain, 1);
+    assert.equal(result.runResult.failedCandidates.filter((failure) => failure.candidateId === candidate.candidateId).length, 1);
+    const outbox = await store.readBossForwardingOutboxEntry('boss', jobKey, candidate.candidateId);
+    assert.deepStrictEqual(outbox?.forwarding.deliveries?.map((delivery) => [delivery.recipient, delivery.status]), [
+      ['stored-primary@example.com', 'uncertain'],
+      ['stored-copy@example.com', 'uncertain'],
+    ]);
+  });
+
+  it('recovers a seen Boss candidate whose process stopped before a routing outbox was durable', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-pending-score-recovery';
+    const candidate = { candidateId: 'boss-pending-score-recovery' };
+    const detailPage = createDetailPage();
+    let scoreCalls = 0;
+    let parseCalls = 0;
+    let forwardCalls = 0;
+    let failScorePersistence = true;
+    const originalSaveCandidateScoreArtifact = store.saveCandidateScoreArtifact.bind(store);
+    store.saveCandidateScoreArtifact = async (...args) => {
+      if (failScorePersistence) {
+        throw new Error('simulated score persistence interruption');
+      }
+      return originalSaveCandidateScoreArtifact(...args);
+    };
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [candidate] }),
+      openResumeDetail: async () => detailPage,
+      parseResumeDetail: async () => {
+        parseCalls += 1;
+        return buildResume(candidate.candidateId);
+      },
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    const screeningSettings = buildModelScreeningSettings();
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async () => {
+      scoreCalls += 1;
+      return {
+        score: buildScore(),
+        evaluations: [buildModelRequirementEvaluation('satisfied', '明确证据')],
+      };
+    };
+    indexModule.forwardBossResumeRef.fn = async () => {
+      forwardCalls += 1;
+    };
+
+    const first = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T01:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary@example.com',
+        bossScreening: screeningSettings,
+      },
+    );
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), [candidate.candidateId]);
+    assert.deepStrictEqual(
+      (await store.listBossScreeningWorkItems('boss', jobKey)).map((item) => item.candidateId),
+      [candidate.candidateId],
+    );
+    assert.match(first.runResult.failedCandidates.at(-1)?.error ?? '', /score persistence interruption/);
+    assert.equal(forwardCalls, 0);
+
+    failScorePersistence = false;
+    const second = await indexModule.runResumeCaptureFlow(
+      'boss',
+      jobKey,
+      buildNormalizedJob(),
+      '物业电工',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-01T02:00:00.000Z',
+      adapter,
+      {
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary@example.com',
+        bossScreening: screeningSettings,
+      },
+    );
+
+    assert.deepStrictEqual(second.newCandidates, []);
+    assert.deepStrictEqual(second.runResult.bossRouting?.qualifiedCandidateIds, [candidate.candidateId]);
+    assert.deepStrictEqual(second.runResult.failedCandidates, []);
+    assert.deepStrictEqual(await store.listBossScreeningWorkItems('boss', jobKey), []);
+    assert.equal(scoreCalls, 2);
+    assert.equal(parseCalls, 2);
+    assert.equal(forwardCalls, 1);
+    assert.deepStrictEqual(second.runResult.bossSeenViewSync?.coveredByProcessingCandidateIds, [candidate.candidateId]);
   });
 
   it('keeps normal Boss capture forwarding job-scoped without changing auto-chat defaults', async () => {
@@ -5072,7 +6297,7 @@ describe('scoring run semantics', () => {
     const store = new indexModule.JobStore();
     const keyword = `Boss岗位级转发-${Date.now()}-${Math.random()}`;
     const jobKey = buildJobKey(keyword, '');
-    const forwardingCalls: Array<{ mode?: string; recipient?: string }> = [];
+    const forwardingCalls: Array<{ mode?: string; recipient?: string; ccEmails?: string[] }> = [];
     const originalAfterResumeDetailOpened = bossAdapter.afterResumeDetailOpened;
 
     await store.saveBossAutomationSettings({
@@ -5089,6 +6314,7 @@ describe('scoring run semantics', () => {
       forwardingCalls.push({
         mode: actions.bossForwardMode,
         recipient: actions.bossForwardRecipient,
+        ccEmails: actions.bossForwardCcEmails,
       });
     };
 
@@ -5105,6 +6331,8 @@ describe('scoring run semantics', () => {
           'email',
           '--boss-forward-recipient',
           'job-specific@example.com',
+          '--boss-forward-cc',
+          'job-specific-audit@example.com',
         ]);
       });
     } finally {
@@ -5114,10 +6342,12 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(forwardingCalls, [{
       mode: 'email',
       recipient: 'job-specific@example.com',
+      ccEmails: ['job-specific-audit@example.com'],
     }]);
     assert.deepStrictEqual((await store.readJobRecord('boss', jobKey)).bossForwarding, {
       mode: 'email',
       recipient: 'job-specific@example.com',
+      ccEmails: ['job-specific-audit@example.com'],
     });
     assert.deepStrictEqual(await store.readBossAutomationSettings(), {
       forwarding: {
@@ -5964,7 +7194,7 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(directCalls.map((call) => call.keyword), ['铝']);
     assert.equal(directCalls[0]?.conditions.length, 1);
     assert.equal(directCalls[0]?.includeViewedCandidates, false);
-    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), ['cand-1']);
+    assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), ['boss-cand-1']);
     assert.equal(await pathExists(path.join(tempDir, 'boss', 'jobs', jobName)), false);
     const storedRun = (await store.listRunResults('boss', jobKey)).at(-1)!;
     assert.equal(storedRun.searchExecution?.pageKeyword, '铝');
@@ -6190,6 +7420,51 @@ describe('scoring run semantics', () => {
         'recruiter@example.com',
       ]),
       /--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss/,
+    );
+  });
+
+  it('keeps Boss screening arguments inside ordinary Boss capture and rejects incomplete secondary forwarding', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        '51job',
+        '--keyword',
+        `非Boss筛选-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：测试岗位',
+        '--boss-screening-enabled',
+        'true',
+      ]),
+      /--boss-screening-enabled.*require --platform boss or --platform all --include-boss true/,
+    );
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        'boss',
+        '--keyword',
+        `筛选副转发-${Date.now()}-${Math.random()}`,
+        '--jd',
+        '职位名称：测试岗位',
+        '--boss-secondary-forward-mode',
+        'colleague',
+      ]),
+      /--boss-secondary-forward-mode and --boss-secondary-forward-recipient must be provided together/,
+    );
+
+    await assert.rejects(
+      () => indexModule.main([
+        '--platform',
+        'boss',
+        '--boss-auto-chat',
+        'true',
+        '--boss-screening-enabled',
+        'true',
+      ]),
+      /--boss-auto-chat cannot be combined .*--boss-screening-enabled/,
     );
   });
 
@@ -6622,6 +7897,7 @@ describe('scoring run semantics', () => {
       bossForwarding: {
         mode: 'email',
         recipient: 'job-specific@example.com',
+        ccEmails: ['job-specific-audit@example.com'],
       },
       rawText: '负责物业电气维修',
       normalizedJob: {
@@ -6643,7 +7919,7 @@ describe('scoring run semantics', () => {
     });
 
     const chatPage = {} as Page;
-    const forwardingCalls: Array<{ mode: string; recipient: string }> = [];
+    const forwardingCalls: Array<{ mode: string; recipient: string; ccEmails?: readonly string[] }> = [];
     const summaryDeliveries: Array<{ recipient: string; ccEmails?: string[] }> = [];
     indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => ({ page: chatPage, context: {} }) as never;
     indexModule.closeBrowserSessionRef.fn = async () => undefined;
@@ -6671,8 +7947,8 @@ describe('scoring run semantics', () => {
       criteria: [],
       rejectionReasons: [],
     });
-    indexModule.forwardBossResumeRef.fn = async (_page, _candidate, mode, recipient) => {
-      forwardingCalls.push({ mode, recipient });
+    indexModule.forwardBossResumeRef.fn = async (_page, _candidate, mode, recipient, _actionMode, ccEmails) => {
+      forwardingCalls.push({ mode, recipient, ccEmails });
     };
     indexModule.closeBossChatResumeRef.fn = async () => undefined;
     indexModule.contactBossQualifiedCandidateRef.fn = async () => ({
@@ -6700,6 +7976,7 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(forwardingCalls, [{
       mode: 'email',
       recipient: 'job-specific@example.com',
+      ccEmails: ['job-specific-audit@example.com'],
     }]);
     assert.deepStrictEqual(summaryDeliveries, [{
       recipient: 'summary@qq.com',
@@ -7281,6 +8558,93 @@ describe('scoring run semantics', () => {
     assert.equal(secondJobRecord.rawText, '职位名称：第二批量岗位');
   });
 
+  it('lets each Boss jobs-file item override both forwarding targets and all four CC lists', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const jobsFilePath = path.join(tempDir, 'boss-routing-jobs.json');
+    const policyFilePath = path.join(tempDir, 'boss-negative-policy.json');
+    await fs.writeFile(policyFilePath, JSON.stringify({
+      version: 2,
+      decisionMode: 'reject-on-any-missing',
+      requirements: [buildModelScreeningSettings().requirements[0]],
+    }), 'utf8');
+    await fs.writeFile(jobsFilePath, JSON.stringify([
+      {
+        keyword: 'Boss batch routing one',
+        jd: '职位名称：Boss批量分流一',
+        email: 'primary-one@example.com',
+        cc: ['primary-report-one@example.com'],
+        bossForwardMode: 'email',
+        bossForwardRecipient: 'primary-forward-one@example.com',
+        bossForwardCc: ['primary-forward-audit-one@example.com'],
+        bossScreeningEnabled: true,
+        bossScreeningPolicyFile: './boss-negative-policy.json',
+        bossSecondaryForwardMode: 'email',
+        bossSecondaryForwardRecipient: 'secondary-forward-one@example.com',
+        bossSecondaryForwardCc: ['secondary-forward-audit-one@example.com'],
+        bossSecondaryEmail: 'secondary-report-one@example.com',
+        bossSecondaryCc: ['secondary-report-audit-one@example.com'],
+      },
+      {
+        keyword: 'Boss batch routing two',
+        jd: '职位名称：Boss批量分流二',
+        email: 'primary-two@example.com',
+        cc: [],
+        bossForwardMode: 'colleague',
+        bossForwardRecipient: '主招聘同事二',
+        bossForwardCc: [],
+        bossScreeningEnabled: true,
+        bossScreeningPolicyFile: './boss-negative-policy.json',
+        bossSecondaryForwardMode: 'email',
+        bossSecondaryForwardRecipient: 'secondary-forward-two@example.com',
+        bossSecondaryForwardCc: [],
+        bossSecondaryEmail: 'secondary-report-two@example.com',
+        bossSecondaryCc: [],
+      },
+    ]), 'utf8');
+
+    stubSuccessfulRun(indexModule);
+    await captureConsole(async () => {
+      await indexModule.main([
+        '--platform',
+        'boss',
+        '--jobs-file',
+        jobsFilePath,
+        '--boss-forward-mode',
+        'email',
+        '--boss-forward-recipient',
+        'run-level-should-not-win@example.com',
+      ]);
+    });
+
+    const store = new indexModule.JobStore();
+    const first = await store.readJobRecord('boss', 'boss-batch-routing-one');
+    const second = await store.readJobRecord('boss', 'boss-batch-routing-two');
+    assert.deepStrictEqual(first.bossForwarding, {
+      mode: 'email',
+      recipient: 'primary-forward-one@example.com',
+      ccEmails: ['primary-forward-audit-one@example.com'],
+    });
+    assert.deepStrictEqual(first.ccEmails, ['primary-report-one@example.com']);
+    assert.deepStrictEqual(first.bossScreening?.secondaryForwarding, {
+      mode: 'email',
+      recipient: 'secondary-forward-one@example.com',
+      ccEmails: ['secondary-forward-audit-one@example.com'],
+    });
+    assert.deepStrictEqual(first.bossScreening?.secondaryDelivery, {
+      recipientEmail: 'secondary-report-one@example.com',
+      ccEmails: ['secondary-report-audit-one@example.com'],
+    });
+    assert.deepStrictEqual(second.bossForwarding, {
+      mode: 'colleague',
+      recipient: '主招聘同事二',
+      ccEmails: [],
+    });
+    assert.deepStrictEqual(second.ccEmails, []);
+    assert.deepStrictEqual(second.bossScreening?.secondaryForwarding?.ccEmails, []);
+    assert.deepStrictEqual(second.bossScreening?.secondaryDelivery?.ccEmails, []);
+  });
+
   it('runs batch jobs outer and supported platforms inner for --platform all', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
@@ -7788,13 +9152,14 @@ describe('scoring run semantics', () => {
 
     const latestSavedRun = JSON.parse(await fs.readFile(summary.resultPath ?? '', 'utf8')) as {
       totalCandidates: number;
-      newCandidateIds: string[];
+      capturedCandidateIds: string[];
       scoredCandidates: string[];
       failedCandidates: Array<{ candidateId: string; error: string }>;
     };
 
     assert.equal(latestSavedRun.totalCandidates, 0);
-    assert.deepStrictEqual(latestSavedRun.newCandidateIds, []);
+    assert.deepStrictEqual(latestSavedRun.capturedCandidateIds, []);
+    assert.equal('newCandidateIds' in latestSavedRun, false);
     assert.deepStrictEqual(latestSavedRun.scoredCandidates, []);
     assert.deepStrictEqual(latestSavedRun.failedCandidates, []);
   });

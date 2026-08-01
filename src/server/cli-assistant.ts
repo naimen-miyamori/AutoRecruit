@@ -91,6 +91,14 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'liepinForwardContact',
     'bossForwardMode',
     'bossForwardRecipient',
+    'bossForwardCc',
+    'bossScreeningEnabled',
+    'bossScreeningPolicyFile',
+    'bossSecondaryForwardMode',
+    'bossSecondaryForwardRecipient',
+    'bossSecondaryForwardCc',
+    'bossSecondaryEmail',
+    'bossSecondaryCc',
   ],
   batch: [
     'platform',
@@ -105,6 +113,14 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'liepinForwardContact',
     'bossForwardMode',
     'bossForwardRecipient',
+    'bossForwardCc',
+    'bossScreeningEnabled',
+    'bossScreeningPolicyFile',
+    'bossSecondaryForwardMode',
+    'bossSecondaryForwardRecipient',
+    'bossSecondaryForwardCc',
+    'bossSecondaryEmail',
+    'bossSecondaryCc',
   ],
   'talent-mapping': [
     'platform', 'talentMappingFile', 'mappingStage', 'confirmedDetailOpen', 'mappingRunId',
@@ -125,6 +141,7 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'replyToUnqualifiedCandidates',
     'bossForwardMode',
     'bossForwardRecipient',
+    'bossForwardCc',
     'summaryEmail',
     'summaryCc',
     'syncJobsBeforeReview',
@@ -183,7 +200,7 @@ function coerceScalar(field: string, value: unknown): unknown {
     return undefined;
   }
 
-  if ((field === 'includeViewed' || field === 'includeBoss' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates' || field === 'syncJobsBeforeReview' || field === 'triggerMatch' || field === 'confirmed' || field === 'confirmedDetailOpen' || field === 'unreadOnly' || field === 'includeClosed') && typeof value === 'string') {
+  if ((field === 'includeViewed' || field === 'includeBoss' || field === 'bossScreeningEnabled' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates' || field === 'syncJobsBeforeReview' || field === 'triggerMatch' || field === 'confirmed' || field === 'confirmedDetailOpen' || field === 'unreadOnly' || field === 'includeClosed') && typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
     if (normalized === 'true') {
       return true;
@@ -198,7 +215,16 @@ function coerceScalar(field: string, value: unknown): unknown {
     return Number.isInteger(parsed) ? parsed : value;
   }
 
-  if (Array.isArray(value) && (field === 'cc' || field === 'summaryCc' || field === 'coreRequirements' || field === 'bonusRequirements' || field === 'bossJobIds')) {
+  if (Array.isArray(value) && (
+    field === 'cc'
+    || field === 'bossForwardCc'
+    || field === 'bossSecondaryForwardCc'
+    || field === 'bossSecondaryCc'
+    || field === 'summaryCc'
+    || field === 'coreRequirements'
+    || field === 'bonusRequirements'
+    || field === 'bossJobIds'
+  )) {
     return value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim());
   }
 
@@ -251,8 +277,30 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
   }
 
   if ((kind === 'resume-capture' || kind === 'batch')
+    && isPresent(input.bossSecondaryForwardMode) !== isPresent(input.bossSecondaryForwardRecipient)) {
+    missing.push(isPresent(input.bossSecondaryForwardMode) ? 'bossSecondaryForwardRecipient' : 'bossSecondaryForwardMode');
+  }
+
+  if (kind === 'resume-capture' || kind === 'batch') {
+    if (Array.isArray(input.bossForwardCc) && input.bossForwardCc.length > 0 && input.bossForwardMode === 'colleague') {
+      missing.push('bossForwardMode=email');
+    }
+    if (Array.isArray(input.bossSecondaryForwardCc) && input.bossSecondaryForwardCc.length > 0 && input.bossSecondaryForwardMode === 'colleague') {
+      missing.push('bossSecondaryForwardMode=email');
+    }
+  }
+
+  if ((kind === 'resume-capture' || kind === 'batch')
     && input.platform === 'all'
-    && isPresent(input.bossForwardMode)
+    && (isPresent(input.bossForwardMode)
+      || isPresent(input.bossForwardCc)
+      || isPresent(input.bossScreeningEnabled)
+      || isPresent(input.bossScreeningPolicyFile)
+      || isPresent(input.bossSecondaryForwardMode)
+      || isPresent(input.bossSecondaryForwardRecipient)
+      || isPresent(input.bossSecondaryForwardCc)
+      || isPresent(input.bossSecondaryEmail)
+      || isPresent(input.bossSecondaryCc))
     && input.includeBoss !== true) {
     missing.push('includeBoss');
   }
@@ -263,6 +311,9 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
     }
     if (isPresent(input.summaryCc) && !isPresent(input.summaryEmail)) {
       missing.push('summaryEmail');
+    }
+    if (Array.isArray(input.bossForwardCc) && input.bossForwardCc.length > 0 && input.bossForwardMode === 'colleague') {
+      missing.push('bossForwardMode=email');
     }
   }
 
@@ -348,7 +399,7 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
     warnings.push('风险：已选择包含已查看候选人，候选人范围会扩大。');
   }
 
-  if ((kind === 'resume-capture' || kind === 'batch') && (isPresent(input.email) || (Array.isArray(input.cc) && input.cc.length > 0))) {
+  if ((kind === 'resume-capture' || kind === 'batch') && (isPresent(input.email) || (Array.isArray(input.cc) && input.cc.length > 0) || isPresent(input.bossSecondaryEmail) || (Array.isArray(input.bossSecondaryCc) && input.bossSecondaryCc.length > 0))) {
     warnings.push('风险：任务完成后会发送邮件。');
   }
 
@@ -356,8 +407,17 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
     warnings.push('风险：猎聘会执行简历转发动作。');
   }
 
-  if ((kind === 'resume-capture' || kind === 'batch') && isPresent(input.bossForwardMode)) {
+  if ((kind === 'resume-capture' || kind === 'batch') && (
+    isPresent(input.bossForwardMode)
+    || isPresent(input.bossForwardCc)
+    || isPresent(input.bossSecondaryForwardMode)
+    || isPresent(input.bossSecondaryForwardCc)
+  )) {
     warnings.push('风险：Boss 会把简历转发给指定站内同事或邮箱。');
+  }
+
+  if ((kind === 'resume-capture' || kind === 'batch') && input.bossScreeningEnabled === true) {
+    warnings.push('风险：Boss 将在评分后按模型要求分流：明确满足和需复核候选人转发并报告给主受众，模型明确判断要求缺失的候选人只转发并报告给副受众；主受众为空时不会发送主报告。');
   }
 
   if (kind === 'boss-auto-chat') {
@@ -529,6 +589,7 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
     pushBooleanPreview(argv, '--boss-chat-reply-unqualified', input.replyToUnqualifiedCandidates);
     pushPreview(argv, '--boss-forward-mode', input.bossForwardMode);
     pushPreview(argv, '--boss-forward-recipient', input.bossForwardRecipient);
+    pushPreview(argv, '--boss-forward-cc', Array.isArray(input.bossForwardCc) ? input.bossForwardCc.join(',') : input.bossForwardCc);
     pushPreview(argv, '--boss-chat-summary-email', input.summaryEmail);
     pushPreview(argv, '--boss-chat-summary-cc', Array.isArray(input.summaryCc) ? input.summaryCc.join(',') : input.summaryCc);
     pushBooleanPreview(argv, '--boss-sync-jobs-before-review', input.syncJobsBeforeReview);
@@ -615,6 +676,14 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   pushPreview(argv, '--liepin-forward-contact', input.liepinForwardContact);
   pushPreview(argv, '--boss-forward-mode', input.bossForwardMode);
   pushPreview(argv, '--boss-forward-recipient', input.bossForwardRecipient);
+  pushPreview(argv, '--boss-forward-cc', Array.isArray(input.bossForwardCc) ? input.bossForwardCc.join(',') : input.bossForwardCc);
+  pushBooleanPreview(argv, '--boss-screening-enabled', input.bossScreeningEnabled);
+  pushPreview(argv, '--boss-screening-policy-file', input.bossScreeningPolicyFile);
+  pushPreview(argv, '--boss-secondary-forward-mode', input.bossSecondaryForwardMode);
+  pushPreview(argv, '--boss-secondary-forward-recipient', input.bossSecondaryForwardRecipient);
+  pushPreview(argv, '--boss-secondary-forward-cc', Array.isArray(input.bossSecondaryForwardCc) ? input.bossSecondaryForwardCc.join(',') : input.bossSecondaryForwardCc);
+  pushPreview(argv, '--boss-secondary-email', input.bossSecondaryEmail);
+  pushPreview(argv, '--boss-secondary-cc', Array.isArray(input.bossSecondaryCc) ? input.bossSecondaryCc.join(',') : input.bossSecondaryCc);
   return argv;
 }
 
@@ -704,11 +773,11 @@ function buildSystemPrompt(): string {
     '允许的 kind 只有：resume-capture、batch、talent-mapping、search-subscription、boss-auto-chat、boss-talent-search、boss-greet、boss-chat-operation、boss-job-sync、login-refresh、rag-ops、rag-answer。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
     'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
-    'resume-capture 字段：platform, keyword, bossJobId, bossSearchKeyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient。bossJobId 只用于 platform=boss 或 all 且 includeBoss=true 的普通抓取，必须是精确的已同步职位 ID；bossSearchKeyword 只覆盖 Boss 人才页查询词，不改变岗位身份或其他平台关键词。只要 platform=boss 且提供 bossJobId，就可复用岗位已保存 JD/搜索设置而省略 jd 和 jdFile。searchConditionSetRefs 是 {平台:{conditionSetId,platform,revision}}，revision 必须固定。',
-    'batch 字段：platform, jobsFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient；不要包含 keyword、jd、jdFile。',
+    'resume-capture 字段：platform, keyword, bossJobId, bossSearchKeyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient, bossForwardCc, bossScreeningEnabled, bossScreeningPolicyFile, bossSecondaryForwardMode, bossSecondaryForwardRecipient, bossSecondaryForwardCc, bossSecondaryEmail, bossSecondaryCc。bossJobId 只用于 platform=boss 或 all 且 includeBoss=true 的普通抓取，必须是精确的已同步职位 ID；bossSearchKeyword 只覆盖 Boss 人才页查询词，不改变岗位身份或其他平台关键词。只要 platform=boss 且提供 bossJobId，就可复用岗位已保存 JD/搜索设置而省略 jd 和 jdFile。searchConditionSetRefs 是 {平台:{conditionSetId,platform,revision}}，revision 必须固定。',
+    'batch 字段：platform, jobsFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient, bossForwardCc, bossScreeningEnabled, bossScreeningPolicyFile, bossSecondaryForwardMode, bossSecondaryForwardRecipient, bossSecondaryForwardCc, bossSecondaryEmail, bossSecondaryCc；不要包含 keyword、jd、jdFile。',
     'talent-mapping 字段：platform, talentMappingFile, mappingStage, confirmedDetailOpen, mappingRunId；mappingStage 只能 scan、enrich、all，详情阶段必须 confirmedDetailOpen=true；只允许 51job、liepin、zhilian 或 all，不允许 Boss；不与普通抓取、JD、邮件、转发、订阅或 RAG 参数组合。',
-    'Boss 转发允许 platform=boss，或 platform=all 且 includeBoss=true；bossForwardMode 只能是 colleague 或 email，出现时必须和 bossForwardRecipient 同时提供，留言由任务执行器自动填写候选人 ID。',
-    'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, replyToUnqualifiedCandidates, bossForwardMode, bossForwardRecipient, summaryEmail, summaryCc, syncJobsBeforeReview；platform 必须是 boss。replyToUnqualifiedCandidates 默认 false，仅显式设为 true 时才向不合适候选人发送固定拒绝常用语。转发和总结邮件参数可省略以复用已保存配置；syncJobsBeforeReview 默认 false。',
+    'Boss 转发和评分后模型要求分流仅允许 platform=boss，或 platform=all 且 includeBoss=true；bossForwardMode、bossSecondaryForwardMode 只能是 colleague 或 email，出现时各自必须与对应 recipient 同时提供。bossScreeningPolicyFile 只引用版本 2 模型要求 JSON，不接受旧版本、脚本、表达式或收件人；bossScreeningEnabled=true 时，明确满足和需复核候选人属于主受众，模型明确判断要求缺失的候选人属于副受众。',
+    'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, replyToUnqualifiedCandidates, bossForwardMode, bossForwardRecipient, bossForwardCc, summaryEmail, summaryCc, syncJobsBeforeReview；platform 必须是 boss。replyToUnqualifiedCandidates 默认 false，仅显式设为 true 时才向不合适候选人发送固定拒绝常用语。转发和总结邮件参数可省略以复用已保存配置；syncJobsBeforeReview 默认 false。',
     'boss-talent-search 字段：platform, source, bossJobId, expectedJobName, coreRequirements, bonusRequirements, triggerMatch, confirmed；source 只能 recommend 或 deep-search。triggerMatch 默认 false，设为 true 时 confirmed 必须为 true。',
     'boss-greet 字段：platform, source, candidateId, expectedCandidateName, expectedJobName, bossJobId, intentId, confirmed；必须提供精确候选人 ID、预期姓名、预期职位，confirmed 必须为 true。',
     'boss-chat-operation 字段：platform, action, conversationId, expectedCandidateName, expectedJobName, text, remark, intentId, unreadOnly, confirmed。只读 action 为 list-conversations、open-conversation、read-conversation、read-history、preview-resume；变更 action 为 send-text、remark、mark-not-fit、request-attachment-resume、accept-attachment-resume、exchange-phone、exchange-wechat，变更操作必须提供 intentId 且 confirmed=true。',

@@ -3,7 +3,11 @@ import http from 'node:http';
 import { after, afterEach, describe, it } from 'node:test';
 import { completeJsonTextFromOpenAI, llmCompletionRouteRef } from '../llm/openai-client.js';
 import { codexSessionCompletionRef } from '../llm/codex-session-provider.js';
-import { resolveLlmCompletionRoute } from '../config.js';
+import {
+  describeScoringModel,
+  resolveLlmCompletionRoute,
+  resolveScoringLlmCompletionRoute,
+} from '../config.js';
 
 interface RecordedRequest {
   method?: string;
@@ -101,6 +105,7 @@ describe('completeJsonTextFromOpenAI', () => {
       const output = await completeJsonTextFromOpenAI({
         featureName: 'llm test',
         modelEnvName: 'OPENAI_MODEL',
+        completionRoute: 'default',
         input: 'Return JSON.',
         instructions: 'Only JSON.',
         maxOutputTokens: 50,
@@ -173,9 +178,52 @@ describe('completeJsonTextFromOpenAI', () => {
         maxOutputTokens: 50,
         settings: { model: 'other-model' },
       }),
-      /cannot use request-level model settings when LLM_COMPLETION_ROUTE=codex-session/,
+      /cannot use request-level model settings when completionRoute=codex-session/,
     );
     assert.equal(called, false);
+  });
+
+  it('uses an explicit feature route independently of the global route', async () => {
+    let codexRequests = 0;
+    llmCompletionRouteRef.current = () => 'default';
+    codexSessionCompletionRef.complete = async () => {
+      codexRequests += 1;
+      return '{"provider":"codex"}';
+    };
+
+    const codexOutput = await completeJsonTextFromOpenAI({
+      featureName: 'feature route test',
+      modelEnvName: 'SCORING_MODEL',
+      completionRoute: 'codex-session',
+      input: 'Return JSON.',
+      instructions: 'Only JSON.',
+      maxOutputTokens: 50,
+    });
+    assert.equal(codexOutput, '{"provider":"codex"}');
+    assert.equal(codexRequests, 1);
+
+    const recordedRequests: RecordedRequest[] = [];
+    const server = await startMockOpenAIServer(recordedRequests);
+    llmCompletionRouteRef.current = () => 'codex-session';
+    try {
+      const defaultOutput = await completeJsonTextFromOpenAI({
+        featureName: 'feature route test',
+        modelEnvName: 'SCORING_MODEL',
+        completionRoute: 'default',
+        input: 'Return JSON.',
+        instructions: 'Only JSON.',
+        maxOutputTokens: 50,
+        settings: {
+          apiKey: 'test-key',
+          baseUrl: server.baseUrl,
+          model: 'test-model',
+        },
+      });
+      assert.equal(defaultOutput, '{"ok":true}');
+      assert.equal(codexRequests, 1);
+    } finally {
+      await server.close();
+    }
   });
 });
 
@@ -184,5 +232,24 @@ describe('LLM completion route configuration', () => {
     assert.equal(resolveLlmCompletionRoute('default'), 'default');
     assert.equal(resolveLlmCompletionRoute(' CODEX-SESSION '), 'codex-session');
     assert.throws(() => resolveLlmCompletionRoute('auto'), /must be either "default" or "codex-session"/);
+  });
+
+  it('defaults only resume scoring to codex-session and describes its actual provider', () => {
+    assert.equal(resolveScoringLlmCompletionRoute(''), 'codex-session');
+    assert.equal(resolveScoringLlmCompletionRoute(' DEFAULT '), 'default');
+    assert.throws(
+      () => resolveScoringLlmCompletionRoute('auto'),
+      /SCORING_LLM_COMPLETION_ROUTE must be either "default" or "codex-session"/,
+    );
+    assert.equal(describeScoringModel('codex-session', {}), 'codex-session:account-default');
+    assert.equal(
+      describeScoringModel('codex-session', { codexSessionModel: ' session-model ' }),
+      'codex-session:session-model',
+    );
+    assert.equal(
+      describeScoringModel('default', { openAIModel: ' scoring-api-model ' }),
+      'scoring-api-model',
+    );
+    assert.equal(describeScoringModel('default', {}), 'openai-compatible:unconfigured');
   });
 });

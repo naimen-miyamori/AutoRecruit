@@ -13,6 +13,7 @@ import { TaskScheduler } from '../server/task-scheduler.js';
 import { TaskQueue } from '../server/task-queue.js';
 import type { SearchConditionSetService } from '../search/search-condition-sets.js';
 import type { BossCapturePlanResolver } from '../server/boss-capture-snapshot.js';
+import type { BossCaptureSettingsSnapshot } from '../types/job.js';
 
 const cardOnlyMappingPath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.card-only.example.json', import.meta.url));
 const detailMappingPath = fileURLToPath(new URL('../../fixtures/talent-mapping/retail-operations.example.json', import.meta.url));
@@ -37,6 +38,8 @@ function output(): MainRunSummary {
   return {
     jobKey: 'scheduled-job',
     totalCandidates: 0,
+    captureAttempts: 0,
+    capturedCandidates: 0,
     newCandidates: 0,
     scoredCandidates: 0,
     failedCandidates: 0,
@@ -45,6 +48,27 @@ function output(): MainRunSummary {
     emailDelivered: false,
     sampleCandidateIds: [],
   };
+}
+
+function takeBossCaptureSettingsSnapshot(argv: readonly string[]): {
+  argv: string[];
+  snapshot?: BossCaptureSettingsSnapshot;
+} {
+  let visible = [...argv];
+  let snapshot: BossCaptureSettingsSnapshot | undefined;
+  const settingsIndex = visible.indexOf('--boss-capture-settings-json');
+  if (settingsIndex >= 0) {
+    const raw = visible[settingsIndex + 1];
+    assert.ok(raw);
+    snapshot = JSON.parse(raw) as BossCaptureSettingsSnapshot;
+    visible = [...visible.slice(0, settingsIndex), ...visible.slice(settingsIndex + 2)];
+  }
+  const taskIndex = visible.indexOf('--boss-capture-task-snapshot-json');
+  if (taskIndex >= 0) {
+    assert.ok(visible[taskIndex + 1]);
+    visible = [...visible.slice(0, taskIndex), ...visible.slice(taskIndex + 2)];
+  }
+  return { argv: visible, ...(snapshot ? { snapshot } : {}) };
 }
 
 function acceptingSearchConditionSetService(): SearchConditionSetService {
@@ -249,7 +273,9 @@ describe('TaskScheduler', () => {
         return runs.find((item) => item.status === 'succeeded');
       }, 'core and opt-in capture schedule');
 
-      assert.deepStrictEqual(calls, [
+      const captured = calls.map(takeBossCaptureSettingsSnapshot);
+      assert.equal(captured[1]?.snapshot?.sourceJobKey, '店长');
+      assert.deepStrictEqual(captured.map((item) => item.argv), [
         ['--platform', 'all', '--keyword', '店长'],
         ['--platform', 'all', '--keyword', '店长', '--include-boss', 'true'],
       ]);
@@ -272,6 +298,7 @@ describe('TaskScheduler', () => {
     const scheduler = new TaskScheduler({
       taskQueue: queue,
       dataDir,
+      bossCapturePlanResolver: savedBossCapturePlanResolver(() => 4),
       searchConditionSetService: {
         resolve: async (reference: unknown) => {
           resolvedReferences.push(reference);
@@ -317,7 +344,9 @@ describe('TaskScheduler', () => {
         return runs.find((run) => run.status === 'succeeded');
       }, 'scheduled condition-set round');
       assert.equal(resolvedReferences.length, 2, 'every scheduled round must recheck the same pinned revision');
-      assert.deepStrictEqual(calls, [[
+      const captured = calls.map(takeBossCaptureSettingsSnapshot);
+      assert.equal(captured[0]?.snapshot?.sourceJobKey, '全铝箱包设计-boss-position-1');
+      assert.deepStrictEqual(captured.map((item) => item.argv), [[
         '--platform', 'boss',
         '--keyword', '全铝箱包设计',
         '--boss-job-id', 'boss-position-1',
@@ -389,7 +418,12 @@ describe('TaskScheduler', () => {
         return runs.find((run) => run.status === 'succeeded' && run.runId !== firstRun.runId);
       }, 'second saved-settings round');
 
-      assert.deepStrictEqual(calls, [
+      const captured = calls.map(takeBossCaptureSettingsSnapshot);
+      assert.deepStrictEqual(captured.map((item) => item.snapshot?.sourceJobKey), [
+        '全铝箱包设计-boss-position-1',
+        '全铝箱包设计-boss-position-1',
+      ]);
+      assert.deepStrictEqual(captured.map((item) => item.argv), [
         [
           '--platform', 'boss',
           '--keyword', '全铝箱包设计',

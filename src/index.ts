@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { buildJobKey, parseJobDescription } from './parsers/jd-parser.js';
 import { config } from './config.js';
@@ -9,9 +10,23 @@ import { createProductionExtractionBoundary } from './extraction/production-extr
 import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listCapturePlatforms, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
-import { forwardBossResume } from './platforms/boss-adapter.js';
+import {
+  BossForwardUncertainError,
+  BossUnexpectedContactDialogError,
+  BossResumeDetailCloseError,
+  BossResumeIdentityVerificationError,
+  forwardBossResume,
+} from './platforms/boss-adapter.js';
 import { resolveBossCapturePlan } from './platforms/boss/capture-plan.js';
 import { acquireBossSearchLease } from './platforms/boss/search-lease.js';
+import {
+  BossSeenCandidateDetailError,
+  visitBossSeenCandidateDetail,
+} from './platforms/boss/actions/search-actions.js';
+import {
+  bossActionPaceUpperBoundMs,
+  waitBossActionPaceWithinDeadline,
+} from './platforms/boss/actions/context.js';
 import { executeBossChatOperation } from './platforms/boss-operations.js';
 import { syncBossPositions } from './platforms/boss-jobs.js';
 import { greetBossTalentCandidate, runBossTalentSearch } from './platforms/boss-talent.js';
@@ -25,7 +40,8 @@ import {
   openBossChatPage,
   openBossUnreadConversation,
 } from './platforms/boss-chat.js';
-import type { BossForwardMode, CandidatePostOpenActions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
+import { normalizeBossCaptureTaskSnapshot } from './server/task-normalizers.js';
+import type { BossForwardMode, CandidatePostOpenActions, CandidateProfileDetailOptions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
 import { answerCandidateQuestionFromJd, toJdRagSources, type JdRagSource } from './rag/jd-question-answering.js';
 import { answerQuestionWithRag } from './rag/service.js';
 import { buildApplicationFilterConditions, loadApplicationFilterInputFile, loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
@@ -34,13 +50,59 @@ import {
   type SearchConditionSetReference,
 } from './search/search-condition-sets.js';
 import { scoreResumeAgainstJob } from './scoring/score-resume.js';
+import {
+  assertBossScreeningJobRecordReady,
+  hashBossScreeningPolicy,
+  normalizeBossCaptureSettingsSnapshot,
+  resolveBossCaptureForwardingSettings,
+  resolveBossCaptureScreeningSettings,
+  resolveBossRoutingDecision,
+  scoreAndEvaluateBossScreening,
+} from './scoring/boss-screening.js';
 import { evaluatePropertyElectricianHardRequirements } from './scoring/boss-chat-hard-requirements.js';
 import { sendBossChatSummary } from './reporting/boss-chat-summary.js';
 import { exportJobResults, type ExportJobResultsSummary } from './scripts/export-job-results.js';
-import { sendJobReport, type SendJobReportSummary } from './scripts/send-job-report-email.js';
+import {
+  sendBossRoutedReports,
+  sendJobReport,
+  type SendBossRoutedReportsSummary,
+  type SendJobReportSummary,
+} from './scripts/send-job-report-email.js';
 import { loadTalentMappingPlanFile } from './talent-mapping/plan.js';
 import { runTalentMappingWorkflow } from './talent-mapping/workflow.js';
-import { BossAutomationSettings, BossChatReviewItem, BossChatReviewRun, BossForwardingSettings, CandidateListItem, CandidateResume, JobRecord, JobSearchSource, NormalizedJob, parseEmailList, ReportDeliveryOptions, resolveReportDelivery, RunResult, SearchCondition, SearchSubscriptionSummary } from './types/job.js';
+import {
+  BossAutomationSettings,
+  BossCaptureSettingsSnapshot,
+  BossCaptureTaskSnapshot,
+  BossCandidateRoutingArtifact,
+  BossChatReviewItem,
+  BossChatReviewRun,
+  BossForwardingDeliveryState,
+  BossForwardingOutboxEntry,
+  BossForwardingSettings,
+  BossForwardingStatus,
+  BossRoutingDecision,
+  BossScreeningWorkItem,
+  BossScreeningSettings,
+  CaptureFailureStage,
+  CandidateListItem,
+  CandidateResume,
+  CandidateScoreArtifact,
+  ResumeDomSnapshot,
+  JobRecord,
+  JobSearchSource,
+  NormalizedJob,
+  parseEmailList,
+  ReportDeliveryOptions,
+  resolveReportDelivery,
+  RunResult,
+  SearchCondition,
+  SearchSubscriptionSummary,
+  RunCaptureFailure,
+  RunProcessingFailure,
+  BossSeenViewSyncFailure,
+  BossSeenViewSyncResult,
+} from './types/job.js';
 import {
   isTalentMappingCorePlatform,
   type TalentMappingPlatformSelection,
@@ -60,9 +122,33 @@ import type {
 
 interface CandidateProcessResult {
   candidateId: string;
-  markAsSeen: boolean;
   captured: boolean;
+  detailVerified: boolean;
+  detailLifecycle: BossDetailLifecycleState;
+  failureStage?: CaptureFailureStage;
   failureReason?: string;
+}
+
+interface BossDetailLifecycleState {
+  detailOpened: boolean;
+  detailIdentityVerified: boolean;
+  detailClosed: boolean;
+}
+
+function createBossDetailLifecycleOptions(): CandidateProfileDetailOptions {
+  const cleanupReserveMs = Math.max(1_000, bossActionPaceUpperBoundMs());
+  const timeoutMs = Math.max(config.playwright.resumeDetailTimeoutMs, cleanupReserveMs + 1);
+  return {
+    deadline: Date.now() + timeoutMs,
+    cleanupReserveMs,
+  };
+}
+
+interface BossScreeningCandidateResult {
+  candidateId: string;
+  scoreArtifact: CandidateScoreArtifact;
+  routingArtifact: BossCandidateRoutingArtifact;
+  forwardingOutbox: BossForwardingOutboxEntry;
 }
 
 interface CandidateScoringResult {
@@ -91,6 +177,20 @@ interface RunnableJobInput extends ReportDeliveryOptions {
   liepinForwardContact?: string;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+  bossForwardCc?: string[];
+  /** Optional so an omitted run reuses the saved Boss screening switch. */
+  bossScreeningEnabled?: boolean;
+  /** Absolute path for CLI inputs; jobs-file paths are resolved per item. */
+  bossScreeningPolicyFile?: string;
+  bossSecondaryForwardMode?: BossForwardMode;
+  bossSecondaryForwardRecipient?: string;
+  bossSecondaryForwardCc?: string[];
+  bossSecondaryEmail?: string;
+  bossSecondaryCc?: string[];
+  /** Internal HTTP/scheduler snapshot; ordinary CLI and jobs files omit it. */
+  bossCaptureSettingsSnapshot?: BossCaptureSettingsSnapshot;
+  /** Private server snapshot carried through the queue runner. */
+  bossCaptureTaskSnapshot?: BossCaptureTaskSnapshot;
   searchSource: SearchSource;
   searchSourceExplicit: boolean;
   applicationFilterInputFilePath?: string;
@@ -111,6 +211,14 @@ interface BatchCliInput extends ReportDeliveryOptions {
   liepinForwardContact?: string;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+  bossForwardCc?: string[];
+  bossScreeningEnabled?: boolean;
+  bossScreeningPolicyFile?: string;
+  bossSecondaryForwardMode?: BossForwardMode;
+  bossSecondaryForwardRecipient?: string;
+  bossSecondaryForwardCc?: string[];
+  bossSecondaryEmail?: string;
+  bossSecondaryCc?: string[];
   searchSource: SearchSource;
   searchSourceExplicit: boolean;
   applicationFilterInputFilePath?: string;
@@ -153,6 +261,7 @@ interface BossAutoChatCliInput {
   replyToUnqualifiedCandidates: boolean;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+  bossForwardCc?: string[];
   summaryEmail?: string;
   summaryCcEmails?: string[];
   syncJobsBeforeReview: boolean;
@@ -201,6 +310,16 @@ interface SinglePlatformCliInput extends ReportDeliveryOptions {
   liepinForwardContact?: string;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+  bossForwardCc?: string[];
+  bossScreeningEnabled?: boolean;
+  bossScreeningPolicyFile?: string;
+  bossSecondaryForwardMode?: BossForwardMode;
+  bossSecondaryForwardRecipient?: string;
+  bossSecondaryForwardCc?: string[];
+  bossSecondaryEmail?: string;
+  bossSecondaryCc?: string[];
+  bossCaptureSettingsSnapshot?: BossCaptureSettingsSnapshot;
+  bossCaptureTaskSnapshot?: BossCaptureTaskSnapshot;
   searchSource: SearchSource;
   searchSourceExplicit: boolean;
   applicationFilterInputFilePath?: string;
@@ -214,6 +333,9 @@ export interface MainRunSummary {
   /** Lightweight audit of the effective Boss search. */
   searchExecution?: RunResult['searchExecution'];
   totalCandidates: number;
+  captureAttempts: number;
+  capturedCandidates: number;
+  /** Deprecated alias retained for task/API compatibility; equals capturedCandidates. */
   newCandidates: number;
   scoredCandidates: number;
   failedCandidates: number;
@@ -225,6 +347,12 @@ export interface MainRunSummary {
   emailRecipient?: string;
   emailSubject?: string;
   emailError?: string;
+  /** Boss-only post-score routing and forwarding state for operator visibility. */
+  bossRouting?: RunResult['bossRouting'];
+  /** Present only for a Boss run with enabled post-score routing. */
+  reportDeliveries?: SendBossRoutedReportsSummary['reportDeliveries'];
+  /** Present for a Boss capture run that synchronised already-seen cards. */
+  bossSeenViewSync?: RunResult['bossSeenViewSync'];
   sampleCandidateIds: string[];
 }
 
@@ -275,6 +403,7 @@ export const extractionBoundary = createProductionExtractionBoundary();
 export const openSubscribeSearchRef = { fn: fiftyOneJobAdapter.openSubscribeSearch };
 export const openDirectSearchRef = { fn: fiftyOneJobAdapter.openDirectSearch };
 export const openResumeDetailRef = { fn: fiftyOneJobAdapter.openResumeDetail };
+export const visitBossSeenCandidateDetailRef = { fn: visitBossSeenCandidateDetail };
 export const extractCandidateListRef = {
   fn: extractionBoundary.extractCandidateListFromPage,
 };
@@ -289,8 +418,11 @@ export const extractResumeFromPageRef = {
   fn: extractionBoundary.extractResumeFromPage,
 };
 export const scoreResumeAgainstJobRef = { fn: scoreResumeAgainstJob };
+/** Test seam for the combined Boss score-and-negative-condition evaluation. */
+export const scoreAndEvaluateBossScreeningRef = { fn: scoreAndEvaluateBossScreening };
 export const exportJobResultsRef = { fn: exportJobResults };
 export const sendJobReportRef = { fn: sendJobReport };
+export const sendBossRoutedReportsRef = { fn: sendBossRoutedReports };
 export const ensureAuthenticatedBrowserSessionRef = { fn: ensureAuthenticatedBrowserSession };
 export const closeBrowserSessionRef = { fn: closeBrowserSession };
 export const runSearchSubscriptionWorkflowRef = { fn: runSearchSubscriptionWorkflow };
@@ -471,7 +603,10 @@ function parseTalentMappingStage(value: string | undefined): TalentMappingStage 
   throw new Error('--mapping-stage must be scan, enrich, or all');
 }
 
-function parseBossForwardMode(value: string | undefined): BossForwardMode | undefined {
+function parseBossForwardMode(
+  value: string | undefined,
+  argumentName = '--boss-forward-mode',
+): BossForwardMode | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -480,7 +615,7 @@ function parseBossForwardMode(value: string | undefined): BossForwardMode | unde
     return value;
   }
 
-  throw new Error('--boss-forward-mode must be colleague or email');
+  throw new Error(`${argumentName} must be colleague or email`);
 }
 
 function parseBossChatScoreThreshold(value: string | undefined): number {
@@ -521,7 +656,7 @@ function parseBossGreetSource(value: string | undefined): BossGreetInput['source
   throw new Error('--boss-greet-source must be recommend, deep-search, or normal-search');
 }
 
-function parseBatchCcEmails(value: unknown, itemIndex: number): string[] | undefined {
+function parseBatchEmailList(value: unknown, fieldName: string, itemIndex: number): string[] | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -534,7 +669,21 @@ function parseBatchCcEmails(value: unknown, itemIndex: number): string[] | undef
     return parseEmailList(value.join(','));
   }
 
-  throw new Error(`Invalid jobs-file item at index ${itemIndex}: cc must be a string or string array`);
+  throw new Error(`Invalid jobs-file item at index ${itemIndex}: ${fieldName} must be a string or string array`);
+}
+
+function parseBatchCcEmails(value: unknown, itemIndex: number): string[] | undefined {
+  return parseBatchEmailList(value, 'cc', itemIndex);
+}
+
+function parseBatchOptionalBoolean(value: unknown, fieldName: string, itemIndex: number): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'boolean') {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: ${fieldName} must be a boolean`);
+  }
+  return value;
 }
 
 function parseOptionalString(value: unknown, fieldName: string, itemIndex: number): string | undefined {
@@ -609,6 +758,40 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   const itemApplicationFilterInputFile = parseOptionalString(item.applicationFilterInputFile, 'applicationFilterInputFile', itemIndex);
   const itemSearchConditionSetRefs = parseBatchSearchConditionSetReferences(item.searchConditionSets, itemIndex, input);
   const itemCcEmails = parseBatchCcEmails(item.cc, itemIndex);
+  const itemBossForwardModeValue = parseOptionalString(item.bossForwardMode, 'bossForwardMode', itemIndex);
+  const itemBossForwardMode = itemBossForwardModeValue === undefined
+    ? undefined
+    : parseBossForwardMode(itemBossForwardModeValue.trim(), `jobs-file item ${itemIndex}.bossForwardMode`);
+  const itemBossForwardRecipient = parseOptionalString(item.bossForwardRecipient, 'bossForwardRecipient', itemIndex)?.trim();
+  const itemBossForwardCc = parseBatchEmailList(item.bossForwardCc, 'bossForwardCc', itemIndex);
+  const itemBossScreeningEnabled = parseBatchOptionalBoolean(item.bossScreeningEnabled, 'bossScreeningEnabled', itemIndex);
+  const itemBossScreeningPolicyFile = parseOptionalString(item.bossScreeningPolicyFile, 'bossScreeningPolicyFile', itemIndex);
+  const itemBossSecondaryForwardModeValue = parseOptionalString(item.bossSecondaryForwardMode, 'bossSecondaryForwardMode', itemIndex);
+  const itemBossSecondaryForwardMode = itemBossSecondaryForwardModeValue === undefined
+    ? undefined
+    : parseBossForwardMode(itemBossSecondaryForwardModeValue.trim(), `jobs-file item ${itemIndex}.bossSecondaryForwardMode`);
+  const itemBossSecondaryForwardRecipient = parseOptionalString(item.bossSecondaryForwardRecipient, 'bossSecondaryForwardRecipient', itemIndex)?.trim();
+  const itemBossSecondaryEmail = parseOptionalString(item.bossSecondaryEmail, 'bossSecondaryEmail', itemIndex)?.trim();
+  const itemBossSecondaryCc = parseBatchEmailList(item.bossSecondaryCc, 'bossSecondaryCc', itemIndex);
+  const itemBossSecondaryForwardCc = parseBatchEmailList(item.bossSecondaryForwardCc, 'bossSecondaryForwardCc', itemIndex);
+  const itemBossCaptureSettingsSnapshot = item.bossCaptureSettingsSnapshot === undefined
+    ? undefined
+    : (() => {
+      try {
+        return normalizeBossCaptureSettingsSnapshot(item.bossCaptureSettingsSnapshot);
+      } catch (error) {
+        throw new Error(`Invalid jobs-file item at index ${itemIndex}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
+  const itemBossCaptureTaskSnapshot = item.bossCaptureTaskSnapshot === undefined
+    ? undefined
+    : (() => {
+      try {
+        return normalizeBossCaptureTaskSnapshot(item.bossCaptureTaskSnapshot);
+      } catch (error) {
+        throw new Error(`Invalid jobs-file item at index ${itemIndex}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
   const searchSource = parseSearchSource(itemSearchSourceValue, `jobs-file item ${itemIndex}.searchSource`);
   const hasItemSearchSource = item.searchSource !== undefined;
   const effectiveSearchSource = item.searchSource === undefined ? input.searchSource : searchSource;
@@ -622,6 +805,20 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
       ...input.searchConditionSetRefs,
       ...itemSearchConditionSetRefs,
     };
+  const effectiveBossScreeningEnabled = itemBossScreeningEnabled ?? input.bossScreeningEnabled;
+  const effectiveBossScreeningPolicyFile = itemBossScreeningPolicyFile
+    ? path.resolve(path.dirname(path.resolve(input.jobsFilePath)), itemBossScreeningPolicyFile)
+    : input.bossScreeningPolicyFile;
+  const effectiveBossForwardMode = itemBossForwardMode ?? input.bossForwardMode;
+  const effectiveBossForwardRecipient = itemBossForwardRecipient ?? input.bossForwardRecipient;
+  const effectiveBossForwardCc = item.bossForwardCc === undefined ? input.bossForwardCc : itemBossForwardCc;
+  const effectiveBossSecondaryForwardMode = itemBossSecondaryForwardMode ?? input.bossSecondaryForwardMode;
+  const effectiveBossSecondaryForwardRecipient = itemBossSecondaryForwardRecipient ?? input.bossSecondaryForwardRecipient;
+  const effectiveBossSecondaryEmail = itemBossSecondaryEmail ?? input.bossSecondaryEmail;
+  const effectiveBossSecondaryCc = item.bossSecondaryCc === undefined ? input.bossSecondaryCc : itemBossSecondaryCc;
+  const effectiveBossSecondaryForwardCc = item.bossSecondaryForwardCc === undefined
+    ? input.bossSecondaryForwardCc
+    : itemBossSecondaryForwardCc;
 
   if (!keyword) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: keyword must be a non-empty string`);
@@ -635,6 +832,37 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   }
   if ((bossJobId || bossSearchKeyword) && !listSelectedCapturePlatforms(input.platform, input.includeBoss).includes('boss')) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossJobId and bossSearchKeyword require a selected Boss capture stage`);
+  }
+
+  const hasItemBossScreeningInput = item.bossScreeningEnabled !== undefined
+    || item.bossScreeningPolicyFile !== undefined
+    || item.bossSecondaryForwardMode !== undefined
+    || item.bossSecondaryForwardRecipient !== undefined
+    || item.bossSecondaryEmail !== undefined
+    || item.bossSecondaryCc !== undefined
+    || item.bossSecondaryForwardCc !== undefined
+    || item.bossCaptureSettingsSnapshot !== undefined
+    || item.bossCaptureTaskSnapshot !== undefined;
+  const hasItemBossForwardingInput = item.bossForwardMode !== undefined
+    || item.bossForwardRecipient !== undefined
+    || item.bossForwardCc !== undefined;
+  if (hasItemBossForwardingInput && !listSelectedCapturePlatforms(input.platform, input.includeBoss).includes('boss')) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: Boss forwarding fields require a selected Boss capture stage`);
+  }
+  if (hasItemBossScreeningInput && !listSelectedCapturePlatforms(input.platform, input.includeBoss).includes('boss')) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: Boss screening fields require a selected Boss capture stage`);
+  }
+  if ((itemBossForwardMode === undefined) !== (itemBossForwardRecipient === undefined)) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossForwardMode and bossForwardRecipient must be provided together`);
+  }
+  if ((effectiveBossSecondaryForwardMode === undefined) !== (effectiveBossSecondaryForwardRecipient === undefined)) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossSecondaryForwardMode and bossSecondaryForwardRecipient must be provided together`);
+  }
+  if (itemBossSecondaryForwardCc?.length && effectiveBossSecondaryForwardMode === 'colleague') {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossSecondaryForwardCc requires bossSecondaryForwardMode email`);
+  }
+  if (itemBossForwardCc?.length && effectiveBossForwardMode === 'colleague') {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossForwardCc requires bossForwardMode email`);
   }
 
   if (jd !== undefined && jdFile !== undefined) {
@@ -664,8 +892,18 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     includeViewedCandidates: input.includeViewedCandidates,
     includeBoss: input.includeBoss,
     liepinForwardContact: input.liepinForwardContact,
-    bossForwardMode: input.bossForwardMode,
-    bossForwardRecipient: input.bossForwardRecipient,
+    bossForwardMode: effectiveBossForwardMode,
+    bossForwardRecipient: effectiveBossForwardRecipient,
+    bossForwardCc: effectiveBossForwardCc,
+    bossScreeningEnabled: effectiveBossScreeningEnabled,
+    bossScreeningPolicyFile: effectiveBossScreeningPolicyFile,
+    bossSecondaryForwardMode: effectiveBossSecondaryForwardMode,
+    bossSecondaryForwardRecipient: effectiveBossSecondaryForwardRecipient,
+    bossSecondaryEmail: effectiveBossSecondaryEmail,
+    bossSecondaryCc: effectiveBossSecondaryCc,
+    bossSecondaryForwardCc: effectiveBossSecondaryForwardCc,
+    bossCaptureSettingsSnapshot: itemBossCaptureSettingsSnapshot,
+    bossCaptureTaskSnapshot: itemBossCaptureTaskSnapshot,
     searchSource: effectiveSearchSource,
     searchSourceExplicit: effectiveSearchSourceExplicit,
     applicationFilterInputFilePath: effectiveApplicationFilterInputFilePath,
@@ -715,6 +953,16 @@ function assertBossCaptureArgumentsAllowed(input: {
   throw new Error('--boss-job-id, --boss-search-keyword, and --boss-search-condition-set require --platform boss or --platform all --include-boss true');
 }
 
+function assertBossScreeningArgumentsAllowed(input: {
+  platform: CliPlatformSelection;
+  includeBoss: boolean;
+  hasScreeningInput: boolean;
+}): void {
+  if (!input.hasScreeningInput) return;
+  if (input.platform === 'boss' || (input.platform === 'all' && input.includeBoss)) return;
+  throw new Error('--boss-screening-enabled, --boss-screening-policy-file, --boss-secondary-forward-mode, --boss-secondary-forward-recipient, --boss-secondary-forward-cc, --boss-secondary-email, and --boss-secondary-cc require --platform boss or --platform all --include-boss true');
+}
+
 function parseArgs(argv: readonly string[]): CliInput {
   const values = new Map<string, string>();
   const flagPresence = new Set<string>();
@@ -759,6 +1007,57 @@ function parseArgs(argv: readonly string[]): CliInput {
   const liepinForwardContact = values.get('liepin-forward-contact')?.trim();
   const bossForwardMode = parseBossForwardMode(values.get('boss-forward-mode')?.trim());
   const bossForwardRecipient = values.get('boss-forward-recipient')?.trim();
+  const bossForwardCc = flagPresence.has('boss-forward-cc')
+    ? parseEmailList(values.get('boss-forward-cc'))
+    : undefined;
+  const bossScreeningEnabled = flagPresence.has('boss-screening-enabled')
+    ? parseOptionalBoolean(values.get('boss-screening-enabled'), '--boss-screening-enabled')
+    : undefined;
+  const bossScreeningPolicyFile = values.get('boss-screening-policy-file')
+    ? path.resolve(values.get('boss-screening-policy-file')!)
+    : undefined;
+  const bossSecondaryForwardMode = parseBossForwardMode(
+    values.get('boss-secondary-forward-mode')?.trim(),
+    '--boss-secondary-forward-mode',
+  );
+  const bossSecondaryForwardRecipient = values.get('boss-secondary-forward-recipient')?.trim();
+  const bossSecondaryForwardCc = flagPresence.has('boss-secondary-forward-cc')
+    ? parseEmailList(values.get('boss-secondary-forward-cc'))
+    : undefined;
+  const bossSecondaryEmail = values.get('boss-secondary-email')?.trim();
+  const bossSecondaryCc = flagPresence.has('boss-secondary-cc')
+    ? parseEmailList(values.get('boss-secondary-cc'))
+    : undefined;
+  const bossCaptureSettingsSnapshot = flagPresence.has('boss-capture-settings-json')
+    ? (() => {
+      try {
+        return normalizeBossCaptureSettingsSnapshot(JSON.parse(values.get('boss-capture-settings-json')!));
+      } catch (error) {
+        throw new Error(`Invalid --boss-capture-settings-json: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })()
+    : undefined;
+  const bossCaptureTaskSnapshot = flagPresence.has('boss-capture-task-snapshot-json')
+    ? (() => {
+      try {
+        return normalizeBossCaptureTaskSnapshot(JSON.parse(values.get('boss-capture-task-snapshot-json')!));
+      } catch (error) {
+        throw new Error(`Invalid --boss-capture-task-snapshot-json: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })()
+    : undefined;
+  const hasBossScreeningInput = flagPresence.has('boss-screening-enabled')
+    || flagPresence.has('boss-screening-policy-file')
+    || flagPresence.has('boss-secondary-forward-mode')
+    || flagPresence.has('boss-secondary-forward-recipient')
+    || flagPresence.has('boss-secondary-email')
+    || flagPresence.has('boss-secondary-cc')
+    || flagPresence.has('boss-secondary-forward-cc')
+    || flagPresence.has('boss-capture-settings-json')
+    || flagPresence.has('boss-capture-task-snapshot-json');
+  const hasBossForwardingInput = flagPresence.has('boss-forward-mode')
+    || flagPresence.has('boss-forward-recipient')
+    || flagPresence.has('boss-forward-cc');
   const bossJobId = values.get('boss-job-id')?.trim();
   const bossSearchKeyword = values.get('boss-search-keyword')?.trim();
   const bossSearchConditionSetRef = parseBossSearchConditionSetReference(values.get('boss-search-condition-set'));
@@ -836,6 +1135,29 @@ function parseArgs(argv: readonly string[]): CliInput {
   if (flagPresence.has('boss-forward-recipient') && !bossForwardRecipient) {
     throw new Error('--boss-forward-recipient must be a non-empty string');
   }
+  if (flagPresence.has('boss-forward-cc') && bossForwardCc?.length && bossForwardMode === 'colleague') {
+    throw new Error('--boss-forward-cc requires --boss-forward-mode email');
+  }
+
+  if (flagPresence.has('boss-screening-policy-file') && !bossScreeningPolicyFile) {
+    throw new Error('--boss-screening-policy-file must be a non-empty path');
+  }
+
+  if (flagPresence.has('boss-secondary-forward-mode') !== flagPresence.has('boss-secondary-forward-recipient')) {
+    throw new Error('--boss-secondary-forward-mode and --boss-secondary-forward-recipient must be provided together');
+  }
+
+  if (flagPresence.has('boss-secondary-forward-recipient') && !bossSecondaryForwardRecipient) {
+    throw new Error('--boss-secondary-forward-recipient must be a non-empty string');
+  }
+
+  if (flagPresence.has('boss-secondary-email') && !bossSecondaryEmail) {
+    throw new Error('--boss-secondary-email must be a non-empty email address');
+  }
+
+  if (flagPresence.has('boss-secondary-forward-cc') && bossSecondaryForwardCc?.length && bossSecondaryForwardMode === 'colleague') {
+    throw new Error('--boss-secondary-forward-cc requires --boss-secondary-forward-mode email');
+  }
 
   if (flagPresence.has('boss-job-id') && !bossJobId) {
     throw new Error('--boss-job-id must be a non-empty string');
@@ -849,9 +1171,10 @@ function parseArgs(argv: readonly string[]): CliInput {
     throw new Error('--include-boss can only be used with --platform all');
   }
 
-  if (bossForwardMode && platform !== 'boss' && !(platform === 'all' && includeBoss)) {
-    throw new Error('--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss or --platform all --include-boss true');
+  if (hasBossForwardingInput && platform !== 'boss' && !(platform === 'all' && includeBoss)) {
+    throw new Error('--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss or --platform all --include-boss true; --boss-forward-cc follows the same boundary');
   }
+  assertBossScreeningArgumentsAllowed({ platform, includeBoss, hasScreeningInput: hasBossScreeningInput });
 
   if (talentMappingFilePath) {
     const allowedFlags = new Set([
@@ -1051,6 +1374,13 @@ function parseArgs(argv: readonly string[]): CliInput {
       'boss-job-id',
       'boss-search-keyword',
       'boss-search-condition-set',
+      'boss-screening-enabled',
+      'boss-screening-policy-file',
+      'boss-secondary-forward-mode',
+      'boss-secondary-forward-recipient',
+      'boss-secondary-forward-cc',
+      'boss-secondary-email',
+      'boss-secondary-cc',
     ].filter((flag) => flagPresence.has(flag));
     if (incompatibleFlags.length > 0) {
       throw new Error(`--boss-auto-chat cannot be combined with ${incompatibleFlags.map((flag) => `--${flag}`).join(', ')}`);
@@ -1064,6 +1394,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       replyToUnqualifiedCandidates: bossChatReplyUnqualified,
       bossForwardMode,
       bossForwardRecipient,
+      bossForwardCc,
       summaryEmail: bossChatSummaryEmail,
       summaryCcEmails: bossChatSummaryCcEmails,
       syncJobsBeforeReview: bossSyncJobsBeforeReview,
@@ -1091,8 +1422,8 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error('--jd-question must be a non-empty string');
     }
 
-    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || flagPresence.has('search-condition-set') || saveSearchSubscription || searchSubscriptionName) {
-      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --search-source, --application-filter-input-file, --search-condition-set, --save-search-subscription, or --search-subscription-name');
+    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || hasBossForwardingInput || hasBossScreeningInput || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || flagPresence.has('search-condition-set') || saveSearchSubscription || searchSubscriptionName) {
+      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-forward-cc, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --search-source, --application-filter-input-file, --search-condition-set, --save-search-subscription, or --search-subscription-name');
     }
 
     if (jobDescriptionText && jobDescriptionFilePath) {
@@ -1114,8 +1445,8 @@ function parseArgs(argv: readonly string[]): CliInput {
   }
 
   if (searchSubscriptionFilePath) {
-    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || flagPresence.has('boss-forward-mode') || flagPresence.has('boss-forward-recipient') || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
-      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --search-source, or --application-filter-input-file');
+    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || hasBossForwardingInput || hasBossScreeningInput || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
+      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-forward-cc, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --search-source, or --application-filter-input-file');
     }
 
     const searchConditionSetRefs = parseSearchConditionSetReferences(values.get('search-condition-set'), {
@@ -1140,6 +1471,9 @@ function parseArgs(argv: readonly string[]): CliInput {
   }
 
   if (jobsFilePath) {
+    if (bossCaptureSettingsSnapshot || bossCaptureTaskSnapshot) {
+      throw new Error('--boss-capture-settings-json and --boss-capture-task-snapshot-json are reserved for a single queued Boss stage; batch snapshots belong inside the jobs snapshot');
+    }
     if (flagPresence.has('keyword') || flagPresence.has('jd') || flagPresence.has('jd-file')) {
       throw new Error('--jobs-file cannot be combined with --keyword, --jd, or --jd-file');
     }
@@ -1173,6 +1507,14 @@ function parseArgs(argv: readonly string[]): CliInput {
       liepinForwardContact,
       bossForwardMode,
       bossForwardRecipient,
+      bossForwardCc,
+      bossScreeningEnabled,
+      bossScreeningPolicyFile,
+      bossSecondaryForwardMode,
+      bossSecondaryForwardRecipient,
+      bossSecondaryForwardCc,
+      bossSecondaryEmail,
+      bossSecondaryCc,
       searchSource,
       searchSourceExplicit,
       applicationFilterInputFilePath,
@@ -1232,6 +1574,16 @@ function parseArgs(argv: readonly string[]): CliInput {
     liepinForwardContact,
     bossForwardMode,
     bossForwardRecipient,
+    bossForwardCc,
+    bossScreeningEnabled,
+    bossScreeningPolicyFile,
+    bossSecondaryForwardMode,
+    bossSecondaryForwardRecipient,
+    bossSecondaryForwardCc,
+    bossSecondaryEmail,
+    bossSecondaryCc,
+    bossCaptureSettingsSnapshot,
+    bossCaptureTaskSnapshot,
     searchSource,
     searchSourceExplicit,
     applicationFilterInputFilePath,
@@ -1254,8 +1606,20 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
     jobDescriptionFilePath: input.jobDescriptionFilePath,
     includeViewedCandidates: input.includeViewedCandidates,
     liepinForwardContact: input.liepinForwardContact,
-    bossForwardMode: input.bossForwardMode,
-    bossForwardRecipient: input.bossForwardRecipient,
+    ...(platform === 'boss' ? {
+      bossForwardMode: input.bossForwardMode,
+      bossForwardRecipient: input.bossForwardRecipient,
+      bossForwardCc: input.bossForwardCc,
+      bossScreeningEnabled: input.bossScreeningEnabled,
+      bossScreeningPolicyFile: input.bossScreeningPolicyFile,
+      bossSecondaryForwardMode: input.bossSecondaryForwardMode,
+      bossSecondaryForwardRecipient: input.bossSecondaryForwardRecipient,
+      bossSecondaryForwardCc: input.bossSecondaryForwardCc,
+      bossSecondaryEmail: input.bossSecondaryEmail,
+      bossSecondaryCc: input.bossSecondaryCc,
+      bossCaptureSettingsSnapshot: input.bossCaptureSettingsSnapshot,
+      bossCaptureTaskSnapshot: input.bossCaptureTaskSnapshot,
+    } : {}),
     searchSource: input.searchSource,
     searchSourceExplicit: input.searchSourceExplicit,
     applicationFilterInputFilePath: input.applicationFilterInputFilePath,
@@ -1323,6 +1687,620 @@ function formatResumeSnapshot(resume: CandidateResume): string {
   return `${lines.filter((line, index, values) => line || values[index - 1]).join('\n')}\n`;
 }
 
+function createBossForwardingOutboxEntry(
+  candidateId: string,
+  policyHash: string,
+  decision: BossRoutingDecision,
+  forwarding: BossForwardingSettings,
+  now: string,
+  metadata?: {
+    routingDecisionId?: string;
+    routingFacts?: BossForwardingOutboxEntry['routingFacts'];
+  },
+): BossForwardingOutboxEntry {
+  const deliveries = createBossForwardingDeliveries(forwarding, 'pending');
+  return {
+    candidateId,
+    workflow: 'post-score',
+    ...(metadata?.routingDecisionId ? { routingDecisionId: metadata.routingDecisionId } : {}),
+    ...(metadata?.routingFacts ? { routingFacts: metadata.routingFacts } : {}),
+    policyHash,
+    classification: decision.classification,
+    audience: decision.audience,
+    createdAt: now,
+    updatedAt: now,
+    forwarding: {
+      status: 'pending',
+      mode: forwarding.mode,
+      recipient: forwarding.recipient,
+      ...(forwarding.ccEmails === undefined ? {} : { ccEmails: forwarding.ccEmails }),
+      deliveries,
+    },
+  };
+}
+
+function createBossRoutingDecisionId(input: {
+  jobKey: string;
+  candidateId: string;
+  policyHash: string;
+  scoredAt?: string;
+  decision: BossRoutingDecision;
+}): string {
+  return createHash('sha256').update(JSON.stringify({
+    jobKey: input.jobKey,
+    candidateId: input.candidateId,
+    policyHash: input.policyHash,
+    scoredAt: input.scoredAt,
+    classification: input.decision.classification,
+    audience: input.decision.audience,
+    matchedRequirementIds: input.decision.matchedRequirementIds,
+    unknownRequirementIds: input.decision.unknownRequirementIds,
+    reason: input.decision.reason,
+  })).digest('hex');
+}
+
+/**
+ * Disabled screening keeps the historical "forward before parse" order, but
+ * it still needs the same durable per-recipient state as post-score routing.
+ * The synthetic policy hash identifies this pre-capture workflow and prevents
+ * an entry from being interpreted as a screening decision during recovery.
+ */
+const BOSS_PRE_CAPTURE_FORWARDING_POLICY_HASH = 'boss-pre-capture-forwarding-v1';
+
+function createBossPreCaptureForwardingOutboxEntry(
+  candidateId: string,
+  forwarding: BossForwardingSettings,
+  now: string,
+): BossForwardingOutboxEntry {
+  const decision: BossRoutingDecision = {
+    classification: 'qualified',
+    audience: 'primary',
+    matchedRequirementIds: [],
+    unknownRequirementIds: [],
+    reason: 'Boss screening disabled; legacy pre-capture forwarding.',
+  };
+  return {
+    ...createBossForwardingOutboxEntry(
+      candidateId,
+      BOSS_PRE_CAPTURE_FORWARDING_POLICY_HASH,
+      decision,
+      forwarding,
+      now,
+    ),
+    workflow: 'pre-capture',
+  };
+}
+
+function createBossForwardingDeliveries(
+  forwarding: Pick<BossForwardingSettings, 'mode' | 'recipient' | 'ccEmails'>,
+  status: BossForwardingStatus,
+): BossForwardingDeliveryState[] {
+  const primaryRecipient = forwarding.recipient.trim();
+  if (!primaryRecipient) {
+    throw new Error('Boss forwarding recipient must be non-empty.');
+  }
+  const ccEmails = forwarding.ccEmails?.map((email) => email.trim()).filter(Boolean) ?? [];
+  if (forwarding.mode !== 'email' && ccEmails.length > 0) {
+    throw new Error('Boss forward CC is only supported for email forwarding.');
+  }
+
+  const deliveries: BossForwardingDeliveryState[] = [];
+  const seenRecipients = new Set<string>();
+  const addDelivery = (role: BossForwardingDeliveryState['role'], recipient: string) => {
+    const key = forwarding.mode === 'email' ? recipient.toLocaleLowerCase('en-US') : recipient;
+    if (seenRecipients.has(key)) return;
+    seenRecipients.add(key);
+    deliveries.push({ role, recipient, status });
+  };
+  addDelivery('recipient', primaryRecipient);
+  for (const ccEmail of ccEmails) addDelivery('cc', ccEmail);
+  return deliveries;
+}
+
+function aggregateBossForwardingStatus(deliveries: readonly BossForwardingDeliveryState[]): BossForwardingStatus {
+  if (deliveries.length > 0 && deliveries.every((delivery) => delivery.status === 'superseded')) return 'superseded';
+  if (deliveries.some((delivery) => delivery.status === 'sending')) return 'sending';
+  // Uncertain means at least one external confirmation may already have been
+  // accepted. Keep that safety signal visible even if another target remains
+  // retryable; retry selection is deliberately based on the delivery rows.
+  if (deliveries.some((delivery) => delivery.status === 'uncertain')) return 'uncertain';
+  if (deliveries.some((delivery) => delivery.status === 'retryable-failed')) return 'retryable-failed';
+  if (deliveries.some((delivery) => delivery.status === 'pending')) return 'pending';
+  if (deliveries.some((delivery) => delivery.status === 'superseded')) return 'superseded';
+  return 'sent';
+}
+
+function latestIsoTimestamp(values: Array<string | undefined>): string | undefined {
+  return values.filter((value): value is string => Boolean(value)).sort().at(-1);
+}
+
+// Filesystem artifact names are ordered by decidedAt. Keep decisions from a
+// fast, zero-pacing test or live loop strictly monotonic so report selection
+// cannot depend on directory ordering when several candidates finish inside
+// one millisecond.
+let lastBossRoutingTimestampMs = 0;
+
+function createMonotonicBossRoutingTimestamp(): string {
+  const next = Math.max(Date.now(), lastBossRoutingTimestampMs + 1);
+  lastBossRoutingTimestampMs = next;
+  return new Date(next).toISOString();
+}
+
+function composeBossForwardingState(
+  base: BossForwardingOutboxEntry['forwarding'],
+  deliveries: BossForwardingDeliveryState[],
+  fallbackError?: string,
+): BossForwardingOutboxEntry['forwarding'] {
+  const status = aggregateBossForwardingStatus(deliveries);
+  const attemptedAt = latestIsoTimestamp(deliveries.map((delivery) => delivery.attemptedAt));
+  const completedAt = status === 'sent'
+    ? latestIsoTimestamp(deliveries.map((delivery) => delivery.completedAt))
+    : undefined;
+  const error = deliveries.find((delivery) => delivery.status === 'uncertain')?.error
+    ?? deliveries.find((delivery) => delivery.status === 'retryable-failed')?.error
+    ?? fallbackError;
+  return {
+    status,
+    mode: base.mode,
+    recipient: base.recipient,
+    ...(base.ccEmails === undefined ? {} : { ccEmails: base.ccEmails }),
+    deliveries,
+    ...(attemptedAt ? { attemptedAt } : {}),
+    ...(completedAt ? { completedAt } : {}),
+    ...(error && status !== 'sent' ? { error } : {}),
+  };
+}
+
+function migrateBossForwardingState(
+  forwarding: BossForwardingOutboxEntry['forwarding'],
+): BossForwardingOutboxEntry['forwarding'] {
+  if (forwarding.deliveries && forwarding.deliveries.length > 0) {
+    return composeBossForwardingState(forwarding, forwarding.deliveries, forwarding.error);
+  }
+
+  // Legacy entries represented the entire configured target set with one
+  // status. A pre-confirmation pending/failure is safe to replay. A prior
+  // sending/uncertain operation might already have delivered the whole set,
+  // so every target becomes uncertain and is never retried automatically.
+  const deliveryStatus: BossForwardingStatus = forwarding.status === 'sending'
+    ? 'uncertain'
+    : forwarding.status;
+  const recoveryError = forwarding.status === 'sending'
+    ? forwarding.error ?? 'The prior process ended after an external forwarding attempt began; verify on Boss before any retry.'
+    : forwarding.error;
+  const deliveries = createBossForwardingDeliveries(forwarding, deliveryStatus).map((delivery) => ({
+    ...delivery,
+    ...(forwarding.attemptedAt ? { attemptedAt: forwarding.attemptedAt } : {}),
+    ...(deliveryStatus === 'sent' && forwarding.completedAt ? { completedAt: forwarding.completedAt } : {}),
+    ...(recoveryError && (deliveryStatus === 'uncertain' || deliveryStatus === 'retryable-failed')
+      ? { error: recoveryError }
+      : {}),
+  }));
+  return composeBossForwardingState(forwarding, deliveries, recoveryError);
+}
+
+function hasRetryableBossForwardingDelivery(entry: BossForwardingOutboxEntry): boolean {
+  const forwarding = migrateBossForwardingState(entry.forwarding);
+  return forwarding.deliveries!.some((delivery) =>
+    delivery.status === 'pending' || delivery.status === 'retryable-failed');
+}
+
+async function ensureBossRoutingArtifactFromOutbox(
+  store: JobStore,
+  jobKey: string,
+  entry: BossForwardingOutboxEntry,
+): Promise<void> {
+  const facts = entry.routingFacts;
+  if (!facts || entry.workflow === 'pre-capture') return;
+  const artifacts = await store.listBossCandidateRoutingArtifacts('boss', jobKey);
+  const matches = artifacts.filter((artifact) => entry.routingDecisionId
+    ? artifact.routingDecisionId === entry.routingDecisionId
+    : artifact.candidateId === facts.candidateId
+      && artifact.policyHash === facts.policyHash
+      && artifact.decidedAt === facts.decidedAt);
+  const expected: BossCandidateRoutingArtifact = {
+    ...facts,
+    ...(entry.routingDecisionId ? { routingDecisionId: entry.routingDecisionId } : {}),
+    forwarding: entry.forwarding,
+  };
+  if (matches.length > 1) {
+    throw new Error(`Expected at most one Boss routing artifact for decision ${entry.routingDecisionId ?? `${facts.candidateId}/${facts.decidedAt}`}, found ${matches.length}.`);
+  }
+  if (matches.length === 1) {
+    const actual = matches[0]!;
+    const comparable = (artifact: BossCandidateRoutingArtifact) => {
+      const { forwarding: _forwarding, ...immutable } = artifact;
+      return immutable;
+    };
+    if (JSON.stringify(comparable(actual)) !== JSON.stringify(comparable(expected))) {
+      throw new Error(`Boss routing artifact conflicts with durable outbox decision ${entry.routingDecisionId ?? facts.candidateId}.`);
+    }
+    return;
+  }
+  await store.saveBossCandidateRoutingArtifact('boss', jobKey, expected);
+}
+
+function replaceBossForwardingDelivery(
+  entry: BossForwardingOutboxEntry,
+  deliveryIndex: number,
+  delivery: BossForwardingDeliveryState,
+  updatedAt: string,
+): BossForwardingOutboxEntry {
+  const forwarding = migrateBossForwardingState(entry.forwarding);
+  const deliveries = forwarding.deliveries!.map((value, index) => index === deliveryIndex ? delivery : value);
+  return {
+    ...entry,
+    updatedAt,
+    forwarding: composeBossForwardingState(forwarding, deliveries),
+  };
+}
+
+async function executeBossForwardingDeliveries(input: {
+  jobKey: string;
+  candidate: CandidateListItem;
+  entry: BossForwardingOutboxEntry;
+  detailPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>;
+  store: JobStore;
+  detailOptions?: CandidateProfileDetailOptions;
+}): Promise<BossForwardingOutboxEntry> {
+  const { jobKey, candidate, detailPage, store, detailOptions } = input;
+  let current: BossForwardingOutboxEntry = {
+    ...input.entry,
+    forwarding: migrateBossForwardingState(input.entry.forwarding),
+  };
+  await store.saveBossForwardingOutboxEntry('boss', jobKey, current);
+
+  for (let index = 0; index < current.forwarding.deliveries!.length; index += 1) {
+    const delivery = current.forwarding.deliveries![index]!;
+    if (delivery.status !== 'pending' && delivery.status !== 'retryable-failed') continue;
+
+    const attemptedAt = new Date().toISOString();
+    current = replaceBossForwardingDelivery(current, index, {
+      role: delivery.role,
+      recipient: delivery.recipient,
+      status: 'sending',
+      attemptedAt,
+    }, attemptedAt);
+    await store.saveBossForwardingOutboxEntry('boss', jobKey, current);
+
+    try {
+      // Each Boss dialog has only one recipient field. A configured CC is an
+      // independent delivery: the page action reopens a fresh dialog and the
+      // candidate ID is written to that delivery's message field as well.
+      await forwardBossResumeRef.fn(
+        detailPage as never,
+        candidate,
+        current.forwarding.mode,
+        delivery.recipient,
+        'confirm',
+        undefined,
+        false,
+        detailOptions,
+      );
+      const completedAt = new Date().toISOString();
+      current = replaceBossForwardingDelivery(current, index, {
+        role: delivery.role,
+        recipient: delivery.recipient,
+        status: 'sent',
+        attemptedAt,
+        completedAt,
+      }, completedAt);
+    } catch (error) {
+      if (error instanceof BossUnexpectedContactDialogError) {
+        throw error;
+      }
+      const updatedAt = new Date().toISOString();
+      current = replaceBossForwardingDelivery(current, index, {
+        role: delivery.role,
+        recipient: delivery.recipient,
+        status: error instanceof BossForwardUncertainError ? 'uncertain' : 'retryable-failed',
+        attemptedAt,
+        error: error instanceof Error ? error.message : String(error),
+      }, updatedAt);
+      await store.saveBossForwardingOutboxEntry('boss', jobKey, current);
+      return current;
+    }
+    await store.saveBossForwardingOutboxEntry('boss', jobKey, current);
+  }
+
+  return current;
+}
+
+/**
+ * The enabled Boss path holds the already-verified detail open through scoring
+ * and routes only after its immutable decision plus pending outbox are durable.
+ * Model/schema failures deliberately become review → primary, never rejected.
+ */
+async function scoreAndRouteBossCapturedCandidate(input: {
+  jobKey: string;
+  job: NormalizedJob;
+  candidate: CandidateListItem;
+  resume: CandidateResume;
+  detailPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>;
+  store: JobStore;
+  fetchedAt: string;
+  screening: BossScreeningSettings;
+  primaryForwarding: BossForwardingSettings;
+  detailOptions?: CandidateProfileDetailOptions;
+}): Promise<BossScreeningCandidateResult> {
+  const { jobKey, job, candidate, resume, detailPage, store, fetchedAt, screening, primaryForwarding, detailOptions } = input;
+  const scoredAt = new Date().toISOString();
+  const scoreArtifactBase = {
+    candidateId: resume.candidateId,
+    candidateShareUrl: resume.candidateShareUrl,
+    model: config.scoring.model,
+    scoredAt,
+  };
+  let scoreArtifact: CandidateScoreArtifact;
+  let requirementEvaluations: BossCandidateRoutingArtifact['requirementEvaluations'] = [];
+
+  try {
+    const result = await scoreAndEvaluateBossScreeningRef.fn({
+      job,
+      resume,
+      policy: screening,
+    });
+    requirementEvaluations = result.evaluations;
+    scoreArtifact = {
+      ...scoreArtifactBase,
+      ...(result.resumeInputHash ? { resumeInputHash: result.resumeInputHash } : {}),
+      status: 'success',
+      score: result.score,
+    };
+  } catch (error) {
+    scoreArtifact = {
+      ...scoreArtifactBase,
+      status: 'failed',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  await store.saveCandidateScoreArtifact('boss', jobKey, scoreArtifact);
+  const policyHash = hashBossScreeningPolicy(screening);
+  const decision = resolveBossRoutingDecision(scoreArtifact, requirementEvaluations, screening);
+  const forwarding = decision.audience === 'primary'
+    ? primaryForwarding
+    : screening.secondaryForwarding;
+  if (!forwarding) {
+    // This should already be caught by preflight. Keeping the guard local
+    // prevents a missing target from falling through to a primary recipient.
+    throw new Error(`Boss routing decision for ${candidate.candidateId} has no ${decision.audience} forwarding target`);
+  }
+
+  const now = createMonotonicBossRoutingTimestamp();
+  const routingFacts: NonNullable<BossForwardingOutboxEntry['routingFacts']> = {
+    candidateId: candidate.candidateId,
+    fetchedAt,
+    scoredAt,
+    decidedAt: now,
+    policyHash,
+    scoreStatus: scoreArtifact.status,
+    ...(scoreArtifact.status === 'failed' ? { scoreError: scoreArtifact.error } : {}),
+    classification: decision.classification,
+    audience: decision.audience,
+    requirementEvaluations,
+    matchedRequirementIds: decision.matchedRequirementIds,
+    unknownRequirementIds: decision.unknownRequirementIds,
+    reason: decision.reason,
+  };
+  const routingDecisionId = createBossRoutingDecisionId({
+    jobKey,
+    candidateId: candidate.candidateId,
+    policyHash,
+    scoredAt,
+    decision,
+  });
+  const pendingOutbox = createBossForwardingOutboxEntry(
+    candidate.candidateId,
+    policyHash,
+    decision,
+    forwarding,
+    now,
+    { routingDecisionId, routingFacts },
+  );
+  const routingArtifact: BossCandidateRoutingArtifact = {
+    ...routingFacts,
+    routingDecisionId,
+    forwarding: pendingOutbox.forwarding,
+  };
+  // The outbox is the recovery anchor. Persist it before the immutable
+  // artifact so an interruption cannot leave a routing decision with no
+  // durable target set; recovery can rebuild the artifact from routingFacts.
+  await store.saveBossForwardingOutboxEntry('boss', jobKey, pendingOutbox);
+  await store.saveBossCandidateRoutingArtifact('boss', jobKey, routingArtifact);
+  const completedOutbox = await executeBossForwardingDeliveries({
+    jobKey,
+    candidate,
+    entry: pendingOutbox,
+    detailPage,
+    store,
+    detailOptions,
+  });
+
+  return {
+    candidateId: candidate.candidateId,
+    scoreArtifact,
+    routingArtifact,
+    forwardingOutbox: completedOutbox,
+  };
+}
+
+interface BossScreeningOutboxRecovery {
+  entries: BossForwardingOutboxEntry[];
+  recoveredUncertainEntries: BossForwardingOutboxEntry[];
+}
+
+async function recoverBossScreeningOutbox(
+  store: JobStore,
+  jobKey: string,
+  candidateIds?: ReadonlySet<string>,
+  workflow?: BossForwardingOutboxEntry['workflow'],
+): Promise<BossScreeningOutboxRecovery> {
+  const allEntries = await store.listBossForwardingOutboxEntries('boss', jobKey);
+  // The ordinary Boss capture cap is applied before recovery writes. Reading
+  // the directory is harmless, but an outbox outside this run's first twenty
+  // visible cards must not be migrated, marked uncertain, or retried here.
+  const entries = allEntries.filter((entry) => {
+    if (candidateIds && !candidateIds.has(entry.candidateId)) return false;
+    if (workflow === 'pre-capture' && entry.workflow !== 'pre-capture') return false;
+    // Legacy outboxes predate the workflow marker and are post-score entries
+    // for compatibility. Explicit pre-capture rows must never be pulled into
+    // an enabled screening run.
+    if (workflow === 'post-score' && entry.workflow === 'pre-capture') return false;
+    return true;
+  });
+  const legacySendingCandidateIds = new Set(entries
+    .filter((entry) => !entry.forwarding.deliveries?.length && entry.forwarding.status === 'sending')
+    .map((entry) => entry.candidateId));
+  const normalizedEntries = await Promise.all(entries.map(async (entry) => {
+    const hadDeliveries = Boolean(entry.forwarding.deliveries?.length);
+    const migrated: BossForwardingOutboxEntry = {
+      ...entry,
+      forwarding: migrateBossForwardingState(entry.forwarding),
+    };
+    if (!hadDeliveries) {
+      await store.saveBossForwardingOutboxEntry('boss', jobKey, migrated);
+    }
+    await ensureBossRoutingArtifactFromOutbox(store, jobKey, migrated);
+    return migrated;
+  }));
+  const recoveredUncertainEntries = await Promise.all(normalizedEntries
+    .filter((entry) => legacySendingCandidateIds.has(entry.candidateId)
+      || entry.forwarding.deliveries!.some((delivery) => delivery.status === 'sending'))
+    .map(async (entry) => {
+      const updatedAt = new Date().toISOString();
+      const recoveryError = 'The prior process ended after an external forwarding attempt began; verify on Boss before any retry.';
+      const recoveredDeliveries = entry.forwarding.deliveries!.map((delivery) => delivery.status === 'sending'
+        ? {
+          ...delivery,
+          status: 'uncertain' as const,
+          error: delivery.error ?? recoveryError,
+        }
+        : legacySendingCandidateIds.has(entry.candidateId) && delivery.status === 'uncertain'
+          ? { ...delivery, error: delivery.error ?? recoveryError }
+          : delivery);
+      const recovered: BossForwardingOutboxEntry = {
+        ...entry,
+        updatedAt,
+        forwarding: composeBossForwardingState(entry.forwarding, recoveredDeliveries, recoveryError),
+      };
+      await store.saveBossForwardingOutboxEntry('boss', jobKey, recovered);
+      return recovered;
+    }));
+  const recoveredByCandidateId = new Map(
+    recoveredUncertainEntries.map((entry) => [entry.candidateId, entry]),
+  );
+  return {
+    entries: normalizedEntries.map((entry) => recoveredByCandidateId.get(entry.candidateId) ?? entry),
+    recoveredUncertainEntries,
+  };
+}
+
+/**
+ * Replays only outbox work that is known not to have completed. The stored
+ * recipient and CC are authoritative for the retry; current job settings must
+ * not redirect an already-decided candidate.
+ */
+async function retryBossScreeningForwarding(input: {
+  jobKey: string;
+  candidate: CandidateListItem;
+  entry: BossForwardingOutboxEntry;
+  store: JobStore;
+  session: BrowserSession;
+  searchPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>;
+  platformAdapter: PlatformAdapter;
+  lifecycle?: BossDetailLifecycleState;
+}): Promise<BossForwardingOutboxEntry> {
+  const { jobKey, candidate, store, session, searchPage, platformAdapter } = input;
+  const lifecycle = input.lifecycle ?? {
+    detailOpened: false,
+    detailIdentityVerified: false,
+    detailClosed: false,
+  };
+  let entry: BossForwardingOutboxEntry = {
+    ...input.entry,
+    forwarding: migrateBossForwardingState(input.entry.forwarding),
+  };
+  let detailPage = session.page;
+  let detailOpened = false;
+  const detailOptions = platformAdapter.platform === 'boss'
+    ? createBossDetailLifecycleOptions()
+    : undefined;
+
+  try {
+    try {
+      detailPage = await platformAdapter.openResumeDetail(session.context, searchPage, candidate, detailOptions);
+      detailOpened = true;
+      lifecycle.detailOpened = true;
+      if (detailOptions) {
+        await waitBossActionPaceWithinDeadline(detailPage, detailOptions.deadline, detailOptions.cleanupReserveMs);
+      } else {
+        await waitPlatformActionPaceRef.fn(detailPage, 'boss');
+      }
+    } catch (error) {
+      if (platformAdapter.platform === 'boss' && error instanceof BossUnexpectedContactDialogError) {
+        throw error;
+      }
+      const updatedAt = new Date().toISOString();
+      const deliveryIndex = entry.forwarding.deliveries!.findIndex((delivery) =>
+        delivery.status === 'pending' || delivery.status === 'retryable-failed');
+      const priorDelivery = entry.forwarding.deliveries![deliveryIndex];
+      const failed = priorDelivery
+        ? replaceBossForwardingDelivery(entry, deliveryIndex, {
+          role: priorDelivery.role,
+          recipient: priorDelivery.recipient,
+          status: 'retryable-failed',
+          ...(priorDelivery.attemptedAt ? { attemptedAt: priorDelivery.attemptedAt } : {}),
+          error: error instanceof Error ? error.message : String(error),
+        }, updatedAt)
+        : entry;
+      await store.saveBossForwardingOutboxEntry('boss', jobKey, failed);
+      return failed;
+    }
+    entry = await executeBossForwardingDeliveries({
+      jobKey,
+      candidate,
+      entry,
+      detailPage,
+      store,
+      detailOptions,
+    });
+    // `forwardBossResume` performs the live detail API identity check before
+    // each recipient dialog. Treat the forwarding action's successful return
+    // as the workflow receipt for this retry lifecycle.
+    if (platformAdapter.platform === 'boss') {
+      lifecycle.detailIdentityVerified = true;
+    }
+    return entry;
+  } finally {
+    if (detailOpened) {
+      if (platformAdapter.closeResumeDetail) {
+        try {
+          await platformAdapter.closeResumeDetail(searchPage, detailPage, candidate, detailOptions);
+          lifecycle.detailClosed = true;
+        } catch (error) {
+          if (platformAdapter.platform === 'boss') {
+            throw error instanceof BossResumeDetailCloseError
+              ? error
+              : new BossResumeDetailCloseError(
+                `Boss resume detail close failed during forwarding recovery for candidate ${candidate.candidateId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+          }
+          // Other platform cleanup remains best effort for compatibility.
+        }
+      } else if (detailPage !== session.page && detailPage !== searchPage) {
+        try {
+          await detailPage.close();
+          lifecycle.detailClosed = true;
+        } catch {
+          // Leave the page for the caller's normal error/recovery handling.
+        }
+      }
+      session.page = searchPage;
+    }
+  }
+}
+
 async function captureCandidateResume(
   platform: SupportedPlatform,
   jobKey: string,
@@ -1331,22 +2309,77 @@ async function captureCandidateResume(
   session: BrowserSession,
   searchPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>,
   platformAdapter: PlatformAdapter,
-  postOpenActions: CandidatePostOpenActions = {},
+  /** null skips legacy post-open hooks for the explicit post-score Boss path. */
+  postOpenActions: CandidatePostOpenActions | null = {},
+  afterResumeSaved?: (input: {
+    detailPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>;
+    resume: CandidateResume;
+    detailOptions?: CandidateProfileDetailOptions;
+  }) => Promise<void>,
+  /** Boss screening-disabled forwarding runs before parsing, but is durable. */
+  beforeResumeParsed?: (input: {
+    detailPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>;
+    detailOptions?: CandidateProfileDetailOptions;
+  }) => Promise<void>,
 ): Promise<CandidateProcessResult> {
   let detailPage = session.page;
   let detailOpened = false;
+  let detailVerified = false;
+  const detailOptions = platform === 'boss'
+    ? createBossDetailLifecycleOptions()
+    : undefined;
+  const detailLifecycle: BossDetailLifecycleState = {
+    detailOpened: false,
+    detailIdentityVerified: false,
+    detailClosed: false,
+  };
+  let failureStage: CaptureFailureStage = 'detail-open';
   let preserveDetailPageForInspection = false;
 
   try {
-    detailPage = await platformAdapter.openResumeDetail(session.context, searchPage, candidate);
+    detailPage = await platformAdapter.openResumeDetail(session.context, searchPage, candidate, detailOptions);
     detailOpened = true;
-    await waitPlatformActionPaceRef.fn(detailPage, platform);
-    const postOpenResult = await platformAdapter.afterResumeDetailOpened?.(detailPage, candidate, postOpenActions);
-    const extraction = platformAdapter.platform === '51job'
-      ? await extractResumeFromPageRef.fn(detailPage, candidate)
-      : {
-        resume: await platformAdapter.parseResumeDetail(detailPage, candidate),
-      };
+    detailLifecycle.detailOpened = true;
+    if (detailOptions) {
+      await waitBossActionPaceWithinDeadline(detailPage, detailOptions.deadline, detailOptions.cleanupReserveMs);
+    } else {
+      await waitPlatformActionPaceRef.fn(detailPage, platform);
+    }
+    failureStage = 'identity-verify';
+    const postOpenResult = postOpenActions === null
+      ? undefined
+      : await platformAdapter.afterResumeDetailOpened?.(detailPage, candidate, postOpenActions, detailOptions);
+    failureStage = 'forward';
+    await beforeResumeParsed?.({
+      detailPage: detailPage as Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>,
+      detailOptions,
+    });
+    failureStage = 'parse';
+    let extraction: { resume: CandidateResume; domSnapshot?: ResumeDomSnapshot };
+    try {
+      extraction = platformAdapter.platform === '51job'
+        ? await extractResumeFromPageRef.fn(detailPage, candidate)
+        : {
+          resume: await platformAdapter.parseResumeDetail(detailPage, candidate, detailOptions),
+        };
+    } catch (error) {
+      if (error instanceof BossResumeIdentityVerificationError) {
+        failureStage = 'identity-verify';
+      }
+      throw error;
+    }
+    if (extraction.resume.candidateId !== candidate.candidateId) {
+      const message = `Parsed resume identity ${extraction.resume.candidateId} does not match candidate ${candidate.candidateId}.`;
+      if (platform === 'boss') {
+        failureStage = 'identity-verify';
+      }
+      throw platform === 'boss'
+        ? new BossResumeIdentityVerificationError(message)
+        : new Error(message);
+    }
+    detailVerified = true;
+    detailLifecycle.detailIdentityVerified = true;
+    failureStage = 'persist';
     const resume = postOpenResult?.candidateShareUrl
       ? { ...extraction.resume, candidateShareUrl: postOpenResult.candidateShareUrl }
       : extraction.resume;
@@ -1355,13 +2388,22 @@ async function captureCandidateResume(
       ? formatResumeSnapshot(resume)
       : await detailPage.locator('body').innerText().catch(() => undefined);
     await store.saveCandidateResume(platform, jobKey, resume, rawSource, domSnapshot);
+    await afterResumeSaved?.({
+      detailPage: detailPage as Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>,
+      resume,
+      detailOptions,
+    });
 
     return {
       candidateId: candidate.candidateId,
-      markAsSeen: true,
       captured: true,
+      detailVerified: true,
+      detailLifecycle,
     };
   } catch (error) {
+    if (platform === 'boss' && error instanceof BossUnexpectedContactDialogError) {
+      throw error;
+    }
     if (platform === 'liepin') {
       preserveDetailPageForInspection = true;
       throw new Error(`Liepin candidate ${candidate.candidateId} failed; stopping flow and leaving the browser open for inspection. Original error: ${error instanceof Error ? error.message : String(error)}`);
@@ -1369,19 +2411,45 @@ async function captureCandidateResume(
 
     return {
       candidateId: candidate.candidateId,
-      markAsSeen: false,
       captured: false,
+      detailVerified,
+      detailLifecycle,
+      failureStage,
       failureReason: error instanceof Error ? error.message : String(error),
     };
   } finally {
     const usesSeparateDetailPage = detailPage !== session.page && detailPage !== searchPage;
     const canCloseDetail = detailOpened && (usesSeparateDetailPage || platformAdapter.closeResumeDetail !== undefined);
     if (!preserveDetailPageForInspection && canCloseDetail) {
-      await waitPlatformActionPaceRef.fn(detailPage, platform);
+      if (!detailOptions) {
+        await waitPlatformActionPaceRef.fn(detailPage, platform);
+      }
       if (platformAdapter.closeResumeDetail) {
-        await platformAdapter.closeResumeDetail(searchPage, detailPage, candidate).catch(() => undefined);
+        try {
+          await platformAdapter.closeResumeDetail(searchPage, detailPage, candidate, detailOptions);
+          detailLifecycle.detailClosed = true;
+        } catch (error) {
+          // Boss close is a hard safety boundary. Returning a successful
+          // capture while its modal remains visible allows the next card
+          // click to operate on the wrong candidate, so stop the whole run
+          // and leave the page available for inspection.
+          if (platform === 'boss') {
+            throw error instanceof BossResumeDetailCloseError
+              ? error
+              : new BossResumeDetailCloseError(
+                `Boss resume detail close failed for candidate ${candidate.candidateId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+          }
+          // Other platform cleanup remains best effort; the lifecycle audit
+          // still prevents the candidate from being treated as synchronized.
+        }
       } else {
-        await detailPage.close().catch(() => undefined);
+        try {
+          await detailPage.close();
+          detailLifecycle.detailClosed = true;
+        } catch {
+          // Keep the detail page available for inspection.
+        }
       }
       if (usesSeparateDetailPage) {
         await (searchPage as Partial<Pick<typeof searchPage, 'bringToFront'>>).bringToFront?.call(searchPage).catch(() => undefined);
@@ -1477,8 +2545,18 @@ function resolveBossAutomationSettings(
     ? {
       mode: input.bossForwardMode,
       recipient: input.bossForwardRecipient,
+      ...(input.bossForwardCc === undefined
+        ? (stored.forwarding?.ccEmails === undefined ? {} : { ccEmails: stored.forwarding.ccEmails })
+        : { ccEmails: input.bossForwardCc }),
     }
-    : stored.forwarding;
+    : input.bossForwardCc === undefined
+      ? stored.forwarding
+      : stored.forwarding
+        ? { ...stored.forwarding, ccEmails: input.bossForwardCc }
+        : undefined;
+  if (forwarding?.ccEmails?.length && forwarding.mode !== 'email') {
+    throw new Error('Boss forward CC can only be used with email forwarding.');
+  }
   const summaryDelivery = input.summaryEmail
     ? {
       recipientEmail: input.summaryEmail,
@@ -1549,7 +2627,7 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
   const reviewedAt = new Date().toISOString();
   const storedAutomationSettings = await store.readBossAutomationSettings();
   const automationSettings = resolveBossAutomationSettings(storedAutomationSettings, input);
-  if ((input.bossForwardMode && input.bossForwardRecipient) || input.summaryEmail) {
+  if ((input.bossForwardMode && input.bossForwardRecipient) || input.bossForwardCc !== undefined || input.summaryEmail) {
     await store.saveBossAutomationSettings(automationSettings);
   }
   const session = await ensureAuthenticatedBrowserSessionRef.fn('boss');
@@ -1634,14 +2712,27 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
             ? {
               mode: input.bossForwardMode,
               recipient: input.bossForwardRecipient,
+              ...(input.bossForwardCc === undefined
+                ? (jobRecord.bossForwarding?.ccEmails === undefined ? {} : { ccEmails: jobRecord.bossForwarding.ccEmails })
+                : { ccEmails: input.bossForwardCc }),
             }
-            : jobRecord.bossForwarding ?? automationSettings.forwarding;
+            : input.bossForwardCc === undefined
+              ? jobRecord.bossForwarding ?? automationSettings.forwarding
+              : jobRecord.bossForwarding
+                ? { ...jobRecord.bossForwarding, ccEmails: input.bossForwardCc }
+                : automationSettings.forwarding
+                  ? { ...automationSettings.forwarding, ccEmails: input.bossForwardCc }
+                  : undefined;
           if (!forwarding) {
             throw new Error(`Missing stored Boss forwarding configuration for job ${conversation.jobName}`);
           }
+          if (forwarding.ccEmails?.length && forwarding.mode !== 'email') {
+            throw new Error('Boss forward CC can only be used with email forwarding.');
+          }
 
           if (jobRecord.bossForwarding?.mode !== forwarding.mode
-            || jobRecord.bossForwarding?.recipient !== forwarding.recipient) {
+            || jobRecord.bossForwarding?.recipient !== forwarding.recipient
+            || JSON.stringify(jobRecord.bossForwarding?.ccEmails ?? []) !== JSON.stringify(forwarding.ccEmails ?? [])) {
             await store.saveJobRecord('boss', {
               ...jobRecord,
               bossForwarding: forwarding,
@@ -1731,6 +2822,9 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
                 opened.candidate,
                 forwarding.mode,
                 forwarding.recipient,
+                'confirm',
+                forwarding.ccEmails,
+                false,
               );
               item = {
                 ...item,
@@ -1821,15 +2915,53 @@ async function runBossAutoChat(input: BossAutoChatCliInput): Promise<BossAutoCha
   }
 }
 
+const BOSS_RESUME_CAPTURE_CANDIDATE_LIMIT = 20;
+
 export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string, job: NormalizedJob, pageKeyword: string, store: JobStore, session: BrowserSession, fetchedAt: string, platformAdapter: PlatformAdapter, options: {
   includeViewedCandidates?: boolean;
   liepinForwardContact?: string;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+  bossForwardCc?: string[];
+  /** Enabled only for ordinary Boss capture; other platform stages ignore it. */
+  bossScreening?: BossScreeningSettings;
   searchSource?: SearchSource;
   searchConditions?: SearchCondition[];
+  /** Immutable report targets captured before the run; used by routed replay. */
+  reportDelivery?: ReportDeliveryOptions;
+  secondaryReportDelivery?: ReportDeliveryOptions;
   searchExecution?: Omit<NonNullable<RunResult['searchExecution']>, 'includeViewedCandidates'>;
-} = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; runResult: RunResult; resultPath: string }> {
+} = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; capturedCandidateIds: string[]; runResult: RunResult; resultPath: string }> {
+  const bossScreeningEnabled = platform === 'boss' && options.bossScreening?.enabled === true;
+  const bossScreeningPolicyHash = bossScreeningEnabled
+    ? hashBossScreeningPolicy(options.bossScreening!)
+    : undefined;
+  if (bossScreeningEnabled && (!options.bossForwardMode || !options.bossForwardRecipient)) {
+    throw new Error('Enabled Boss screening requires a primary Boss forwarding mode and recipient.');
+  }
+  if (bossScreeningEnabled && !options.bossScreening?.secondaryForwarding) {
+    throw new Error('Enabled Boss screening requires a secondary Boss forwarding target.');
+  }
+  let preloadedScreeningWorkItems: BossScreeningWorkItem[] = [];
+  if (bossScreeningEnabled) {
+    const [pendingItems, outboxEntries] = await Promise.all([
+      store.listBossScreeningWorkItems('boss', jobKey),
+      store.listBossForwardingOutboxEntries('boss', jobKey),
+    ]);
+    const incompatibleWorkItemCount = pendingItems.filter((item) => item.policyHash !== bossScreeningPolicyHash).length;
+    const incompatibleOutboxCount = outboxEntries.filter((entry) =>
+      entry.policyHash !== bossScreeningPolicyHash && hasRetryableBossForwardingDelivery(entry),
+    ).length;
+    if (incompatibleWorkItemCount > 0 || incompatibleOutboxCount > 0) {
+      throw new Error(
+        `Boss job ${jobKey} has ${incompatibleWorkItemCount} pending score item(s) and ${incompatibleOutboxCount} unfinished outbox entr${incompatibleOutboxCount === 1 ? 'y' : 'ies'} from an older policy; run migrate:boss-model-screening before opening the browser.`,
+      );
+    }
+    preloadedScreeningWorkItems = pendingItems;
+  }
+  if (platform === 'boss') {
+    await store.assertSeenIdsHaveResumes('boss', jobKey);
+  }
   const searchSource = options.searchSource ?? 'saved';
   const searchConditions = options.searchConditions ?? [];
   const platformEstimatedTimeoutMs = platformAdapter.estimateSearchTimeoutMs?.({
@@ -1860,39 +2992,466 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
     })()
     : await platformAdapter.openSubscribeSearch(session.page, pageKeyword, searchOptions);
   session.page = searchPage;
-  const { candidates } = platformAdapter.platform === '51job'
+  const { candidates: extractedCandidates } = platformAdapter.platform === '51job'
     ? await extractCandidateListRef.fn(searchPage, { deadline: searchDeadline })
     : await extractCandidateListWithAdapterRef.fn(platformAdapter, searchPage, { deadline: searchDeadline });
+  // An ordinary Boss capture run is deliberately bounded by visible result
+  // order. Apply the cap before seen/recovery filtering so candidates beyond
+  // the first twenty cannot be recorded or reach any detail/score/forwarding
+  // action in this run.
+  const candidates = platform === 'boss'
+    ? extractedCandidates.slice(0, BOSS_RESUME_CAPTURE_CANDIDATE_LIMIT)
+    : extractedCandidates;
+  if (platform === 'boss') {
+    const duplicateCandidateIds = candidates
+      .map((candidate) => candidate.candidateId)
+      .filter((candidateId, index, ids) => ids.indexOf(candidateId) !== index);
+    if (duplicateCandidateIds.length > 0) {
+      throw new Error(`Boss candidate list contains duplicate stable IDs inside the first twenty: ${[...new Set(duplicateCandidateIds)].join(', ')}`);
+    }
+  }
+  const candidateIdsInRun = new Set(candidates.map((candidate) => candidate.candidateId));
   const seenCandidateIdsBeforeRun = await store.readSeenIds(platform, jobKey);
   const seenCandidateIdsSet = new Set(seenCandidateIdsBeforeRun);
-  const newCandidates = candidates.filter((candidate) => !seenCandidateIdsSet.has(candidate.candidateId));
+  const outboxRecovery = await recoverBossScreeningOutbox(
+    store,
+    jobKey,
+    candidateIdsInRun,
+    bossScreeningEnabled ? 'post-score' : 'pre-capture',
+  );
+  const unreportedRecoveryRoutingArtifacts: BossCandidateRoutingArtifact[] = bossScreeningEnabled
+    ? await (async () => {
+      const policyHash = hashBossScreeningPolicy(options.bossScreening!);
+      const [priorRuns, routingArtifacts] = await Promise.all([
+        store.listRunResults('boss', jobKey),
+        store.listBossCandidateRoutingArtifacts('boss', jobKey),
+      ]);
+      const indexedCandidateIds = new Set(priorRuns.flatMap((run) => run.bossRouting?.enabled
+        ? [
+          ...run.bossRouting.qualifiedCandidateIds,
+          ...run.bossRouting.reviewCandidateIds,
+          ...run.bossRouting.rejectedCandidateIds,
+        ]
+        : []));
+      const orphanCandidateIds = new Set(outboxRecovery.entries
+        .filter((entry) => candidateIdsInRun.has(entry.candidateId)
+          && entry.policyHash === policyHash
+          && !indexedCandidateIds.has(entry.candidateId))
+        .map((entry) => entry.candidateId));
+      const selected: BossCandidateRoutingArtifact[] = [];
+      for (const candidateId of orphanCandidateIds) {
+        const matches = routingArtifacts.filter((artifact) =>
+          artifact.candidateId === candidateId && artifact.policyHash === policyHash);
+        if (matches.length !== 1) {
+          throw new Error(`Expected one unreported Boss routing fact for candidate ${candidateId}, found ${matches.length}.`);
+        }
+        selected.push(matches[0]!);
+      }
+      return selected;
+    })()
+    : [];
+  const screeningWorkItems = preloadedScreeningWorkItems
+    .filter((item) => candidateIdsInRun.has(item.candidateId));
+  const retryableOutboxByCandidateId = new Map(outboxRecovery.entries
+    .filter(hasRetryableBossForwardingDelivery)
+    .map((entry) => [entry.candidateId, entry]));
+  const retryCandidates = candidates.filter((candidate) => retryableOutboxByCandidateId.has(candidate.candidateId));
+  const retryCandidateIds = new Set(retryCandidates.map((candidate) => candidate.candidateId));
+  const existingOutboxCandidateIds = new Set(outboxRecovery.entries.map((entry) => entry.candidateId));
+  const staleScreeningWorkItems = screeningWorkItems
+    .filter((item) => existingOutboxCandidateIds.has(item.candidateId));
+  await Promise.all(staleScreeningWorkItems.map((item) =>
+    store.deleteBossScreeningWorkItem('boss', jobKey, item.candidateId),
+  ));
+  const screeningWorkByCandidateId = new Map(screeningWorkItems
+    .filter((item) => !existingOutboxCandidateIds.has(item.candidateId))
+    .map((item) => [item.candidateId, item]));
+  const pendingScoreCandidates = bossScreeningEnabled
+    ? candidates.filter((candidate) => screeningWorkByCandidateId.has(candidate.candidateId))
+    : [];
+  const pendingScoreCandidateIds = new Set(pendingScoreCandidates.map((candidate) => candidate.candidateId));
+  const preCaptureForwardingCompletedCandidateIds = new Set(outboxRecovery.entries
+    .filter((entry) => entry.workflow === 'pre-capture'
+      && entry.forwarding.status === 'sent'
+      && !seenCandidateIdsSet.has(entry.candidateId))
+    .map((entry) => entry.candidateId));
+  const newCandidates = candidates.filter((candidate) =>
+    !seenCandidateIdsSet.has(candidate.candidateId)
+    && !retryCandidateIds.has(candidate.candidateId)
+    && !pendingScoreCandidateIds.has(candidate.candidateId)
+    && (!existingOutboxCandidateIds.has(candidate.candidateId)
+      || preCaptureForwardingCompletedCandidateIds.has(candidate.candidateId)));
+  const bossSeenEligibleCandidates = platform === 'boss'
+    ? candidates.filter((candidate) => seenCandidateIdsSet.has(candidate.candidateId))
+    : [];
+  const bossSeenViewOnlyCandidates = platform === 'boss'
+    ? bossSeenEligibleCandidates.filter((candidate) =>
+      !retryCandidateIds.has(candidate.candidateId)
+      && !pendingScoreCandidateIds.has(candidate.candidateId))
+    : [];
   const candidateResults: CandidateProcessResult[] = [];
+  const bossScreeningResults: BossScreeningCandidateResult[] = [];
+  const bossForwardingRetryResults: BossForwardingOutboxEntry[] = [];
+  const bossPreCaptureForwardingResults: BossForwardingOutboxEntry[] = [];
+  const bossScreeningFailures: Array<{ candidateId: string; error: string }> = [];
+  const bossSeenViewAttemptedCandidateIds = new Set<string>();
+  const bossSeenViewCompletedCandidateIds = new Set<string>();
+  const bossSeenViewCoveredByProcessingCandidateIds = new Set<string>();
+  const bossSeenViewFailures: BossSeenViewSyncFailure[] = [];
+  const bossSeenEligibleCandidateIds = new Set(bossSeenEligibleCandidates.map((candidate) => candidate.candidateId));
 
-  for (const candidate of newCandidates) {
-    if (candidateResults.length > 0) {
+  const recordBossSeenProcessingLifecycle = (
+    candidateId: string,
+    lifecycle: BossDetailLifecycleState,
+    error?: string,
+  ): void => {
+    if (!bossSeenEligibleCandidateIds.has(candidateId)) return;
+    if (lifecycle.detailOpened && lifecycle.detailIdentityVerified && lifecycle.detailClosed) {
+      bossSeenViewCoveredByProcessingCandidateIds.add(candidateId);
+      return;
+    }
+    const stage: BossSeenViewSyncFailure['stage'] = !lifecycle.detailOpened
+      ? 'detail-open'
+      : !lifecycle.detailIdentityVerified
+        ? 'identity-verify'
+        : 'detail-close';
+    bossSeenViewFailures.push({
+      candidateId,
+      stage,
+      detailOpened: lifecycle.detailOpened,
+      detailIdentityVerified: lifecycle.detailIdentityVerified,
+      detailClosed: lifecycle.detailClosed,
+      error: error ?? 'Boss detail lifecycle did not complete during processing.',
+    });
+  };
+  const seenCandidateIdsDuringRun = new Set(seenCandidateIdsBeforeRun);
+  let processedCandidateCount = 0;
+
+  for (const candidate of retryCandidates) {
+    if (processedCandidateCount > 0) {
       await waitPlatformCandidatePaceRef.fn(searchPage, platform);
     }
-
-    candidateResults.push(await captureCandidateResume(platform, jobKey, candidate, store, session, searchPage, platformAdapter, {
-      liepinForwardContact: platform === 'liepin' ? options.liepinForwardContact : undefined,
-      bossForwardMode: platform === 'boss' ? options.bossForwardMode : undefined,
-      bossForwardRecipient: platform === 'boss' ? options.bossForwardRecipient : undefined,
-    }));
+    processedCandidateCount += 1;
+    const entry = retryableOutboxByCandidateId.get(candidate.candidateId)!;
+    const lifecycle: BossDetailLifecycleState = {
+      detailOpened: false,
+      detailIdentityVerified: false,
+      detailClosed: false,
+    };
+    try {
+      const retryResult = await retryBossScreeningForwarding({
+        jobKey,
+        candidate,
+        entry,
+        store,
+        session,
+        searchPage,
+        platformAdapter,
+        lifecycle,
+      });
+      bossForwardingRetryResults.push(retryResult);
+      if (retryResult.workflow === 'pre-capture'
+        && retryResult.forwarding.status === 'sent'
+        && !seenCandidateIdsSet.has(candidate.candidateId)) {
+        // The pre-capture external action can finish before the resume was
+        // parsed. Keep this candidate in a capture-only pass below; no
+        // delivery row will be opened again.
+        preCaptureForwardingCompletedCandidateIds.add(candidate.candidateId);
+      }
+      recordBossSeenProcessingLifecycle(candidate.candidateId, lifecycle);
+    } catch (error) {
+      recordBossSeenProcessingLifecycle(candidate.candidateId, lifecycle, error instanceof Error ? error.message : String(error));
+      if (platformAdapter.platform === 'boss' && lifecycle.detailOpened && !lifecycle.detailClosed) {
+        // A failed Boss close leaves an ambiguous modal active. Do not move to
+        // another card or attempt a second click in the same page session.
+        throw error;
+      }
+      bossScreeningFailures.push({
+        candidateId: candidate.candidateId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
-  const seenCandidateIds = candidateResults
-    .filter((result) => result.markAsSeen)
-    .map((result) => result.candidateId);
-  const capturedCandidateIds = candidateResults
+  const preCaptureRecoveryCaptureCandidates = bossScreeningEnabled
+    ? []
+    : candidates.filter((candidate) => preCaptureForwardingCompletedCandidateIds.has(candidate.candidateId)
+      && !seenCandidateIdsSet.has(candidate.candidateId));
+  const captureCandidates = bossScreeningEnabled
+    ? [...pendingScoreCandidates, ...newCandidates]
+    : [...newCandidates, ...preCaptureRecoveryCaptureCandidates.filter((candidate) =>
+      !newCandidates.some((item) => item.candidateId === candidate.candidateId))];
+  let bossSeenViewOnlyProcessed = false;
+  const processBossSeenViewOnlyCandidates = async (): Promise<void> => {
+    if (bossSeenViewOnlyProcessed) return;
+    bossSeenViewOnlyProcessed = true;
+    // A seen candidate with no pending score or retryable forwarding work gets
+    // a dedicated read-only detail visit. It runs after pending-score work and
+    // before new-capture work so a close failure stops later card mutations.
+    for (const candidate of bossSeenViewOnlyCandidates) {
+      if (processedCandidateCount > 0) {
+        await waitPlatformCandidatePaceRef.fn(searchPage, platform);
+      }
+      processedCandidateCount += 1;
+      bossSeenViewAttemptedCandidateIds.add(candidate.candidateId);
+      try {
+        const receipt = await visitBossSeenCandidateDetailRef.fn(
+          searchPage,
+          candidate,
+          createBossDetailLifecycleOptions(),
+        );
+        if (receipt.detailOpened && receipt.detailIdentityVerified && receipt.detailClosed) {
+          bossSeenViewCompletedCandidateIds.add(candidate.candidateId);
+        } else {
+          bossSeenViewFailures.push({
+            candidateId: candidate.candidateId,
+            stage: 'detail-close',
+            detailOpened: receipt.detailOpened,
+            detailIdentityVerified: receipt.detailIdentityVerified,
+            detailClosed: receipt.detailClosed,
+            error: 'Boss history detail visit returned an incomplete lifecycle.',
+          });
+        }
+      } catch (error) {
+        const detailError = error instanceof BossSeenCandidateDetailError ? error : undefined;
+        bossSeenViewFailures.push({
+          candidateId: candidate.candidateId,
+          stage: detailError?.stage ?? 'detail-open',
+          detailOpened: detailError?.detailOpened ?? false,
+          detailIdentityVerified: detailError?.detailIdentityVerified ?? false,
+          detailClosed: detailError?.detailClosed ?? false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (detailError?.fatalCloseFailure) {
+          throw error;
+        }
+      }
+    }
+  };
+  if (!bossScreeningEnabled || pendingScoreCandidates.length === 0) {
+    await processBossSeenViewOnlyCandidates();
+  }
+  for (let captureIndex = 0; captureIndex < captureCandidates.length; captureIndex += 1) {
+    if (bossScreeningEnabled && captureIndex === pendingScoreCandidates.length) {
+      await processBossSeenViewOnlyCandidates();
+    }
+    const candidate = captureCandidates[captureIndex]!;
+    if (processedCandidateCount > 0) {
+      await waitPlatformCandidatePaceRef.fn(searchPage, platform);
+    }
+    processedCandidateCount += 1;
+
+    if (bossScreeningEnabled) {
+      const screening = options.bossScreening!;
+      const primaryForwarding: BossForwardingSettings = {
+        mode: options.bossForwardMode!,
+        recipient: options.bossForwardRecipient!,
+        ...(options.bossForwardCc === undefined ? {} : { ccEmails: options.bossForwardCc }),
+      };
+      candidateResults.push(await captureCandidateResume(
+        platform,
+        jobKey,
+        candidate,
+        store,
+        session,
+        searchPage,
+        platformAdapter,
+        null,
+        async ({ detailPage, resume, detailOptions }) => {
+          if (!screeningWorkByCandidateId.has(candidate.candidateId)) {
+            const now = new Date().toISOString();
+            const workItem: BossScreeningWorkItem = {
+              candidateId: candidate.candidateId,
+              policyHash: hashBossScreeningPolicy(screening),
+              createdAt: now,
+              updatedAt: now,
+            };
+            await store.saveBossScreeningWorkItem('boss', jobKey, workItem);
+            screeningWorkByCandidateId.set(candidate.candidateId, workItem);
+          }
+          // A successfully saved resume becomes seen before model work. This
+          // intentionally prevents fetch retries from repeating external work.
+          // The durable work item above lets an interrupted pre-decision run
+          // resume this exact candidate despite that seen marker.
+          seenCandidateIdsDuringRun.add(candidate.candidateId);
+          await store.markCapturedCandidatesSeen(platform, jobKey, [candidate.candidateId]);
+          try {
+            const screeningResult = await scoreAndRouteBossCapturedCandidate({
+              jobKey,
+              job,
+              candidate,
+              resume,
+              detailPage,
+              store,
+              fetchedAt,
+              screening,
+              primaryForwarding,
+              detailOptions,
+            });
+            bossScreeningResults.push(screeningResult);
+            await store.deleteBossScreeningWorkItem('boss', jobKey, candidate.candidateId);
+            screeningWorkByCandidateId.delete(candidate.candidateId);
+          } catch (error) {
+            if (error instanceof BossUnexpectedContactDialogError || error instanceof BossResumeDetailCloseError) {
+              throw error;
+            }
+            // A persistence or routing orchestration failure must not turn a
+            // saved resume back into an unseen candidate. It is visible in the
+            // run failure summary and no external fallback recipient is used.
+            bossScreeningFailures.push({
+              candidateId: candidate.candidateId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        },
+      ));
+      const result = candidateResults[candidateResults.length - 1]!;
+      recordBossSeenProcessingLifecycle(candidate.candidateId, result.detailLifecycle, result.failureReason);
+    } else {
+      const preCaptureForwarding = platform === 'boss' && options.bossForwardMode && options.bossForwardRecipient
+        ? {
+          mode: options.bossForwardMode,
+          recipient: options.bossForwardRecipient,
+          ...(options.bossForwardCc === undefined ? {} : { ccEmails: options.bossForwardCc }),
+        } satisfies BossForwardingSettings
+        : undefined;
+      const usesWorkflowOwnedBossForwarding = platform !== 'boss'
+        || platformAdapter.afterResumeDetailOpened === undefined
+        || platformAdapter.afterResumeDetailOpened === getPlatformAdapter('boss').afterResumeDetailOpened;
+      const beforeResumeParsed = preCaptureForwarding
+        && usesWorkflowOwnedBossForwarding
+        && !preCaptureForwardingCompletedCandidateIds.has(candidate.candidateId)
+        ? async ({
+          detailPage,
+          detailOptions,
+        }: {
+          detailPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>;
+          detailOptions?: CandidateProfileDetailOptions;
+        }) => {
+          const now = new Date().toISOString();
+          const pendingOutbox = createBossPreCaptureForwardingOutboxEntry(candidate.candidateId, preCaptureForwarding, now);
+          // Persist the exact target set before opening the first forwarding
+          // dialog. Each recipient is then advanced independently by the
+          // shared outbox executor, so a failed copy never repeats a sent one.
+          await store.saveBossForwardingOutboxEntry('boss', jobKey, pendingOutbox);
+          const completedOutbox = await executeBossForwardingDeliveries({
+            jobKey,
+            candidate,
+            entry: pendingOutbox,
+            detailPage,
+            store,
+            detailOptions,
+          });
+          bossPreCaptureForwardingResults.push(completedOutbox);
+          if (completedOutbox.forwarding.status !== 'sent') {
+            throw new Error(
+              `Boss pre-capture forwarding ${completedOutbox.forwarding.status}: ${completedOutbox.forwarding.error ?? 'manual review required'}`,
+            );
+          }
+        }
+        : undefined;
+      const postOpenActions: CandidatePostOpenActions | null = platform === 'boss'
+        ? preCaptureForwarding
+          ? {
+            bossForwardMode: preCaptureForwarding.mode,
+            bossForwardRecipient: preCaptureForwarding.recipient,
+            bossForwardCcEmails: preCaptureForwarding.ccEmails,
+            bossForwardTransactionManaged: true,
+          }
+          : null
+        : {
+          liepinForwardContact: platform === 'liepin' ? options.liepinForwardContact : undefined,
+        };
+      candidateResults.push(await captureCandidateResume(
+        platform,
+        jobKey,
+        candidate,
+        store,
+        session,
+        searchPage,
+        platformAdapter,
+        postOpenActions,
+        undefined,
+        beforeResumeParsed,
+      ));
+      const result = candidateResults[candidateResults.length - 1]!;
+      recordBossSeenProcessingLifecycle(candidate.candidateId, result.detailLifecycle, result.failureReason);
+    }
+  }
+  await processBossSeenViewOnlyCandidates();
+
+  const capturedCandidateIds = [...new Set(candidateResults
     .filter((result) => result.captured)
-    .map((result) => result.candidateId);
+    .map((result) => result.candidateId))];
 
-  await store.saveSeenIds(platform, jobKey, [
-    ...seenCandidateIdsBeforeRun,
-    ...seenCandidateIds,
-  ]);
+  if (!bossScreeningEnabled) {
+    await store.markCapturedCandidatesSeen(platform, jobKey, capturedCandidateIds);
+  }
 
-  const scoringResult = await scoreCapturedResumes(platform, jobKey, job, store, capturedCandidateIds);
+  const scoringResult = bossScreeningEnabled
+    ? {
+      scoredCandidates: [
+        ...unreportedRecoveryRoutingArtifacts
+          .filter((artifact) => artifact.scoreStatus === 'success')
+          .map((artifact) => artifact.candidateId),
+        ...bossScreeningResults
+          .filter((result) => result.scoreArtifact.status === 'success')
+          .map((result) => result.candidateId),
+      ],
+      failedCandidates: [
+        ...unreportedRecoveryRoutingArtifacts
+          .filter((artifact) => artifact.scoreStatus === 'failed')
+          .map((artifact) => ({
+            candidateId: artifact.candidateId,
+            error: artifact.scoreError ?? 'Unknown Boss screening score error',
+          })),
+        ...bossScreeningResults
+          .filter((result) => result.scoreArtifact.status === 'failed')
+          .map((result) => ({
+            candidateId: result.candidateId,
+            error: result.scoreArtifact.status === 'failed' ? result.scoreArtifact.error : 'Unknown Boss screening score error',
+          })),
+        ...bossScreeningFailures,
+      ],
+    }
+    : await scoreCapturedResumes(platform, jobKey, job, store, capturedCandidateIds);
+  const latestForwardingEntries = new Map<string, BossForwardingOutboxEntry>();
+  for (const entry of [
+    ...outboxRecovery.recoveredUncertainEntries,
+    ...bossForwardingRetryResults,
+    ...bossPreCaptureForwardingResults,
+    ...bossScreeningResults.map((result) => result.forwardingOutbox),
+  ]) {
+    latestForwardingEntries.set(entry.candidateId, entry);
+  }
+  const forwardingOutcomeEntries = [...latestForwardingEntries.values()];
+  const captureFailures: RunCaptureFailure[] = candidateResults
+    .filter((result) => !result.captured)
+    .map((result) => ({
+      candidateId: result.candidateId,
+      stage: result.failureStage ?? 'persist',
+      detailVerified: result.detailVerified,
+      error: result.failureReason ?? 'Unknown capture failure',
+    }));
+  const processingFailures: RunProcessingFailure[] = [
+    ...scoringResult.failedCandidates.map((failure) => ({
+      candidateId: failure.candidateId,
+      stage: 'score' as const,
+      error: failure.error,
+    })),
+    ...bossScreeningFailures.map((failure) => ({
+      candidateId: failure.candidateId,
+      stage: 'routing' as const,
+      error: failure.error,
+    })),
+    ...forwardingOutcomeEntries
+      .filter((entry) => entry.forwarding.status !== 'sent')
+      .map((entry) => ({
+        candidateId: entry.candidateId,
+        stage: 'forward' as const,
+        error: `Boss forwarding ${entry.forwarding.status}: ${entry.forwarding.error ?? 'manual review required'}`,
+      })),
+  ];
   const failedCandidates = [
     ...candidateResults
       .filter((result) => !result.captured)
@@ -1901,16 +3460,72 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
         error: result.failureReason ?? 'Unknown error',
       })),
     ...scoringResult.failedCandidates,
+    ...forwardingOutcomeEntries
+      .filter((entry) => entry.forwarding.status !== 'sent')
+      .map((entry) => ({
+        candidateId: entry.candidateId,
+        error: `Boss forwarding ${entry.forwarding.status}: ${entry.forwarding.error ?? 'manual review required'}`,
+      })),
   ];
+
+  const bossRouting = bossScreeningEnabled
+    ? (() => {
+      const policyHash = hashBossScreeningPolicy(options.bossScreening!);
+      const routingArtifactsForCurrentReport = [
+        ...unreportedRecoveryRoutingArtifacts,
+        ...bossScreeningResults.map((result) => result.routingArtifact),
+      ];
+      const forwardingStatusCounts = forwardingOutcomeEntries.reduce<Record<string, number>>((counts, entry) => {
+        const status = entry.forwarding.status;
+        counts[status] = (counts[status] ?? 0) + 1;
+        return counts;
+      }, {});
+      return {
+        enabled: true as const,
+        policyHash,
+        ...(options.reportDelivery || options.secondaryReportDelivery ? {
+          reportDelivery: {
+            ...(options.reportDelivery ? { primary: options.reportDelivery } : {}),
+            ...(options.secondaryReportDelivery ? { secondary: options.secondaryReportDelivery } : {}),
+          },
+        } : {}),
+        qualifiedCandidateIds: routingArtifactsForCurrentReport
+          .filter((artifact) => artifact.classification === 'qualified')
+          .map((artifact) => artifact.candidateId),
+        reviewCandidateIds: routingArtifactsForCurrentReport
+          .filter((artifact) => artifact.classification === 'review')
+          .map((artifact) => artifact.candidateId),
+        rejectedCandidateIds: routingArtifactsForCurrentReport
+          .filter((artifact) => artifact.classification === 'rejected')
+          .map((artifact) => artifact.candidateId),
+        forwardingStatusCounts,
+      };
+    })()
+    : undefined;
 
   const runResult: RunResult = {
     jobKey,
     platform: platformAdapter.platform,
     fetchedAt,
     totalCandidates: candidates.length,
-    newCandidateIds: newCandidates.map((candidate) => candidate.candidateId),
+    runResultVersion: 2,
+    capturedCandidateIds,
+    captureAttemptCount: captureCandidates.length,
+    detailAttemptCount: retryCandidates.length + captureCandidates.length + bossSeenViewAttemptedCandidateIds.size,
+    captureFailures,
+    processingFailures,
+    ...(platform === 'boss' ? {
+      bossSeenViewSync: {
+        eligibleCandidateIds: bossSeenEligibleCandidates.map((candidate) => candidate.candidateId),
+        attemptedCandidateIds: [...bossSeenViewAttemptedCandidateIds],
+        completedCandidateIds: [...bossSeenViewCompletedCandidateIds],
+        coveredByProcessingCandidateIds: [...bossSeenViewCoveredByProcessingCandidateIds],
+        failures: bossSeenViewFailures,
+      } satisfies BossSeenViewSyncResult,
+    } : {}),
     scoredCandidates: scoringResult.scoredCandidates,
     failedCandidates,
+    ...(bossRouting ? { bossRouting } : {}),
     ...(options.searchExecution ? {
       searchExecution: {
         ...options.searchExecution,
@@ -1921,7 +3536,7 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
 
   const resultPath = await store.saveRunResult(platform, jobKey, runResult);
 
-  return { candidates, newCandidates, runResult, resultPath };
+  return { candidates, newCandidates, capturedCandidateIds, runResult, resultPath };
 }
 
 async function resolveResumeCaptureSearchSettings(
@@ -2009,6 +3624,55 @@ async function resolveResumeCaptureContext(
     };
   }
 
+  if (input.bossCaptureTaskSnapshot) {
+    const snapshot = input.bossCaptureTaskSnapshot;
+    if (snapshot.jobIdentity.bossJobId
+      && input.bossJobId
+      && snapshot.jobIdentity.bossJobId !== input.bossJobId) {
+      throw new Error(`Boss capture task snapshot belongs to Boss position ${snapshot.jobIdentity.bossJobId}, not ${input.bossJobId}.`);
+    }
+    if (!input.bossJobId
+      && snapshot.jobIdentity.expectedJobName.normalize('NFKC').trim() !== input.searchKeyword.normalize('NFKC').trim()) {
+      throw new Error(`Boss capture task snapshot expects job "${snapshot.jobIdentity.expectedJobName}", not "${input.searchKeyword}".`);
+    }
+    const existingJobRecord = await store.readJobRecordIfExists('boss', snapshot.sourceJobKey);
+    if (snapshot.sourceJobRevision !== undefined
+      && (!existingJobRecord || (existingJobRecord.revision ?? 1) !== snapshot.sourceJobRevision)) {
+      throw new Error(
+        `Boss capture task snapshot revision conflict for ${snapshot.sourceJobKey}: expected ${snapshot.sourceJobRevision}, found ${existingJobRecord?.revision ?? 'missing'}. Refresh and confirm the task again.`,
+      );
+    }
+    return {
+      jobKey: snapshot.sourceJobKey,
+      ...(existingJobRecord ? { existingJobRecord } : {}),
+      searchSettings: {
+        source: snapshot.searchPlan.source,
+        pageKeyword: snapshot.searchPlan.pageKeyword,
+        ...(snapshot.searchPlan.applicationFilterInput
+          ? { applicationFilterInput: snapshot.searchPlan.applicationFilterInput }
+          : {}),
+        conditions: snapshot.searchPlan.conditions,
+        ...(snapshot.searchPlan.conditionSetRef
+          ? { conditionSetRef: snapshot.searchPlan.conditionSetRef }
+          : {}),
+        ...(snapshot.searchPlan.selectedFieldsFingerprint
+          ? { resolution: { selectedFieldsFingerprint: snapshot.searchPlan.selectedFieldsFingerprint } }
+          : {}),
+      },
+      pageKeyword: snapshot.searchPlan.pageKeyword,
+      ...(snapshot.jobIdentity.bossJobId ? { bossJobId: snapshot.jobIdentity.bossJobId } : {}),
+      searchExecution: {
+        source: snapshot.searchPlan.source,
+        pageKeyword: snapshot.searchPlan.pageKeyword,
+        keywordSource: snapshot.searchPlan.keywordSource as NonNullable<RunResult['searchExecution']>['keywordSource'],
+        ...(snapshot.searchPlan.conditionSetRef ? { conditionSetRef: snapshot.searchPlan.conditionSetRef } : {}),
+        ...(snapshot.searchPlan.selectedFieldsFingerprint
+          ? { selectedFieldsFingerprint: snapshot.searchPlan.selectedFieldsFingerprint }
+          : {}),
+      },
+    };
+  }
+
   const explicitSearchSettings = input.applicationFilterInputFilePath
     ? await resolveResumeCaptureSearchSettings(input)
     : undefined;
@@ -2056,18 +3720,40 @@ function resolveBossForwardingSettings(
   input: SinglePlatformCliInput,
   existingJobRecord?: JobRecord,
 ): BossForwardingSettings | undefined {
-  if (input.platform !== 'boss') {
-    return undefined;
-  }
+  if (input.platform !== 'boss') return undefined;
+  return input.bossCaptureSettingsSnapshot
+    ? input.bossCaptureSettingsSnapshot.primaryForwarding
+    : resolveBossCaptureForwardingSettings(input, existingJobRecord);
+}
 
-  if (input.bossForwardMode && input.bossForwardRecipient) {
-    return {
-      mode: input.bossForwardMode,
-      recipient: input.bossForwardRecipient,
-    };
-  }
+/**
+ * Resolves the Boss-only policy from the saved canonical value plus explicit
+ * capture input. A disabled invocation retains previously saved conditions and
+ * secondary targets so operators can safely turn the workflow back on later.
+ */
+async function resolveBossScreeningSettings(
+  input: SinglePlatformCliInput,
+  existingJobRecord?: JobRecord,
+): Promise<BossScreeningSettings | undefined> {
+  if (input.platform !== 'boss') return undefined;
+  return input.bossCaptureSettingsSnapshot
+    ? input.bossCaptureSettingsSnapshot.screening
+    : resolveBossCaptureScreeningSettings(input, existingJobRecord);
+}
 
-  return existingJobRecord?.bossForwarding;
+function assertBossScreeningPreflight(
+  platform: SupportedPlatform,
+  forwarding: BossForwardingSettings | undefined,
+  delivery: ReportDeliveryOptions,
+  screening: BossScreeningSettings | undefined,
+): void {
+  if (!screening?.enabled) return;
+  assertBossScreeningJobRecordReady({
+    platform,
+    bossForwarding: forwarding,
+    recipientEmail: delivery.recipientEmail,
+    bossScreening: screening,
+  });
 }
 
 async function preflightCaptureRun(
@@ -2087,6 +3773,15 @@ async function preflightCaptureRun(
       if (!context.existingJobRecord && platformInput.jobDescriptionFilePath) {
         await readFile(platformInput.jobDescriptionFilePath, 'utf8');
       }
+      const forwarding = resolveBossForwardingSettings(platformInput, context.existingJobRecord);
+      const screening = await resolveBossScreeningSettings(platformInput, context.existingJobRecord);
+      const storedDelivery: ReportDeliveryOptions = context.existingJobRecord
+        ? {
+          recipientEmail: context.existingJobRecord.recipientEmail,
+          ccEmails: context.existingJobRecord.ccEmails,
+        }
+        : {};
+      assertBossScreeningPreflight(platform, forwarding, resolveReportDelivery(storedDelivery, platformInput), screening);
       return undefined;
     } catch (error) {
       return { keyword: input.searchKeyword, platform, error };
@@ -2117,9 +3812,27 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
   const platformAdapter = resolvePlatformAdapter(input.platform);
   const store = new JobStore();
   const captureContext = await resolveResumeCaptureContext(input, store);
-  const { jobKey, existingJobRecord, searchSettings, pageKeyword } = captureContext;
+  const { jobKey, searchSettings, pageKeyword } = captureContext;
+  let existingJobRecord = captureContext.existingJobRecord;
   const fetchedAt = new Date().toISOString();
+  if (input.bossCaptureSettingsSnapshot?.sourceJobKey
+    && input.bossCaptureSettingsSnapshot.sourceJobKey !== jobKey) {
+    throw new Error(`Boss capture settings snapshot belongs to job ${input.bossCaptureSettingsSnapshot.sourceJobKey}, not ${jobKey}`);
+  }
+  if (input.bossCaptureTaskSnapshot?.canonicalPatch && existingJobRecord) {
+    const expectedRevision = input.bossCaptureTaskSnapshot.sourceJobRevision;
+    if (expectedRevision === undefined) {
+      throw new Error(`Boss capture task snapshot for existing job ${jobKey} is missing sourceJobRevision; refusing configuration write-back.`);
+    }
+    existingJobRecord = await store.applyJobConfigPatch(
+      'boss',
+      jobKey,
+      expectedRevision,
+      input.bossCaptureTaskSnapshot.canonicalPatch,
+    );
+  }
   const bossForwarding = resolveBossForwardingSettings(input, existingJobRecord);
+  const bossScreening = await resolveBossScreeningSettings(input, existingJobRecord);
 
   if (!existingJobRecord && !input.jobDescriptionText && !input.jobDescriptionFilePath) {
     throw new Error('Missing required argument --jd or --jd-file');
@@ -2136,10 +3849,15 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       ...existingJobRecord,
       platform: existingJobRecord.platform,
       searchKeyword: input.platform === 'boss' ? existingJobRecord.searchKeyword : input.searchKeyword,
-      recipientEmail: input.recipientEmail ?? existingJobRecord.recipientEmail,
-      ccEmails: input.ccEmails === undefined ? existingJobRecord.ccEmails : input.ccEmails,
+      recipientEmail: input.bossCaptureSettingsSnapshot
+        ? existingJobRecord.recipientEmail
+        : input.recipientEmail ?? existingJobRecord.recipientEmail,
+      ccEmails: input.bossCaptureSettingsSnapshot
+        ? existingJobRecord.ccEmails
+        : input.ccEmails === undefined ? existingJobRecord.ccEmails : input.ccEmails,
       searchSettings,
-      bossForwarding,
+      bossForwarding: input.bossCaptureSettingsSnapshot ? existingJobRecord.bossForwarding : bossForwarding,
+      bossScreening: input.bossCaptureSettingsSnapshot ? existingJobRecord.bossScreening : bossScreening,
     }
     : {
       jobKey,
@@ -2149,6 +3867,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       ccEmails: input.ccEmails,
       searchSettings,
       bossForwarding,
+      ...(bossScreening ? { bossScreening } : {}),
       rawText: jobDescriptionText,
       normalizedJob,
       createdAt: fetchedAt,
@@ -2159,15 +3878,28 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       ccEmails: existingJobRecord.ccEmails,
     }
     : {};
-  const delivery = resolveReportDelivery(storedDelivery, input);
+  const delivery = input.bossCaptureSettingsSnapshot
+    ? input.bossCaptureSettingsSnapshot.primaryDelivery
+    : resolveReportDelivery(storedDelivery, input);
+  const persistedDelivery = input.bossCaptureSettingsSnapshot && existingJobRecord
+    ? storedDelivery
+    : delivery;
 
   const jobRecord: JobRecord = {
     ...effectiveJobRecord,
-    recipientEmail: delivery.recipientEmail,
-    ccEmails: delivery.ccEmails,
+    recipientEmail: persistedDelivery.recipientEmail,
+    ccEmails: persistedDelivery.ccEmails,
   };
 
-  await store.saveJobRecord(input.platform, jobRecord);
+  assertBossScreeningPreflight(input.platform, bossForwarding, delivery, bossScreening);
+
+  // A queued immutable snapshot has already applied its explicit canonical
+  // patch with CAS. Do not rewrite the full stale JobRecord and resurrect a
+  // cleared address or an older search setting. New jobs still need their
+  // initial record persisted normally.
+  if (!input.bossCaptureTaskSnapshot || !existingJobRecord) {
+    await store.saveJobRecord(input.platform, jobRecord);
+  }
 
   if (!isCrawl4aiAdapterAvailable()) {
     console.warn('Crawl4AI adapter unavailable at startup; continuing with built-in extraction only.');
@@ -2180,7 +3912,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
 
   try {
     session = await ensureAuthenticatedBrowserSessionRef.fn(platformAdapter.platform);
-    const { candidates, newCandidates, runResult, resultPath } = await runResumeCaptureFlow(
+    const { candidates, newCandidates, capturedCandidateIds, runResult, resultPath } = await runResumeCaptureFlow(
       input.platform,
       jobKey,
       normalizedJob,
@@ -2194,8 +3926,12 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
         liepinForwardContact: input.liepinForwardContact,
         bossForwardMode: bossForwarding?.mode,
         bossForwardRecipient: bossForwarding?.recipient,
+        bossForwardCc: bossForwarding?.ccEmails,
+        bossScreening,
         searchSource: searchSettings.source,
         searchConditions: searchSettings.conditions,
+        reportDelivery: delivery,
+        secondaryReportDelivery: bossScreening?.secondaryDelivery,
         searchExecution: captureContext.searchExecution,
       },
     );
@@ -2203,12 +3939,15 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
     let exportSummary: ExportJobResultsSummary | undefined;
     let exportError: string | undefined;
     let emailSummary: SendJobReportSummary | undefined;
+    let routedReportSummary: SendBossRoutedReportsSummary | undefined;
     let emailError: string | undefined;
 
     const exportPromise = exportJobResultsRef.fn(input.platform, jobKey);
-    const emailPromise = delivery.recipientEmail
-      ? sendJobReportRef.fn(input.platform, jobKey, delivery)
-      : undefined;
+    const emailPromise: Promise<SendJobReportSummary | SendBossRoutedReportsSummary> | undefined = runResult.bossRouting?.enabled
+      ? sendBossRoutedReportsRef.fn(jobKey)
+      : delivery.recipientEmail
+        ? sendJobReportRef.fn(input.platform, jobKey, delivery)
+        : undefined;
 
     const [exportResult, emailResult] = await Promise.allSettled([
       exportPromise,
@@ -2222,8 +3961,14 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       console.error(exportError);
     }
 
-    if (emailResult?.status === 'fulfilled') {
-      emailSummary = emailResult.value;
+    if (emailResult?.status === 'fulfilled' && emailResult.value) {
+      if ('reportDeliveries' in emailResult.value) {
+        routedReportSummary = emailResult.value;
+        // Preserve legacy summary fields as aliases for the primary report.
+        emailSummary = routedReportSummary.reportDeliveries.primary;
+      } else {
+        emailSummary = emailResult.value;
+      }
     } else if (emailResult?.status === 'rejected') {
       emailError = emailResult.reason instanceof Error ? emailResult.reason.message : String(emailResult.reason);
       console.error(emailError);
@@ -2232,18 +3977,27 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
     const summary: MainRunSummary = {
       jobKey,
       totalCandidates: candidates.length,
-      newCandidates: newCandidates.length,
+      captureAttempts: runResult.captureAttemptCount ?? 0,
+      capturedCandidates: capturedCandidateIds.length,
+      newCandidates: capturedCandidateIds.length,
       scoredCandidates: runResult.scoredCandidates.length,
       failedCandidates: runResult.failedCandidates.length,
       resultPath,
       exportPath: exportSummary?.exportPath,
       exportError,
-      emailAttempted: Boolean(delivery.recipientEmail),
-      emailDelivered: Boolean(emailSummary),
+      emailAttempted: routedReportSummary
+        ? routedReportSummary.reportDeliveries.primary.attempted
+        : Boolean(delivery.recipientEmail),
+      emailDelivered: routedReportSummary
+        ? routedReportSummary.reportDeliveries.primary.delivered
+        : Boolean(emailSummary),
       emailRecipient: emailSummary?.recipient,
       emailSubject: emailSummary?.subject,
-      emailError,
-      sampleCandidateIds: newCandidates.slice(0, 10).map((candidate) => candidate.candidateId),
+      emailError: emailError ?? emailSummary?.error,
+      ...(runResult.bossRouting ? { bossRouting: runResult.bossRouting } : {}),
+      ...(runResult.bossSeenViewSync ? { bossSeenViewSync: runResult.bossSeenViewSync } : {}),
+      ...(routedReportSummary ? { reportDeliveries: routedReportSummary.reportDeliveries } : {}),
+      sampleCandidateIds: capturedCandidateIds.slice(0, 10),
       ...(captureContext.searchExecution ? {
         searchExecution: runResult.searchExecution,
         ...(captureContext.bossJobId ? { bossJobId: captureContext.bossJobId } : {}),

@@ -256,10 +256,14 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
     return {
       jobKey: output.jobKey,
       totalCandidates: output.totalCandidates,
+      captureAttempts: output.captureAttempts,
+      capturedCandidates: output.capturedCandidates,
       newCandidates: output.newCandidates,
       scoredCandidates: output.scoredCandidates,
       failedCandidates: output.failedCandidates,
       resultPath: output.resultPath,
+      ...('bossRouting' in output && output.bossRouting ? { bossRouting: output.bossRouting } : {}),
+      ...('bossSeenViewSync' in output && output.bossSeenViewSync ? { bossSeenViewSync: output.bossSeenViewSync } : {}),
       ...summarizeCaptureSearchExecution(output),
     };
   }

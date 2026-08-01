@@ -3,7 +3,6 @@ import type { BrowserContext, Frame, Locator, Page } from 'playwright';
 import {
   moveMouseContinuously,
   typeBossLocatorSequentially,
-  waitPlatformActionPace,
 } from '../../../browser/pacing.js';
 import { config } from '../../../config.js';
 import {
@@ -23,18 +22,26 @@ import type {
   SearchCondition,
   SearchConditionApplyResult,
 } from '../../../types/job.js';
-import type { CandidatePostOpenActions, SearchWaitOptions } from '../../types.js';
+import type { CandidatePostOpenActions, CandidateProfileDetailOptions, SearchWaitOptions } from '../../types.js';
 import { parseBossResumeData } from './resume-actions.js';
 import {
   clickBossControl as clickBossLocator,
   clickBossControlWithDomEvent,
+  clickBossControlNatively,
   runBossAction as runBossPageAction,
   runBossFrameAction,
+  waitBossActionPaceWithinDeadline,
 } from './context.js';
 import {
+  assertNoBossPurchaseChatDialog,
+  BossUnexpectedContactDialogError,
+  BossResumeDetailCloseError,
+  closeBossResumeDetailStrict,
   closeExistingBossResumeDialog,
   forwardBossResume,
   parseBossResumeDetail,
+  verifyBossResumeDetailIdentity,
+  waitForBossResumeDetailOrPurchase,
   waitForBossResumeDetailReady,
 } from './resume-detail-actions.js';
 
@@ -55,6 +62,13 @@ type BossCandidateCardSnapshot = {
   dataItemId: string;
   searchResultIndex: number;
 };
+
+/**
+ * The capture workflow is intentionally bounded by the raw visible card
+ * window.  Keep this limit next to the card extraction action so parsing or
+ * deduplication can never make a later card move into the allowed window.
+ */
+export const BOSS_RAW_CANDIDATE_CARD_LIMIT = 20;
 
 type BossStaticFilterSnapshot = {
   key: string;
@@ -218,7 +232,7 @@ export function estimateBossDirectSearchTimeoutMs(input: {
   // readiness. A direct search with custom sliders has several paced pointer
   // operations; the ordinary list-read budget is not sufficient for it.
   const viewedPolicyActionUnits = includeViewedCandidates === undefined ? 0 : 2;
-  const estimatedMs = 24_000 + (12 + viewedPolicyActionUnits + conditions.reduce((total, condition) => total + bossDirectSearchActionUnits(condition), 0)) * pacingUpperBound;
+  const estimatedMs = 24_000 + (14 + viewedPolicyActionUnits + conditions.reduce((total, condition) => total + bossDirectSearchActionUnits(condition), 0)) * pacingUpperBound;
   return Math.min(120_000, Math.max(config.playwright.searchPageTimeoutMs, estimatedMs));
 }
 
@@ -232,13 +246,13 @@ export function estimateBossSearchTimeoutMs(input: {
   }
 
   // Saved search only has keyword/result readiness plus the optional viewed
-  // control. It intentionally keeps the normal list-read budget unless the
-  // policy itself needs a paced toggle and result refresh.
+  // control. The final explicit search click has its own paced action and
+  // result-cycle wait, even when every input was already ready.
   const pacingUpperBound = Math.max(config.playwright.actionDelayMaxMsByPlatform.boss, 1);
   const viewedPolicyActionUnits = input.includeViewedCandidates === undefined ? 0 : 2;
   return Math.min(120_000, Math.max(
     config.playwright.searchPageTimeoutMs,
-    24_000 + (4 + viewedPolicyActionUnits) * pacingUpperBound,
+    24_000 + (6 + viewedPolicyActionUnits) * pacingUpperBound,
   ));
 }
 
@@ -412,9 +426,6 @@ async function applyBossSearchKeyword(page: Page, keyword: string, deadline: num
   await typeBossLocatorSequentially(keywordInput, page, normalizedKeyword, remainingTime(deadline), {
     replaceExisting: true,
   });
-  await runBossFrameAction(frame, () => keywordInput.press('Enter', { timeout: remainingTime(deadline) })).catch(async () => {
-    await clickBossLocator(frame.locator('.icon-search').first(), page, remainingTime(deadline));
-  });
 
   await frame.waitForFunction(
     (expectedKeyword) => {
@@ -425,7 +436,294 @@ async function applyBossSearchKeyword(page: Page, keyword: string, deadline: num
     normalizedKeyword,
     { timeout: remainingTime(deadline), polling: 250 },
   );
-  await waitForBossSearchResults(frame, deadline);
+}
+
+export type BossSearchSubmissionEvidence = 'result-mutation' | 'loading-cycle' | 'search-resource';
+
+export interface BossSearchSubmissionReceipt {
+  submitted: true;
+  evidence: BossSearchSubmissionEvidence;
+}
+
+type BossSearchSubmissionObserverState = {
+  token: string;
+  target: Element;
+  clickedAt: number;
+  resultMutation: boolean;
+  loadingSeen: boolean;
+  observer: MutationObserver;
+  clickHandler: (event: Event) => void;
+};
+
+function bossSearchSubmissionToken(): string {
+  return `boss-search-submit-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+async function locateBossSearchSubmitControl(frame: Frame, deadline: number): Promise<Locator> {
+  const preferredSelectors = [
+    'button.search-btn, a.search-btn, [role="button"].search-btn, .btn-search',
+    '[ka="search_submit"], [ka="search"]',
+    '.search-input-wrap .icon-search, .search-box .icon-search, .search-btn .icon-search',
+  ];
+  const preferred = frame.locator(preferredSelectors.join(', '));
+  const generic = frame.locator('button, a, [role="button"], input[type="submit"], [class*="search"]');
+  const evaluateCandidates = async (controls: Locator): Promise<number[]> => controls.evaluateAll((elements) => {
+    const normalize = (value: string | null | undefined): string => (value ?? '').replace(/\s+/g, ' ').trim();
+    const keywordInputs = [...document.querySelectorAll<HTMLInputElement>('input.search-input, .search-input')]
+      .filter((input) => {
+        const style = window.getComputedStyle(input);
+        const rect = input.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      });
+    if (keywordInputs.length !== 1) return [];
+    const keywordInput = keywordInputs[0]!;
+    const inputParent = keywordInput?.parentElement;
+    const inputForm = keywordInput?.closest('form');
+    const inputSearchAncestor = keywordInput?.closest('[class*="search"], [id*="search"]');
+    const isVisibleAndEnabled = (element: Element): boolean => {
+      if (!(element instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && Number.parseFloat(style.opacity || '1') > 0
+        && rect.width > 0
+        && rect.height > 0
+        && !(('disabled' in element) && Boolean((element as HTMLButtonElement).disabled))
+        && element.getAttribute('aria-disabled') !== 'true';
+    };
+    const isSearchControl = (element: Element): boolean => {
+      const text = normalize(element.textContent)
+        || normalize(element.getAttribute('aria-label'))
+        || normalize(element.getAttribute('title'))
+        || normalize(element.getAttribute('ka'))
+        || normalize(element.className);
+      if (!/(?:搜索|search)/i.test(text)) return false;
+      const buttonLike = element instanceof HTMLButtonElement
+        || element instanceof HTMLAnchorElement
+        || element.getAttribute('role') === 'button'
+        || element.matches('input[type="submit"]')
+        || /(?:search-btn|btn-search|icon-search)/i.test(element.className);
+      if (!buttonLike) return false;
+      const sameForm = Boolean(inputForm && element.closest('form') === inputForm);
+      const inputParentIsSearchContainer = Boolean(inputParent
+        && /search/i.test(`${inputParent.className ?? ''} ${inputParent.id ?? ''}`));
+      const explicitSubmitSemantic = /(?:search[_-]?submit|search-btn|btn-search)/i.test(
+        `${element.getAttribute('ka') ?? ''} ${element.className ?? ''}`,
+      );
+      const sameParent = Boolean(
+        inputParent
+        && (inputParentIsSearchContainer || explicitSubmitSemantic)
+        && (element.parentElement === inputParent || inputParent.contains(element)),
+      );
+      const sameSearchAncestor = Boolean(inputSearchAncestor && element.closest('[class*="search"], [id*="search"]') === inputSearchAncestor);
+      return sameForm || sameParent || sameSearchAncestor;
+    };
+    const candidates = elements.filter((element) => isVisibleAndEnabled(element) && isSearchControl(element));
+    return candidates
+      .filter((element) => !candidates.some((other) => other !== element && other.contains(element)))
+      .map((element) => elements.indexOf(element));
+  });
+
+  const preferredIndexes = await evaluateCandidates(preferred);
+  const genericIndexes = preferredIndexes.length > 0 ? [] : await evaluateCandidates(generic);
+  const controls = preferredIndexes.length > 0 ? preferred : generic;
+  const indexes = preferredIndexes.length > 0 ? preferredIndexes : genericIndexes;
+  if (indexes.length > 1) throw new Error('Boss search submit control is ambiguous near the keyword input.');
+  if (indexes.length === 1) return controls.nth(indexes[0]!);
+
+  throw new Error('Boss search submit control was not found near the keyword input.');
+}
+
+async function armBossSearchSubmissionObserver(control: Locator, token: string): Promise<void> {
+  await control.evaluate((element, expectedToken) => {
+    type ObserverState = BossSearchSubmissionObserverState;
+    const resultText = (): string => (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    const isLoadingText = (text: string): boolean => /(?:加载中|正在加载|加载资料)/.test(text);
+    const isResultRelatedNode = (node: Node | null): boolean => {
+      const candidate = node?.nodeType === Node.ELEMENT_NODE
+        ? node as Element
+        : node?.parentElement;
+      if (!candidate) return false;
+      const relatedSelector = '.geek-info-card, [data-boss-search-result-version], .geek-list, .geek-info-list, .geek-list-wrap, .search-result-list';
+      if (candidate.matches(relatedSelector) || Boolean(candidate.closest(relatedSelector))) return true;
+      const className = candidate instanceof HTMLElement ? candidate.className : '';
+      return typeof className === 'string'
+        && /(?:geek|search).*(?:result|list|card)|(?:result|list|card).*(?:geek|search)/i.test(className);
+    };
+    const host = window as Window & { __autorecruitBossSearchSubmission?: ObserverState };
+    const previous = host.__autorecruitBossSearchSubmission;
+    if (previous) {
+      previous.observer.disconnect();
+      document.removeEventListener('click', previous.clickHandler, true);
+    }
+
+    const state = {} as ObserverState;
+    state.token = expectedToken;
+    state.target = element;
+    state.clickedAt = 0;
+    state.resultMutation = false;
+    state.loadingSeen = false;
+    state.clickHandler = (event: Event) => {
+      const eventTarget = event.target;
+      if (eventTarget instanceof Node && !state.target.contains(eventTarget) && eventTarget !== state.target) {
+        return;
+      }
+      state.clickedAt = performance.now();
+    };
+    state.observer = new MutationObserver((mutations) => {
+      if (!state.clickedAt) return;
+      if (isLoadingText(resultText())) {
+        state.loadingSeen = true;
+      }
+      for (const mutation of mutations) {
+        if (isResultRelatedNode(mutation.target)
+          || [...mutation.addedNodes, ...mutation.removedNodes].some(isResultRelatedNode)) {
+          state.resultMutation = true;
+          return;
+        }
+      }
+    });
+    document.addEventListener('click', state.clickHandler, true);
+    state.observer.observe(document.body, {
+      attributes: true,
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    host.__autorecruitBossSearchSubmission = state;
+  }, token);
+}
+
+async function clearBossSearchSubmissionObserver(frame: Frame, token: string): Promise<void> {
+  await frame.evaluate((expectedToken) => {
+    type ObserverState = BossSearchSubmissionObserverState;
+    const host = window as Window & { __autorecruitBossSearchSubmission?: ObserverState };
+    const state = host.__autorecruitBossSearchSubmission;
+    if (!state || state.token !== expectedToken) return;
+    state.observer.disconnect();
+    document.removeEventListener('click', state.clickHandler, true);
+    delete host.__autorecruitBossSearchSubmission;
+  }, token).catch(() => undefined);
+}
+
+async function assertBossSearchSubmitControlStillCurrent(
+  frame: Frame,
+  control: Locator,
+  marker: string,
+  deadline: number,
+): Promise<void> {
+  const marked = frame.locator(`[data-autorecruit-boss-submit-marker="${marker}"]`);
+  if (await marked.count() !== 1) {
+    throw new Error('Boss search submit control was replaced after pre-click validation.');
+  }
+  const refreshed = await locateBossSearchSubmitControl(frame, deadline);
+  if (await refreshed.count() !== 1 || await refreshed.getAttribute('data-autorecruit-boss-submit-marker') !== marker) {
+    throw new Error('Boss search submit control identity changed before the final click.');
+  }
+  const visibleAndEnabled = await control.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none'
+      && style.visibility !== 'hidden'
+      && rect.width > 0
+      && rect.height > 0
+      && !('disabled' in element && Boolean((element as HTMLButtonElement).disabled))
+      && element.getAttribute('aria-disabled') !== 'true';
+  }).catch(() => false);
+  if (!visibleAndEnabled) {
+    throw new Error('Boss search submit control is no longer visible and enabled before the final click.');
+  }
+}
+
+async function waitForBossSearchSubmission(
+  frame: Frame,
+  token: string,
+  deadline: number,
+): Promise<BossSearchSubmissionReceipt> {
+  try {
+    const observed = await frame.waitForFunction((expectedToken) => {
+      type ObserverState = {
+        token: string;
+        clickedAt: number;
+        resultMutation: boolean;
+        loadingSeen: boolean;
+      };
+      const host = window as Window & { __autorecruitBossSearchSubmission?: ObserverState };
+      const state = host.__autorecruitBossSearchSubmission;
+      if (!state || state.token !== expectedToken || !state.clickedAt) return undefined;
+
+      const bodyText = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim();
+      if (/数据加载异常/.test(bodyText)) {
+        return { status: 'error', message: 'Boss search reported a data-loading error after the explicit search submit.' };
+      }
+      const isLoading = /(?:加载中|正在加载|加载资料)/.test(bodyText);
+      state.loadingSeen ||= isLoading;
+      const hasCards = document.querySelectorAll('.geek-info-card').length > 0;
+      const hasExplicitEmpty = /暂无|没有|未找到|无相关|搜索使用方法/.test(bodyText) && !isLoading;
+      if ((!hasCards && !hasExplicitEmpty) || isLoading) return undefined;
+
+      const hasSearchResource = performance.getEntriesByType('resource').some((entry) => (
+        entry.startTime >= state.clickedAt
+        && /\/(?:wapi|api)\/.*(?:search|geek)/i.test(entry.name)
+      ));
+      if (state.resultMutation) return { status: 'ready', evidence: 'result-mutation' };
+      if (state.loadingSeen) return { status: 'ready', evidence: 'loading-cycle' };
+      if (hasSearchResource) return { status: 'ready', evidence: 'search-resource' };
+      return undefined;
+    }, token, { timeout: remainingTime(deadline), polling: 100 });
+    const result = await observed.jsonValue() as { status: 'ready' | 'error'; evidence?: BossSearchSubmissionEvidence; message?: string };
+    if (result.status === 'error') {
+      throw new Error(result.message ?? 'Boss search submit failed.');
+    }
+    if (!result.evidence) {
+      throw new Error('Boss search submit produced no result-cycle evidence.');
+    }
+    return { submitted: true, evidence: result.evidence };
+  } catch (error) {
+    if (error instanceof Error && /data-loading error after the explicit search submit|no result-cycle evidence/.test(error.message)) {
+      throw error;
+    }
+    throw new Error('Boss search submit produced no observable new result cycle before the search deadline.');
+  } finally {
+    await clearBossSearchSubmissionObserver(frame, token);
+  }
+}
+
+async function submitBossPreparedSearch(
+  page: Page,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<BossSearchSubmissionReceipt> {
+  throwIfBossSearchAborted(signal);
+  const frame = await waitForBossSearchFrame(page, deadline);
+  const control = await locateBossSearchSubmitControl(frame, deadline);
+  const token = bossSearchSubmissionToken();
+  const marker = `${token}-marker`;
+  await control.evaluate((element, expectedMarker) => {
+    element.setAttribute('data-autorecruit-boss-submit-marker', expectedMarker);
+  }, marker);
+  try {
+    await armBossSearchSubmissionObserver(control, token);
+    await assertBossSearchSubmitControlStillCurrent(frame, control, marker, deadline);
+    throwIfBossSearchAborted(signal);
+    await clickBossControlNatively(page, control, remainingTime(deadline), {
+      pace: false,
+      beforeClick: () => assertBossSearchSubmitControlStillCurrent(frame, control, marker, deadline),
+    });
+    throwIfBossSearchAborted(signal);
+    return await waitForBossSearchSubmission(frame, token, deadline);
+  } catch (error) {
+    await clearBossSearchSubmissionObserver(frame, token);
+    throw error;
+  } finally {
+    await control.evaluate((element, expectedMarker) => {
+      if (element.getAttribute('data-autorecruit-boss-submit-marker') === expectedMarker) {
+        element.removeAttribute('data-autorecruit-boss-submit-marker');
+      }
+    }, marker).catch(() => undefined);
+  }
 }
 
 async function prepareBossSearchPage(page: Page, keyword: string, deadline: number): Promise<Page> {
@@ -437,12 +735,46 @@ async function prepareBossSearchPage(page: Page, keyword: string, deadline: numb
   return page;
 }
 
+async function assertBossSavedSearchState(
+  page: Page,
+  keyword: string,
+  expectedRecentViewed: boolean | undefined,
+  deadline: number,
+): Promise<void> {
+  const state = await snapshotBossSearchFilterState(page, deadline);
+  const expectedKeyword = normalizeText(keyword);
+  if (state.keyword !== expectedKeyword) {
+    throw new Error(`Boss saved search keyword was not ready before submit: expected ${expectedKeyword}, observed ${state.keyword || '(empty)'}.`);
+  }
+  if (state.jobScope !== bossUnrestrictedJobName) {
+    throw new Error(`Boss saved search job scope was not ready before submit: expected ${bossUnrestrictedJobName}, observed ${state.jobScope || '(empty)'}.`);
+  }
+  if (expectedRecentViewed !== undefined && state.toggles.filter_recent_viewed !== expectedRecentViewed) {
+    throw new Error(`Boss saved search viewed policy was not ready before submit: expected ${String(expectedRecentViewed)}, observed ${String(state.toggles.filter_recent_viewed)}.`);
+  }
+}
+
 async function openBossSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page> {
   const deadline = createSearchDeadline(options);
   const searchPage = await prepareBossSearchPage(page, keyword, deadline);
   if (options?.includeViewedCandidates !== undefined) {
     await applyBossViewedCandidatePolicy(searchPage, options.includeViewedCandidates, deadline);
   }
+  throwIfBossSearchAborted(options?.signal);
+  await waitBossActionPaceWithinDeadline(searchPage, deadline);
+  await assertBossSavedSearchState(
+    searchPage,
+    keyword,
+    options?.includeViewedCandidates === undefined ? undefined : !options.includeViewedCandidates,
+    deadline,
+  );
+  await submitBossPreparedSearch(searchPage, deadline, options?.signal);
+  await assertBossSavedSearchState(
+    searchPage,
+    keyword,
+    options?.includeViewedCandidates === undefined ? undefined : !options.includeViewedCandidates,
+    deadline,
+  );
   return searchPage;
 }
 
@@ -462,6 +794,7 @@ async function prepareBossSearchConditionPage(page: Page, keyword: string, optio
 export interface BossDirectSearchApplyResult {
   page: Page;
   verification: BossDirectSearchVerificationSummary;
+  submission?: BossSearchSubmissionReceipt;
   /** Fields that required a UI mutation during this replay. */
   changedFields?: string[];
   /** Fields whose semantic target was already present on the page. */
@@ -603,7 +936,31 @@ export async function applyBossDirectSearch(
     }
   }
 
+  // Applying a later filter can trigger a Boss iframe refresh that replaces a
+  // short keyword with the first autocomplete suggestion (for example, 铝 →
+  // 铝模). Reconcile the keyword immediately before the one required final
+  // search click so the submitted search always carries the requested value.
+  const keywordBeforeSubmit = await readBossSearchKeyword(searchPage, deadline);
+  if (keywordBeforeSubmit !== normalizeText(keyword)) {
+    await applyBossSearchKeyword(searchPage, keyword, deadline);
+    changedFields.push('keyword');
+  }
+
   throwIfBossSearchAborted(options?.signal);
+  await waitBossActionPaceWithinDeadline(searchPage, deadline);
+  const preSubmissionVerification = await readBossDirectSearchVerificationSummary(
+    searchPage,
+    keyword,
+    effectiveConditions,
+    deadline,
+    resolvedViewedPolicy.desiredChecked,
+    { includeResult: false },
+  );
+  const preSubmissionFailure = preSubmissionVerification.conditions.find((entry) => !entry.verified);
+  if (preSubmissionFailure) {
+    throw new Error(preSubmissionFailure.message ?? `Boss direct-search condition was not ready before submit for ${preSubmissionFailure.fieldId}.`);
+  }
+  const submission = await submitBossPreparedSearch(searchPage, deadline, options?.signal);
   const verification = await assertBossDirectSearchPostcondition(
     searchPage,
     keyword,
@@ -615,6 +972,7 @@ export async function applyBossDirectSearch(
   return {
     page: searchPage,
     verification,
+    submission,
     changedFields: uniqueStrings(changedFields),
     alreadySatisfiedFields: uniqueStrings(alreadySatisfiedFields)
       .filter((fieldId) => !changedFields.includes(fieldId)),
@@ -1758,23 +2116,6 @@ async function waitForBossFilterSettle(frame: Frame, deadline: number): Promise<
     undefined,
     { timeout: Math.min(remainingTime(deadline), 5000), polling: 250 },
   ).catch(() => undefined);
-
-  const hasLoadError = await frame.evaluate(() => /数据加载异常/.test((document.body?.innerText ?? '').replace(/\s+/g, ' ').trim()))
-    .catch(() => false);
-  if (!hasLoadError || remainingTime(deadline) <= 1000) {
-    return;
-  }
-
-  const keywordInput = frame.locator('input.search-input, .search-input').first();
-  await runBossFrameAction(frame, () => keywordInput.press('Enter', { timeout: Math.min(remainingTime(deadline), 2000) })).catch(async () => {
-    await clickBossLocator(frame.locator('.icon-search').first(), frame.page(), Math.min(remainingTime(deadline), 2000)).catch(() => undefined);
-  });
-  await frame.waitForFunction(
-    () => document.querySelectorAll('.geek-info-card').length > 0
-      || /暂无|没有|未找到|无相关|搜索使用方法/.test((document.body?.innerText ?? '').replace(/\s+/g, ' ').trim()),
-    undefined,
-    { timeout: Math.min(remainingTime(deadline), 5000), polling: 250 },
-  ).catch(() => undefined);
 }
 
 async function clickBossInlineApplicationFilter(
@@ -2008,6 +2349,8 @@ type BossProvinceSelectionState = {
   provinces: string[];
   /** Selected province labels paired with their stable option values. */
   provinceOptions: BossProvinceOption[];
+  /** All province label/value aliases still present in the hidden picker DOM. */
+  provinceAliases: BossProvinceOption[];
   /** The visible city summary, normalized so placeholders and 全国 are empty. */
   summary: string;
   panelVisible: boolean;
@@ -2059,13 +2402,36 @@ function bossProvinceSummaryMatchesLabels(summary: string, labels: readonly stri
   return sameBossStringSet(summarizedLabels, labels);
 }
 
+function bossProvinceSummaryMatchesValues(
+  selection: BossProvinceSelectionState,
+  desiredValues: readonly string[],
+): boolean {
+  if (desiredValues.length === 0) return !selection.summary;
+  if (!selection.summary) return false;
+  const summaryValues = selection.summary.split(/[、,，]/u).map((entry) => normalizeText(entry)).filter(Boolean);
+  if (summaryValues.length !== desiredValues.length) return false;
+
+  const desiredAliases = desiredValues.map((desired) => selection.provinceAliases.find((option) =>
+    option.label === desired || option.value === desired));
+  if (desiredAliases.some((option) => !option)) {
+    return bossProvinceSummaryMatchesLabels(selection.summary, desiredValues);
+  }
+  const unmatched = [...summaryValues];
+  for (const alias of desiredAliases) {
+    const index = unmatched.findIndex((summary) => summary === alias!.label || summary === alias!.value);
+    if (index < 0) return false;
+    unmatched.splice(index, 1);
+  }
+  return unmatched.length === 0;
+}
+
 function bossProvinceSelectionStateMatchesValues(
   selection: BossProvinceSelectionState,
   desiredValues: readonly string[],
 ): boolean {
   return selection.provinceOptions.length > 0
     ? bossProvinceSelectionMatchesValues(selection.provinceOptions, desiredValues)
-    : bossProvinceSummaryMatchesLabels(selection.summary, desiredValues);
+    : bossProvinceSummaryMatchesValues(selection, desiredValues);
 }
 
 /**
@@ -2085,14 +2451,20 @@ async function readBossProvinceSelectionState(frame: Frame): Promise<BossProvinc
       const rect = element.getBoundingClientRect();
       return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
     };
-    const selectedOptions = Array.from(document.querySelectorAll<HTMLElement>('.city-wrap .dropdown-province > li')).flatMap((item) => {
+    const allOptions = Array.from(document.querySelectorAll<HTMLElement>('.city-wrap .dropdown-province > li')).flatMap((item) => {
       const checkbox = item.querySelector<HTMLElement>('.city-checkbox, .mul-checkbox-ui');
-      const checked = /status1|checked|active/.test(checkbox?.className ?? '')
-        || Boolean(item.querySelector<HTMLInputElement>('input')?.checked);
       const label = normalize(item.textContent);
       const value = normalize(item.getAttribute('data-value')) || normalize(item.getAttribute('data-id')) || label;
-      return checked && label ? [{ label, value }] : [];
+      return label ? [{
+        label,
+        value,
+        selected: /status1|checked|active/.test(checkbox?.className ?? '')
+          || Boolean(item.querySelector<HTMLInputElement>('input')?.checked),
+      }] : [];
     });
+    const selectedOptions = allOptions
+      .filter((option) => option.selected)
+      .map(({ label, value }) => ({ label, value }));
     const selected = selectedOptions.map((option) => option.label);
     if (new Set(selected).size !== selected.length) {
       throw new Error('Boss city selector contains duplicate selected province labels.');
@@ -2116,11 +2488,38 @@ async function readBossProvinceSelectionState(frame: Frame): Promise<BossProvinc
     return {
       provinces,
       provinceOptions: hasNational ? [] : selectedOptions,
+      provinceAliases: allOptions.map(({ label, value }) => ({ label, value })),
       summary,
       panelVisible: isVisible(cityBox),
       evidenceConflict,
     };
   });
+}
+
+/**
+ * Wait for Boss to commit the city summary after closing the picker. Some
+ * live page versions hide the panel first and hydrate the closed summary a
+ * little later, so reading once immediately after the close would falsely
+ * report an empty selection. Keep the check bounded and require the same
+ * semantic evidence used by the normal postcondition.
+ */
+async function waitForBossProvinceSelectionState(
+  frame: Frame,
+  desiredValues: readonly string[],
+  deadline: number,
+): Promise<BossProvinceSelectionState> {
+  const waitUntil = Math.min(deadline, Date.now() + 5000);
+  let state = await readBossProvinceSelectionState(frame);
+  while (Date.now() < waitUntil) {
+    if (!state.panelVisible
+      && !state.evidenceConflict
+      && bossProvinceSelectionStateMatchesValues(state, desiredValues)) {
+      return state;
+    }
+    await frame.waitForTimeout(Math.min(100, remainingTime(waitUntil))).catch(() => undefined);
+    state = await readBossProvinceSelectionState(frame);
+  }
+  return state;
 }
 
 async function applyBossCityApplicationFilter(
@@ -2183,7 +2582,6 @@ async function applyBossCityApplicationFilter(
     }).filter((item) => item.label);
   });
   const desiredIndexes = new Set<number>();
-  const desiredProvinceLabels = new Set<string>();
   for (const value of desired) {
     const matches = states.filter((item) => item.label === value || item.value === value);
     if (matches.length !== 1) {
@@ -2193,7 +2591,6 @@ async function applyBossCityApplicationFilter(
       throw new Error(`Boss city option is disabled: ${value}`);
     }
     desiredIndexes.add(matches[0]!.index);
-    desiredProvinceLabels.add(matches[0]!.label);
   }
   for (const option of states) {
     const shouldSelect = desired.has(option.label) || desired.has(option.value);
@@ -2241,9 +2638,9 @@ async function applyBossCityApplicationFilter(
   await clickBossLocator(cityBox.locator('button').nth(confirmIndex), page, Math.min(remainingTime(deadline), 5000));
   await waitForBossFilterSettle(frame, deadline);
   await cityBox.waitFor({ state: 'hidden', timeout: Math.min(remainingTime(deadline), 5000) });
-  const confirmed = await readBossProvinceSelectionState(frame);
-  if (confirmed.panelVisible || confirmed.evidenceConflict || !bossProvinceSelectionStateMatchesValues(confirmed, [...desiredProvinceLabels])) {
-    throw new Error(`Boss city selection did not match the requested province set after confirmation (expected: ${[...desiredProvinceLabels].join('、')}; observed: ${confirmed.provinces.join('、') || '(none)'}).`);
+  const confirmed = await waitForBossProvinceSelectionState(frame, desiredValues, deadline);
+  if (confirmed.panelVisible || confirmed.evidenceConflict || !bossProvinceSelectionStateMatchesValues(confirmed, desiredValues)) {
+    throw new Error(`Boss city selection did not match the requested province set after confirmation (expected: ${desiredValues.join('、')}; observed: ${confirmed.provinces.join('、') || '(none)'}).`);
   }
   return {
     status: 'applied',
@@ -2715,7 +3112,7 @@ export async function applyBossViewedCandidatePolicy(
   // Arm immediately before the pointer click. The pace remains part of this
   // action, but is performed before observation so background page activity
   // during the human-like delay cannot be mistaken for this filter refresh.
-  await waitPlatformActionPace(page, 'boss');
+  await waitBossActionPaceWithinDeadline(page, deadline);
   const refreshToken = await armBossRecentViewedSearchRefresh(frame);
   try {
     await clickBossLocator(control.root, page, Math.min(remainingTime(deadline), 5000), { pace: false });
@@ -3558,6 +3955,7 @@ export async function readBossDirectSearchVerificationSummary(
   conditions: SearchCondition[],
   deadline: number,
   expectedRecentViewed?: boolean,
+  options: { includeResult?: boolean } = {},
 ): Promise<BossDirectSearchVerificationSummary> {
   const state = await snapshotBossSearchFilterState(page, deadline);
   const entries: BossSearchConditionVerification[] = [];
@@ -3703,7 +4101,9 @@ export async function readBossDirectSearchVerificationSummary(
     ));
   }
 
-  const result = await readBossSearchConditionResultTotal(page, { deadline });
+  const result = options.includeResult === false
+    ? { resultTotal: 0, resultTotalSource: 'page' as const }
+    : await readBossSearchConditionResultTotal(page, { deadline });
   return {
     keyword: expectedKeyword,
     conditions: entries,
@@ -3930,6 +4330,23 @@ function resolveBossCandidateId(snapshot: BossCandidateCardSnapshot): string {
   return `boss-card-${hashBossCandidateText(`${snapshot.href}\n${snapshot.text}\n${snapshot.html}`)}`;
 }
 
+function assertBossCandidateCardWindow(snapshots: BossCandidateCardSnapshot[]): void {
+  const ids = snapshots.map((snapshot) => {
+    if (!snapshot.dataExpect && !snapshot.dataJid && !snapshot.dataLid) {
+      throw new Error(
+        `Boss candidate card at visible index ${snapshot.searchResultIndex} has no stable candidate identity; refusing to parse or operate it.`,
+      );
+    }
+    return resolveBossCandidateId(snapshot);
+  });
+  const duplicateIds = ids.filter((candidateId, index) => ids.indexOf(candidateId) !== index);
+  if (duplicateIds.length > 0) {
+    throw new Error(
+      `Boss candidate list contains duplicate stable IDs inside the first twenty: ${[...new Set(duplicateIds)].join(', ')}`,
+    );
+  }
+}
+
 function parseBossCandidateName(lines: string[]): string | undefined {
   const isNameLike = (line: string) => /^[\u4e00-\u9fa5A-Za-z·*]{1,24}$/.test(line)
     && !/热搜|刚刚活跃|活跃|联系|职位|期望|城市|院校|不感兴趣|收藏|转发|举报|不合适/.test(line);
@@ -4035,7 +4452,12 @@ async function collectBossCandidateSnapshots(page: Page, deadline: number): Prom
 
 async function extractBossCandidateList(page: Page, options?: SearchWaitOptions): Promise<{ candidates: CandidateListItem[] }> {
   const deadline = createSearchDeadline(options);
-  const snapshots = await collectBossCandidateSnapshots(page, deadline);
+  const rawSnapshots = await collectBossCandidateSnapshots(page, deadline);
+  // Slice before parsing, filtering, or Map-based deduplication.  A malformed
+  // or repeated card therefore fails closed and can never cause card 21+ to
+  // be promoted into the operation window.
+  const snapshots = rawSnapshots.slice(0, BOSS_RAW_CANDIDATE_CARD_LIMIT);
+  assertBossCandidateCardWindow(snapshots);
   return { candidates: parseBossCandidateSnapshots(snapshots) };
 }
 
@@ -4071,27 +4493,254 @@ async function resolveBossCandidateAnchorIndex(page: Page, candidate: CandidateL
   return matchedIndexes[0]!;
 }
 
-async function openBossResumeDetail(_context: BrowserContext, searchPage: Page, candidate: CandidateListItem): Promise<Page> {
-  const deadline = createResumeDetailDeadline();
-  await closeExistingBossResumeDialog(searchPage, deadline);
+async function openBossResumeDetail(
+  _context: BrowserContext,
+  searchPage: Page,
+  candidate: CandidateListItem,
+  options?: CandidateProfileDetailOptions,
+): Promise<Page> {
+  const deadline = options?.deadline ?? createResumeDetailDeadline();
+  if (options) {
+    const staleDetailCount = await searchPage
+      .locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])')
+      .count()
+      .catch(() => 0);
+    if (staleDetailCount > 0) {
+      await closeBossResumeDetailStrict(searchPage, deadline, { pace: false });
+    }
+  } else {
+    await closeExistingBossResumeDialog(searchPage, deadline);
+  }
+  await assertNoBossPurchaseChatDialog(searchPage, deadline);
 
   const frame = await waitForBossSearchFrame(searchPage, deadline);
   const targetIndex = await resolveBossCandidateAnchorIndex(searchPage, candidate, deadline);
   const candidateAnchor = frame.locator('a[ka="search_click_open_resume"], a[data-expect], a[data-jid], a[data-lid]').nth(targetIndex);
-  const safeClickTarget = candidateAnchor.locator('.geek-info-detail, .search-geek-info, .card-inner').first();
-  const clickable = await safeClickTarget.count().catch(() => 0) > 0 ? safeClickTarget : candidateAnchor;
+  const marker = `boss-detail-target-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await candidateAnchor.evaluate((element, input) => {
+    const identifiers = [
+      element.getAttribute('data-expect'),
+      element.getAttribute('data-jid'),
+      element.getAttribute('data-lid'),
+    ].filter((value): value is string => Boolean(value));
+    if (!identifiers.includes(input.candidateId)
+      && !(identifiers.includes(input.candidateId.split('_')[0] ?? '') && identifiers.includes(input.candidateId.split('_')[1] ?? ''))) {
+      throw new Error(`Boss detail target was replaced before marking candidate ${input.candidateId}.`);
+    }
+    element.setAttribute('data-autorecruit-boss-detail-target', input.marker);
+  }, { candidateId: candidate.candidateId, marker });
+  const markedAnchor = frame.locator(`[data-autorecruit-boss-detail-target="${marker}"]`);
+  const safeClickTarget = markedAnchor.locator('.geek-info-detail:visible, .search-geek-info:visible, .card-inner:visible');
+  const assertSafeClickTargetStillCurrent = async (): Promise<void> => {
+    const markedCount = await markedAnchor.count().catch(() => 0);
+    if (markedCount !== 1) {
+      throw new Error(`Boss detail target for candidate ${candidate.candidateId} was replaced before click; found ${markedCount}.`);
+    }
+    const identityMatches = await markedAnchor.evaluate((element, candidateId) => {
+      const identifiers = [
+        element.getAttribute('data-expect'),
+        element.getAttribute('data-jid'),
+        element.getAttribute('data-lid'),
+      ].filter((value): value is string => Boolean(value));
+      return identifiers.includes(candidateId)
+        || (candidateId.includes('_')
+          && identifiers.includes(candidateId.split('_')[0] ?? '')
+          && identifiers.includes(candidateId.split('_')[1] ?? ''));
+    }, candidate.candidateId).catch(() => false);
+    if (!identityMatches) {
+      throw new Error(`Boss detail target identity changed before clicking candidate ${candidate.candidateId}.`);
+    }
+    const targetCount = await safeClickTarget.count().catch(() => 0);
+    if (targetCount !== 1) {
+      throw new Error(
+        `Could not uniquely find a safe Boss detail click target for candidate ${candidate.candidateId}; found ${targetCount}.`,
+      );
+    }
+  };
 
-  await clickBossLocator(clickable, searchPage, remainingTime(deadline), { position: { x: 24, y: 24 } });
-  await waitForBossResumeDetailReady(searchPage, deadline);
-  return searchPage;
+  try {
+    await assertSafeClickTargetStillCurrent();
+    await clickBossControlNatively(searchPage, safeClickTarget, remainingTime(deadline), {
+      deadline,
+      cleanupReserveMs: options?.cleanupReserveMs ?? 0,
+      beforeClick: assertSafeClickTargetStillCurrent,
+    });
+    await waitForBossResumeDetailOrPurchase(searchPage, deadline, options?.cleanupReserveMs ?? 0);
+    return searchPage;
+  } finally {
+    await candidateAnchor.evaluate((element, expectedMarker) => {
+      if (element.getAttribute('data-autorecruit-boss-detail-target') === expectedMarker) {
+        element.removeAttribute('data-autorecruit-boss-detail-target');
+      }
+    }, marker).catch(() => undefined);
+  }
 }
 
-async function runBossPostOpenActions(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions): Promise<void> {
+export type BossSeenCandidateDetailFailureStage = 'card-resolve' | 'detail-open' | 'identity-verify' | 'detail-close';
+
+export class BossSeenCandidateDetailError extends Error {
+  readonly stage: BossSeenCandidateDetailFailureStage;
+  readonly detailOpened: boolean;
+  readonly detailIdentityVerified: boolean;
+  readonly detailClosed: boolean;
+  readonly fatalCloseFailure: boolean;
+
+  constructor(input: {
+    message: string;
+    stage: BossSeenCandidateDetailFailureStage;
+    detailOpened: boolean;
+    detailIdentityVerified: boolean;
+    detailClosed: boolean;
+    fatalCloseFailure: boolean;
+  }) {
+    super(input.message);
+    this.name = 'BossSeenCandidateDetailError';
+    this.stage = input.stage;
+    this.detailOpened = input.detailOpened;
+    this.detailIdentityVerified = input.detailIdentityVerified;
+    this.detailClosed = input.detailClosed;
+    this.fatalCloseFailure = input.fatalCloseFailure;
+  }
+}
+
+export interface BossSeenCandidateDetailVisitReceipt {
+  candidateId: string;
+  detailOpened: true;
+  detailIdentityVerified: true;
+  detailClosed: true;
+}
+
+/**
+ * Opens one already-seen search card, verifies the live detail identity, and
+ * closes the detail again. This is intentionally a read-only history-view
+ * action: it never parses/persists a resume and never invokes forwarding or
+ * contact controls.
+ */
+async function visitBossSeenCandidateDetail(
+  searchPage: Page,
+  candidate: CandidateListItem,
+  options: CandidateProfileDetailOptions = { deadline: createResumeDetailDeadline() },
+): Promise<BossSeenCandidateDetailVisitReceipt> {
+  const deadline = options.deadline;
+  let detailOpened = false;
+  let detailIdentityVerified = false;
+  let detailClosed = false;
+  let closeAttempted = false;
+
+  try {
+    await assertNoBossPurchaseChatDialog(searchPage, deadline);
+    await openBossResumeDetail(searchPage.context(), searchPage, candidate, options);
+    detailOpened = true;
+    await waitBossActionPaceWithinDeadline(searchPage, deadline, options.cleanupReserveMs ?? 0);
+  } catch (error) {
+    let closeError: unknown;
+    const visibleDetailCount = await searchPage
+      .locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])')
+      .count()
+      .catch(() => 0);
+    if ((detailOpened || visibleDetailCount > 0) && !closeAttempted) {
+      closeAttempted = true;
+      try {
+        await closeBossResumeDetailStrict(searchPage, deadline, { pace: false });
+        detailClosed = true;
+      } catch (cleanupError) {
+        closeError = cleanupError;
+      }
+    }
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const stage: BossSeenCandidateDetailFailureStage = /Could not (?:open|uniquely find) Boss candidate card|card has no stable Boss identity|no candidate cards are visible/.test(errorMessage)
+      ? 'card-resolve'
+      : 'detail-open';
+    throw new BossSeenCandidateDetailError({
+      message: `Boss history detail open failed for candidate ${candidate.candidateId}: ${errorMessage}${closeError ? `; close failed: ${closeError instanceof Error ? closeError.message : String(closeError)}` : ''}`,
+      stage,
+      detailOpened,
+      detailIdentityVerified,
+      detailClosed,
+      fatalCloseFailure: Boolean(closeError) || error instanceof BossUnexpectedContactDialogError,
+    });
+  }
+
+  try {
+    await verifyBossResumeDetailIdentity(searchPage, candidate, deadline, options.cleanupReserveMs ?? 0);
+    detailIdentityVerified = true;
+    await waitBossActionPaceWithinDeadline(searchPage, deadline, options.cleanupReserveMs ?? 0);
+  } catch (error) {
+    // Identity failures are retryable, but the modal must still be closed once
+    // before the next card is considered. A failed close leaves the page for
+    // inspection and stops orchestration rather than clicking again.
+    let closeError: unknown;
+    if (!closeAttempted) {
+      closeAttempted = true;
+      try {
+        await closeBossResumeDetailStrict(searchPage, deadline, { pace: false });
+        detailClosed = true;
+      } catch (cleanupError) {
+        closeError = cleanupError;
+      }
+    }
+    throw new BossSeenCandidateDetailError({
+      message: `Boss history detail identity verification failed for candidate ${candidate.candidateId}: ${error instanceof Error ? error.message : String(error)}${closeError ? `; close failed: ${closeError instanceof Error ? closeError.message : String(closeError)}` : ''}`,
+      stage: 'identity-verify',
+      detailOpened,
+      detailIdentityVerified,
+      detailClosed,
+      fatalCloseFailure: Boolean(closeError),
+    });
+  }
+
+  closeAttempted = true;
+  try {
+    await closeBossResumeDetailStrict(searchPage, deadline, { pace: false });
+    detailClosed = true;
+  } catch (error) {
+    throw new BossSeenCandidateDetailError({
+      message: `Boss history detail close failed for candidate ${candidate.candidateId}: ${error instanceof Error ? error.message : String(error)}`,
+      stage: 'detail-close',
+      detailOpened,
+      detailIdentityVerified,
+      detailClosed,
+      fatalCloseFailure: true,
+    });
+  }
+
+  if (!detailOpened || !detailIdentityVerified || !detailClosed) {
+    throw new BossSeenCandidateDetailError({
+      message: `Boss history detail lifecycle was incomplete for candidate ${candidate.candidateId}.`,
+      stage: 'detail-close',
+      detailOpened,
+      detailIdentityVerified,
+      detailClosed,
+      fatalCloseFailure: true,
+    });
+  }
+  return {
+    candidateId: candidate.candidateId,
+    detailOpened: true,
+    detailIdentityVerified: true,
+    detailClosed: true,
+  };
+}
+
+async function runBossPostOpenActions(
+  page: Page,
+  candidate: CandidateListItem,
+  actions: CandidatePostOpenActions,
+  options?: CandidateProfileDetailOptions,
+): Promise<void> {
   const hasMode = actions.bossForwardMode !== undefined;
   const hasRecipient = actions.bossForwardRecipient !== undefined;
   if (hasMode !== hasRecipient) {
     throw new Error('Boss forward mode and recipient must be provided together.');
   }
+  if (actions.bossForwardCcEmails !== undefined && !hasMode) {
+    throw new Error('Boss forward CC requires a Boss forward mode and recipient.');
+  }
+
+  // Normal capture may pass the configured target through this hook for
+  // compatibility/observability, while the workflow itself owns the durable
+  // per-recipient pre-capture transaction. Never issue a second external send.
+  if (actions.bossForwardTransactionManaged) return;
 
   if (actions.bossForwardMode && actions.bossForwardRecipient) {
     await forwardBossResume(
@@ -4100,6 +4749,9 @@ async function runBossPostOpenActions(page: Page, candidate: CandidateListItem, 
       actions.bossForwardMode,
       actions.bossForwardRecipient,
       actions.bossForwardActionMode,
+      actions.bossForwardCcEmails,
+      true,
+      options,
     );
   }
 }
@@ -4108,8 +4760,28 @@ export async function openBossLoginPage(page: Page): Promise<void> {
   await runBossPageAction(page, () => page.goto(bossLoginUrl, { waitUntil: 'domcontentloaded' }));
 }
 
-export async function closeBossResumeDetail(page: Page): Promise<void> {
-  await closeExistingBossResumeDialog(page, createResumeDetailDeadline(), { pace: false });
+export async function closeBossResumeDetail(
+  page: Page,
+  _detailPage?: Page,
+  _candidate?: CandidateListItem,
+  options?: CandidateProfileDetailOptions,
+): Promise<void> {
+  // Lightweight orchestration doubles used by offline tests expose no DOM
+  // locator API. Real Boss pages always do; keep the adapter seam compatible
+  // without weakening the strict browser-side postcondition below.
+  if (typeof (page as Partial<Page>).locator !== 'function') return;
+  const deadline = options?.deadline ?? createResumeDetailDeadline();
+  try {
+    await closeBossResumeDetailStrict(page, deadline, {
+      pace: false,
+      cleanupReserveMs: options?.cleanupReserveMs,
+    });
+  } catch (error) {
+    if (error instanceof BossResumeDetailCloseError) throw error;
+    throw new BossResumeDetailCloseError(
+      `Boss resume detail close failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 export {
@@ -4124,6 +4796,7 @@ export {
   openBossAuthenticatedHome,
   openBossDirectSearch,
   openBossResumeDetail,
+  visitBossSeenCandidateDetail,
   openBossSubscribeSearch,
   parseBossResumeData,
   parseBossResumeDetail,

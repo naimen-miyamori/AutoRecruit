@@ -23,15 +23,69 @@ scheduled work.
 - Reuse the Boss-scoped headed browser, profile, CDP port, and useful authenticated
   search/chat/talent/job-management tab. Do not repeatedly open login, create extra tabs, or
   replace a usable current page.
+- Every high-level Boss search (`saved`, `direct`, condition-set apply, and the capture/batch/all
+  callers that reuse them) must finish entering and verifying its conditions, then click one
+  unique visible/enabled global search control. This click is mandatory even when every condition
+  was already satisfied. Keyword input and filter auto-refreshes are preparation only; Enter and
+  intermediate search fallbacks must not submit early. Candidate extraction waits for a new
+  post-click result cycle (cards or explicit empty state) and fails closed when the cycle is not
+  observable; after a click with uncertain outcome the action never clicks again. Preparation,
+  discovery, single-condition, reset, and restore actions remain non-submitting.
 - Navigation, clicks, input, keys, forwarding, chat, contact, and candidate transitions use the
   shared paced continuous pointer path. Keyword, direct-chat, and remark typing use the sequential
   typing helper; search/remark replacement clears the prior value, direct chat preserves a
   non-empty draft, and fixed common phrases remain option selections.
 - Normal capture reuses the current search page. Boss forwarding mode and recipient appear together
   and only on Boss; they include the stable candidate ID and select exactly one colleague or fill
-  the email recipient. Forward before parsing or seen marking; a pre-capture failure remains
-  retryable. Explicit normal-capture forwarding persists only on that Boss job record; it must not
-  rewrite the auto-chat platform default. Only explicit auto-chat input may update the latter.
+  one email recipient. Boss exposes no native CC field: an email CC configuration means reopening
+  the dialog and independently forwarding to each deduplicated address, with the same candidate ID
+  written and verified in every message. CC is valid only for email forwarding. With Boss
+  post-score screening disabled, retain the legacy order: forward
+  before parsing or seen marking, so a pre-capture failure remains retryable. With enabled
+  post-score screening, skip that legacy forwarding hook: parse and persist the exact resume, mark
+  it seen, score and evaluate the version 2 model requirements while the same detail remains
+  open, persist the routing decision/outbox, then forward `qualified` and `review` to the primary
+  target and proven `rejected` candidates to the secondary target. Page actions never decide this
+  route or write its facts. Persist a pending-score work item before seen so an interruption before
+  the first decision can recover only that exact candidate. A pending or known pre-confirmation
+  failed outbox may retry only while the exact candidate is visible and must use its stored target
+  deliveries. The primary address and every copy address have separate durable states; sent and
+  uncertain external confirmations are never auto-retried, and a failed copy must not repeat a
+  successful primary delivery. A policy-version migration may mark unfinished old-policy
+  deliveries as `superseded`; that terminal state is never retried. Explicit
+  normal-capture forwarding and screening settings persist only on that Boss job record; they must
+  not rewrite the auto-chat platform default. Only explicit auto-chat input may update the latter.
+- HTTP, assistant, batch, and scheduler capture tasks use the server-created Boss v3 snapshot:
+  stable identity, complete search plan, immutable delivery targets, screening policy, and source
+  configuration revision. Explicit patches use JobStore CAS before browser work; a revision
+  conflict fails closed. RunResult routing facts own report recipients and CC, so manual replay
+  cannot be retargeted by later job edits.
+- Every ordinary Boss capture run truncates the extracted result order to the first 20 resumes
+  before seen, recovery, detail, scoring, forwarding, or persistence work. Seen candidates inside
+  that window do not backfill from position 21 onward. For each stable ID in that bounded window
+  already present in the validated current-job `seen-ids.json`, ordinary capture performs exactly
+  one detail open/identity-check/close lifecycle unless an outbox-retry or pending-score lifecycle
+  already covers it. This history-view action is read-only: it never parses, scores, forwards,
+  contacts, or writes history, and a failed close stops later card operations. Boss standalone modes
+  and other platforms do not inherit this cap or view-sync contract.
+- A candidate enters captured history only after the current detail identity is verified, the parsed
+  resume ID matches the requested card, and the resume file is written and read back successfully.
+  RunResult v2 records `capturedCandidateIds` and stage-specific retryable failures; legacy v1
+  `newCandidateIds` remain read-only attempt history and are never inferred to be captured.
+- Opening or confirming forwarding must move the shared pointer and then use a freshly resolved
+  native locator click, never a stale coordinate that can land on `联系Ta`. Detect a visible search-
+  chat-card purchase dialog before and after opening forwarding, close its unique safe close control,
+  and fail before confirmation if it appeared instead of the forwarding dialog. A purchase dialog
+  exposed by a detail click is the same fatal page-safety condition: cleanup is allowed, but the
+  current run must stop rather than continue to another card. `sent` requires a dispatched confirm
+  click plus a new visible Boss success indication; a known pre-confirmation failure is retryable,
+  while a dispatched click without success evidence is `uncertain` and is never auto-retried.
+- A normal Boss detail lifecycle uses one absolute deadline created by the workflow and passed
+  through open, identity verification, parsing, every recipient delivery, and strict close. Actions
+  reserve cleanup time before spending user-like pace, recompute remaining timeout after pacing, and
+  revalidate the exact candidate/control again after pointer movement immediately before dispatch.
+  Actions must not create a fresh detail deadline for a later lifecycle phase; unfinished deliveries
+  remain pending/retryable while strict close owns the reserved budget.
 
 ## Talent Discovery and Atomic Conversations
 

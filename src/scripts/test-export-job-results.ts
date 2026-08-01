@@ -373,6 +373,74 @@ describe('exportJobResults', () => {
     assert.doesNotMatch(persisted, /cand-old/);
   });
 
+  it('does not treat legacy v1 attempts without score facts as captured candidates', async () => {
+    const jobKey = `job-export-v1-attempt-without-score-${Date.now()}`;
+    const { expectedPath } = await seedJobData(jobKey, {
+      artifacts: [],
+      runResults: [{
+        jobKey,
+        platform: '51job',
+        fetchedAt: '2026-04-21T00:00:02.000Z',
+        totalCandidates: 1,
+        newCandidateIds: ['legacy-detail-failure'],
+        scoredCandidates: [],
+        failedCandidates: [{ candidateId: 'legacy-detail-failure', error: 'detail parse failed' }],
+      }],
+    });
+
+    const result = await exportJobResults('51job', jobKey);
+
+    assert.deepStrictEqual(result.summary, {
+      candidateCount: 0,
+      successCount: 0,
+      failureCount: 0,
+    });
+    const persisted = await fs.readFile(expectedPath, 'utf8');
+    assert.match(persisted, /- 候选人数: 0/);
+    assert.doesNotMatch(persisted, /legacy-detail-failure/);
+  });
+
+  it('keeps an existing score artifact in a legacy attempt scope without promoting the attempt itself', async () => {
+    const jobKey = `job-export-v1-attempt-with-score-${Date.now()}`;
+    const artifact: CandidateScoreArtifact = {
+      candidateId: 'legacy-scored-candidate',
+      model: 'claude-test',
+      scoredAt: '2026-04-21T00:00:01.000Z',
+      status: 'success',
+      score: {
+        totalScore: 82,
+        dimensionScores: {
+          education: { score: 82, reason: 'legacy' },
+          language: { score: 82, reason: 'legacy' },
+          experience: { score: 82, reason: 'legacy' },
+          industryMatch: { score: 82, reason: 'legacy' },
+          regionMatch: { score: 82, reason: 'legacy' },
+          responsibilityMatch: { score: 82, reason: 'legacy' },
+        },
+        risks: [],
+        summary: 'legacy score artifact',
+      },
+    };
+    const { expectedPath } = await seedJobData(jobKey, {
+      artifacts: [artifact],
+      runResults: [{
+        jobKey,
+        platform: '51job',
+        fetchedAt: '2026-04-21T00:00:02.000Z',
+        totalCandidates: 1,
+        newCandidateIds: ['legacy-scored-candidate'],
+        scoredCandidates: [],
+        failedCandidates: [],
+      }],
+    });
+
+    const result = await exportJobResults('51job', jobKey);
+
+    assert.equal(result.summary.candidateCount, 1);
+    const persisted = await fs.readFile(expectedPath, 'utf8');
+    assert.match(persisted, /legacy-scored-candidate/);
+  });
+
   it('fails when latest run candidates have no matching score artifacts', async () => {
     const jobKey = `job-export-current-run-missing-${Date.now()}`;
     await seedJobData(jobKey, {

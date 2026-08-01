@@ -68,7 +68,9 @@ async function listJsonFiles(dirPath: string): Promise<string[]> {
 
 function collectRunCandidateIds(runResult: Partial<RunResult>): string[] {
   return [
-    ...(runResult.newCandidateIds ?? []),
+    ...(runResult.runResultVersion === 2
+      ? (runResult.capturedCandidateIds ?? [])
+      : (runResult.newCandidateIds ?? [])),
     ...(runResult.scoredCandidates ?? []),
     ...((runResult.failedCandidates ?? []).map((candidate) => candidate.candidateId)),
   ].filter(Boolean);

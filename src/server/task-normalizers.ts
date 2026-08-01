@@ -7,6 +7,8 @@ import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
 import { isTalentMappingCorePlatform } from '../types/talent-mapping.js';
 import { loadTalentMappingPlanFile } from '../talent-mapping/plan.js';
 import { assertSafeSearchConditionSetId } from '../search/search-condition-set-store.js';
+import { normalizeBossCaptureSettingsSnapshot } from '../scoring/boss-screening.js';
+import type { BossCaptureTaskSnapshot } from '../types/job.js';
 import type {
   BatchTaskInput,
   BossAutoChatTaskInput,
@@ -48,6 +50,8 @@ export type NormalizedTask<TInput> = {
  */
 export interface NormalizeResumeCaptureTaskOptions {
   allowBossSearchConditionSetRef?: boolean;
+  allowBossCaptureSettingsSnapshot?: boolean;
+  allowBossCaptureTaskSnapshot?: boolean;
 }
 
 export type NormalizedSchedulableTask = NormalizedTask<TaskInput> & {
@@ -74,6 +78,81 @@ export function normalizeJsonObject(value: unknown, label: string): JsonObject {
   }
 
   return value as JsonObject;
+}
+
+/**
+ * Validate the shape of the private v3 Boss task snapshot.  Public callers
+ * cannot opt into this field; keeping the structural check here still makes
+ * persisted queue files fail closed instead of producing a partially pinned
+ * execution plan.
+ */
+export function normalizeBossCaptureTaskSnapshot(value: unknown): BossCaptureTaskSnapshot {
+  const item = normalizeJsonObject(value, 'bossCaptureTaskSnapshot');
+  if (item.version !== 3) {
+    throw new Error('bossCaptureTaskSnapshot.version must be 3');
+  }
+  const resolvedAt = getRequiredString(item, 'resolvedAt');
+  const sourceJobKey = getRequiredString(item, 'sourceJobKey');
+  const snapshotHash = getRequiredString(item, 'snapshotHash');
+  if (!/^[a-f0-9]{64}$/u.test(snapshotHash)) {
+    throw new Error('bossCaptureTaskSnapshot.snapshotHash must be a SHA-256 hex digest');
+  }
+  if (item.sourceJobRevision !== undefined
+    && (typeof item.sourceJobRevision !== 'number'
+      || !Number.isSafeInteger(item.sourceJobRevision)
+      || item.sourceJobRevision <= 0)) {
+    throw new Error('bossCaptureTaskSnapshot.sourceJobRevision must be a positive integer');
+  }
+  if (item.sourceItemIndex !== undefined
+    && (typeof item.sourceItemIndex !== 'number'
+      || !Number.isSafeInteger(item.sourceItemIndex)
+      || item.sourceItemIndex < 0)) {
+    throw new Error('bossCaptureTaskSnapshot.sourceItemIndex must be a non-negative integer');
+  }
+  const identity = normalizeJsonObject(item.jobIdentity, 'bossCaptureTaskSnapshot.jobIdentity');
+  const expectedJobName = getRequiredString(identity, 'expectedJobName');
+  const searchPlan = normalizeJsonObject(item.searchPlan, 'bossCaptureTaskSnapshot.searchPlan');
+  const source = searchPlan.source;
+  if (source !== 'saved' && source !== 'direct') {
+    throw new Error('bossCaptureTaskSnapshot.searchPlan.source must be saved or direct');
+  }
+  const pageKeyword = getRequiredString(searchPlan, 'pageKeyword');
+  const keywordSource = getRequiredString(searchPlan, 'keywordSource');
+  if (!Array.isArray(searchPlan.conditions)) {
+    throw new Error('bossCaptureTaskSnapshot.searchPlan.conditions must be an array');
+  }
+  const delivery = normalizeJsonObject(item.deliveryAndScreening, 'bossCaptureTaskSnapshot.deliveryAndScreening');
+  const primaryDelivery = normalizeJsonObject(delivery.primaryDelivery, 'bossCaptureTaskSnapshot.deliveryAndScreening.primaryDelivery');
+  if (!Array.isArray(primaryDelivery.ccEmails)
+    || !primaryDelivery.ccEmails.every((email) => typeof email === 'string')) {
+    throw new Error('bossCaptureTaskSnapshot primaryDelivery.ccEmails must be a string array');
+  }
+  // The queue stores JSON values.  A deep clone prevents callers from
+  // mutating an in-memory task snapshot after it has been normalized.
+  const cloned = JSON.parse(JSON.stringify(item)) as BossCaptureTaskSnapshot;
+  cloned.resolvedAt = resolvedAt;
+  cloned.sourceJobKey = sourceJobKey;
+  cloned.jobIdentity.expectedJobName = expectedJobName;
+  cloned.searchPlan.source = source;
+  cloned.searchPlan.pageKeyword = pageKeyword;
+  cloned.searchPlan.keywordSource = keywordSource;
+  const { snapshotHash: suppliedHash, resolvedAt: _resolvedAt, ...behavior } = cloned;
+  const canonicalize = (nested: unknown): unknown => {
+    if (Array.isArray(nested)) return nested.map(canonicalize);
+    if (nested && typeof nested === 'object') {
+      return Object.fromEntries(Object.entries(nested as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalize(child)]));
+    }
+    return nested;
+  };
+  const expectedHash = crypto.createHash('sha256')
+    .update(JSON.stringify(canonicalize(behavior)))
+    .digest('hex');
+  if (suppliedHash !== expectedHash) {
+    throw new Error('bossCaptureTaskSnapshot hash does not match its canonical content');
+  }
+  return cloned;
 }
 
 export function getOptionalString(item: JsonObject, fieldName: string): string | undefined {
@@ -209,9 +288,10 @@ function normalizeBossForwarding(
   item: JsonObject,
   platform: ConsolePlatformSelection,
   includeBoss = false,
-): { bossForwardMode?: BossForwardMode; bossForwardRecipient?: string } {
+): { bossForwardMode?: BossForwardMode; bossForwardRecipient?: string; bossForwardCc?: string[] } {
   const bossForwardMode = normalizeBossForwardMode(getOptionalString(item, 'bossForwardMode'));
   const bossForwardRecipient = getOptionalString(item, 'bossForwardRecipient');
+  const bossForwardCc = normalizeForwardCc(item.bossForwardCc, 'bossForwardCc');
   if (Boolean(bossForwardMode) !== Boolean(bossForwardRecipient)) {
     throw new Error('bossForwardMode and bossForwardRecipient must be provided together');
   }
@@ -219,8 +299,71 @@ function normalizeBossForwarding(
   if (bossForwardMode && platform !== 'boss' && !(platform === 'all' && includeBoss)) {
     throw new Error('Boss forwarding can only be used with platform boss or platform all with includeBoss=true');
   }
+  if (bossForwardCc?.length && bossForwardMode === 'colleague') {
+    throw new Error('bossForwardCc requires bossForwardMode email');
+  }
+  if (bossForwardCc !== undefined && platform !== 'boss' && !(platform === 'all' && includeBoss)) {
+    throw new Error('Boss forwarding can only be used with platform boss or platform all with includeBoss=true');
+  }
 
-  return { bossForwardMode, bossForwardRecipient };
+  return { bossForwardMode, bossForwardRecipient, bossForwardCc };
+}
+
+interface BossScreeningTaskFields {
+  bossScreeningEnabled?: boolean;
+  bossScreeningPolicyFile?: string;
+  bossSecondaryForwardMode?: BossForwardMode;
+  bossSecondaryForwardRecipient?: string;
+  bossSecondaryForwardCc?: string[];
+  bossSecondaryEmail?: string;
+  bossSecondaryCc?: string[];
+}
+
+/**
+ * Keep the Boss post-score routing settings on the normal capture boundary.
+ * The normalizer intentionally validates only transport shape and platform
+ * isolation: saved-policy reuse and enabled-policy completeness are resolved
+ * by the Boss capture preflight before browser activity.
+ */
+function normalizeBossScreening(
+  item: JsonObject,
+  platform: ConsolePlatformSelection,
+  includeBoss = false,
+): BossScreeningTaskFields {
+  const bossScreeningEnabled = getOptionalBoolean(item, 'bossScreeningEnabled');
+  const bossScreeningPolicyFile = getOptionalString(item, 'bossScreeningPolicyFile');
+  const bossSecondaryForwardMode = normalizeBossForwardMode(getOptionalString(item, 'bossSecondaryForwardMode'));
+  const bossSecondaryForwardRecipient = getOptionalString(item, 'bossSecondaryForwardRecipient');
+  const bossSecondaryForwardCc = normalizeForwardCc(item.bossSecondaryForwardCc, 'bossSecondaryForwardCc');
+  const bossSecondaryEmail = getOptionalString(item, 'bossSecondaryEmail');
+  const bossSecondaryCc = normalizeCc(item.bossSecondaryCc);
+  const hasScreeningInput = bossScreeningEnabled !== undefined
+    || bossScreeningPolicyFile !== undefined
+    || bossSecondaryForwardMode !== undefined
+    || bossSecondaryForwardRecipient !== undefined
+    || bossSecondaryForwardCc !== undefined
+    || bossSecondaryEmail !== undefined
+    || bossSecondaryCc !== undefined;
+
+  if (hasScreeningInput && platform !== 'boss' && !(platform === 'all' && includeBoss)) {
+    throw new Error('Boss screening can only be used with platform boss or platform all with includeBoss=true');
+  }
+  if (Boolean(bossSecondaryForwardMode) !== Boolean(bossSecondaryForwardRecipient)) {
+    throw new Error('bossSecondaryForwardMode and bossSecondaryForwardRecipient must be provided together');
+  }
+  if (bossSecondaryForwardCc?.length && bossSecondaryForwardMode === 'colleague') {
+    throw new Error('bossSecondaryForwardCc requires bossSecondaryForwardMode email');
+  }
+
+  return {
+    bossScreeningEnabled,
+    bossScreeningPolicyFile,
+    bossSecondaryForwardMode,
+    bossSecondaryForwardRecipient,
+    bossSecondaryForwardCc,
+    bossSecondaryEmail,
+    bossSecondaryCc,
+  };
 }
 
 function normalizeCaptureIncludeBoss(item: JsonObject, platform: ConsolePlatformSelection): boolean | undefined {
@@ -376,15 +519,26 @@ function normalizeCc(value: unknown): string[] | undefined {
 
   if (typeof value === 'string') {
     const items = value.split(',').map((item) => item.trim()).filter(Boolean);
-    return items.length > 0 ? items : undefined;
+    return items.length > 0 ? [...new Set(items)] : undefined;
   }
 
   if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
     const items = value.map((item) => item.trim()).filter(Boolean);
-    return items.length > 0 ? items : undefined;
+    return [...new Set(items)];
   }
 
   throw new Error('cc must be a string or string array');
+}
+
+function normalizeForwardCc(value: unknown, fieldName: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'string') {
+    return [...new Set(value.split(',').map((item) => item.trim()).filter(Boolean))];
+  }
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+    return [...new Set(value.map((item) => item.trim()).filter(Boolean))];
+  }
+  throw new Error(`${fieldName} must be a string or string array`);
 }
 
 function normalizeStringArray(value: unknown, fieldName: string): string[] | undefined {
@@ -453,6 +607,16 @@ export function normalizeResumeCaptureTask(
     'liepinForwardContact',
     'bossForwardMode',
     'bossForwardRecipient',
+    'bossForwardCc',
+    'bossScreeningEnabled',
+    'bossScreeningPolicyFile',
+    'bossSecondaryForwardMode',
+    'bossSecondaryForwardRecipient',
+    'bossSecondaryForwardCc',
+    'bossSecondaryEmail',
+    'bossSecondaryCc',
+    ...(options.allowBossCaptureSettingsSnapshot ? ['bossCaptureSettingsSnapshot'] : []),
+    ...(options.allowBossCaptureTaskSnapshot ? ['bossCaptureTaskSnapshot'] : []),
   ], 'resume-capture task');
   const platform = normalizePlatformSelection(item.platform);
   const includeBoss = normalizeCaptureIncludeBoss(item, platform);
@@ -469,7 +633,22 @@ export function normalizeResumeCaptureTask(
   const email = getOptionalString(item, 'email');
   const cc = normalizeCc(item.cc);
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
-  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform, includeBoss === true);
+  const { bossForwardMode, bossForwardRecipient, bossForwardCc } = normalizeBossForwarding(item, platform, includeBoss === true);
+  const bossScreening = normalizeBossScreening(item, platform, includeBoss === true);
+  const bossCaptureSettingsSnapshot = options.allowBossCaptureSettingsSnapshot
+    && item.bossCaptureSettingsSnapshot !== undefined
+    ? normalizeBossCaptureSettingsSnapshot(item.bossCaptureSettingsSnapshot)
+    : undefined;
+  const bossCaptureTaskSnapshot = options.allowBossCaptureTaskSnapshot
+    && item.bossCaptureTaskSnapshot !== undefined
+    ? normalizeBossCaptureTaskSnapshot(item.bossCaptureTaskSnapshot)
+    : undefined;
+  if (bossCaptureSettingsSnapshot && platform !== 'boss' && !(platform === 'all' && includeBoss === true)) {
+    throw new Error('Boss capture settings snapshots require platform boss or platform all with includeBoss=true');
+  }
+  if (bossCaptureTaskSnapshot && platform !== 'boss' && !(platform === 'all' && includeBoss === true)) {
+    throw new Error('Boss capture task snapshots require platform boss or platform all with includeBoss=true');
+  }
 
   if (jd && jdFile) {
     throw new Error('jd and jdFile are mutually exclusive');
@@ -512,6 +691,10 @@ export function normalizeResumeCaptureTask(
     liepinForwardContact,
     bossForwardMode,
     bossForwardRecipient,
+    bossForwardCc,
+    ...bossScreening,
+    bossCaptureSettingsSnapshot,
+    bossCaptureTaskSnapshot,
   };
   const argv = ['--platform', platform, '--keyword', keyword];
   pushOptionalBoolean(argv, '--include-boss', includeBoss);
@@ -533,6 +716,24 @@ export function normalizeResumeCaptureTask(
   pushOptional(argv, '--liepin-forward-contact', liepinForwardContact);
   pushOptional(argv, '--boss-forward-mode', bossForwardMode);
   pushOptional(argv, '--boss-forward-recipient', bossForwardRecipient);
+  pushOptional(argv, '--boss-forward-cc', bossForwardCc?.join(','));
+  pushOptionalBoolean(argv, '--boss-screening-enabled', bossScreening.bossScreeningEnabled);
+  pushOptional(argv, '--boss-screening-policy-file', bossScreening.bossScreeningPolicyFile);
+  pushOptional(argv, '--boss-secondary-forward-mode', bossScreening.bossSecondaryForwardMode);
+  pushOptional(argv, '--boss-secondary-forward-recipient', bossScreening.bossSecondaryForwardRecipient);
+  pushOptional(argv, '--boss-secondary-forward-cc', bossScreening.bossSecondaryForwardCc?.join(','));
+  pushOptional(argv, '--boss-secondary-email', bossScreening.bossSecondaryEmail);
+  pushOptional(argv, '--boss-secondary-cc', bossScreening.bossSecondaryCc?.join(','));
+  pushOptional(
+    argv,
+    '--boss-capture-settings-json',
+    bossCaptureSettingsSnapshot ? JSON.stringify(bossCaptureSettingsSnapshot) : undefined,
+  );
+  pushOptional(
+    argv,
+    '--boss-capture-task-snapshot-json',
+    bossCaptureTaskSnapshot ? JSON.stringify(bossCaptureTaskSnapshot) : undefined,
+  );
 
   return {
     input,
@@ -556,12 +757,46 @@ export function normalizeResumeCaptureTask(
       liepinForwardContact,
       bossForwardMode,
       bossForwardRecipient,
+      bossForwardCcCount: bossForwardCc?.length ?? 0,
+      bossScreeningEnabled: bossScreening.bossScreeningEnabled,
+      bossScreeningPolicyFile: bossScreening.bossScreeningPolicyFile,
+      bossSecondaryForwardMode: bossScreening.bossSecondaryForwardMode,
+      bossSecondaryForwardRecipient: bossScreening.bossSecondaryForwardRecipient,
+      bossSecondaryForwardCcCount: bossScreening.bossSecondaryForwardCc?.length ?? 0,
+      bossSecondaryEmail: bossScreening.bossSecondaryEmail,
+      bossSecondaryCcCount: bossScreening.bossSecondaryCc?.length ?? 0,
+      bossCaptureSettingsHash: bossCaptureSettingsSnapshot?.settingsHash,
+      bossCaptureSettingsResolvedAt: bossCaptureSettingsSnapshot?.resolvedAt,
+      bossCaptureTaskSnapshotHash: bossCaptureTaskSnapshot?.snapshotHash,
+      bossCaptureTaskSnapshotResolvedAt: bossCaptureTaskSnapshot?.resolvedAt,
     },
   };
 }
 
 export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskInput> {
   const item = normalizeJsonObject(payload, 'request body');
+  assertOnlyFields(item, [
+    'platform',
+    'includeBoss',
+    'jobsFile',
+    'includeViewed',
+    'searchSource',
+    'applicationFilterInputFile',
+    'searchConditionSetRefs',
+    'email',
+    'cc',
+    'liepinForwardContact',
+    'bossForwardMode',
+    'bossForwardRecipient',
+    'bossForwardCc',
+    'bossScreeningEnabled',
+    'bossScreeningPolicyFile',
+    'bossSecondaryForwardMode',
+    'bossSecondaryForwardRecipient',
+    'bossSecondaryForwardCc',
+    'bossSecondaryEmail',
+    'bossSecondaryCc',
+  ], 'batch task');
   assertAbsent(item, ['keyword', 'bossJobId', 'bossSearchKeyword', 'jd', 'jdFile'], 'batch task');
 
   const platform = normalizePlatformSelection(item.platform);
@@ -574,7 +809,8 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   const email = getOptionalString(item, 'email');
   const cc = normalizeCc(item.cc);
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
-  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform, includeBoss === true);
+  const { bossForwardMode, bossForwardRecipient, bossForwardCc } = normalizeBossForwarding(item, platform, includeBoss === true);
+  const bossScreening = normalizeBossScreening(item, platform, includeBoss === true);
 
   validateDirectConditionInput(searchSource, applicationFilterInputFile, searchConditionSetRefs);
 
@@ -595,6 +831,8 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
     liepinForwardContact,
     bossForwardMode,
     bossForwardRecipient,
+    bossForwardCc,
+    ...bossScreening,
   };
   const argv = ['--platform', platform, '--jobs-file', jobsFile];
   pushOptionalBoolean(argv, '--include-boss', includeBoss);
@@ -607,6 +845,14 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   pushOptional(argv, '--liepin-forward-contact', liepinForwardContact);
   pushOptional(argv, '--boss-forward-mode', bossForwardMode);
   pushOptional(argv, '--boss-forward-recipient', bossForwardRecipient);
+  pushOptional(argv, '--boss-forward-cc', bossForwardCc?.join(','));
+  pushOptionalBoolean(argv, '--boss-screening-enabled', bossScreening.bossScreeningEnabled);
+  pushOptional(argv, '--boss-screening-policy-file', bossScreening.bossScreeningPolicyFile);
+  pushOptional(argv, '--boss-secondary-forward-mode', bossScreening.bossSecondaryForwardMode);
+  pushOptional(argv, '--boss-secondary-forward-recipient', bossScreening.bossSecondaryForwardRecipient);
+  pushOptional(argv, '--boss-secondary-forward-cc', bossScreening.bossSecondaryForwardCc?.join(','));
+  pushOptional(argv, '--boss-secondary-email', bossScreening.bossSecondaryEmail);
+  pushOptional(argv, '--boss-secondary-cc', bossScreening.bossSecondaryCc?.join(','));
 
   return {
     input,
@@ -624,6 +870,14 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
       liepinForwardContact,
       bossForwardMode,
       bossForwardRecipient,
+      bossForwardCcCount: bossForwardCc?.length ?? 0,
+      bossScreeningEnabled: bossScreening.bossScreeningEnabled,
+      bossScreeningPolicyFile: bossScreening.bossScreeningPolicyFile,
+      bossSecondaryForwardMode: bossScreening.bossSecondaryForwardMode,
+      bossSecondaryForwardRecipient: bossScreening.bossSecondaryForwardRecipient,
+      bossSecondaryForwardCcCount: bossScreening.bossSecondaryForwardCc?.length ?? 0,
+      bossSecondaryEmail: bossScreening.bossSecondaryEmail,
+      bossSecondaryCcCount: bossScreening.bossSecondaryCc?.length ?? 0,
     },
   };
 }
@@ -793,7 +1047,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
   if (summaryCc && !summaryEmail) {
     throw new Error('boss-auto-chat summaryCc requires summaryEmail');
   }
-  const { bossForwardMode, bossForwardRecipient } = normalizeBossForwarding(item, platform);
+  const { bossForwardMode, bossForwardRecipient, bossForwardCc } = normalizeBossForwarding(item, platform);
 
   const input: BossAutoChatTaskInput = {
     platform: 'boss',
@@ -802,6 +1056,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
     replyToUnqualifiedCandidates,
     bossForwardMode,
     bossForwardRecipient,
+    bossForwardCc,
     summaryEmail,
     summaryCc,
     syncJobsBeforeReview,
@@ -814,6 +1069,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
   pushOptionalBoolean(argv, '--boss-chat-reply-unqualified', replyToUnqualifiedCandidates);
   pushOptional(argv, '--boss-forward-mode', bossForwardMode);
   pushOptional(argv, '--boss-forward-recipient', bossForwardRecipient);
+  pushOptional(argv, '--boss-forward-cc', bossForwardCc?.join(','));
   pushOptional(argv, '--boss-chat-summary-email', summaryEmail);
   pushOptional(argv, '--boss-chat-summary-cc', summaryCc?.join(','));
   pushOptionalBoolean(argv, '--boss-sync-jobs-before-review', syncJobsBeforeReview);
@@ -828,6 +1084,7 @@ export function normalizeBossAutoChatTask(payload: unknown): NormalizedTask<Boss
       replyToUnqualifiedCandidates: replyToUnqualifiedCandidates ?? false,
       bossForwardMode,
       bossForwardRecipient,
+      bossForwardCcCount: bossForwardCc?.length ?? 0,
       summaryEmail,
       summaryCcCount: summaryCc?.length ?? 0,
       syncJobsBeforeReview: syncJobsBeforeReview ?? false,

@@ -16,8 +16,14 @@ import {
 } from '../index.js';
 import { JobStore } from '../storage/job-store.js';
 import type { MainResult, MainRunSummary } from '../index.js';
-import type { CandidateScoreArtifact, JobRecord, ReportDeliveryOptions, RunResult } from '../types/job.js';
-import { sendJobReport, sendJobReportEmailRef } from './send-job-report-email.js';
+import type {
+  BossCandidateRoutingArtifact,
+  CandidateScoreArtifact,
+  JobRecord,
+  ReportDeliveryOptions,
+  RunResult,
+} from '../types/job.js';
+import { sendBossRoutedReports, sendJobReport, sendJobReportEmailRef } from './send-job-report-email.js';
 
 let tempDir: string;
 let originalDataDir: string;
@@ -51,7 +57,7 @@ afterEach(async () => {
 async function seedJobRecord(
   jobKey: string,
   reportDelivery: ReportDeliveryOptions = {},
-  platform: '51job' | 'liepin' | 'zhilian' = '51job',
+  platform: '51job' | 'liepin' | 'zhilian' | 'boss' = '51job',
 ) {
   const store = new JobStore();
   const jobRecord: JobRecord = {
@@ -78,8 +84,148 @@ async function seedJobRecord(
   return { store, jobRecord };
 }
 
-async function saveRunResult(store: JobStore, jobKey: string, runResult: RunResult, platform: '51job' | 'liepin' | 'zhilian' = '51job') {
+async function saveRunResult(store: JobStore, jobKey: string, runResult: RunResult, platform: '51job' | 'liepin' | 'zhilian' | 'boss' = '51job') {
   await store.saveRunResult(platform, jobKey, runResult);
+}
+
+function bossScoreArtifact(candidateId: string, status: CandidateScoreArtifact['status'] = 'success'): CandidateScoreArtifact {
+  const base = {
+    candidateId,
+    model: 'claude-test',
+    scoredAt: '2026-07-31T00:00:01.000Z',
+  };
+  if (status === 'failed') {
+    return { ...base, status, error: 'simulated scoring failure' };
+  }
+  return {
+    ...base,
+    status,
+    score: {
+      totalScore: 88,
+      dimensionScores: {
+        education: { score: 88, reason: 'ok' },
+        language: { score: 88, reason: 'ok' },
+        experience: { score: 88, reason: 'ok' },
+        industryMatch: { score: 88, reason: 'ok' },
+        regionMatch: { score: 88, reason: 'ok' },
+        responsibilityMatch: { score: 88, reason: 'ok' },
+      },
+      risks: [],
+      summary: `${candidateId} scoring summary`,
+    },
+  };
+}
+
+interface BossRoutingSeed {
+  candidateId: string;
+  classification: BossCandidateRoutingArtifact['classification'];
+  artifactStatus?: CandidateScoreArtifact['status'];
+  matchedRequirementIds?: string[];
+  unknownRequirementIds?: string[];
+}
+
+async function seedBossRoutedRun(
+  jobKey: string,
+  candidates: BossRoutingSeed[],
+  options: { unroutedNewCandidateIds?: string[] } = {},
+): Promise<{ store: JobStore; fetchedAt: string }> {
+  const store = new JobStore();
+  const fetchedAt = '2026-07-31T00:00:02.000Z';
+  const policyHash = 'boss-policy-hash';
+  const qualifiedCandidateIds = candidates.filter((candidate) => candidate.classification === 'qualified').map((candidate) => candidate.candidateId);
+  const reviewCandidateIds = candidates.filter((candidate) => candidate.classification === 'review').map((candidate) => candidate.candidateId);
+  const rejectedCandidateIds = candidates.filter((candidate) => candidate.classification === 'rejected').map((candidate) => candidate.candidateId);
+  const jobRecord: JobRecord = {
+    jobKey,
+    platform: 'boss',
+    searchKeyword: 'Boss 测试岗位',
+    recipientEmail: 'primary@example.com',
+    ccEmails: ['primary-cc@example.com'],
+    bossForwarding: { mode: 'email', recipient: 'primary-forward@example.com' },
+    bossScreening: {
+      enabled: true,
+      policyVersion: 2,
+      decisionMode: 'reject-on-any-missing',
+      requirements: [{
+        id: 'requirement-1',
+        enabled: true,
+        kind: 'modelRequirement',
+        requirement: '满足测试岗位要求',
+        criteria: ['明确证据'],
+        insufficientEvidence: ['无证据'],
+      }],
+      secondaryForwarding: { mode: 'email', recipient: 'secondary-forward@example.com' },
+      secondaryDelivery: { recipientEmail: 'secondary@example.com', ccEmails: ['secondary-cc@example.com'] },
+    },
+    rawText: 'raw jd',
+    normalizedJob: {
+      title: 'Boss 测试岗位',
+      majors: [],
+      languageRequirements: [],
+      responsibilities: [],
+      hardRequirements: [],
+      preferredRequirements: [],
+      regionPreferences: [],
+      industryTags: [],
+    },
+    createdAt: fetchedAt,
+  };
+  await store.saveJobRecord('boss', jobRecord);
+  await Promise.all(candidates.map(async (candidate) => {
+    const artifact = bossScoreArtifact(candidate.candidateId, candidate.artifactStatus);
+    await store.saveCandidateScoreArtifact('boss', jobKey, artifact);
+    const audience = candidate.classification === 'rejected' ? 'secondary' : 'primary';
+    const matchedRequirementIds = candidate.matchedRequirementIds ?? (candidate.classification === 'rejected' ? ['requirement-1'] : []);
+    const unknownRequirementIds = candidate.unknownRequirementIds ?? (candidate.classification === 'review' ? ['requirement-1'] : []);
+    await store.saveBossCandidateRoutingArtifact('boss', jobKey, {
+      candidateId: candidate.candidateId,
+      fetchedAt,
+      scoredAt: artifact.scoredAt,
+      decidedAt: `2026-07-31T00:00:0${candidates.indexOf(candidate) + 3}.000Z`,
+      policyHash,
+      scoreStatus: artifact.status,
+      ...(artifact.status === 'failed' ? { scoreError: artifact.error } : {}),
+      classification: candidate.classification,
+      audience,
+      requirementEvaluations: candidate.classification === 'rejected'
+        ? [{ requirementId: 'requirement-1', outcome: 'missing', evidence: [`${candidate.candidateId} 明确证据`], missingCriteria: ['明确证据'], reason: 'missing' }]
+        : candidate.classification === 'review'
+          ? [{ requirementId: 'requirement-1', outcome: 'unknown', evidence: [], missingCriteria: [], reason: 'insufficient evidence' }]
+          : [{ requirementId: 'requirement-1', outcome: 'satisfied', evidence: [`${candidate.candidateId} 明确证据`], missingCriteria: [], reason: 'satisfied' }],
+      matchedRequirementIds,
+      unknownRequirementIds,
+      reason: candidate.classification === 'review' ? '条件证据不足，需要人工复核' : `${candidate.classification} routing result`,
+      forwarding: { status: 'sent', mode: 'email', recipient: audience === 'primary' ? 'primary-forward@example.com' : 'secondary-forward@example.com' },
+    });
+  }));
+  await store.saveRunResult('boss', jobKey, {
+    jobKey,
+    platform: 'boss',
+    fetchedAt,
+    totalCandidates: candidates.length + (options.unroutedNewCandidateIds?.length ?? 0),
+    newCandidateIds: [
+      ...candidates.map((candidate) => candidate.candidateId),
+      ...(options.unroutedNewCandidateIds ?? []),
+    ],
+    scoredCandidates: candidates.filter((candidate) => (candidate.artifactStatus ?? 'success') === 'success').map((candidate) => candidate.candidateId),
+    failedCandidates: [
+      ...candidates.filter((candidate) => candidate.artifactStatus === 'failed').map((candidate) => ({ candidateId: candidate.candidateId, error: 'simulated scoring failure' })),
+      ...(options.unroutedNewCandidateIds ?? []).map((candidateId) => ({ candidateId, error: 'simulated capture failure' })),
+    ],
+    bossRouting: {
+      enabled: true,
+      policyHash,
+      reportDelivery: {
+        primary: { recipientEmail: 'primary@example.com', ccEmails: ['immutable-primary-cc@example.com'] },
+        secondary: { recipientEmail: 'secondary@example.com', ccEmails: ['immutable-secondary-cc@example.com'] },
+      },
+      qualifiedCandidateIds,
+      reviewCandidateIds,
+      rejectedCandidateIds,
+      forwardingStatusCounts: { sent: candidates.length },
+    },
+  });
+  return { store, fetchedAt };
 }
 
 function assertSinglePlatformSummary(result: MainResult): MainRunSummary {
@@ -640,6 +786,184 @@ describe('sendJobReport', () => {
     await seedJobData(jobKey);
 
     await assert.rejects(() => sendJobReport('51job', jobKey), /No recipient email found for job key/);
+  });
+
+  it('sends review candidates only to the primary Boss report and rejected candidates only to the secondary report', async () => {
+    const jobKey = `boss-routed-reports-${Date.now()}`;
+    await seedBossRoutedRun(jobKey, [
+      { candidateId: 'qualified-candidate', classification: 'qualified' },
+      { candidateId: 'review-candidate', classification: 'review' },
+      { candidateId: 'rejected-candidate', classification: 'rejected' },
+    ]);
+    const sent: Array<{ recipient: string; markdown: string; subject: string; ccEmails?: string[] }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, markdown, subject, ccEmails }) => {
+      sent.push({ recipient, markdown, subject, ccEmails });
+      return { recipient, subject };
+    };
+
+    const result = await sendBossRoutedReports(jobKey);
+
+    assert.equal(sent.length, 2);
+    const primary = sent.find((item) => item.recipient === 'primary@example.com');
+    const secondary = sent.find((item) => item.recipient === 'secondary@example.com');
+    assert.ok(primary);
+    assert.ok(secondary);
+    assert.match(primary.markdown, /## 明确符合/);
+    assert.match(primary.markdown, /## 需复核/);
+    assert.match(primary.markdown, /qualified-candidate/);
+    assert.match(primary.markdown, /review-candidate/);
+    assert.doesNotMatch(primary.markdown, /rejected-candidate/);
+    assert.match(secondary.markdown, /## 明确否定候选人/);
+    assert.match(secondary.markdown, /rejected-candidate/);
+    assert.match(secondary.markdown, /明确证据/);
+    assert.doesNotMatch(secondary.markdown, /qualified-candidate|review-candidate/);
+    assert.deepStrictEqual(primary.ccEmails, ['immutable-primary-cc@example.com']);
+    assert.deepStrictEqual(secondary.ccEmails, ['immutable-secondary-cc@example.com']);
+    assert.equal(result.reportDeliveries.primary.delivered, true);
+    assert.equal(result.reportDeliveries.secondary.delivered, true);
+    assert.equal(result.reportDeliveries.primary.summary.candidateCount, 2);
+    assert.equal(result.reportDeliveries.secondary.summary.candidateCount, 1);
+  });
+
+  it('reports routed Boss candidates when another attempted candidate failed before scoring and routing', async () => {
+    const jobKey = `boss-routed-with-capture-failure-${Date.now()}`;
+    await seedBossRoutedRun(
+      jobKey,
+      [{ candidateId: 'review-candidate', classification: 'review', artifactStatus: 'failed' }],
+      { unroutedNewCandidateIds: ['capture-failed-candidate'] },
+    );
+    const sent: Array<{ recipient: string; markdown: string }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, markdown, subject }) => {
+      sent.push({ recipient, markdown });
+      return { recipient, subject };
+    };
+
+    const result = await sendBossRoutedReports(jobKey);
+
+    assert.equal(result.reportDeliveries.primary.delivered, true);
+    assert.equal(result.reportDeliveries.primary.summary.candidateCount, 1);
+    assert.equal(result.reportDeliveries.secondary.skipReason, 'no-rejected-candidates');
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]?.markdown ?? '', /review-candidate/);
+    assert.doesNotMatch(sent[0]?.markdown ?? '', /capture-failed-candidate/);
+  });
+
+  it('sends a primary report for review-only Boss runs and skips primary when every routed candidate is rejected', async () => {
+    const reviewOnlyKey = `boss-review-only-${Date.now()}`;
+    await seedBossRoutedRun(reviewOnlyKey, [{ candidateId: 'review-candidate', classification: 'review' }]);
+    const sent: Array<{ recipient: string; markdown: string; subject: string }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, markdown, subject }) => {
+      sent.push({ recipient, markdown, subject });
+      return { recipient, subject };
+    };
+    const reviewOnly = await sendBossRoutedReports(reviewOnlyKey);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.recipient, 'primary@example.com');
+    assert.match(sent[0]?.markdown ?? '', /需复核/);
+    assert.equal(reviewOnly.reportDeliveries.primary.delivered, true);
+    assert.equal(reviewOnly.reportDeliveries.secondary.skipReason, 'no-rejected-candidates');
+
+    const rejectedOnlyKey = `boss-rejected-only-${Date.now()}`;
+    await seedBossRoutedRun(rejectedOnlyKey, [{ candidateId: 'rejected-candidate', classification: 'rejected' }]);
+    sent.length = 0;
+    const rejectedOnly = await sendBossRoutedReports(rejectedOnlyKey);
+    assert.deepStrictEqual(sent.map((item) => item.recipient), ['secondary@example.com']);
+    assert.equal(rejectedOnly.reportDeliveries.primary.attempted, false);
+    assert.equal(rejectedOnly.reportDeliveries.primary.skipReason, 'no-primary-audience-candidates');
+    assert.equal(rejectedOnly.reportDeliveries.secondary.delivered, true);
+  });
+
+  it('requires an explicit audience for manual Boss replay and never sends an unfiltered second report', async () => {
+    const jobKey = `boss-manual-audience-${Date.now()}`;
+    await seedBossRoutedRun(jobKey, [
+      { candidateId: 'qualified-candidate', classification: 'qualified' },
+      { candidateId: 'rejected-candidate', classification: 'rejected' },
+    ]);
+    const sent: Array<{ recipient: string; markdown: string }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, markdown, subject }) => {
+      sent.push({ recipient, markdown });
+      return { recipient, subject };
+    };
+
+    const primary = await sendJobReport('boss', jobKey);
+    assert.equal(primary.audience, 'primary');
+    assert.deepStrictEqual(sent.map((item) => item.recipient), ['primary@example.com']);
+    assert.doesNotMatch(sent[0]?.markdown ?? '', /rejected-candidate/);
+
+    sent.length = 0;
+    const secondary = await sendJobReport('boss', jobKey, {}, { audience: 'secondary' });
+    assert.equal(secondary.audience, 'secondary');
+    assert.deepStrictEqual(sent.map((item) => item.recipient), ['secondary@example.com']);
+    assert.doesNotMatch(sent[0]?.markdown ?? '', /qualified-candidate/);
+  });
+
+  it('uses latest-run routing facts even when the current Boss screening switch is changed', async () => {
+    const jobKey = `boss-routing-current-switch-${Date.now()}`;
+    const { store } = await seedBossRoutedRun(jobKey, [
+      { candidateId: 'qualified-candidate', classification: 'qualified' },
+      { candidateId: 'rejected-candidate', classification: 'rejected' },
+    ]);
+    const current = await store.readJobRecord('boss', jobKey);
+    await store.saveJobRecord('boss', {
+      ...current,
+      bossScreening: current.bossScreening ? { ...current.bossScreening, enabled: false } : undefined,
+    });
+
+    const sent: Array<{ recipient: string; markdown: string }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, markdown, subject }) => {
+      sent.push({ recipient, markdown });
+      return { recipient, subject };
+    };
+
+    const result = await sendJobReport('boss', jobKey);
+
+    assert.equal(result.audience, 'primary');
+    assert.deepStrictEqual(sent.map((item) => item.recipient), ['primary@example.com']);
+    assert.match(sent[0]?.markdown ?? '', /qualified-candidate/);
+    assert.doesNotMatch(sent[0]?.markdown ?? '', /rejected-candidate/);
+  });
+
+  it('uses immutable report recipients and CC from the latest Boss run after job settings change', async () => {
+    const jobKey = `boss-routing-immutable-delivery-${Date.now()}`;
+    const { store } = await seedBossRoutedRun(jobKey, [{ candidateId: 'qualified-candidate', classification: 'qualified' }]);
+    const current = await store.readJobRecord('boss', jobKey);
+    await store.saveJobRecord('boss', {
+      ...current,
+      recipientEmail: 'changed-after-run@example.com',
+      ccEmails: ['changed-after-run-cc@example.com'],
+      bossScreening: current.bossScreening
+        ? { ...current.bossScreening, secondaryDelivery: { recipientEmail: 'changed-secondary@example.com', ccEmails: ['changed-secondary-cc@example.com'] } }
+        : undefined,
+    });
+
+    const sent: Array<{ recipient: string; ccEmails?: string[] }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, ccEmails, subject }) => {
+      sent.push({ recipient, ccEmails });
+      return { recipient, subject };
+    };
+
+    await sendBossRoutedReports(jobKey);
+    assert.deepStrictEqual(sent, [{
+      recipient: 'primary@example.com',
+      ccEmails: ['immutable-primary-cc@example.com'],
+    }]);
+  });
+
+  it('fails closed before SMTP when Boss routing facts do not cover the current routing index', async () => {
+    const jobKey = `boss-routing-missing-fact-${Date.now()}`;
+    const { store } = await seedBossRoutedRun(jobKey, [{ candidateId: 'rejected-candidate', classification: 'rejected' }]);
+    const routingDir = path.join(tempDir, 'boss', 'jobs', jobKey, 'routing', 'artifacts');
+    const files = await fs.readdir(routingDir);
+    await fs.unlink(path.join(routingDir, files[0]!));
+    let sendAttempted = false;
+    sendJobReportEmailRef.fn = async ({ recipient, subject }) => {
+      sendAttempted = true;
+      return { recipient, subject };
+    };
+
+    await assert.rejects(() => sendBossRoutedReports(jobKey), /Boss routing facts does not match the current run/);
+    assert.equal(sendAttempted, false);
+    assert.ok(store);
   });
 
   it('fails when no latest run result exists', async () => {

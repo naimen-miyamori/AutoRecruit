@@ -286,6 +286,72 @@ describe('frontend client', () => {
     await page.close();
   });
 
+  it('submits Boss post-score screening with separate primary and secondary delivery targets', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/run`, { waitUntil: 'networkidle' });
+
+    await page.locator('label').filter({ hasText: /^平台/ }).first().locator('select').selectOption('boss');
+    await page.getByLabel('岗位名称', { exact: true }).fill('物业电工');
+    await page.getByLabel('JD 文本', { exact: true }).fill('负责物业电气维修');
+    const screeningSwitch = page.getByLabel('启用 Boss 评分后模型要求分流', { exact: true });
+    await screeningSwitch.check();
+    assert.equal(await screeningSwitch.isChecked(), true);
+    await page.getByText(/需复核者发给主受众/).waitFor({ state: 'visible' });
+    assert.match(await page.locator('body').innerText(), /Boss 副转发方式/);
+    await page.getByLabel('模型要求策略文件（可选，留空复用岗位已保存策略）', { exact: true }).fill('./boss-model-requirements.json');
+    await page.getByLabel(/^(主)?报告邮箱$/).fill('primary@example.com');
+    const bossScreeningFields = page.locator('.form-grid');
+    await bossScreeningFields.locator('label').filter({ hasText: 'Boss 副转发方式' }).locator('select').selectOption('email');
+    await bossScreeningFields.locator('label').filter({ hasText: 'Boss 副转发收件人' }).locator('input').fill('secondary-forward@example.com');
+    await bossScreeningFields.locator('label').filter({ hasText: 'Boss 副转发抄送' }).locator('input').fill('secondary-forward-audit@example.com');
+    await bossScreeningFields.locator('label').filter({ hasText: '副报告邮箱' }).locator('input').fill('secondary@example.com');
+    await bossScreeningFields.locator('label').filter({ hasText: '副报告抄送' }).locator('input').fill('audit@example.com');
+
+    const submitted = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/resume-capture');
+    await page.getByRole('button', { name: '提交任务', exact: true }).click();
+    const payload = (await submitted).postDataJSON() as Record<string, unknown>;
+    assert.equal(payload.platform, 'boss');
+    assert.equal(payload.bossScreeningEnabled, true);
+    assert.equal(payload.bossScreeningPolicyFile, './boss-model-requirements.json');
+    assert.equal(payload.email, 'primary@example.com');
+    assert.equal(payload.bossSecondaryForwardMode, 'email');
+    assert.equal(payload.bossSecondaryForwardRecipient, 'secondary-forward@example.com');
+    assert.deepStrictEqual(payload.bossSecondaryForwardCc, ['secondary-forward-audit@example.com']);
+    assert.equal(payload.bossSecondaryEmail, 'secondary@example.com');
+    assert.deepStrictEqual(payload.bossSecondaryCc, ['audit@example.com']);
+    await page.close();
+  });
+
+  it('keeps Boss screening inherit, enable, and disable as distinct request intents', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/run`, { waitUntil: 'networkidle' });
+    await page.locator('label').filter({ hasText: /^平台/ }).first().locator('select').selectOption('boss');
+    await page.getByLabel('岗位名称', { exact: true }).fill('物业电工');
+    await page.getByLabel('JD 文本', { exact: true }).fill('负责物业电气维修');
+    const screeningChoice = page.locator('label').filter({ hasText: 'Boss 评分后模型要求分流' }).locator('select').first();
+    await screeningChoice.selectOption('disabled');
+
+    const disabledSubmitted = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/resume-capture');
+    await page.getByRole('button', { name: '提交任务', exact: true }).click();
+    const disabledPayload = (await disabledSubmitted).postDataJSON() as Record<string, unknown>;
+    assert.equal(disabledPayload.bossScreeningEnabled, false);
+    await page.close();
+
+    const inheritedPage = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(inheritedPage);
+    await inheritedPage.goto(`${baseUrl}/run`, { waitUntil: 'networkidle' });
+    await inheritedPage.locator('label').filter({ hasText: /^平台/ }).first().locator('select').selectOption('boss');
+    await inheritedPage.getByLabel('岗位名称', { exact: true }).fill('物业电工');
+    await inheritedPage.getByLabel('JD 文本', { exact: true }).fill('负责物业电气维修');
+    const inheritedSubmitted = inheritedPage.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/resume-capture');
+    await inheritedPage.getByRole('button', { name: '提交任务', exact: true }).click();
+    const inheritedPayload = (await inheritedSubmitted).postDataJSON() as Record<string, unknown>;
+    assert.equal(Object.prototype.hasOwnProperty.call(inheritedPayload, 'bossScreeningEnabled'), false);
+    await inheritedPage.close();
+  });
+
   it('keeps the selected Boss job identity separate from its page search keyword', async () => {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await mockApi(page);

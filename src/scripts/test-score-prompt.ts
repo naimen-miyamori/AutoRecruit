@@ -1,8 +1,25 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { config } from '../config.js';
+import { completeResumeScoreJsonRef, scoreResumeAgainstJob } from '../scoring/score-resume.js';
 import { buildScorePrompt } from '../scoring/score-prompt.js';
+import type { OpenAITextCompletionRequest } from '../llm/openai-client.js';
 import type { CandidateResume, NormalizedJob } from '../types/job.js';
+
+const scoreResponse = JSON.stringify({
+  totalScore: 80,
+  dimensionScores: {
+    education: { score: 80, reason: '学历信息明确。' },
+    language: { score: 80, reason: '语言信息明确。' },
+    experience: { score: 80, reason: '经历信息明确。' },
+    industryMatch: { score: 80, reason: '行业信息明确。' },
+    regionMatch: { score: 80, reason: '地区信息明确。' },
+    responsibilityMatch: { score: 80, reason: '职责信息明确。' },
+  },
+  risks: [],
+  summary: '测试评分。',
+});
 
 describe('buildScorePrompt', () => {
   it('requires concise evidence-only reason style for each dimension', () => {
@@ -53,5 +70,40 @@ describe('buildScorePrompt', () => {
     assert.equal(prompt.outputSchema.dimensionScores.industryMatch.reason, 'string (1-2 short factual sentences, industry evidence only)');
     assert.equal(prompt.outputSchema.dimensionScores.regionMatch.reason, 'string (1-2 short factual sentences, region evidence only)');
     assert.equal(prompt.outputSchema.dimensionScores.responsibilityMatch.reason, 'string (1-2 short factual sentences, responsibility evidence only)');
+  });
+
+  it('uses the scoring-specific completion route', async () => {
+    const job: NormalizedJob = {
+      title: '设计师',
+      majors: [],
+      languageRequirements: [],
+      responsibilities: [],
+      hardRequirements: [],
+      preferredRequirements: [],
+      regionPreferences: [],
+      industryTags: [],
+    };
+    const resume: CandidateResume = {
+      candidateId: 'cand-route',
+      regions: [],
+      pr: [],
+      workExperiences: [],
+      projectExperiences: [],
+      educationExperiences: [],
+      skill: [],
+      certificates: [],
+    };
+    const original = completeResumeScoreJsonRef.fn;
+    let request: OpenAITextCompletionRequest | undefined;
+    try {
+      completeResumeScoreJsonRef.fn = async (input) => {
+        request = input;
+        return scoreResponse;
+      };
+      await scoreResumeAgainstJob(job, resume);
+      assert.equal(request?.completionRoute, config.scoring.completionRoute);
+    } finally {
+      completeResumeScoreJsonRef.fn = original;
+    }
   });
 });

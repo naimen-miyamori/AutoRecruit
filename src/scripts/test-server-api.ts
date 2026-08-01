@@ -14,7 +14,7 @@ import { bossReceiptArtifact, bossReviewArtifact, bossSyncArtifact, jobExportArt
 import type { ResumeCaptureTaskInput, TaskDetail } from '../server/types.js';
 import type { MainRunSummary } from '../index.js';
 import type { ApplicationFilterOptions } from '../search/filter-application-options.js';
-import type { CandidateResume, CandidateScoreArtifact, JobRecord, RunResult } from '../types/job.js';
+import type { BossCaptureSettingsSnapshot, CandidateResume, CandidateScoreArtifact, JobRecord, RunResult } from '../types/job.js';
 
 async function makeTempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-server-api-'));
@@ -73,6 +73,8 @@ function buildRunSummary(overrides: Partial<MainRunSummary> = {}): MainRunSummar
   return {
     jobKey: '优衣库-店长',
     totalCandidates: 0,
+    captureAttempts: 0,
+    capturedCandidates: 0,
     newCandidates: 0,
     scoredCandidates: 0,
     failedCandidates: 0,
@@ -82,6 +84,42 @@ function buildRunSummary(overrides: Partial<MainRunSummary> = {}): MainRunSummar
     sampleCandidateIds: [],
     ...overrides,
   };
+}
+
+function modelPolicyForApi() {
+  return {
+    version: 2,
+    decisionMode: 'reject-on-any-missing',
+    requirements: [{
+      id: 'requirement-1',
+      enabled: true,
+      kind: 'modelRequirement',
+      requirement: '明确满足测试岗位要求',
+      criteria: ['有明确简历证据'],
+      insufficientEvidence: ['没有明确简历证据'],
+    }],
+  };
+}
+
+function takeBossCaptureSettingsSnapshot(argv: readonly string[]): {
+  argv: string[];
+  snapshot?: BossCaptureSettingsSnapshot;
+} {
+  let visible = [...argv];
+  let snapshot: BossCaptureSettingsSnapshot | undefined;
+  const settingsIndex = visible.indexOf('--boss-capture-settings-json');
+  if (settingsIndex >= 0) {
+    const raw = visible[settingsIndex + 1];
+    assert.ok(raw);
+    snapshot = JSON.parse(raw) as BossCaptureSettingsSnapshot;
+    visible = [...visible.slice(0, settingsIndex), ...visible.slice(settingsIndex + 2)];
+  }
+  const taskIndex = visible.indexOf('--boss-capture-task-snapshot-json');
+  if (taskIndex >= 0) {
+    assert.ok(visible[taskIndex + 1]);
+    visible = [...visible.slice(0, taskIndex), ...visible.slice(taskIndex + 2)];
+  }
+  return { argv: visible, ...(snapshot ? { snapshot } : {}) };
 }
 
 function acceptingSearchConditionSetService(): SearchConditionSetService {
@@ -427,7 +465,9 @@ describe('console API routes', () => {
     });
 
     const completed = await waitForTask(queue, queued.taskId);
-    assert.deepStrictEqual(calls[0], [
+    const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
+    assert.equal(captured.snapshot?.sourceJobKey, 'stable-boss-position-1');
+    assert.deepStrictEqual(captured.argv, [
       '--platform', 'boss',
       '--keyword', '全铝箱包设计',
       '--boss-job-id', 'boss-position-1',
@@ -474,6 +514,15 @@ describe('console API routes', () => {
         bossCapturePlan: { jobKey: 'forged' },
       },
     });
+    const forgedSettingsSnapshot = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      body: {
+        platform: 'boss',
+        keyword: '全铝箱包设计',
+        bossCaptureSettingsSnapshot: { version: 1, settingsHash: 'forged' },
+      },
+    });
 
     assert.equal(outsideBoss.statusCode, 400);
     assert.match(JSON.stringify(outsideBoss.body), /only be used with platform boss/);
@@ -481,6 +530,8 @@ describe('console API routes', () => {
     assert.match(JSON.stringify(allWithoutBoss.body), /includeBoss=true/);
     assert.equal(forgedResolution.statusCode, 400);
     assert.match(JSON.stringify(forgedResolution.body), /cannot include bossCapturePlan/);
+    assert.equal(forgedSettingsSnapshot.statusCode, 400);
+    assert.match(JSON.stringify(forgedSettingsSnapshot.body), /cannot include bossCaptureSettingsSnapshot/);
   });
 
   it('pins reusable search-condition-set revisions in capture task input without retaining filter paths', async () => {
@@ -635,6 +686,7 @@ describe('console API routes', () => {
         jd: '负责物业电气维修',
         bossForwardMode: 'email',
         bossForwardRecipient: 'recruiter@example.com',
+        bossForwardCc: ['forward-audit@example.com'],
       },
     });
 
@@ -642,7 +694,13 @@ describe('console API routes', () => {
     const queued = response.body as TaskDetail;
     const completed = await waitForTask(queue, queued.taskId);
     assert.equal(completed.status, 'succeeded');
-    assert.deepStrictEqual(calls[0], [
+    const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
+    assert.deepStrictEqual(captured.snapshot?.primaryForwarding, {
+      mode: 'email',
+      recipient: 'recruiter@example.com',
+      ccEmails: ['forward-audit@example.com'],
+    });
+    assert.deepStrictEqual(captured.argv, [
       '--platform',
       'boss',
       '--keyword',
@@ -653,9 +711,136 @@ describe('console API routes', () => {
       'email',
       '--boss-forward-recipient',
       'recruiter@example.com',
+      '--boss-forward-cc',
+      'forward-audit@example.com',
     ]);
     assert.equal(completed.inputSummary.bossForwardMode, 'email');
     assert.equal(completed.inputSummary.bossForwardRecipient, 'recruiter@example.com');
+    assert.equal(completed.inputSummary.bossForwardCcCount, 1);
+  });
+
+  it('queues Boss post-score screening with separate secondary forwarding and report targets', async () => {
+    const taskDir = await makeTempDir();
+    const policyPath = path.join(taskDir, 'boss-model-requirements.json');
+    await writeJson(policyPath, modelPolicyForApi());
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver(),
+      body: {
+        platform: 'boss',
+        keyword: '物业电工',
+        jd: '负责物业电气维修',
+        email: 'primary@example.com',
+        bossForwardMode: 'colleague',
+        bossForwardRecipient: '主招聘同事',
+        bossScreeningEnabled: true,
+        bossScreeningPolicyFile: policyPath,
+        bossSecondaryForwardMode: 'email',
+        bossSecondaryForwardRecipient: 'secondary-forward@example.com',
+        bossSecondaryForwardCc: ['secondary-forward-audit@example.com'],
+        bossSecondaryEmail: 'secondary@example.com',
+        bossSecondaryCc: ['audit@example.com'],
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+    assert.equal(completed.status, 'succeeded');
+    const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
+    assert.equal(captured.snapshot?.screening?.enabled, true);
+    assert.deepStrictEqual(captured.argv, [
+      '--platform', 'boss',
+      '--keyword', '物业电工',
+      '--jd', '负责物业电气维修',
+      '--email', 'primary@example.com',
+      '--boss-forward-mode', 'colleague',
+      '--boss-forward-recipient', '主招聘同事',
+      '--boss-screening-enabled', 'true',
+      '--boss-screening-policy-file', policyPath,
+      '--boss-secondary-forward-mode', 'email',
+      '--boss-secondary-forward-recipient', 'secondary-forward@example.com',
+      '--boss-secondary-forward-cc', 'secondary-forward-audit@example.com',
+      '--boss-secondary-email', 'secondary@example.com',
+      '--boss-secondary-cc', 'audit@example.com',
+    ]);
+    assert.equal(completed.inputSummary.bossScreeningEnabled, true);
+    assert.equal(completed.inputSummary.bossScreeningPolicyFile, policyPath);
+    assert.equal(completed.inputSummary.bossSecondaryForwardMode, 'email');
+    assert.equal(completed.inputSummary.bossSecondaryEmail, 'secondary@example.com');
+    assert.equal(completed.inputSummary.bossSecondaryForwardCcCount, 1);
+    assert.equal(completed.inputSummary.bossSecondaryCcCount, 1);
+  });
+
+  it('materializes Boss batch delivery and policy settings into an immutable jobs snapshot', async () => {
+    const taskDir = await makeTempDir();
+    const jobsFile = path.join(taskDir, 'jobs.json');
+    const policyFile = path.join(taskDir, 'policy.json');
+    await writeJson(policyFile, modelPolicyForApi());
+    await writeJson(jobsFile, [{
+      keyword: '物业电工',
+      jd: '负责物业电气维修',
+      email: 'primary@example.com',
+      cc: [],
+      bossForwardMode: 'email',
+      bossForwardRecipient: 'primary-forward@example.com',
+      bossForwardCc: [],
+      bossScreeningEnabled: true,
+      bossScreeningPolicyFile: './policy.json',
+      bossSecondaryForwardMode: 'email',
+      bossSecondaryForwardRecipient: 'secondary-forward@example.com',
+      bossSecondaryForwardCc: [],
+      bossSecondaryEmail: 'secondary@example.com',
+      bossSecondaryCc: [],
+    }]);
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir: path.join(taskDir, 'tasks'),
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/batch',
+      taskQueue: queue,
+      dataDir: taskDir,
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver(),
+      body: { platform: 'boss', jobsFile },
+    });
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+    assert.equal(completed.status, 'succeeded');
+    assert.equal(calls[0]?.[0], '--platform');
+    assert.equal(calls[0]?.[1], 'boss');
+    assert.equal(calls[0]?.[2], '--jobs-file');
+    const snapshotPath = calls[0]?.[3];
+    assert.ok(snapshotPath);
+    assert.notEqual(snapshotPath, jobsFile);
+    const snapshottedJobs = JSON.parse(await fs.readFile(snapshotPath, 'utf8')) as Array<{
+      bossCaptureSettingsSnapshot?: BossCaptureSettingsSnapshot;
+    }>;
+    const snapshot = snapshottedJobs[0]?.bossCaptureSettingsSnapshot;
+    assert.equal(snapshot?.screening?.enabled, true);
+    assert.deepStrictEqual(snapshot?.primaryForwarding?.ccEmails, []);
+    assert.deepStrictEqual(snapshot?.primaryDelivery.ccEmails, []);
+    assert.deepStrictEqual(snapshot?.screening?.secondaryForwarding?.ccEmails, []);
+    assert.deepStrictEqual(snapshot?.screening?.secondaryDelivery?.ccEmails, []);
+    assert.equal(completed.inputSummary.bossCaptureSettingsSnapshotCount, 1);
   });
 
   it('queues an opt-in all-platform capture with Boss as a fourth stage', async () => {
@@ -688,7 +873,13 @@ describe('console API routes', () => {
     const queued = response.body as TaskDetail;
     const completed = await waitForTask(queue, queued.taskId);
     assert.equal(completed.status, 'succeeded');
-    assert.deepStrictEqual(calls[0], [
+    const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
+    assert.deepStrictEqual(captured.snapshot?.primaryForwarding, {
+      mode: 'email',
+      recipient: 'recruiter@example.com',
+      ccEmails: [],
+    });
+    assert.deepStrictEqual(captured.argv, [
       '--platform',
       'all',
       '--keyword',
@@ -745,6 +936,7 @@ describe('console API routes', () => {
         replyToUnqualifiedCandidates: true,
         bossForwardMode: 'email',
         bossForwardRecipient: 'resume@qq.com',
+        bossForwardCc: ['resume-audit@example.com'],
         summaryEmail: 'summary@qq.com',
         summaryCc: ['audit@hotmail.com'],
       },
@@ -769,6 +961,8 @@ describe('console API routes', () => {
       'email',
       '--boss-forward-recipient',
       'resume@qq.com',
+      '--boss-forward-cc',
+      'resume-audit@example.com',
       '--boss-chat-summary-email',
       'summary@qq.com',
       '--boss-chat-summary-cc',
@@ -779,6 +973,7 @@ describe('console API routes', () => {
     assert.equal(completed.outputSummary?.phoneExchangeRequests, 1);
     assert.equal(completed.outputSummary?.summaryEmailRecipient, 'summary@qq.com');
     assert.equal(completed.inputSummary.replyToUnqualifiedCandidates, true);
+    assert.equal(completed.inputSummary.bossForwardCcCount, 1);
   });
 
   it('queues Boss auto-chat review without repeated forwarding arguments', async () => {
@@ -1390,7 +1585,9 @@ describe('console API routes', () => {
     const task = (response.body as { task: TaskDetail }).task;
     const completed = await waitForTask(queue, task.taskId);
     assert.equal(completed.status, 'succeeded');
-    assert.deepStrictEqual(calls[0], [
+    const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
+    assert.equal(captured.snapshot?.sourceJobKey, 'stable-legacy');
+    assert.deepStrictEqual(captured.argv, [
       '--platform',
       'boss',
       '--keyword',
@@ -1454,7 +1651,9 @@ describe('console API routes', () => {
     assert.equal((task.input as ResumeCaptureTaskInput).bossJobId, 'boss-position-1');
     assert.equal((task.input as ResumeCaptureTaskInput).bossSearchKeyword, '铝');
     await waitForTask(queue, task.taskId);
-    assert.deepStrictEqual(calls[0], [
+    const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
+    assert.equal(captured.snapshot?.sourceJobKey, 'stable-boss-position-1');
+    assert.deepStrictEqual(captured.argv, [
       '--platform', 'boss',
       '--keyword', '全铝箱包设计',
       '--boss-job-id', 'boss-position-1',
@@ -2164,7 +2363,7 @@ describe('console API routes', () => {
     assert.equal(health.platformRuns[0]?.latestFailureMessage?.length, 140);
     assert.equal(health.platformRuns[0]?.latestFailureDetail, longLiepinFailure);
     assert.equal(health.candidateFunnels[0]?.totalCandidates, 2);
-    assert.equal(health.candidateFunnels[0]?.newCandidates, 2);
+    assert.equal(health.candidateFunnels[0]?.newCandidates, 0);
     assert.equal(health.candidateFunnels[0]?.capturedResumes, 1);
     assert.equal(health.candidateFunnels[0]?.scoredCandidates, 1);
     assert.equal(health.candidateFunnels[0]?.failedCandidates, 1);

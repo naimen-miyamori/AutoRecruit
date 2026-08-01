@@ -58,7 +58,7 @@ npm install
 cp .env.example .env
 ```
 
-编辑 `.env`，选择一种模型调用路径。默认路径使用 OpenAI 兼容服务：
+编辑 `.env`。`LLM_COMPLETION_ROUTE` 控制 JD、RAG、助手等通用文本调用；`default` 使用 OpenAI 兼容服务：
 
 ```dotenv
 OPENAI_API_KEY=your-api-key
@@ -75,6 +75,19 @@ LLM_COMPLETION_ROUTE=codex-session
 ```
 
 两条路径严格互斥：`codex-session` 不会读取或调用 OpenAI 兼容服务；默认服务失败时也不会自动转入 Codex。Codex 路径会为每次调用创建隔离、短生命周期、只读的线程，禁止工具、网页搜索、MCP 和文件变更。可用 `npm run llm:route:doctor` 检查当前配置，或附加 `-- --verify true` 进行不含业务数据的连通性验证。
+
+简历评分有独立路由，默认使用当前已登录 Codex/ChatGPT 账户的模型（每次仍是隔离临时线程，不复用当前对话正文）：
+
+```dotenv
+SCORING_LLM_COMPLETION_ROUTE=codex-session
+```
+
+如需改回原 OpenAI 兼容评分接口，显式切换并保留原模型配置即可；两条评分路径也不会自动互相回退：
+
+```dotenv
+SCORING_LLM_COMPLETION_ROUTE=default
+SCORING_MODEL=your-scoring-model
+```
 
 项目默认使用 CloakBrowser。如需改用 Playwright 自带 Chromium：
 
@@ -291,12 +304,17 @@ npm run dev -- \
 如果抓取和评分已经完成，只补发最新一次运行的评分报告，使用独立入口：
 
 ```bash
-npm run email:report -- boss "工业设计师-boss-job-id-123" recruiter@example.com audit@example.com
+npm run email:report -- boss "工业设计师-boss-job-id-123" recruiter@example.com audit@example.com primary
 ```
 
-参数依次为 `platform`、`jobKey`、收件人和可选的逗号分隔抄送列表。该命令只读取最新 run 与对应评分产物并通过
-SMTP 发送，不打开浏览器、不重新抓取、不转发候选人简历，也不修改 seen。这里的收件人仅覆盖本次补发；如需
-后续普通抓取持续发送报告，应在普通抓取中配置 `--email`。
+参数依次为 `platform`、`jobKey`、收件人、可选的逗号分隔抄送列表和可选 audience（`primary` 或 `secondary`）。
+对开启 Boss 分流的岗位，补发默认只发主受众；副受众必须显式传入 `secondary`，不会存在把全部候选人发送到一个
+覆盖收件人的补发模式。该命令只读取最新 run、对应评分产物和分流事实并通过 SMTP 发送，不打开浏览器、不重新
+抓取、不转发候选人简历，也不修改 seen。这里的收件人仅覆盖本次补发；如需后续普通抓取持续发送报告，应在
+普通抓取中配置 `--email`。
+
+所有评分报告（包括 Boss 主/副受众）在进入 SMTP 前都会校验收件人和抄送地址；格式错误或
+`example.com`、`.test`、`.invalid` 等文档/测试域名会直接 fail closed，不会尝试发送并产生退信。
 
 默认普通抓取会排除平台页面标记为已查看的候选人；只有普通抓取可以使用 `--include-viewed true`。在 Boss 直猎邦，这一开关控制“过滤近14天查看”：默认勾选以排除平台近 14 天已查看人选，`--include-viewed true` 取消勾选。无论该开关取何值，本地 `seen-ids.json` 都仍会排除已经成功抓取过的候选人。
 
@@ -306,9 +324,119 @@ SMTP 发送，不打开浏览器、不重新抓取、不转发候选人简历，
 
 Boss 阶段复用 `data/boss/`、独立登录态和本地 `seen-ids.json`。普通抓取会将公共 `--include-viewed` 映射到直猎邦的“过滤近14天查看”：默认勾选以排除平台近 14 天已查看人选，传入 `true` 时取消勾选。这个页面筛选不等同于本地历史去重；无论页面开关取何值，`seen-ids.json` 仍会排除已经成功抓取的候选人。若 Boss 岗位已有保存的转发设置，省略本次转发参数时可能复用该设置；显式 `--boss-forward-mode` 和 `--boss-forward-recipient` 也可在 `all + --include-boss true` 中使用，并只作用于 Boss 阶段。
 
-Boss 的两个邮件字段用途不同：`--boss-forward-recipient` 在候选人详情阶段逐份转发简历，`--email` 在本轮评分和
-导出完成后发送汇总报告，配置其中一个不会自动启用另一个。普通抓取显式提供的 Boss 转发目标只保存到当前岗位，
-不会改写 Boss 自动沟通的全局默认；只有 `--boss-auto-chat true` 自身显式提供转发参数时才更新该全局设置。
+每次 Boss 普通抓取固定只记录并操作平台当前顺序中的前 20 份简历。上限在 seen、恢复、打开详情、评分和转发前应用；若前 20 份中已有本地 seen，不会从第 21 份以后补位。本轮 `totalCandidates`、候选人 ID、简历、评分、分流和外部操作因此都不超过这 20 份；其他平台和 Boss 独立模式不受此上限影响。
+
+前 20 份中已经存在于当前岗位 `seen-ids.json` 的候选人，会执行一次精确卡片定位、详情打开、详情 API 身份核验和严格关闭，让 Boss 平台有机会在下一次默认搜索中隐藏该卡片。pending-score 或可重试 outbox 的候选人由原有详情处理覆盖，避免重复打开；纯查看不解析、评分、转发、联系或发送邮件。查看同步事实会写入 RunResult 的 `bossSeenViewSync`，并与抓取尝试、失败候选人和报告候选集分开统计；关闭无法验证时停止本轮后续卡片操作。
+
+Boss 详情打开、身份校验、解析、评分后转发和严格关闭共享同一个绝对 deadline；页面动作会在用户式节奏前为关闭预留预算，并在指针移动后再次核对候选人和控件身份。详情卡片或转发操作若意外打开“购买搜索畅聊卡”，会关闭弹窗后立即终止当前页面会话，不继续下一张卡片。转发只有在 click event 已派发且出现新的可见成功提示时才记为 `sent`；点击前失败可重试，点击已派发但无成功证据记为 `uncertain`，不会自动重发。
+
+只有详情身份验证通过、解析后的候选人 ID 与详情目标一致、简历文件成功落盘并回读通过，才会进入成功抓取历史和
+`seen-ids.json`。详情打开、身份、解析或落盘失败只写入可重试的阶段失败事实；新运行使用 `capturedCandidateIds`，
+旧运行中的 `newCandidateIds` 仅按“旧版尝试”展示，不反推为成功简历。
+
+Boss 的简历转发和评分报告是两组独立邮件通道：`--boss-forward-recipient` 在候选人详情阶段逐份转发简历，
+`--boss-forward-cc` 可为邮件转发配置逗号分隔的副本地址（仅 `--boss-forward-mode email` 有效）。Boss 详情页
+没有原生抄送框：程序会先向主地址转发，再为每个去重后的副本地址重新打开转发框并独立发送；每一次留言都
+固定写入同一候选人 ID。`--email` 和
+`--cc` 在本轮评分和导出完成后发送汇总报告。普通抓取显式提供的 Boss 转发目标只保存到当前岗位，不会改写 Boss
+自动沟通的全局默认；只有 `--boss-auto-chat true` 自身显式提供转发参数时才更新该全局设置。
+
+#### Boss 评分后模型要求分流
+
+Boss 普通抓取可按岗位开启“先评分、后转发”的模型要求分流。开关关闭或岗位没有该配置时，完全保留原有流程：
+按配置转发后再解析和评分。开关开启后，成功保存的每份简历先写入本地 seen、评分并由同一次模型请求判断模型要求，再决定转发和
+报告受众：
+
+- `qualified`：所有启用模型要求都明确满足，转发和评分报告发给主受众。
+- `review`：模型要求含糊、无法确定、评分失败或结构化校验失败，也发给主受众，并在报告中标为“需复核”。
+- `rejected`：至少一项模型要求被明确判断为缺失，只转发并报告给副受众。
+
+因此主报告仅在“明确符合 + 需复核”都为空时跳过；全是明确否定时只发送副报告。主/副 Boss 简历转发与主/副
+SMTP 报告是四组独立配置：主/副转发 CC 分别使用 `--boss-forward-cc`、`--boss-secondary-forward-cc`，主/副
+报告 CC 分别使用 `--cc`、`--boss-secondary-cc`；转发 CC 表示 Boss 上的独立二次转发，SMTP 报告 CC 才是
+邮件协议中的抄送。两者绝不会由一个邮箱或转发目标自动推导另一个。
+
+启用分流后，简历保存与写入 seen 之间会先落一条“待评分分流”工作项；若进程在分流决定落盘前中断，后续启用
+分流的运行只会按同一候选人 ID 恢复该工作，不会把 seen 误当作已经转发。已经形成 outbox 后，`pending` 或明确的
+`retryable-failed` 会在候选人仍出现在当前结果时按原 outbox 的单个地址重试；主地址和每个副本地址分别保存
+状态，已 `sent` 或结果不确定的 `uncertain` 地址永不自动重发，因而副本失败不会重复发送已成功的主地址。
+
+HTTP、控制台助手、批量和 scheduler 入队时会固化 Boss v3 任务快照：岗位/职位 ID、页面搜索词、固定条件集
+revision、交付目标、筛选策略和岗位配置 revision 都随任务保存。执行前用 revision/CAS 应用显式配置修改；岗位在排队后
+被编辑时任务会失败并要求重新确认，不会恢复旧抄送或覆盖新设置。控制台中的分流开关区分“复用岗位设置 / 本次启用并保存 /
+本次停用并保存”，清空抄送也会作为明确的持久化意图记录。
+
+模型要求文件只保存版本化业务规则，不能包含收件人、脚本或候选人数据。当前只接受版本 2 的 `modelRequirement`：
+
+```json
+{
+  "version": 2,
+  "decisionMode": "reject-on-any-missing",
+  "requirements": [
+    {
+      "id": "aluminum-luggage-experience",
+      "enabled": true,
+      "kind": "modelRequirement",
+      "requirement": "候选人具有铝制、铝合金或金属硬壳箱包或行李箱相关的设计、结构、工艺或量产经验",
+      "criteria": [
+        "材料与箱包或行李箱在同一工作、项目或产品语境中明确关联",
+        "体现实际设计、结构、工艺、打样或量产工作"
+      ],
+      "insufficientEvidence": [
+        "仅出现箱包、皮具、女包、公司名称或岗位名称",
+        "仅有与箱包无关的铝材经验"
+      ]
+    }
+  ]
+}
+```
+
+模型只在一次 Boss 评分请求中返回 `satisfied | missing | unknown`。`satisfied` 必须有简历原文证据；`missing`
+表示完整结构化简历中没有满足全部标准的经历，转副受众；`unknown` 或模型调用失败转主受众复核。版本 1 以及旧的
+`scoreBelow`、`resumeFact`、`resumeMissingKeywords` 不再兼容执行，会在浏览器前失败。
+升级已有岗位的本地 outbox 时先预演，再执行迁移；已发送/不确定地址保留，旧待发送地址标记为不可重试：
+
+```bash
+npm run migrate:boss-model-screening -- \
+  --job-key "全铝箱包设计-554cbe84c293028b0nJ72NW7FlJV" \
+  --dry-run
+```
+
+历史一致性审计是只读操作，不会删除 seen、重评、转发或发送邮件：
+
+```bash
+npm run audit:boss-capture-history -- \
+  --job-key "全铝箱包设计-554cbe84c293028b0nJ72NW7FlJV"
+```
+
+新岗位可一次配置两组目标；已保存 Boss 岗位省略任意字段时复用其 canonical 配置：
+
+```bash
+npm run dev -- \
+  --platform boss \
+  --keyword "物业电工" \
+  --jd-file ./jd.txt \
+  --email primary@example.com \
+  --cc primary-report-audit@example.com \
+  --boss-forward-mode email \
+  --boss-forward-recipient primary-forward@example.com \
+  --boss-forward-cc primary-forward-audit@example.com \
+  --boss-screening-enabled true \
+  --boss-screening-policy-file ./boss-model-requirements.json \
+  --boss-secondary-forward-mode email \
+  --boss-secondary-forward-recipient secondary-forward@example.com \
+  --boss-secondary-forward-cc secondary-forward-audit@example.com \
+  --boss-secondary-email secondary@example.com \
+  --boss-secondary-cc secondary-report-audit@example.com
+```
+
+`--boss-screening-*` 和 `--boss-secondary-*` 只允许用于 `--platform boss`，或 `--platform all --include-boss true`
+的 Boss 第四阶段；不能用于自动沟通、人才发现、会话操作、职位同步、搜索订阅、Talent Mapping 或 JD/RAG 问答。
+主转发的 `--boss-forward-cc` 还可随自动沟通自身显式提供的邮件转发目标使用，但不会从普通抓取岗位配置改写自动
+沟通默认值。批量 jobs-file 可在单个条目用同名 camelCase 字段覆盖运行级默认值，包括主/副转发方式、收件人和
+四组 CC；显式空数组表示清空该条目的已保存 CC，省略才表示复用。`bossScreeningPolicyFile` 的相对路径按
+jobs-file 所在目录解析。通过 HTTP、助手或调度入队时，系统会把每个 Boss 岗位当时解析出的策略、主/副转发、
+主/副报告与 CC 固化为带 hash 的任务快照，排队后的岗位配置编辑不会改变该任务。
 
 ### 批量职位
 
@@ -417,10 +545,11 @@ npm run dev -- \
   --keyword "物业电工" \
   --jd-file ./jd.txt \
   --boss-forward-mode email \
-  --boss-forward-recipient resume@example.com
+  --boss-forward-recipient resume@example.com \
+  --boss-forward-cc resume-audit@example.com
 ```
 
-流程按候选人打开详情、按配置转发、提取并保存简历；全部新候选人抓取后再统一评分、导出和发送报告。因此普通抓取中的转发发生在评分之前，并非只转发评分合适的候选人。搜索结果必须出现候选卡片、站点明确空态或明确错误；未就绪的 iframe 不会被误记为零候选人。详情打开会按当前卡片的稳定 Boss 标识复核，不会仅按列表序号点击。
+未开启评分后模型要求分流时，流程按候选人打开详情、按配置转发、提取并保存简历；全部新候选人抓取后再统一评分、导出和发送报告。开启分流时，流程改为打开详情、提取并保存简历、写 seen、评分与模型要求判定、持久化决定、按主/副受众转发，最后生成互斥的主/副报告；评分或模型要求判定失败一律归入主受众“需复核”，不会误送到副受众。搜索结果必须出现候选卡片、站点明确空态或明确错误；未就绪的 iframe 不会被误记为零候选人。详情打开会按当前卡片的稳定 Boss 标识复核，不会仅按列表序号点击。
 
 Boss 的 direct 搜索会先通过页面“清空筛选”回到基线，再按“职位 → 关键词 → 城市 → 其余条件”顺序应用并复核完整期望状态，避免复用页面继承人工或上轮条件。学历和经验的自定义范围在输入 catalog 中使用页面可见的语义边界（如“大专”“博士”“10年以上”），动作内部才转换为滑块索引，并同时核对隐藏值与可见范围文案；两个经验手柄允许重叠表示“10年以上”。城市会核对唯一的一级选中集合，并在复核后通过页面“确认”收起面板。所有筛选共用一个按条件数量计算、上限 120 秒的 deadline；任一项被后续动作重置、可见语义不符或面板未稳定收起，都会在候选人提取前失败。当前 application-filter 输入支持目录内的单选、年龄/薪资范围、院校要求多选、学历/经验自定义范围、城市、职位范围、公司文本、专业，以及“过滤近 14 天查看”“近 30 天未和同事交换简历”两个独立布尔条件；当前实页“更多筛选”以“专业”为最后一项，没有“资格证书”，Boss 不注册或导出虚构字段。该回放和核验均为确定性页面动作，不调用 LLM。
 
@@ -495,6 +624,7 @@ PLAYWRIGHT_HEADLESS=false npm run dev -- \
   --boss-sync-jobs-before-review true \
   --boss-forward-mode email \
   --boss-forward-recipient resume@example.com \
+  --boss-forward-cc resume-audit@example.com \
   --boss-chat-summary-email recruiter@example.com
 ```
 
@@ -617,6 +747,7 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 | `data/<platform>/jobs/<jobKey>/scores/` | 候选人评分及失败记录 |
 | `data/<platform>/jobs/<jobKey>/results/` | 轻量运行摘要 |
 | `data/<platform>/jobs/<jobKey>/exports/` | Markdown 等导出结果 |
+| `data/boss/jobs/<jobKey>/routing/` | Boss 开启评分后分流时的不可变决定事实和可恢复的转发 outbox |
 | `data/<platform>/jobs/<jobKey>/rag/` | RAG 本地事实和索引源数据 |
 | `data/talent-mapping/<mappingKey>/` | 当前 Mapping 配置、每运行不可变合同、平台观察、内容哈希详情证据/冲突记录、人工关联/分类审核、变化视图和 CSV/Markdown 导出 |
 | `data/boss/chat-operations/runs/` | Boss 原子会话变更回执 |
@@ -641,6 +772,7 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 | `PLAYWRIGHT_<PLATFORM>_CANDIDATE_DELAY_MIN_MS/MAX_MS` | 平台候选人切换间隔 |
 | `PLAYWRIGHT_BOSS_TYPING_DELAY_MIN_MS/MAX_MS` | Boss 搜索关键词、直接聊天文本和备注的逐字间隔，默认 `80-180ms` |
 | `LLM_COMPLETION_ROUTE` | `default`（默认）或 `codex-session`；只选择调用路径，不做失败自动切换 |
+| `SCORING_LLM_COMPLETION_ROUTE` | 简历评分专属路由；默认 `codex-session`，显式 `default` 切回原 OpenAI 兼容接口 |
 | `CODEX_SESSION_MODEL` | `codex-session` 的可选模型；未设置时使用当前 Codex/ChatGPT 登录的默认模型 |
 | `CODEX_SESSION_TIMEOUT_MS` / `CODEX_SESSION_MAX_CONCURRENCY` | Codex 隔离线程的总超时和并发上限，默认 `120000` / `1` |
 | `TALENT_MAPPING_MODEL` | Mapping 分类建议模型；未设置时回退 `OPENAI_MODEL` |

@@ -7,6 +7,7 @@ import {
   createBossActionContext,
   remainingBossActionMs,
   runBossFrameAction,
+  waitBossActionPaceWithinDeadline,
   withBossActionPage,
 } from '../platforms/boss/actions/context.js';
 
@@ -42,6 +43,25 @@ describe('Boss action context', () => {
       let ran = false;
       await runBossFrameAction(frame!, async () => { ran = true; });
       assert.equal(ran, true);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('refuses to spend action pace when the deadline must be reserved for cleanup', async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 25;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 25;
+    try {
+      await assert.rejects(
+        () => waitBossActionPaceWithinDeadline(page, Date.now() + 20, 10),
+        /would exceed its deadline.*10ms for cleanup/i,
+      );
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;

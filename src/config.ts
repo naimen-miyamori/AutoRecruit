@@ -61,6 +61,33 @@ export function resolveLlmCompletionRoute(value = process.env.LLM_COMPLETION_ROU
   throw new Error('Environment variable LLM_COMPLETION_ROUTE must be either "default" or "codex-session"');
 }
 
+export function resolveScoringLlmCompletionRoute(
+  value = process.env.SCORING_LLM_COMPLETION_ROUTE,
+): LlmCompletionRoute {
+  const normalized = value?.trim().toLowerCase() || 'codex-session';
+  if (normalized === 'default' || normalized === 'codex-session') {
+    return normalized;
+  }
+
+  throw new Error(
+    'Environment variable SCORING_LLM_COMPLETION_ROUTE must be either "default" or "codex-session"',
+  );
+}
+
+export function describeScoringModel(
+  route: LlmCompletionRoute,
+  options: {
+    codexSessionModel?: string;
+    openAIModel?: string;
+  },
+): string {
+  if (route === 'codex-session') {
+    return `codex-session:${options.codexSessionModel?.trim() || 'account-default'}`;
+  }
+
+  return options.openAIModel?.trim() || 'openai-compatible:unconfigured';
+}
+
 function getBooleanEnv(name: string): boolean | undefined {
   const value = process.env[name];
   if (value === undefined || value === '') {
@@ -171,6 +198,9 @@ const reuseCdpPortByPlatform: Record<SupportedPlatform, number> = {
 };
 const bossTypingDelayMinMs = getOptionalNumberEnv('PLAYWRIGHT_BOSS_TYPING_DELAY_MIN_MS', 80);
 const bossTypingDelayMaxMs = getOptionalNumberEnv('PLAYWRIGHT_BOSS_TYPING_DELAY_MAX_MS', 180);
+const codexSessionModel = process.env.CODEX_SESSION_MODEL?.trim() || undefined;
+const scoringCompletionRoute = resolveScoringLlmCompletionRoute();
+const scoringOpenAIModel = process.env.SCORING_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || '';
 
 export const config = {
   dataDir: path.resolve(process.env.DATA_DIR ?? './data'),
@@ -210,7 +240,7 @@ export const config = {
   },
   llm: {
     completionRoute: resolveLlmCompletionRoute(),
-    codexSessionModel: process.env.CODEX_SESSION_MODEL?.trim() || undefined,
+    codexSessionModel,
     codexSessionTimeoutMs: getPositiveIntegerEnv('CODEX_SESSION_TIMEOUT_MS', 120000),
     codexSessionMaxConcurrency: getPositiveIntegerEnv('CODEX_SESSION_MAX_CONCURRENCY', 1),
   },
@@ -218,7 +248,11 @@ export const config = {
     model: process.env.JD_PARSING_MODEL ?? process.env.OPENAI_MODEL ?? '',
   },
   scoring: {
-    model: process.env.SCORING_MODEL ?? process.env.OPENAI_MODEL ?? '',
+    completionRoute: scoringCompletionRoute,
+    model: describeScoringModel(scoringCompletionRoute, {
+      codexSessionModel,
+      openAIModel: scoringOpenAIModel,
+    }),
   },
   smtp: {
     host: process.env.SMTP_HOST ?? '',

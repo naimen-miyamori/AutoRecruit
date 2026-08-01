@@ -3,14 +3,19 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { config } from '../config.js';
 import type { SupportedPlatform } from '../platforms/types.js';
+import { normalizeBossScreeningSettings } from '../scoring/boss-screening.js';
 import type { SearchFilterCatalog } from '../search/filter-catalog.js';
 import type { BossJobSyncRun, BossPositionSummary } from '../types/boss.js';
 import {
+  JobConfigPatch,
   CandidateListItem,
   CandidateResume,
   BossAutomationSettings,
+  BossCandidateRoutingArtifact,
   BossChatReviewItem,
   BossChatReviewRun,
+  BossForwardingOutboxEntry,
+  BossScreeningWorkItem,
   CandidateScoreArtifact,
   JobRecord,
   ResumeDomSnapshot,
@@ -23,6 +28,9 @@ interface JobPaths {
   resultsDir: string;
   scoresDir: string;
   exportsDir: string;
+  routingArtifactsDir: string;
+  screeningWorkDir: string;
+  forwardingOutboxDir: string;
   snapshotsDir: string;
   domSnapshotsDir: string;
   jdPath: string;
@@ -71,12 +79,43 @@ export interface StoredResumeSnapshot {
   migratedSnapshot: boolean;
 }
 
+/** A stale queued task must fail before it can overwrite a newer job config. */
+export class JobConfigConflictError extends Error {
+  readonly code = 'JOB_CONFIG_REVISION_CONFLICT' as const;
+
+  constructor(
+    readonly platform: SupportedPlatform,
+    readonly jobKey: string,
+    readonly expectedRevision: number,
+    readonly actualRevision: number,
+  ) {
+    super(
+      `Job configuration revision conflict for ${platform}/${jobKey}: `
+      + `expected ${expectedRevision}, found ${actualRevision}. Refresh the job and confirm again.`,
+    );
+    this.name = 'JobConfigConflictError';
+  }
+}
+
 async function ensureDir(dirPath: string): Promise<void> {
   await fs.mkdir(dirPath, { recursive: true });
 }
 
+let atomicWriteCounter = 0;
+const jobConfigWriteChains = new Map<string, Promise<void>>();
+
+async function writeFileAtomically(filePath: string, content: string): Promise<void> {
+  const temporaryPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${atomicWriteCounter += 1}`;
+  try {
+    await fs.writeFile(temporaryPath, content, 'utf8');
+    await fs.rename(temporaryPath, filePath);
+  } finally {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
 async function writeJson(filePath: string, data: unknown): Promise<void> {
-  await fs.writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+  await writeFileAtomically(filePath, `${JSON.stringify(data, null, 2)}\n`);
 }
 
 async function writeJsonIfChanged(filePath: string, data: unknown): Promise<boolean> {
@@ -94,7 +133,7 @@ async function writeJsonIfChanged(filePath: string, data: unknown): Promise<bool
     }
   }
 
-  await fs.writeFile(filePath, content, 'utf8');
+  await writeFileAtomically(filePath, content);
   return true;
 }
 
@@ -124,11 +163,20 @@ async function listJsonFiles(dirPath: string): Promise<string[]> {
   }
 }
 
+function bossRoutingCandidateFileName(candidateId: string): string {
+  return encodeURIComponent(candidateId);
+}
+
+function bossRoutingTimestamp(value: string): string {
+  return value.replace(/[:.]/g, '-');
+}
+
 function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
   const {
     recipientEmail,
     ccEmails,
     bossForwarding,
+    bossScreening,
     searchSettings,
     ...rest
   } = jobRecord;
@@ -140,8 +188,14 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
     ? {
       mode: bossForwarding.mode,
       recipient: bossForwarding.recipient.trim(),
+      ...(bossForwarding.ccEmails === undefined ? {} : {
+        ccEmails: [...new Set(bossForwarding.ccEmails.map((email) => email.trim()).filter(Boolean))],
+      }),
     }
     : undefined;
+  const normalizedBossScreening = bossScreening === undefined
+    ? undefined
+    : normalizeBossScreeningSettings(bossScreening);
   const normalizedPageKeyword = searchSettings?.pageKeyword
     ?.normalize('NFKC')
     .replace(/\s+/gu, ' ')
@@ -159,10 +213,14 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
   return {
     ...rest,
     platform: jobRecord.platform ?? '51job',
+    revision: Number.isSafeInteger(jobRecord.revision) && (jobRecord.revision as number) > 0
+      ? jobRecord.revision
+      : 1,
     ...(normalizedRecipientEmail ? { recipientEmail: normalizedRecipientEmail } : {}),
     ...(normalizedCcEmails ? { ccEmails: normalizedCcEmails } : {}),
     ...(normalizedSearchSettings ? { searchSettings: normalizedSearchSettings } : {}),
     ...(normalizedBossForwarding ? { bossForwarding: normalizedBossForwarding } : {}),
+    ...(normalizedBossScreening ? { bossScreening: normalizedBossScreening } : {}),
   };
 }
 
@@ -174,8 +232,27 @@ function normalizeRunResult(runResult: LegacyRunResult): RunResult {
 }
 
 export class JobStore {
+  private readonly dataDir: string;
+
+  constructor(dataDir: string | { dataDir?: string } = config.dataDir) {
+    this.dataDir = path.resolve(typeof dataDir === 'string' ? dataDir : dataDir.dataDir ?? config.dataDir);
+  }
+
+  private withConfigLock<T>(platform: SupportedPlatform, jobKey: string, operation: () => Promise<T>): Promise<T> {
+    const lockKey = `${this.dataDir}/${platform}/${jobKey}`;
+    const previous = jobConfigWriteChains.get(lockKey) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    const chain = current.then(() => undefined, () => undefined);
+    jobConfigWriteChains.set(lockKey, chain);
+    return current.finally(() => {
+      if (jobConfigWriteChains.get(lockKey) === chain) {
+        jobConfigWriteChains.delete(lockKey);
+      }
+    });
+  }
+
   private getBossJobSyncPaths(): BossJobSyncPaths {
-    const dir = path.join(config.dataDir, 'boss', 'job-sync');
+    const dir = path.join(this.dataDir, 'boss', 'job-sync');
     return {
       dir,
       runsDir: path.join(dir, 'runs'),
@@ -184,7 +261,7 @@ export class JobStore {
   }
 
   private getBossChatReviewPaths(): BossChatReviewPaths {
-    const dir = path.join(config.dataDir, 'boss', 'chat-review');
+    const dir = path.join(this.dataDir, 'boss', 'chat-review');
     return {
       dir,
       runsDir: path.join(dir, 'runs'),
@@ -194,7 +271,7 @@ export class JobStore {
   }
 
   private getFilterCatalogPaths(platform: SupportedPlatform): FilterCatalogPaths {
-    const dir = path.join(config.dataDir, platform, 'filter-catalog');
+    const dir = path.join(this.dataDir, platform, 'filter-catalog');
     return {
       dir,
       latestPath: path.join(dir, 'latest.json'),
@@ -202,13 +279,16 @@ export class JobStore {
   }
 
   private getJobPaths(platform: SupportedPlatform, jobKey: string): JobPaths {
-    const jobDir = path.join(config.dataDir, platform, 'jobs', jobKey);
+    const jobDir = path.join(this.dataDir, platform, 'jobs', jobKey);
     return {
       jobDir,
       resumesDir: path.join(jobDir, 'resumes'),
       resultsDir: path.join(jobDir, 'results'),
       scoresDir: path.join(jobDir, 'scores'),
       exportsDir: path.join(jobDir, 'exports'),
+      routingArtifactsDir: path.join(jobDir, 'routing', 'artifacts'),
+      screeningWorkDir: path.join(jobDir, 'routing', 'pending-score'),
+      forwardingOutboxDir: path.join(jobDir, 'routing', 'outbox'),
       snapshotsDir: path.join(jobDir, 'snapshots'),
       domSnapshotsDir: path.join(jobDir, 'snapshots-dom'),
       jdPath: path.join(jobDir, 'jd.json'),
@@ -223,6 +303,9 @@ export class JobStore {
       ensureDir(paths.resultsDir),
       ensureDir(paths.scoresDir),
       ensureDir(paths.exportsDir),
+      ensureDir(paths.routingArtifactsDir),
+      ensureDir(paths.screeningWorkDir),
+      ensureDir(paths.forwardingOutboxDir),
       ensureDir(paths.snapshotsDir),
       ensureDir(paths.domSnapshotsDir),
     ]);
@@ -234,7 +317,19 @@ export class JobStore {
     return paths;
   }
 
-  async saveJobRecord(platform: SupportedPlatform, jobRecord: JobRecord): Promise<void> {
+  async saveJobRecord(
+    platform: SupportedPlatform,
+    jobRecord: JobRecord,
+    options: { expectedRevision?: number } = {},
+  ): Promise<void> {
+    const current = await this.readJobRecordIfExists(platform, jobRecord.jobKey);
+    const currentRevision = current?.revision ?? 1;
+    if (options.expectedRevision !== undefined && currentRevision !== options.expectedRevision) {
+      throw new JobConfigConflictError(platform, jobRecord.jobKey, options.expectedRevision, currentRevision);
+    }
+    if (options.expectedRevision === undefined && jobRecord.revision !== undefined && current && jobRecord.revision !== currentRevision) {
+      throw new JobConfigConflictError(platform, jobRecord.jobKey, jobRecord.revision, currentRevision);
+    }
     const paths = await this.initializeJob(platform, jobRecord.jobKey);
     const normalizedPageKeyword = jobRecord.searchSettings?.pageKeyword
       ?.normalize('NFKC')
@@ -249,9 +344,13 @@ export class JobStore {
     if (searchSettings && !normalizedPageKeyword) {
       delete searchSettings.pageKeyword;
     }
+    const bossScreening = jobRecord.bossScreening === undefined
+      ? undefined
+      : normalizeBossScreeningSettings(jobRecord.bossScreening);
     await writeJsonIfChanged(paths.jdPath, {
       ...jobRecord,
       platform,
+      revision: jobRecord.revision ?? currentRevision,
       ...(searchSettings ? { searchSettings } : {}),
       recipientEmail: jobRecord.recipientEmail?.trim() || undefined,
       ccEmails: jobRecord.ccEmails
@@ -261,9 +360,108 @@ export class JobStore {
         ? {
           mode: jobRecord.bossForwarding.mode,
           recipient: jobRecord.bossForwarding.recipient.trim(),
+          ...(jobRecord.bossForwarding.ccEmails === undefined ? {} : {
+            ccEmails: [...new Set(jobRecord.bossForwarding.ccEmails.map((email) => email.trim()).filter(Boolean))],
+          }),
         }
         : undefined,
+      bossScreening,
     });
+  }
+
+  /**
+   * Apply only explicitly requested reusable configuration fields.  The
+   * operation is serialized per job and checks the revision immediately
+   * before writing, so a queued task cannot resurrect a later clear/edit.
+   */
+  async applyJobConfigPatch(
+    platform: SupportedPlatform,
+    jobKey: string,
+    expectedRevision: number,
+    patch: JobConfigPatch,
+  ): Promise<JobRecord> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0) {
+      throw new Error('expectedRevision must be a positive integer');
+    }
+    return this.withConfigLock(platform, jobKey, async () => {
+      const current = await this.readJobRecordIfExists(platform, jobKey);
+      if (!current) {
+        throw new Error(`Missing job record for job key ${jobKey}`);
+      }
+      const currentRevision = current.revision ?? 1;
+      if (currentRevision !== expectedRevision) {
+        throw new JobConfigConflictError(platform, jobKey, expectedRevision, currentRevision);
+      }
+
+      const next: JobRecord = { ...current };
+      if (patch.recipientEmail !== undefined) {
+        if (patch.recipientEmail === null || !patch.recipientEmail.trim()) delete next.recipientEmail;
+        else next.recipientEmail = patch.recipientEmail.trim();
+      }
+      if (patch.ccEmails !== undefined) {
+        next.ccEmails = [...new Set(patch.ccEmails.map((email) => email.trim()).filter(Boolean))];
+      }
+      if (patch.bossForwarding !== undefined) {
+        if (patch.bossForwarding === null) delete next.bossForwarding;
+        else {
+          next.bossForwarding = {
+            mode: patch.bossForwarding.mode,
+            recipient: patch.bossForwarding.recipient.trim(),
+            ...(patch.bossForwarding.ccEmails === undefined
+              ? {}
+              : { ccEmails: [...new Set(patch.bossForwarding.ccEmails.map((email) => email.trim()).filter(Boolean))] }),
+          };
+        }
+      }
+      if (patch.bossScreening !== undefined) {
+        if (patch.bossScreening === null) delete next.bossScreening;
+        else next.bossScreening = normalizeBossScreeningSettings(patch.bossScreening);
+      }
+      if (patch.searchSource !== undefined
+        || patch.pageKeyword !== undefined
+        || patch.applicationFilterInput !== undefined
+        || patch.conditions !== undefined
+        || patch.conditionSetRef !== undefined
+        || patch.selectedFieldsFingerprint !== undefined) {
+        const existing = next.searchSettings ?? { source: patch.searchSource ?? 'saved', conditions: [] };
+        const searchSettings: NonNullable<JobRecord['searchSettings']> = {
+          ...existing,
+          ...(patch.searchSource !== undefined ? { source: patch.searchSource } : {}),
+          ...(patch.pageKeyword === null ? {} : patch.pageKeyword !== undefined ? { pageKeyword: patch.pageKeyword } : {}),
+          ...(patch.applicationFilterInput === null
+            ? {}
+            : patch.applicationFilterInput !== undefined ? { applicationFilterInput: patch.applicationFilterInput } : {}),
+          ...(patch.conditions !== undefined ? { conditions: [...patch.conditions] } : {}),
+          ...(patch.conditionSetRef === null
+            ? {}
+            : patch.conditionSetRef !== undefined ? { conditionSetRef: patch.conditionSetRef } : {}),
+          ...(patch.selectedFieldsFingerprint === null
+            ? {}
+            : patch.selectedFieldsFingerprint !== undefined
+              ? { resolution: { selectedFieldsFingerprint: patch.selectedFieldsFingerprint } }
+              : {}),
+        };
+        if (patch.pageKeyword === null) delete searchSettings.pageKeyword;
+        if (patch.applicationFilterInput === null) delete searchSettings.applicationFilterInput;
+        if (patch.conditionSetRef === null) delete searchSettings.conditionSetRef;
+        if (patch.selectedFieldsFingerprint === null) delete searchSettings.resolution;
+        next.searchSettings = searchSettings;
+      }
+
+      next.revision = currentRevision + 1;
+      await this.saveJobRecord(platform, next, { expectedRevision: currentRevision });
+      return (await this.readJobRecord(platform, jobKey));
+    });
+  }
+
+  /** Alias with an explicit name for callers that treat this as a CAS update. */
+  async updateJobConfigIfRevision(
+    platform: SupportedPlatform,
+    jobKey: string,
+    expectedRevision: number,
+    patch: JobConfigPatch,
+  ): Promise<JobRecord> {
+    return this.applyJobConfigPatch(platform, jobKey, expectedRevision, patch);
   }
 
   async readJobRecord(platform: SupportedPlatform, jobKey: string): Promise<JobRecord> {
@@ -283,7 +481,7 @@ export class JobStore {
   }
 
   async listJobRecords(platform: SupportedPlatform): Promise<JobRecord[]> {
-    const jobsDir = path.join(config.dataDir, platform, 'jobs');
+    const jobsDir = path.join(this.dataDir, platform, 'jobs');
     let jobDirs: string[];
     try {
       jobDirs = await fs.readdir(jobsDir);
@@ -337,15 +535,68 @@ export class JobStore {
     await writeJson(paths.seenIdsPath, [...new Set(candidateIds)]);
   }
 
+  /**
+   * Adds only candidates whose resume files are already present and whose
+   * serialized identity matches the requested ID. Capture workflows use this
+   * instead of treating a list-card discovery as a successful capture.
+   */
+  async markCapturedCandidatesSeen(
+    platform: SupportedPlatform,
+    jobKey: string,
+    candidateIds: readonly string[],
+  ): Promise<void> {
+    if (candidateIds.length === 0) return;
+    const paths = await this.initializeJob(platform, jobKey);
+    const uniqueCandidateIds = [...new Set(candidateIds)];
+    for (const candidateId of uniqueCandidateIds) {
+      if (!candidateId.trim() || path.basename(candidateId) !== candidateId) {
+        throw new Error(`Cannot mark invalid candidate ID as captured: ${candidateId}`);
+      }
+      const resume = await readJsonFile<CandidateResume>(
+        path.join(paths.resumesDir, `${candidateId}.json`),
+      );
+      if (resume.candidateId !== candidateId) {
+        throw new Error(`Captured resume identity ${resume.candidateId} does not match requested candidate ${candidateId}.`);
+      }
+    }
+    const seenIds = await readJsonFile<string[]>(paths.seenIdsPath, []);
+    await writeJson(paths.seenIdsPath, [...new Set([...seenIds, ...uniqueCandidateIds])]);
+  }
+
+  /** Fails closed when a historical captured ID has no matching persisted resume. */
+  async assertSeenIdsHaveResumes(platform: SupportedPlatform, jobKey: string): Promise<void> {
+    const seenIds = await this.readSeenIds(platform, jobKey);
+    for (const candidateId of seenIds) {
+      const resume = await this.readCandidateResume(platform, jobKey, candidateId).catch((error) => {
+        throw new Error(
+          `Captured history invariant failed for ${platform}/${jobKey}: seen candidate ${candidateId} has no readable resume.`,
+          { cause: error },
+        );
+      });
+      if (resume.candidateId !== candidateId) {
+        throw new Error(
+          `Captured history invariant failed for ${platform}/${jobKey}: seen candidate ${candidateId} maps to resume ${resume.candidateId}.`,
+        );
+      }
+    }
+  }
+
   async getNewCandidates(platform: SupportedPlatform, jobKey: string, candidates: CandidateListItem[]): Promise<CandidateListItem[]> {
     const seenIds = new Set(await this.readSeenIds(platform, jobKey));
     return candidates.filter((candidate) => !seenIds.has(candidate.candidateId));
   }
 
   async saveCandidateResume(platform: SupportedPlatform, jobKey: string, resume: CandidateResume, rawText?: string, domSnapshot?: ResumeDomSnapshot): Promise<string> {
+    if (!resume.candidateId.trim() || path.basename(resume.candidateId) !== resume.candidateId) {
+      throw new Error(`Cannot save resume with invalid candidate ID: ${resume.candidateId}`);
+    }
     const paths = await this.initializeJob(platform, jobKey);
     const filePath = path.join(paths.resumesDir, `${resume.candidateId}.json`);
     await writeJson(filePath, resume);
+    const persisted = await readJsonFile<CandidateResume>(filePath);
+    if (persisted.candidateId !== resume.candidateId) {
+      throw new Error(`Persisted resume identity ${persisted.candidateId} does not match candidate ${resume.candidateId}.`);
+    }
 
     if (rawText) {
       await fs.writeFile(path.join(paths.snapshotsDir, `${resume.candidateId}.txt`), rawText, 'utf8');
@@ -392,6 +643,146 @@ export class JobStore {
     const filePath = path.join(paths.scoresDir, `${scoreArtifact.candidateId}.json`);
     await writeJson(filePath, scoreArtifact);
     return filePath;
+  }
+
+  /**
+   * Appends an immutable Boss screening decision. The separate outbox API is
+   * intentionally responsible for mutable external-forwarding state.
+   */
+  async saveBossCandidateRoutingArtifact(
+    platform: 'boss',
+    jobKey: string,
+    artifact: BossCandidateRoutingArtifact,
+  ): Promise<string> {
+    const paths = await this.initializeJob(platform, jobKey);
+    if (artifact.routingDecisionId) {
+      const filePath = path.join(
+        paths.routingArtifactsDir,
+        `${bossRoutingCandidateFileName(artifact.routingDecisionId)}.json`,
+      );
+      try {
+        const existing = await readJsonFile<BossCandidateRoutingArtifact>(filePath);
+        if (!isDeepStrictEqual(existing, artifact)) {
+          throw new Error(`Routing decision ${artifact.routingDecisionId} already exists with different content.`);
+        }
+        return filePath;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      await writeJson(filePath, artifact);
+      const persisted = await readJsonFile<BossCandidateRoutingArtifact>(filePath);
+      if (!isDeepStrictEqual(persisted, artifact)) {
+        throw new Error(`Routing decision ${artifact.routingDecisionId} changed during idempotent write.`);
+      }
+      return filePath;
+    }
+    const stem = `${bossRoutingTimestamp(artifact.decidedAt)}-${bossRoutingCandidateFileName(artifact.candidateId)}`;
+    let suffix = 0;
+    let filePath = path.join(paths.routingArtifactsDir, `${stem}.json`);
+
+    while (true) {
+      try {
+        await fs.access(filePath);
+        suffix += 1;
+        filePath = path.join(paths.routingArtifactsDir, `${stem}-${suffix}.json`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+        break;
+      }
+    }
+
+    await writeJson(filePath, artifact);
+    return filePath;
+  }
+
+  async listBossCandidateRoutingArtifacts(
+    platform: 'boss',
+    jobKey: string,
+  ): Promise<BossCandidateRoutingArtifact[]> {
+    const { routingArtifactsDir } = this.getJobPaths(platform, jobKey);
+    const files = await listJsonFiles(routingArtifactsDir);
+    const artifacts = await Promise.all(files.map((file) =>
+      readJsonFile<BossCandidateRoutingArtifact>(path.join(routingArtifactsDir, file)),
+    ));
+    return artifacts.sort((left, right) => left.decidedAt.localeCompare(right.decidedAt)
+      || (left.routingDecisionId ?? left.candidateId).localeCompare(right.routingDecisionId ?? right.candidateId));
+  }
+
+  async readBossCandidateRoutingArtifactByDecisionId(
+    platform: 'boss',
+    jobKey: string,
+    routingDecisionId: string,
+  ): Promise<BossCandidateRoutingArtifact | undefined> {
+    const { routingArtifactsDir } = this.getJobPaths(platform, jobKey);
+    const filePath = path.join(routingArtifactsDir, `${bossRoutingCandidateFileName(routingDecisionId)}.json`);
+    return readJsonFile<BossCandidateRoutingArtifact | undefined>(filePath, undefined);
+  }
+
+  async saveBossScreeningWorkItem(
+    platform: 'boss',
+    jobKey: string,
+    item: BossScreeningWorkItem,
+  ): Promise<string> {
+    const paths = await this.initializeJob(platform, jobKey);
+    const filePath = path.join(paths.screeningWorkDir, `${bossRoutingCandidateFileName(item.candidateId)}.json`);
+    await writeJsonIfChanged(filePath, item);
+    return filePath;
+  }
+
+  async deleteBossScreeningWorkItem(
+    platform: 'boss',
+    jobKey: string,
+    candidateId: string,
+  ): Promise<void> {
+    const { screeningWorkDir } = this.getJobPaths(platform, jobKey);
+    await fs.rm(path.join(screeningWorkDir, `${bossRoutingCandidateFileName(candidateId)}.json`), { force: true });
+  }
+
+  async listBossScreeningWorkItems(
+    platform: 'boss',
+    jobKey: string,
+  ): Promise<BossScreeningWorkItem[]> {
+    const { screeningWorkDir } = this.getJobPaths(platform, jobKey);
+    const files = await listJsonFiles(screeningWorkDir);
+    return Promise.all(files.map((file) =>
+      readJsonFile<BossScreeningWorkItem>(path.join(screeningWorkDir, file)),
+    ));
+  }
+
+  async saveBossForwardingOutboxEntry(
+    platform: 'boss',
+    jobKey: string,
+    entry: BossForwardingOutboxEntry,
+  ): Promise<string> {
+    const paths = await this.initializeJob(platform, jobKey);
+    const filePath = path.join(paths.forwardingOutboxDir, `${bossRoutingCandidateFileName(entry.candidateId)}.json`);
+    await writeJsonIfChanged(filePath, entry);
+    return filePath;
+  }
+
+  async readBossForwardingOutboxEntry(
+    platform: 'boss',
+    jobKey: string,
+    candidateId: string,
+  ): Promise<BossForwardingOutboxEntry | undefined> {
+    const { forwardingOutboxDir } = this.getJobPaths(platform, jobKey);
+    return readJsonFile<BossForwardingOutboxEntry | undefined>(
+      path.join(forwardingOutboxDir, `${bossRoutingCandidateFileName(candidateId)}.json`),
+      undefined,
+    );
+  }
+
+  async listBossForwardingOutboxEntries(
+    platform: 'boss',
+    jobKey: string,
+  ): Promise<BossForwardingOutboxEntry[]> {
+    const { forwardingOutboxDir } = this.getJobPaths(platform, jobKey);
+    const files = await listJsonFiles(forwardingOutboxDir);
+    return Promise.all(files.map((file) =>
+      readJsonFile<BossForwardingOutboxEntry>(path.join(forwardingOutboxDir, file)),
+    ));
   }
 
   async saveJobExport(platform: SupportedPlatform, jobKey: string, markdown: string): Promise<string> {
@@ -474,11 +865,20 @@ export class JobStore {
   }
 
   async saveRunResult(platform: SupportedPlatform, jobKey: string, runResult: RunResult): Promise<string> {
+    if (runResult.runResultVersion === 2 && !Array.isArray(runResult.capturedCandidateIds)) {
+      throw new Error(`RunResult v2 for ${platform}/${jobKey} must include capturedCandidateIds.`);
+    }
     const paths = await this.initializeJob(platform, jobKey);
     const timestamp = runResult.fetchedAt.replace(/[:.]/g, '-');
     const filePath = path.join(paths.resultsDir, `${timestamp}.json`);
+    const persistedRunResult = runResult.runResultVersion === 2
+      ? (() => {
+        const { newCandidateIds: _legacyAttemptIds, ...v2RunResult } = runResult;
+        return v2RunResult;
+      })()
+      : runResult;
     await writeJson(filePath, {
-      ...runResult,
+      ...persistedRunResult,
       platform,
     });
     return filePath;
@@ -502,6 +902,9 @@ export class JobStore {
         forwarding: {
           mode: settings.forwarding.mode,
           recipient: settings.forwarding.recipient.trim(),
+          ...(settings.forwarding.ccEmails === undefined ? {} : {
+            ccEmails: [...new Set(settings.forwarding.ccEmails.map((email) => email.trim()).filter(Boolean))],
+          }),
         },
       } : {}),
       ...(settings.summaryDelivery ? {

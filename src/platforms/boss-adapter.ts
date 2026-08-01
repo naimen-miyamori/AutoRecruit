@@ -24,6 +24,11 @@ export {
   closeBossResumeDetail,
 } from './boss/actions/search-actions.js';
 export {
+  BossUnexpectedContactDialogError,
+  BossForwardPreConfirmationError,
+  BossForwardUncertainError,
+  BossResumeDetailCloseError,
+  BossResumeIdentityVerificationError,
   closeExistingBossResumeDialog,
   forwardBossResume,
   parseBossResumeDetail,

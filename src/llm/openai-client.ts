@@ -17,6 +17,8 @@ export interface OpenAISettingsOverride {
 export interface OpenAITextCompletionRequest {
   featureName: string;
   modelEnvName: string;
+  /** Overrides the global route for one feature without enabling provider fallback. */
+  completionRoute?: LlmCompletionRoute;
   input: string;
   instructions: string;
   maxOutputTokens: number;
@@ -242,9 +244,10 @@ async function completeJsonTextFromDefaultProvider(request: OpenAITextCompletion
 }
 
 export async function completeJsonTextFromOpenAI(request: OpenAITextCompletionRequest): Promise<string> {
-  if (llmCompletionRouteRef.current() === 'codex-session') {
+  const completionRoute = request.completionRoute ?? llmCompletionRouteRef.current();
+  if (completionRoute === 'codex-session') {
     if (hasRequestSettings(request.settings)) {
-      throw new Error(`${request.featureName} cannot use request-level model settings when LLM_COMPLETION_ROUTE=codex-session`);
+      throw new Error(`${request.featureName} cannot use request-level model settings when completionRoute=codex-session`);
     }
 
     return completeTextFromCodexSession({

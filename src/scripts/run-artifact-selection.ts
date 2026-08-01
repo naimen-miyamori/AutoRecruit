@@ -11,17 +11,34 @@ export function getLatestRunResult(runResults: RunResult[], jobKey: string): Run
 }
 
 export function getRunCandidateIds(runResult: RunResult): string[] {
-  return [
+  // This helper describes candidates for which a score artifact is expected,
+  // not every card/detail attempt. In v1 `newCandidateIds` is only legacy
+  // attempt history and must never be promoted to captured/scored data.
+  const processingFailures = runResult.processingFailures
+    ?.filter((failure) => failure.stage === 'score')
+    .map((failure) => failure.candidateId) ?? [];
+  return [...new Set([
     ...runResult.scoredCandidates,
-    ...runResult.failedCandidates.map((candidate) => candidate.candidateId),
-  ];
+    ...processingFailures,
+  ])];
+}
+
+/** IDs that the legacy v1 run says were seen/attempted, for filtering only. */
+export function getLegacyRunAttemptIds(runResult: RunResult): string[] {
+  return runResult.runResultVersion === 2 ? [] : [...new Set(runResult.newCandidateIds ?? [])];
 }
 
 export function filterArtifactsForRun(
   scoreArtifacts: CandidateScoreArtifact[],
   runResult: RunResult,
 ): CandidateScoreArtifact[] {
-  const allowedCandidateIds = new Set(getRunCandidateIds(runResult));
+  const allowedCandidateIds = new Set([
+    ...getRunCandidateIds(runResult),
+    // v1 has no run-scoped score timestamp/ID. Existing artifacts whose IDs
+    // appear in the legacy attempt list are eligible for display, but the
+    // caller only asserts artifacts for explicit scored/score-failed IDs.
+    ...getLegacyRunAttemptIds(runResult),
+  ]);
 
   return scoreArtifacts.filter((artifact) => allowedCandidateIds.has(artifact.candidateId));
 }

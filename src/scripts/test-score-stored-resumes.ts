@@ -102,7 +102,7 @@ describe('JobStore offline scoring readers', () => {
     const storedJobRecord = await store.readJobRecord('51job', jobKey);
     const resumes = await store.listStoredResumes('51job', jobKey);
 
-    assert.deepStrictEqual(storedJobRecord, jobRecord);
+    assert.deepStrictEqual(storedJobRecord, { ...jobRecord, revision: 1 });
     assert.deepStrictEqual(resumes, [resume]);
   });
 });

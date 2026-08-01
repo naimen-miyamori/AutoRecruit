@@ -2,6 +2,8 @@ import type { MainResult } from '../index.js';
 import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
 import type { SearchConditionSetReference } from '../search/search-condition-sets.js';
 import type {
+  BossCaptureSettingsSnapshot,
+  BossCaptureTaskSnapshot,
   CandidateResume,
   CandidateScoreArtifact,
   JobRecord,
@@ -95,6 +97,20 @@ export interface ResumeCaptureTaskInput {
   liepinForwardContact?: string;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+  bossForwardCc?: string[];
+  /** Boss-only post-score negative-condition routing switch. */
+  bossScreeningEnabled?: boolean;
+  /** JSON policy file containing only the negative-condition definitions. */
+  bossScreeningPolicyFile?: string;
+  bossSecondaryForwardMode?: BossForwardMode;
+  bossSecondaryForwardRecipient?: string;
+  bossSecondaryForwardCc?: string[];
+  bossSecondaryEmail?: string;
+  bossSecondaryCc?: string[];
+  /** Private queue/scheduler fact; public HTTP bodies cannot provide it. */
+  bossCaptureSettingsSnapshot?: BossCaptureSettingsSnapshot;
+  /** Complete immutable Boss identity/search/config snapshot; server-only. */
+  bossCaptureTaskSnapshot?: BossCaptureTaskSnapshot;
 }
 
 export interface BatchTaskInput {
@@ -110,6 +126,14 @@ export interface BatchTaskInput {
   liepinForwardContact?: string;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+  bossForwardCc?: string[];
+  bossScreeningEnabled?: boolean;
+  bossScreeningPolicyFile?: string;
+  bossSecondaryForwardMode?: BossForwardMode;
+  bossSecondaryForwardRecipient?: string;
+  bossSecondaryForwardCc?: string[];
+  bossSecondaryEmail?: string;
+  bossSecondaryCc?: string[];
 }
 
 export interface TalentMappingTaskInput {
@@ -146,6 +170,7 @@ export interface BossAutoChatTaskInput {
   replyToUnqualifiedCandidates?: boolean;
   bossForwardMode?: BossForwardMode;
   bossForwardRecipient?: string;
+  bossForwardCc?: string[];
   summaryEmail?: string;
   summaryCc?: string[];
   syncJobsBeforeReview?: boolean;
@@ -542,6 +567,9 @@ export interface PlatformRunHealth {
 export interface CandidateFunnelHealth {
   platform: SupportedPlatform;
   totalCandidates: number;
+  captureAttempts: number;
+  capturedCandidates: number;
+  /** Deprecated alias for capturedCandidates. */
   newCandidates: number;
   capturedResumes: number;
   scoredCandidates: number;

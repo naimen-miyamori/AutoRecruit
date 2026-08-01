@@ -4,6 +4,7 @@ import { config } from '../config.js';
 import type { BossCapturePlanStore } from '../platforms/boss/capture-plan.js';
 import { SearchConditionSetService } from '../search/search-condition-sets.js';
 import {
+  snapshotBossBatchCaptureSettings,
   snapshotBossCaptureSettings,
   type BossCapturePlanResolver,
 } from './boss-capture-snapshot.js';
@@ -14,6 +15,7 @@ import { ScheduleStore } from './schedule-store.js';
 import { normalizeSchedulableTask } from './task-normalizers.js';
 import { TaskQueue, type QueueTaskDefinition } from './task-queue.js';
 import type {
+  BatchTaskInput,
   ResumeCaptureTaskInput,
   ScheduleDefinition,
   ScheduleRunRecord,
@@ -353,12 +355,27 @@ export class TaskScheduler {
             argv: baseTask.argv,
             inputSummary: baseTask.inputSummary,
           }, {
+            dataDir: this.dataDir,
             ...(this.bossCapturePlanResolver ? { resolveBossCapturePlan: this.bossCapturePlanResolver } : {}),
             ...(this.bossCapturePlanStore ? { store: this.bossCapturePlanStore } : {}),
             searchConditionSets: this.searchConditionSetService,
           }),
         }
-        : baseTask;
+        : baseTask.kind === 'batch'
+          ? {
+            kind: baseTask.kind,
+            ...await snapshotBossBatchCaptureSettings({
+              input: baseTask.input as BatchTaskInput,
+              argv: baseTask.argv,
+              inputSummary: baseTask.inputSummary,
+            }, {
+              dataDir: this.dataDir,
+              ...(this.bossCapturePlanResolver ? { resolveBossCapturePlan: this.bossCapturePlanResolver } : {}),
+              ...(this.bossCapturePlanStore ? { store: this.bossCapturePlanStore } : {}),
+              searchConditionSets: this.searchConditionSetService,
+            }),
+          }
+          : baseTask;
       await preflightTaskSearchConditionSets(task.input, this.searchConditionSetService);
       return {
         kind: task.kind,
