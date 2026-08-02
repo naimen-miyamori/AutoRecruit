@@ -4212,7 +4212,7 @@ describe('scoring run semantics', () => {
     }
   });
 
-  it('brings only authenticated headed Zhilian sessions to the front', async () => {
+  it('brings authenticated headed Zhilian and Boss sessions to the front', async () => {
     const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
     const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
@@ -4233,6 +4233,7 @@ describe('scoring run semantics', () => {
 
     try {
       await sessionModule.ensureAuthenticatedBrowserSession('zhilian');
+      await sessionModule.ensureAuthenticatedBrowserSession('boss');
       await sessionModule.ensureAuthenticatedBrowserSession('51job');
       await sessionModule.ensureAuthenticatedBrowserSession('liepin');
     } finally {
@@ -4241,10 +4242,10 @@ describe('scoring run semantics', () => {
       (config.playwright as { headless: boolean }).headless = originalHeadless;
     }
 
-    assert.deepStrictEqual(bringToFrontCalls, ['zhilian']);
+    assert.deepStrictEqual(bringToFrontCalls, ['zhilian', 'boss']);
   });
 
-  it('skips Zhilian page foregrounding in headless mode', async () => {
+  it('skips foregrounding in headless mode and for platforms without foreground behavior', async () => {
     const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
     let bringToFrontCalls = 0;
     const session = {
@@ -4258,6 +4259,7 @@ describe('scoring run semantics', () => {
     } as unknown as BrowserSession;
 
     await sessionModule.bringAuthenticatedSessionPageToFront(session, 'zhilian', true);
+    await sessionModule.bringAuthenticatedSessionPageToFront(session, 'boss', true);
     await sessionModule.bringAuthenticatedSessionPageToFront(session, '51job', false);
     await sessionModule.bringAuthenticatedSessionPageToFront(session, 'liepin', false);
 

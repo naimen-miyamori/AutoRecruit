@@ -460,14 +460,14 @@ export async function bringAuthenticatedSessionPageToFront(
   platform: SupportedPlatform,
   headless = resolveBrowserHeadless(platform),
 ): Promise<void> {
-  if (platform !== 'zhilian' || headless) {
+  if ((platform !== 'zhilian' && platform !== 'boss') || headless) {
     return;
   }
 
   try {
     await session.page.bringToFront();
   } catch (error) {
-    console.warn(`Could not bring Zhilian browser page to front; continuing without changing the run: ${error instanceof Error ? error.message : String(error)}`);
+    console.warn(`Could not bring ${getPlatformAdapter(platform).displayName} browser page to front; continuing without changing the run: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
