@@ -479,7 +479,11 @@ async function locateBossSearchSubmitControl(frame: Frame, deadline: number): Pr
     const keywordInput = keywordInputs[0]!;
     const inputParent = keywordInput?.parentElement;
     const inputForm = keywordInput?.closest('form');
-    const inputSearchAncestor = keywordInput?.closest('[class*="search"], [id*="search"]');
+    // The current Boss page nests the input one level below its clickable
+    // icon: `.search-input-wrap > .input-warp > input` plus a sibling
+    // `.icon-search`. Start from the parent so the input's own
+    // `.search-input` class cannot masquerade as the shared container.
+    const inputSearchAncestor = keywordInput?.parentElement?.closest('[class*="search"], [id*="search"]');
     const isVisibleAndEnabled = (element: Element): boolean => {
       if (!(element instanceof HTMLElement)) return false;
       const style = window.getComputedStyle(element);
@@ -516,7 +520,8 @@ async function locateBossSearchSubmitControl(frame: Frame, deadline: number): Pr
         && (inputParentIsSearchContainer || explicitSubmitSemantic)
         && (element.parentElement === inputParent || inputParent.contains(element)),
       );
-      const sameSearchAncestor = Boolean(inputSearchAncestor && element.closest('[class*="search"], [id*="search"]') === inputSearchAncestor);
+      const elementSearchAncestor = element.parentElement?.closest('[class*="search"], [id*="search"]');
+      const sameSearchAncestor = Boolean(inputSearchAncestor && elementSearchAncestor === inputSearchAncestor);
       return sameForm || sameParent || sameSearchAncestor;
     };
     const candidates = elements.filter((element) => isVisibleAndEnabled(element) && isSearchControl(element));
@@ -861,16 +866,8 @@ export async function applyBossDirectSearch(
       alreadySatisfiedFields,
     );
   }
-  throwIfBossSearchAborted(options?.signal);
-  const stateBeforeKeyword = await snapshotBossSearchFilterState(searchPage, deadline);
-  if (stateBeforeKeyword.keyword === normalizeText(keyword)) {
-    alreadySatisfiedFields.push('keyword');
-  } else {
-    await applyBossSearchKeyword(searchPage, keyword, deadline);
-    changedFields.push('keyword');
-  }
 
-  // A job or keyword change can make the iframe redraw its city control.
+  // A job change can make the iframe redraw its city control.
   // Read the closed state again immediately before deciding whether the city
   // requires its one allowed open/select/confirm chain.
   const stateBeforeCity = await snapshotBossSearchFilterState(searchPage, deadline);
@@ -936,12 +933,15 @@ export async function applyBossDirectSearch(
     }
   }
 
-  // Applying a later filter can trigger a Boss iframe refresh that replaces a
-  // short keyword with the first autocomplete suggestion (for example, 铝 →
-  // 铝模). Reconcile the keyword immediately before the one required final
-  // search click so the submitted search always carries the requested value.
+  // Boss may replace a short keyword with its first autocomplete suggestion
+  // while later filters refresh the iframe (for example, 铝 → 铝模). Enter the
+  // keyword only after every other filter is stable so one write is both the
+  // first input and the final value submitted by the mandatory search click.
+  throwIfBossSearchAborted(options?.signal);
   const keywordBeforeSubmit = await readBossSearchKeyword(searchPage, deadline);
-  if (keywordBeforeSubmit !== normalizeText(keyword)) {
+  if (keywordBeforeSubmit === normalizeText(keyword)) {
+    alreadySatisfiedFields.push('keyword');
+  } else {
     await applyBossSearchKeyword(searchPage, keyword, deadline);
     changedFields.push('keyword');
   }

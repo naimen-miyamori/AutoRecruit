@@ -443,6 +443,40 @@ describe('Boss normal-search actions', () => {
     }
   });
 
+  it('enters a short keyword only once after filter refreshes can replace its value', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = recentViewedSearchBody().replace('</body>', `<script>
+      window.__bossAluminumKeywordInputs = 0;
+      const diagnosticKeyword = document.querySelector('.search-input');
+      diagnosticKeyword.addEventListener('input', () => {
+        if (diagnosticKeyword.value === '铝') window.__bossAluminumKeywordInputs += 1;
+      });
+      document.querySelector('.high_search_checkbox[ka="search_change_view_resume"] input').addEventListener('change', () => {
+        diagnosticKeyword.value = '铝模';
+      });
+    </script></body>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const result = await applyBossDirectSearch(page, '铝', [], {
+        deadline: Date.now() + 5_000,
+        includeViewedCandidates: false,
+      });
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.locator('.search-input').inputValue(), '铝');
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossAluminumKeywordInputs), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+      assert.ok(result.changedFields?.includes('keyword'));
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
   it('fails closed before clicking when the final search control is missing or ambiguous', async () => {
     const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
     const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
@@ -493,6 +527,46 @@ describe('Boss normal-search actions', () => {
       const frame = page.frame({ name: 'searchFrame' });
       assert.ok(frame);
       assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__unrelatedIconClicks ?? 0), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('uses the unique Boss icon that shares the current search-input wrapper', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`<div class="geek-info-card">candidate card</div><script>
+      document.querySelector('.search-btn').remove();
+      const keyword = document.querySelector('.search-input');
+      const container = document.createElement('div');
+      container.className = 'search-container';
+      const wrapper = document.createElement('div');
+      wrapper.className = 'search-input-wrap';
+      const inputWrapper = document.createElement('div');
+      inputWrapper.className = 'input-warp';
+      const icon = document.createElement('i');
+      icon.className = 'icon-search';
+      icon.style.cssText = 'display:block;width:24px;height:24px';
+      inputWrapper.appendChild(keyword);
+      wrapper.append(inputWrapper, icon);
+      container.appendChild(wrapper);
+      document.body.prepend(container);
+      icon.addEventListener('click', () => {
+        window.__bossSearchClicks += 1;
+        const epoch = document.querySelector('#boss-search-submit-epoch');
+        epoch.setAttribute('data-boss-search-result-version', String(Number(epoch.getAttribute('data-boss-search-result-version') || '0') + 1));
+      });
+    </script>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      await openBossSubscribeSearch(page, '测试关键词', { deadline: Date.now() + 5_000 });
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;

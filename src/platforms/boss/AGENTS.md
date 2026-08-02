@@ -31,6 +31,9 @@ scheduled work.
   post-click result cycle (cards or explicit empty state) and fails closed when the cycle is not
   observable; after a click with uncertain outcome the action never clicks again. Preparation,
   discovery, single-condition, reset, and restore actions remain non-submitting.
+- Direct search applies the keyword once, after job scope, filters, and viewed policy are stable.
+  The unique final search control may be an icon only when it shares the keyword input's nearest
+  search-input wrapper; an unrelated global search icon is never a fallback.
 - Navigation, clicks, input, keys, forwarding, chat, contact, and candidate transitions use the
   shared paced continuous pointer path. Keyword, direct-chat, and remark typing use the sequential
   typing helper; search/remark replacement clears the prior value, direct chat preserves a
