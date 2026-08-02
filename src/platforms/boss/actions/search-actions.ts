@@ -4530,7 +4530,27 @@ async function openBossResumeDetail(
     element.setAttribute('data-autorecruit-boss-detail-target', input.marker);
   }, { candidateId: candidate.candidateId, marker });
   const markedAnchor = frame.locator(`[data-autorecruit-boss-detail-target="${marker}"]`);
-  const safeClickTarget = markedAnchor.locator('.geek-info-detail:visible, .search-geek-info:visible, .card-inner:visible');
+  const safeClickTargetCandidates = markedAnchor.locator('.geek-info-detail:visible, .search-geek-info:visible, .card-inner:visible');
+  const findTopLevelSafeClickTargetIndexes = async (): Promise<number[]> => safeClickTargetCandidates.evaluateAll((elements) => {
+    const visible = (element: Element): boolean => element instanceof HTMLElement
+      && Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+      && window.getComputedStyle(element).visibility !== 'hidden';
+    const visibleElements = elements.filter(visible);
+    return visibleElements
+      .filter((element) => !visibleElements.some((other) => other !== element && other.contains(element)))
+      .map((element) => elements.indexOf(element));
+  });
+  const initialSafeClickTargetIndexes = await findTopLevelSafeClickTargetIndexes();
+  if (initialSafeClickTargetIndexes.length !== 1) {
+    throw new Error(
+      `Could not uniquely find a safe Boss detail click target for candidate ${candidate.candidateId}; found ${initialSafeClickTargetIndexes.length}.`,
+    );
+  }
+  const clickTargetMarker = `${marker}-click`;
+  await safeClickTargetCandidates.nth(initialSafeClickTargetIndexes[0]!).evaluate((element, expectedMarker) => {
+    element.setAttribute('data-autorecruit-boss-detail-click-target', expectedMarker);
+  }, clickTargetMarker);
+  const markedSafeClickTarget = markedAnchor.locator(`[data-autorecruit-boss-detail-click-target="${clickTargetMarker}"]`);
   const assertSafeClickTargetStillCurrent = async (): Promise<void> => {
     const markedCount = await markedAnchor.count().catch(() => 0);
     if (markedCount !== 1) {
@@ -4550,17 +4570,24 @@ async function openBossResumeDetail(
     if (!identityMatches) {
       throw new Error(`Boss detail target identity changed before clicking candidate ${candidate.candidateId}.`);
     }
-    const targetCount = await safeClickTarget.count().catch(() => 0);
-    if (targetCount !== 1) {
+    const currentTargetIndexes = await findTopLevelSafeClickTargetIndexes();
+    if (currentTargetIndexes.length !== 1) {
       throw new Error(
-        `Could not uniquely find a safe Boss detail click target for candidate ${candidate.candidateId}; found ${targetCount}.`,
+        `Could not uniquely find a safe Boss detail click target for candidate ${candidate.candidateId}; found ${currentTargetIndexes.length}.`,
       );
+    }
+    const currentTopLevelTarget = safeClickTargetCandidates.nth(currentTargetIndexes[0]!);
+    if (await currentTopLevelTarget.getAttribute('data-autorecruit-boss-detail-click-target') !== clickTargetMarker) {
+      throw new Error(`Boss detail click target changed before clicking candidate ${candidate.candidateId}.`);
+    }
+    if (await markedSafeClickTarget.count().catch(() => 0) !== 1) {
+      throw new Error(`Boss detail click target marker was lost before clicking candidate ${candidate.candidateId}.`);
     }
   };
 
   try {
     await assertSafeClickTargetStillCurrent();
-    await clickBossControlNatively(searchPage, safeClickTarget, remainingTime(deadline), {
+    await clickBossControlNatively(searchPage, markedSafeClickTarget, remainingTime(deadline), {
       deadline,
       cleanupReserveMs: options?.cleanupReserveMs ?? 0,
       beforeClick: assertSafeClickTargetStillCurrent,
@@ -4571,6 +4598,11 @@ async function openBossResumeDetail(
     await candidateAnchor.evaluate((element, expectedMarker) => {
       if (element.getAttribute('data-autorecruit-boss-detail-target') === expectedMarker) {
         element.removeAttribute('data-autorecruit-boss-detail-target');
+      }
+      for (const child of element.querySelectorAll('[data-autorecruit-boss-detail-click-target]')) {
+        if (child.getAttribute('data-autorecruit-boss-detail-click-target') === `${expectedMarker}-click`) {
+          child.removeAttribute('data-autorecruit-boss-detail-click-target');
+        }
       }
     }, marker).catch(() => undefined);
   }

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import { config } from '../config.js';
 import {
+  buildBossRoutedMainRunEmailSummary,
   main,
   closeBrowserSessionRef,
   ensureAuthenticatedBrowserSessionRef,
@@ -823,6 +824,65 @@ describe('sendJobReport', () => {
     assert.equal(result.reportDeliveries.secondary.delivered, true);
     assert.equal(result.reportDeliveries.primary.summary.candidateCount, 2);
     assert.equal(result.reportDeliveries.secondary.summary.candidateCount, 1);
+  });
+
+  it('summarizes secondary-only Boss report delivery in the legacy top-level email fields', () => {
+    const summary = buildBossRoutedMainRunEmailSummary({
+      primary: {
+        jobKey: 'boss-secondary-only',
+        audience: 'primary',
+        attempted: false,
+        delivered: false,
+        skipReason: 'no-primary-audience-candidates',
+        summary: { candidateCount: 0, successCount: 0, failureCount: 0 },
+      },
+      secondary: {
+        jobKey: 'boss-secondary-only',
+        audience: 'secondary',
+        attempted: true,
+        delivered: true,
+        recipient: 'secondary@example.com',
+        subject: 'secondary report',
+        summary: { candidateCount: 15, successCount: 15, failureCount: 0 },
+      },
+    });
+
+    assert.deepStrictEqual(summary, {
+      emailAttempted: true,
+      emailDelivered: true,
+      emailRecipient: 'secondary@example.com',
+      emailSubject: 'secondary report',
+      emailError: undefined,
+    });
+  });
+
+  it('keeps aggregate Boss email delivery false when any required audience report fails', () => {
+    const summary = buildBossRoutedMainRunEmailSummary({
+      primary: {
+        jobKey: 'boss-partial-report-failure',
+        audience: 'primary',
+        attempted: true,
+        delivered: true,
+        recipient: 'primary@example.com',
+        subject: 'primary report',
+        summary: { candidateCount: 1, successCount: 1, failureCount: 0 },
+      },
+      secondary: {
+        jobKey: 'boss-partial-report-failure',
+        audience: 'secondary',
+        attempted: true,
+        delivered: false,
+        recipient: 'secondary@example.com',
+        subject: 'secondary report',
+        summary: { candidateCount: 1, successCount: 1, failureCount: 0 },
+        error: 'smtp failed',
+      },
+    });
+
+    assert.equal(summary.emailAttempted, true);
+    assert.equal(summary.emailDelivered, false);
+    assert.equal(summary.emailRecipient, 'primary@example.com');
+    assert.equal(summary.emailError, 'smtp failed');
   });
 
   it('reports routed Boss candidates when another attempted candidate failed before scoring and routing', async () => {

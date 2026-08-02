@@ -106,7 +106,7 @@ export async function closeExistingBossResumeDialog(
   deadline: number,
   options: { pace?: boolean; allowEscapeFallback?: boolean; cleanupReserveMs?: number } & Partial<CandidateProfileDetailOptions> = {},
 ): Promise<void> {
-  const activeDialog = page.locator('.dialog-wrap.active[data-type="boss-dialog"], .dialog-wrap.active:has(iframe[src*="/web/frame/c-resume/"]), .dialog-wrap.active:has(.c-share-box)').first();
+  const activeDialog = page.locator('.dialog-wrap.active:visible[data-type="boss-dialog"], .dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"]), .dialog-wrap.active:visible:has(.c-share-box)').first();
   if (await activeDialog.count().catch(() => 0) === 0) return;
 
   const closeButton = activeDialog.locator('.boss-popup__close, .close-btn, [ka="dialog_close"], .boss-dialog__close').first();
@@ -384,6 +384,27 @@ async function closeBossPurchaseChatDialogIfPresent(page: Page, deadline: number
   return true;
 }
 
+async function closeVisibleBossForwardDialogIfPresent(page: Page, deadline: number): Promise<boolean> {
+  const dialogs = page.locator('.dialog-wrap.active:visible:has(.c-share-box:visible)');
+  const dialogCount = await dialogs.count();
+  if (dialogCount === 0) return false;
+  if (dialogCount !== 1) {
+    throw new Error(`Expected at most one visible Boss forwarding dialog before detail close, found ${dialogCount}.`);
+  }
+  const dialog = dialogs.first();
+  const closeButtons = dialog.locator('.boss-popup__close:visible, .close-btn:visible, [ka="dialog_close"]:visible, .boss-dialog__close:visible');
+  const closeCount = await closeButtons.count();
+  if (closeCount !== 1) {
+    throw new Error(`Expected one close control on the visible Boss forwarding dialog, found ${closeCount}.`);
+  }
+  await clickBossControlNatively(page, closeButtons.first(), remainingTime(deadline), {
+    deadline,
+    pace: false,
+  });
+  await dialog.waitFor({ state: 'hidden', timeout: remainingTime(deadline) });
+  return true;
+}
+
 /**
  * Safety-only semantic action used by non-forwarding detail visits. It keeps
  * the purchase-dialog selector inside the Boss action boundary while allowing
@@ -409,6 +430,11 @@ export async function closeBossResumeDetailStrict(
   if (dialogCount !== 1) {
     throw new Error(`Expected one visible Boss resume detail dialog before close, found ${dialogCount}.`);
   }
+  // A dispatched forward click can leave the share box visible when the
+  // success indication is delayed or absent. Close that nested/overlay dialog
+  // first so its layer cannot intercept the detail close control. The strict
+  // postcondition below still requires the resume detail itself to disappear.
+  await closeVisibleBossForwardDialogIfPresent(page, deadline);
   if (await bossPurchaseChatDialogs(page).count() > 0) {
     await closeBossPurchaseChatDialogIfPresent(page, deadline);
     throw new Error('Boss resume detail close was blocked by a visible search-chat-card purchase dialog.');
@@ -566,7 +592,7 @@ async function fillBossForwardForm(
 }
 
 function bossForwardSuccessIndicators(page: Page): Locator {
-  return page.locator('[data-boss-forward-success="true"], .boss-toast, .toast-success, [role="alert"]');
+  return page.locator('[data-boss-forward-success="true"], .boss-toast, .toast-success, .toast-con, [role="alert"]');
 }
 
 async function readBossForwardSuccessSignature(page: Page): Promise<string> {
@@ -595,7 +621,7 @@ async function waitForBossForwardSuccessEvidence(
     const isVisible = (element: Element): boolean => element instanceof HTMLElement
       && Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length)
       && window.getComputedStyle(element).visibility !== 'hidden';
-    const signature = [...document.querySelectorAll('[data-boss-forward-success="true"], .boss-toast, .toast-success, [role="alert"]')]
+    const signature = [...document.querySelectorAll('[data-boss-forward-success="true"], .boss-toast, .toast-success, .toast-con, [role="alert"]')]
       .flatMap((element, index) => {
         const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim();
         return isVisible(element) && /转发成功|发送成功|已转发|forwarded successfully/i.test(text)

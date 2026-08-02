@@ -356,6 +356,10 @@ SMTP 报告是四组独立配置：主/副转发 CC 分别使用 `--boss-forward
 报告 CC 分别使用 `--cc`、`--boss-secondary-cc`；转发 CC 表示 Boss 上的独立二次转发，SMTP 报告 CC 才是
 邮件协议中的抄送。两者绝不会由一个邮箱或转发目标自动推导另一个。
 
+运行摘要中的 `reportDeliveries.primary/secondary` 是逐受众交付事实；顶层兼容字段会汇总两者：任一受众实际尝试即
+`emailAttempted=true`，所有非跳过的应发报告都成功才有 `emailDelivered=true`。若本轮只发送一个受众，顶层
+`emailRecipient/emailSubject` 指向该实际报告，而不是固定指向主报告。
+
 启用分流后，简历保存与写入 seen 之间会先落一条“待评分分流”工作项；若进程在分流决定落盘前中断，后续启用
 分流的运行只会按同一候选人 ID 恢复该工作，不会把 seen 误当作已经转发。已经形成 outbox 后，`pending` 或明确的
 `retryable-failed` 会在候选人仍出现在当前结果时按原 outbox 的单个地址重试；主地址和每个副本地址分别保存

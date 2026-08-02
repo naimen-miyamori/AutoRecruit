@@ -135,8 +135,8 @@ async function installForwardReceiptFixture(page: Page, mode: 'success' | 'uncer
         share.style.display = 'none';
         if (fixtureMode === 'success') {
           const success = document.createElement('div');
-          success.dataset.bossForwardSuccess = 'true';
-          success.textContent = '转发成功';
+          success.className = 'toast';
+          success.innerHTML = '<div class="toast-con">转发成功</div>';
           success.style.cssText = 'display:block;width:80px;height:20px';
           document.body.appendChild(success);
         }
@@ -314,6 +314,29 @@ describe('Boss normal-search actions', () => {
         (error: unknown) => error instanceof BossForwardPreConfirmationError
           && /did not dispatch|changed before/.test(error.message),
       );
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('accepts the current Boss legacy toast container as forwarding success evidence', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installForwardReceiptFixture(page, 'success');
+      await forwardBossResumeAction(page, {
+        candidateId: 'candidate-legacy-toast-success',
+        mode: 'email',
+        recipient: 'primary@example.com',
+        actionMode: 'confirm',
+        deadline: Date.now() + 3_000,
+      });
+      assert.equal(await page.locator('.toast-con').filter({ hasText: '转发成功' }).count(), 1);
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
@@ -1463,6 +1486,33 @@ describe('Boss normal-search actions', () => {
         /remained visible after the close action/,
       );
       assert.equal(await page.locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])').count(), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('closes a visible forwarding overlay before closing the resume detail', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await page.evaluate(() => {
+        const detail = document.createElement('div');
+        detail.className = 'dialog-wrap active';
+        detail.dataset.type = 'boss-dialog';
+        detail.style.cssText = 'display:block;width:480px;height:360px';
+        detail.innerHTML = '<button class="boss-popup__close" style="display:block;width:24px;height:24px"></button><iframe src="https://www.zhipin.com/web/frame/c-resume/"></iframe><div class="c-share-box" style="display:block;width:320px;height:180px">转发</div>';
+        detail.querySelector('.boss-popup__close')?.addEventListener('click', () => {
+          detail.style.display = 'none';
+        });
+        document.body.appendChild(detail);
+      });
+      await closeBossResumeDetailStrict(page, Date.now() + 10_000, { pace: false });
+      assert.equal(await page.locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])').count(), 0);
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;

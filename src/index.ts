@@ -135,9 +135,25 @@ interface BossDetailLifecycleState {
   detailClosed: boolean;
 }
 
-function createBossDetailLifecycleOptions(): CandidateProfileDetailOptions {
+function createBossDetailLifecycleOptions(options: { keepOpenForScreening?: boolean } = {}): CandidateProfileDetailOptions {
   const cleanupReserveMs = Math.max(1_000, bossActionPaceUpperBoundMs());
-  const timeoutMs = Math.max(config.playwright.resumeDetailTimeoutMs, cleanupReserveMs + 1);
+  // Screening deliberately keeps the verified detail open while the model
+  // evaluates the resume and while the selected delivery addresses are
+  // forwarded. The ordinary 20s detail-read budget is too short for the
+  // configured Codex-session completion limit, so allocate one larger,
+  // still-bounded lifecycle budget up front. Actions continue to consume this
+  // same absolute deadline; no later phase resets it.
+  const screeningModelBudgetMs = options.keepOpenForScreening
+    ? config.llm.codexSessionTimeoutMs
+    : 0;
+  const screeningForwardingBudgetMs = options.keepOpenForScreening
+    ? Math.max(120_000, config.playwright.resumeDetailTimeoutMs * 4)
+    : 0;
+  const timeoutMs = Math.max(
+    config.playwright.resumeDetailTimeoutMs,
+    cleanupReserveMs + 1,
+    screeningModelBudgetMs + screeningForwardingBudgetMs + cleanupReserveMs,
+  );
   return {
     deadline: Date.now() + timeoutMs,
     cleanupReserveMs,
@@ -342,7 +358,9 @@ export interface MainRunSummary {
   resultPath: string;
   exportPath?: string;
   exportError?: string;
+  /** In routed Boss runs, true when either audience made an SMTP attempt. */
   emailAttempted: boolean;
+  /** In routed Boss runs, true only when every non-skipped audience report was delivered. */
   emailDelivered: boolean;
   emailRecipient?: string;
   emailSubject?: string;
@@ -354,6 +372,33 @@ export interface MainRunSummary {
   /** Present for a Boss capture run that synchronised already-seen cards. */
   bossSeenViewSync?: RunResult['bossSeenViewSync'];
   sampleCandidateIds: string[];
+}
+
+export function buildBossRoutedMainRunEmailSummary(
+  reportDeliveries: SendBossRoutedReportsSummary['reportDeliveries'],
+): Pick<MainRunSummary, 'emailAttempted' | 'emailDelivered' | 'emailRecipient' | 'emailSubject' | 'emailError'> {
+  const deliveries = [reportDeliveries.primary, reportDeliveries.secondary];
+  const requiredDeliveries = deliveries.filter((delivery) => !delivery.skipReason);
+  const representative = requiredDeliveries.length === 1
+    ? requiredDeliveries[0]
+    : requiredDeliveries.find((delivery) => delivery.audience === 'primary');
+  const errors = requiredDeliveries.flatMap((delivery) => delivery.error
+    ? [{ audience: delivery.audience, message: delivery.error }]
+    : []);
+  const emailError = errors.length === 1
+    ? errors[0]!.message
+    : errors.length > 1
+      ? errors.map((error) => `${error.audience}: ${error.message}`).join('; ')
+      : undefined;
+
+  return {
+    emailAttempted: deliveries.some((delivery) => delivery.attempted),
+    emailDelivered: requiredDeliveries.length > 0
+      && requiredDeliveries.every((delivery) => delivery.delivered),
+    emailRecipient: representative?.recipient,
+    emailSubject: representative?.subject,
+    emailError,
+  };
 }
 
 export interface AllPlatformsRunSummary {
@@ -2321,12 +2366,13 @@ async function captureCandidateResume(
     detailPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>;
     detailOptions?: CandidateProfileDetailOptions;
   }) => Promise<void>,
+  keepDetailOpenForScreening = false,
 ): Promise<CandidateProcessResult> {
   let detailPage = session.page;
   let detailOpened = false;
   let detailVerified = false;
   const detailOptions = platform === 'boss'
-    ? createBossDetailLifecycleOptions()
+    ? createBossDetailLifecycleOptions({ keepOpenForScreening: keepDetailOpenForScreening })
     : undefined;
   const detailLifecycle: BossDetailLifecycleState = {
     detailOpened: false,
@@ -3304,6 +3350,8 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
             });
           }
         },
+        undefined,
+        true,
       ));
       const result = candidateResults[candidateResults.length - 1]!;
       recordBossSeenProcessingLifecycle(candidate.candidateId, result.detailLifecycle, result.failureReason);
@@ -3940,6 +3988,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
     let exportError: string | undefined;
     let emailSummary: SendJobReportSummary | undefined;
     let routedReportSummary: SendBossRoutedReportsSummary | undefined;
+    let routedMainRunEmailSummary: ReturnType<typeof buildBossRoutedMainRunEmailSummary> | undefined;
     let emailError: string | undefined;
 
     const exportPromise = exportJobResultsRef.fn(input.platform, jobKey);
@@ -3964,8 +4013,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
     if (emailResult?.status === 'fulfilled' && emailResult.value) {
       if ('reportDeliveries' in emailResult.value) {
         routedReportSummary = emailResult.value;
-        // Preserve legacy summary fields as aliases for the primary report.
-        emailSummary = routedReportSummary.reportDeliveries.primary;
+        routedMainRunEmailSummary = buildBossRoutedMainRunEmailSummary(routedReportSummary.reportDeliveries);
       } else {
         emailSummary = emailResult.value;
       }
@@ -3985,15 +4033,15 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       resultPath,
       exportPath: exportSummary?.exportPath,
       exportError,
-      emailAttempted: routedReportSummary
-        ? routedReportSummary.reportDeliveries.primary.attempted
+      emailAttempted: runResult.bossRouting?.enabled
+        ? routedMainRunEmailSummary?.emailAttempted ?? false
         : Boolean(delivery.recipientEmail),
-      emailDelivered: routedReportSummary
-        ? routedReportSummary.reportDeliveries.primary.delivered
+      emailDelivered: runResult.bossRouting?.enabled
+        ? routedMainRunEmailSummary?.emailDelivered ?? false
         : Boolean(emailSummary),
-      emailRecipient: emailSummary?.recipient,
-      emailSubject: emailSummary?.subject,
-      emailError: emailError ?? emailSummary?.error,
+      emailRecipient: routedMainRunEmailSummary?.emailRecipient ?? emailSummary?.recipient,
+      emailSubject: routedMainRunEmailSummary?.emailSubject ?? emailSummary?.subject,
+      emailError: emailError ?? routedMainRunEmailSummary?.emailError ?? emailSummary?.error,
       ...(runResult.bossRouting ? { bossRouting: runResult.bossRouting } : {}),
       ...(runResult.bossSeenViewSync ? { bossSeenViewSync: runResult.bossSeenViewSync } : {}),
       ...(routedReportSummary ? { reportDeliveries: routedReportSummary.reportDeliveries } : {}),
