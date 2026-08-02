@@ -89,7 +89,11 @@ async function saveRunResult(store: JobStore, jobKey: string, runResult: RunResu
   await store.saveRunResult(platform, jobKey, runResult);
 }
 
-function bossScoreArtifact(candidateId: string, status: CandidateScoreArtifact['status'] = 'success'): CandidateScoreArtifact {
+function bossScoreArtifact(
+  candidateId: string,
+  status: CandidateScoreArtifact['status'] = 'success',
+  risks: string[] = [],
+): CandidateScoreArtifact {
   const base = {
     candidateId,
     model: 'claude-test',
@@ -111,7 +115,7 @@ function bossScoreArtifact(candidateId: string, status: CandidateScoreArtifact['
         regionMatch: { score: 88, reason: 'ok' },
         responsibilityMatch: { score: 88, reason: 'ok' },
       },
-      risks: [],
+      risks,
       summary: `${candidateId} scoring summary`,
     },
   };
@@ -123,6 +127,9 @@ interface BossRoutingSeed {
   artifactStatus?: CandidateScoreArtifact['status'];
   matchedRequirementIds?: string[];
   unknownRequirementIds?: string[];
+  evidence?: string[];
+  missingCriteria?: string[];
+  risks?: string[];
 }
 
 async function seedBossRoutedRun(
@@ -173,7 +180,7 @@ async function seedBossRoutedRun(
   };
   await store.saveJobRecord('boss', jobRecord);
   await Promise.all(candidates.map(async (candidate) => {
-    const artifact = bossScoreArtifact(candidate.candidateId, candidate.artifactStatus);
+    const artifact = bossScoreArtifact(candidate.candidateId, candidate.artifactStatus, candidate.risks);
     await store.saveCandidateScoreArtifact('boss', jobKey, artifact);
     const audience = candidate.classification === 'rejected' ? 'secondary' : 'primary';
     const matchedRequirementIds = candidate.matchedRequirementIds ?? (candidate.classification === 'rejected' ? ['requirement-1'] : []);
@@ -189,10 +196,16 @@ async function seedBossRoutedRun(
       classification: candidate.classification,
       audience,
       requirementEvaluations: candidate.classification === 'rejected'
-        ? [{ requirementId: 'requirement-1', outcome: 'missing', evidence: [`${candidate.candidateId} 明确证据`], missingCriteria: ['明确证据'], reason: 'missing' }]
+        ? [{
+          requirementId: 'requirement-1',
+          outcome: 'missing',
+          evidence: candidate.evidence ?? [`${candidate.candidateId} 明确证据`],
+          missingCriteria: candidate.missingCriteria ?? ['明确证据'],
+          reason: 'missing',
+        }]
         : candidate.classification === 'review'
-          ? [{ requirementId: 'requirement-1', outcome: 'unknown', evidence: [], missingCriteria: [], reason: 'insufficient evidence' }]
-          : [{ requirementId: 'requirement-1', outcome: 'satisfied', evidence: [`${candidate.candidateId} 明确证据`], missingCriteria: [], reason: 'satisfied' }],
+          ? [{ requirementId: 'requirement-1', outcome: 'unknown', evidence: candidate.evidence ?? [], missingCriteria: [], reason: 'insufficient evidence' }]
+          : [{ requirementId: 'requirement-1', outcome: 'satisfied', evidence: candidate.evidence ?? [`${candidate.candidateId} 明确证据`], missingCriteria: [], reason: 'satisfied' }],
       matchedRequirementIds,
       unknownRequirementIds,
       reason: candidate.classification === 'review' ? '条件证据不足，需要人工复核' : `${candidate.classification} routing result`,
@@ -792,9 +805,20 @@ describe('sendJobReport', () => {
   it('sends review candidates only to the primary Boss report and rejected candidates only to the secondary report', async () => {
     const jobKey = `boss-routed-reports-${Date.now()}`;
     await seedBossRoutedRun(jobKey, [
-      { candidateId: 'qualified-candidate', classification: 'qualified' },
+      {
+        candidateId: 'qualified-candidate',
+        classification: 'qualified',
+        evidence: ['符合证据一', '符合证据二', '符合证据三不应出现'],
+        risks: ['符合风险一', '符合风险二', '符合风险三不应出现'],
+      },
       { candidateId: 'review-candidate', classification: 'review' },
-      { candidateId: 'rejected-candidate', classification: 'rejected' },
+      {
+        candidateId: 'rejected-candidate',
+        classification: 'rejected',
+        evidence: ['简历信息一', '简历信息二', '简历信息三不应出现'],
+        missingCriteria: ['缺失条件一', '缺失条件二', '缺失条件三不应出现'],
+        risks: ['否定风险一', '否定风险二', '否定风险三不应出现'],
+      },
     ]);
     const sent: Array<{ recipient: string; markdown: string; subject: string; ccEmails?: string[] }> = [];
     sendJobReportEmailRef.fn = async ({ recipient, markdown, subject, ccEmails }) => {
@@ -809,15 +833,24 @@ describe('sendJobReport', () => {
     const secondary = sent.find((item) => item.recipient === 'secondary@example.com');
     assert.ok(primary);
     assert.ok(secondary);
+    assert.equal(primary.subject, '【BOSS】Boss 测试岗位 评分结果（2/2）（主）');
+    assert.equal(secondary.subject, '【BOSS】Boss 测试岗位 评分结果（1/1）（副）');
     assert.match(primary.markdown, /## 明确符合/);
     assert.match(primary.markdown, /## 需复核/);
     assert.match(primary.markdown, /qualified-candidate/);
     assert.match(primary.markdown, /review-candidate/);
     assert.doesNotMatch(primary.markdown, /rejected-candidate/);
+    assert.match(primary.markdown, /满足依据：符合证据一；符合证据二/);
+    assert.match(primary.markdown, /主要风险：符合风险一；符合风险二/);
+    assert.doesNotMatch(primary.markdown, /符合证据三不应出现|符合风险三不应出现/);
     assert.match(secondary.markdown, /## 明确否定候选人/);
     assert.match(secondary.markdown, /rejected-candidate/);
-    assert.match(secondary.markdown, /明确证据/);
+    assert.match(secondary.markdown, /缺失条件：缺失条件一；缺失条件二/);
+    assert.match(secondary.markdown, /简历信息：简历信息一；简历信息二/);
+    assert.match(secondary.markdown, /主要风险：否定风险一；否定风险二/);
+    assert.doesNotMatch(secondary.markdown, /缺失条件三不应出现|简历信息三不应出现|否定风险三不应出现/);
     assert.doesNotMatch(secondary.markdown, /qualified-candidate|review-candidate/);
+    assert.doesNotMatch(`${primary.markdown}\n${secondary.markdown}`, /候选人速览|排名结果|维度评分|评分时间|模型:/);
     assert.deepStrictEqual(primary.ccEmails, ['immutable-primary-cc@example.com']);
     assert.deepStrictEqual(secondary.ccEmails, ['immutable-secondary-cc@example.com']);
     assert.equal(result.reportDeliveries.primary.delivered, true);

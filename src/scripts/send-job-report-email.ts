@@ -218,41 +218,104 @@ async function loadBossRoutedReportInputs(
   };
 }
 
-function candidateSection(
-  jobRecord: Awaited<ReturnType<JobStore['readJobRecord']>>,
-  scoreArtifacts: CandidateScoreArtifact[],
+const BOSS_COMPACT_REPORT_ITEM_LIMIT = 2;
+const BOSS_COMPACT_REPORT_TEXT_LIMIT = 160;
+
+function compactBossReportText(value: string, limit = BOSS_COMPACT_REPORT_TEXT_LIMIT): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  const characters = [...normalized];
+  return characters.length <= limit
+    ? normalized
+    : `${characters.slice(0, Math.max(1, limit - 1)).join('')}…`;
+}
+
+function compactBossReportItems(values: readonly string[]): string[] {
+  const normalized = values
+    .map((value) => value.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  return [...new Set(normalized)]
+    .slice(0, BOSS_COMPACT_REPORT_ITEM_LIMIT)
+    .map((value) => compactBossReportText(value));
+}
+
+function compareBossCompactReportArtifacts(left: CandidateScoreArtifact, right: CandidateScoreArtifact): number {
+  if (left.status === 'success' && right.status === 'success') {
+    const scoreDifference = right.score.totalScore - left.score.totalScore;
+    return scoreDifference || left.candidateId.localeCompare(right.candidateId);
+  }
+  if (left.status === 'success') return -1;
+  if (right.status === 'success') return 1;
+  return left.candidateId.localeCompare(right.candidateId);
+}
+
+function renderCompactBossRoutedCandidate(
+  scoreArtifact: CandidateScoreArtifact,
+  routingArtifact: BossCandidateRoutingArtifact,
+  rank: number,
+): string {
+  const classificationLabel = routingArtifact.classification === 'qualified'
+    ? '明确符合'
+    : routingArtifact.classification === 'review'
+      ? '需复核'
+      : '明确否定';
+  const scoreLabel = scoreArtifact.status === 'success'
+    ? `${scoreArtifact.score.totalScore} 分`
+    : '评分失败';
+  const relevantOutcome = routingArtifact.classification === 'qualified'
+    ? 'satisfied'
+    : routingArtifact.classification === 'review'
+      ? 'unknown'
+      : 'missing';
+  const relevantEvaluations = routingArtifact.requirementEvaluations
+    .filter((evaluation) => evaluation.outcome === relevantOutcome);
+  const evidence = compactBossReportItems(relevantEvaluations.flatMap((evaluation) => evaluation.evidence));
+  const missingCriteria = compactBossReportItems(relevantEvaluations.flatMap((evaluation) => evaluation.missingCriteria));
+  const lines = [`${rank}. ${scoreArtifact.candidateId} ｜ ${scoreLabel} ｜ ${classificationLabel}`];
+
+  if (routingArtifact.classification === 'qualified') {
+    lines.push(`   - 满足依据：${evidence.length > 0 ? evidence.join('；') : compactBossReportText(routingArtifact.reason)}`);
+  } else if (routingArtifact.classification === 'review') {
+    lines.push(`   - 复核原因：${compactBossReportText(routingArtifact.reason)}`);
+    if (evidence.length > 0) {
+      lines.push(`   - 已有信息：${evidence.join('；')}`);
+    }
+  } else {
+    lines.push(`   - 缺失条件：${missingCriteria.length > 0 ? missingCriteria.join('；') : compactBossReportText(routingArtifact.reason)}`);
+    if (evidence.length > 0) {
+      lines.push(`   - 简历信息：${evidence.join('；')}`);
+    }
+  }
+
+  if (scoreArtifact.status === 'failed') {
+    lines.push(`   - 评分异常：${compactBossReportText(scoreArtifact.error)}`);
+  } else {
+    const risks = compactBossReportItems(scoreArtifact.score.risks);
+    if (risks.length > 0) {
+      lines.push(`   - 主要风险：${risks.join('；')}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+function renderCompactBossRoutedCandidates(
+  scoreArtifacts: readonly CandidateScoreArtifact[],
+  routingByCandidateId: Map<string, BossCandidateRoutingArtifact>,
 ): string {
   if (scoreArtifacts.length === 0) {
     return '本组没有候选人。';
   }
-  const markdown = renderJobResultsMarkdown(aggregateJobResults({ jobRecord, scoreArtifacts }));
-  const candidateSectionIndex = markdown.indexOf('## 候选人速览');
-  return candidateSectionIndex >= 0 ? markdown.slice(candidateSectionIndex).trim() : markdown.trim();
-}
 
-function renderRoutingDetails(
-  candidateIds: readonly string[],
-  routingByCandidateId: Map<string, BossCandidateRoutingArtifact>,
-  mode: 'review' | 'rejected',
-): string {
-  if (candidateIds.length === 0) {
-    return '本组没有候选人。';
-  }
-
-  return candidateIds.map((candidateId) => {
-    const artifact = routingByCandidateId.get(candidateId)!;
-    const requirementIds = mode === 'review' ? artifact.unknownRequirementIds : artifact.matchedRequirementIds;
-    const evidence = mode === 'rejected'
-      ? artifact.requirementEvaluations
-        .filter((evaluation) => evaluation.outcome === 'missing')
-        .flatMap((evaluation) => evaluation.evidence)
-      : [];
-    return [
-      `- ${candidateId}: ${artifact.reason}`,
-      ...(requirementIds.length > 0 ? [`  - ${mode === 'review' ? '未确定要求' : '缺失要求'}: ${requirementIds.join('、')}`] : []),
-      ...(evidence.length > 0 ? [`  - 证据: ${[...new Set(evidence)].join('；')}`] : []),
-    ].join('\n');
-  }).join('\n');
+  return [...scoreArtifacts]
+    .sort(compareBossCompactReportArtifacts)
+    .map((scoreArtifact, index) => {
+      const routingArtifact = routingByCandidateId.get(scoreArtifact.candidateId);
+      if (!routingArtifact) {
+        throw new Error(`Missing Boss routing fact for compact report candidate ${scoreArtifact.candidateId}`);
+      }
+      return renderCompactBossRoutedCandidate(scoreArtifact, routingArtifact, index + 1);
+    })
+    .join('\n\n');
 }
 
 function buildBossRoutedReportMarkdown(
@@ -263,42 +326,34 @@ function buildBossRoutedReportMarkdown(
   const routing = inputs.latestRun.bossRouting!;
   if (audience === 'primary') {
     return [
-      `# ${jobRecord.normalizedJob.title} 评分后分流报告（主受众）`,
+      `# ${jobRecord.normalizedJob.title} BOSS 评分后分流报告（主）`,
       '',
-      `- 平台来源: ${jobRecord.platform}`,
-      `- 岗位标识: ${jobRecord.jobKey}`,
-      `- 策略版本: ${routing.policyHash}`,
-      `- 明确符合: ${routing.qualifiedCandidateIds.length}`,
-      `- 需复核: ${routing.reviewCandidateIds.length}`,
+      `- 明确符合：${routing.qualifiedCandidateIds.length}`,
+      `- 需复核：${routing.reviewCandidateIds.length}`,
+      '- 说明：本邮件仅保留分流依据和主要风险，完整评分仍保存在本地导出。',
       '',
-      '## 明确符合',
+      `## 明确符合（${routing.qualifiedCandidateIds.length}）`,
       '',
-      candidateSection(jobRecord, inputs.qualifiedArtifacts),
+      renderCompactBossRoutedCandidates(inputs.qualifiedArtifacts, inputs.routingByCandidateId),
       '',
-      '## 需复核',
+      `## 需复核（${routing.reviewCandidateIds.length}）`,
       '',
       '以下候选人因证据不足、条件无法确定或评分失败而需要人工复核；他们不代表明确符合。',
       '',
-      renderRoutingDetails(routing.reviewCandidateIds, inputs.routingByCandidateId, 'review'),
-      '',
-      candidateSection(jobRecord, inputs.reviewArtifacts),
+      renderCompactBossRoutedCandidates(inputs.reviewArtifacts, inputs.routingByCandidateId),
       '',
     ].join('\n');
   }
 
   return [
-    `# ${jobRecord.normalizedJob.title} 评分后分流报告（副受众）`,
+    `# ${jobRecord.normalizedJob.title} BOSS 评分后分流报告（副）`,
     '',
-    `- 平台来源: ${jobRecord.platform}`,
-    `- 岗位标识: ${jobRecord.jobKey}`,
-    `- 策略版本: ${routing.policyHash}`,
-    `- 明确命中否定条件: ${routing.rejectedCandidateIds.length}`,
+    `- 明确否定：${routing.rejectedCandidateIds.length}`,
+    '- 说明：本邮件仅保留分流依据和主要风险，完整评分仍保存在本地导出。',
     '',
-    '## 明确否定候选人',
+    `## 明确否定候选人（${routing.rejectedCandidateIds.length}）`,
     '',
-    renderRoutingDetails(routing.rejectedCandidateIds, inputs.routingByCandidateId, 'rejected'),
-    '',
-    candidateSection(jobRecord, inputs.secondaryArtifacts),
+    renderCompactBossRoutedCandidates(inputs.secondaryArtifacts, inputs.routingByCandidateId),
     '',
   ].join('\n');
 }
@@ -308,7 +363,7 @@ function buildBossRoutedReportSubject(
   summary: SendJobReportSummary['summary'],
   audience: ReportAudience,
 ): string {
-  return `${buildJobReportEmailSubject(jobTitle, summary)}（${audience === 'primary' ? '主受众' : '副受众'}）`;
+  return `【BOSS】${buildJobReportEmailSubject(jobTitle, summary)}（${audience === 'primary' ? '主' : '副'}）`;
 }
 
 async function sendBossRoutedAudienceReport(input: {
