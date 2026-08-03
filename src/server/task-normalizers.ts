@@ -319,6 +319,36 @@ interface BossScreeningTaskFields {
   bossSecondaryCc?: string[];
 }
 
+interface PostScoreRoutingTaskFields {
+  resultRoutingEnabled?: boolean;
+  resultRoutingPolicyFile?: string;
+  secondaryEmail?: string;
+  secondaryCc?: string[];
+}
+
+function normalizePostScoreRouting(
+  item: JsonObject,
+  platform: ConsolePlatformSelection,
+): PostScoreRoutingTaskFields {
+  const resultRoutingEnabled = getOptionalBoolean(item, 'resultRoutingEnabled');
+  const resultRoutingPolicyFile = getOptionalString(item, 'resultRoutingPolicyFile');
+  const secondaryEmail = getOptionalString(item, 'secondaryEmail');
+  const secondaryCc = normalizeCc(item.secondaryCc);
+  const hasInput = resultRoutingEnabled !== undefined
+    || resultRoutingPolicyFile !== undefined
+    || secondaryEmail !== undefined
+    || secondaryCc !== undefined;
+  if (hasInput && platform === 'boss') {
+    throw new Error('Generic result routing cannot be used with platform boss; use Boss screening so native forwarding remains explicit');
+  }
+  return {
+    resultRoutingEnabled,
+    resultRoutingPolicyFile: resultRoutingPolicyFile ? path.resolve(resultRoutingPolicyFile) : undefined,
+    secondaryEmail,
+    secondaryCc,
+  };
+}
+
 /**
  * Keep the Boss post-score routing settings on the normal capture boundary.
  * The normalizer intentionally validates only transport shape and platform
@@ -615,6 +645,10 @@ export function normalizeResumeCaptureTask(
     'bossSecondaryForwardCc',
     'bossSecondaryEmail',
     'bossSecondaryCc',
+    'resultRoutingEnabled',
+    'resultRoutingPolicyFile',
+    'secondaryEmail',
+    'secondaryCc',
     ...(options.allowBossCaptureSettingsSnapshot ? ['bossCaptureSettingsSnapshot'] : []),
     ...(options.allowBossCaptureTaskSnapshot ? ['bossCaptureTaskSnapshot'] : []),
   ], 'resume-capture task');
@@ -635,6 +669,7 @@ export function normalizeResumeCaptureTask(
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
   const { bossForwardMode, bossForwardRecipient, bossForwardCc } = normalizeBossForwarding(item, platform, includeBoss === true);
   const bossScreening = normalizeBossScreening(item, platform, includeBoss === true);
+  const postScoreRouting = normalizePostScoreRouting(item, platform);
   const bossCaptureSettingsSnapshot = options.allowBossCaptureSettingsSnapshot
     && item.bossCaptureSettingsSnapshot !== undefined
     ? normalizeBossCaptureSettingsSnapshot(item.bossCaptureSettingsSnapshot)
@@ -693,6 +728,7 @@ export function normalizeResumeCaptureTask(
     bossForwardRecipient,
     bossForwardCc,
     ...bossScreening,
+    ...postScoreRouting,
     bossCaptureSettingsSnapshot,
     bossCaptureTaskSnapshot,
   };
@@ -724,6 +760,10 @@ export function normalizeResumeCaptureTask(
   pushOptional(argv, '--boss-secondary-forward-cc', bossScreening.bossSecondaryForwardCc?.join(','));
   pushOptional(argv, '--boss-secondary-email', bossScreening.bossSecondaryEmail);
   pushOptional(argv, '--boss-secondary-cc', bossScreening.bossSecondaryCc?.join(','));
+  pushOptionalBoolean(argv, '--result-routing-enabled', postScoreRouting.resultRoutingEnabled);
+  pushOptional(argv, '--result-routing-policy-file', postScoreRouting.resultRoutingPolicyFile);
+  pushOptional(argv, '--secondary-email', postScoreRouting.secondaryEmail);
+  pushOptional(argv, '--secondary-cc', postScoreRouting.secondaryCc?.join(','));
   pushOptional(
     argv,
     '--boss-capture-settings-json',
@@ -765,6 +805,10 @@ export function normalizeResumeCaptureTask(
       bossSecondaryForwardCcCount: bossScreening.bossSecondaryForwardCc?.length ?? 0,
       bossSecondaryEmail: bossScreening.bossSecondaryEmail,
       bossSecondaryCcCount: bossScreening.bossSecondaryCc?.length ?? 0,
+      resultRoutingEnabled: postScoreRouting.resultRoutingEnabled,
+      resultRoutingPolicyFile: postScoreRouting.resultRoutingPolicyFile,
+      secondaryEmail: postScoreRouting.secondaryEmail,
+      secondaryCcCount: postScoreRouting.secondaryCc?.length ?? 0,
       bossCaptureSettingsHash: bossCaptureSettingsSnapshot?.settingsHash,
       bossCaptureSettingsResolvedAt: bossCaptureSettingsSnapshot?.resolvedAt,
       bossCaptureTaskSnapshotHash: bossCaptureTaskSnapshot?.snapshotHash,
@@ -796,6 +840,10 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
     'bossSecondaryForwardCc',
     'bossSecondaryEmail',
     'bossSecondaryCc',
+    'resultRoutingEnabled',
+    'resultRoutingPolicyFile',
+    'secondaryEmail',
+    'secondaryCc',
   ], 'batch task');
   assertAbsent(item, ['keyword', 'bossJobId', 'bossSearchKeyword', 'jd', 'jdFile'], 'batch task');
 
@@ -811,6 +859,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   const liepinForwardContact = getOptionalString(item, 'liepinForwardContact');
   const { bossForwardMode, bossForwardRecipient, bossForwardCc } = normalizeBossForwarding(item, platform, includeBoss === true);
   const bossScreening = normalizeBossScreening(item, platform, includeBoss === true);
+  const postScoreRouting = normalizePostScoreRouting(item, platform);
 
   validateDirectConditionInput(searchSource, applicationFilterInputFile, searchConditionSetRefs);
 
@@ -833,6 +882,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
     bossForwardRecipient,
     bossForwardCc,
     ...bossScreening,
+    ...postScoreRouting,
   };
   const argv = ['--platform', platform, '--jobs-file', jobsFile];
   pushOptionalBoolean(argv, '--include-boss', includeBoss);
@@ -853,6 +903,10 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   pushOptional(argv, '--boss-secondary-forward-cc', bossScreening.bossSecondaryForwardCc?.join(','));
   pushOptional(argv, '--boss-secondary-email', bossScreening.bossSecondaryEmail);
   pushOptional(argv, '--boss-secondary-cc', bossScreening.bossSecondaryCc?.join(','));
+  pushOptionalBoolean(argv, '--result-routing-enabled', postScoreRouting.resultRoutingEnabled);
+  pushOptional(argv, '--result-routing-policy-file', postScoreRouting.resultRoutingPolicyFile);
+  pushOptional(argv, '--secondary-email', postScoreRouting.secondaryEmail);
+  pushOptional(argv, '--secondary-cc', postScoreRouting.secondaryCc?.join(','));
 
   return {
     input,
@@ -878,6 +932,10 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
       bossSecondaryForwardCcCount: bossScreening.bossSecondaryForwardCc?.length ?? 0,
       bossSecondaryEmail: bossScreening.bossSecondaryEmail,
       bossSecondaryCcCount: bossScreening.bossSecondaryCc?.length ?? 0,
+      resultRoutingEnabled: postScoreRouting.resultRoutingEnabled,
+      resultRoutingPolicyFile: postScoreRouting.resultRoutingPolicyFile,
+      secondaryEmail: postScoreRouting.secondaryEmail,
+      secondaryCcCount: postScoreRouting.secondaryCc?.length ?? 0,
     },
   };
 }

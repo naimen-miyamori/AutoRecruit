@@ -53,19 +53,26 @@ import { scoreResumeAgainstJob } from './scoring/score-resume.js';
 import {
   assertBossScreeningJobRecordReady,
   hashBossScreeningPolicy,
+  hashPostScoreRoutingPolicy,
   normalizeBossCaptureSettingsSnapshot,
+  normalizePostScoreRoutingSettings,
+  loadPostScoreRoutingPolicyFile,
   resolveBossCaptureForwardingSettings,
   resolveBossCaptureScreeningSettings,
   resolveBossRoutingDecision,
+  resolvePostScoreRoutingDecision,
   scoreAndEvaluateBossScreening,
+  scoreAndEvaluatePostScoreRouting,
 } from './scoring/boss-screening.js';
 import { evaluatePropertyElectricianHardRequirements } from './scoring/boss-chat-hard-requirements.js';
 import { sendBossChatSummary } from './reporting/boss-chat-summary.js';
 import { exportJobResults, type ExportJobResultsSummary } from './scripts/export-job-results.js';
 import {
   sendBossRoutedReports,
+  sendPostScoreRoutedReports,
   sendJobReport,
   type SendBossRoutedReportsSummary,
+  type SendPostScoreRoutedReportsSummary,
   type SendJobReportSummary,
 } from './scripts/send-job-report-email.js';
 import { loadTalentMappingPlanFile } from './talent-mapping/plan.js';
@@ -84,9 +91,13 @@ import {
   BossRoutingDecision,
   BossScreeningWorkItem,
   BossScreeningSettings,
+  CandidateRoutingArtifact,
+  PostScoreRoutingSettings,
+  PostScoreRoutingWorkItem,
   CaptureFailureStage,
   CandidateListItem,
   CandidateResume,
+  CandidateScore,
   CandidateScoreArtifact,
   ResumeDomSnapshot,
   JobRecord,
@@ -173,6 +184,7 @@ interface CandidateScoringResult {
     candidateId: string;
     error: string;
   }>;
+  routingArtifacts?: CandidateRoutingArtifact[];
 }
 
 type CliPlatformSelection = SupportedPlatform | 'all';
@@ -203,6 +215,11 @@ interface RunnableJobInput extends ReportDeliveryOptions {
   bossSecondaryForwardCc?: string[];
   bossSecondaryEmail?: string;
   bossSecondaryCc?: string[];
+  /** Platform-neutral model routing; native forwarding remains Boss-only. */
+  resultRoutingEnabled?: boolean;
+  resultRoutingPolicyFile?: string;
+  secondaryEmail?: string;
+  secondaryCc?: string[];
   /** Internal HTTP/scheduler snapshot; ordinary CLI and jobs files omit it. */
   bossCaptureSettingsSnapshot?: BossCaptureSettingsSnapshot;
   /** Private server snapshot carried through the queue runner. */
@@ -235,6 +252,10 @@ interface BatchCliInput extends ReportDeliveryOptions {
   bossSecondaryForwardCc?: string[];
   bossSecondaryEmail?: string;
   bossSecondaryCc?: string[];
+  resultRoutingEnabled?: boolean;
+  resultRoutingPolicyFile?: string;
+  secondaryEmail?: string;
+  secondaryCc?: string[];
   searchSource: SearchSource;
   searchSourceExplicit: boolean;
   applicationFilterInputFilePath?: string;
@@ -334,6 +355,10 @@ interface SinglePlatformCliInput extends ReportDeliveryOptions {
   bossSecondaryForwardCc?: string[];
   bossSecondaryEmail?: string;
   bossSecondaryCc?: string[];
+  resultRoutingEnabled?: boolean;
+  resultRoutingPolicyFile?: string;
+  secondaryEmail?: string;
+  secondaryCc?: string[];
   bossCaptureSettingsSnapshot?: BossCaptureSettingsSnapshot;
   bossCaptureTaskSnapshot?: BossCaptureTaskSnapshot;
   searchSource: SearchSource;
@@ -367,6 +392,7 @@ export interface MainRunSummary {
   emailError?: string;
   /** Boss-only post-score routing and forwarding state for operator visibility. */
   bossRouting?: RunResult['bossRouting'];
+  postScoreRouting?: RunResult['postScoreRouting'];
   /** Present only for a Boss run with enabled post-score routing. */
   reportDeliveries?: SendBossRoutedReportsSummary['reportDeliveries'];
   /** Present for a Boss capture run that synchronised already-seen cards. */
@@ -465,6 +491,7 @@ export const extractResumeFromPageRef = {
 export const scoreResumeAgainstJobRef = { fn: scoreResumeAgainstJob };
 /** Test seam for the combined Boss score-and-negative-condition evaluation. */
 export const scoreAndEvaluateBossScreeningRef = { fn: scoreAndEvaluateBossScreening };
+export const scoreAndEvaluatePostScoreRoutingRef = { fn: scoreAndEvaluatePostScoreRouting };
 export const exportJobResultsRef = { fn: exportJobResults };
 export const sendJobReportRef = { fn: sendJobReport };
 export const sendBossRoutedReportsRef = { fn: sendBossRoutedReports };
@@ -819,6 +846,10 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   const itemBossSecondaryEmail = parseOptionalString(item.bossSecondaryEmail, 'bossSecondaryEmail', itemIndex)?.trim();
   const itemBossSecondaryCc = parseBatchEmailList(item.bossSecondaryCc, 'bossSecondaryCc', itemIndex);
   const itemBossSecondaryForwardCc = parseBatchEmailList(item.bossSecondaryForwardCc, 'bossSecondaryForwardCc', itemIndex);
+  const itemResultRoutingEnabled = parseBatchOptionalBoolean(item.resultRoutingEnabled, 'resultRoutingEnabled', itemIndex);
+  const itemResultRoutingPolicyFile = parseOptionalString(item.resultRoutingPolicyFile, 'resultRoutingPolicyFile', itemIndex);
+  const itemSecondaryEmail = parseOptionalString(item.secondaryEmail, 'secondaryEmail', itemIndex)?.trim();
+  const itemSecondaryCc = parseBatchEmailList(item.secondaryCc, 'secondaryCc', itemIndex);
   const itemBossCaptureSettingsSnapshot = item.bossCaptureSettingsSnapshot === undefined
     ? undefined
     : (() => {
@@ -864,6 +895,12 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   const effectiveBossSecondaryForwardCc = item.bossSecondaryForwardCc === undefined
     ? input.bossSecondaryForwardCc
     : itemBossSecondaryForwardCc;
+  const effectiveResultRoutingEnabled = itemResultRoutingEnabled ?? input.resultRoutingEnabled;
+  const effectiveResultRoutingPolicyFile = itemResultRoutingPolicyFile
+    ? path.resolve(path.dirname(path.resolve(input.jobsFilePath)), itemResultRoutingPolicyFile)
+    : input.resultRoutingPolicyFile;
+  const effectiveSecondaryEmail = itemSecondaryEmail ?? input.secondaryEmail;
+  const effectiveSecondaryCc = item.secondaryCc === undefined ? input.secondaryCc : itemSecondaryCc;
 
   if (!keyword) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: keyword must be a non-empty string`);
@@ -888,6 +925,13 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     || item.bossSecondaryForwardCc !== undefined
     || item.bossCaptureSettingsSnapshot !== undefined
     || item.bossCaptureTaskSnapshot !== undefined;
+  const hasItemResultRoutingInput = item.resultRoutingEnabled !== undefined
+    || item.resultRoutingPolicyFile !== undefined
+    || item.secondaryEmail !== undefined
+    || item.secondaryCc !== undefined;
+  if (hasItemResultRoutingInput && input.platform === 'boss') {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: generic result routing cannot be used with the standalone Boss stage`);
+  }
   const hasItemBossForwardingInput = item.bossForwardMode !== undefined
     || item.bossForwardRecipient !== undefined
     || item.bossForwardCc !== undefined;
@@ -896,6 +940,9 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   }
   if (hasItemBossScreeningInput && !listSelectedCapturePlatforms(input.platform, input.includeBoss).includes('boss')) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: Boss screening fields require a selected Boss capture stage`);
+  }
+  if (hasItemResultRoutingInput && listSelectedCapturePlatforms(input.platform, input.includeBoss).length === 0) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: result routing requires a selected capture stage`);
   }
   if ((itemBossForwardMode === undefined) !== (itemBossForwardRecipient === undefined)) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossForwardMode and bossForwardRecipient must be provided together`);
@@ -946,6 +993,10 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     bossSecondaryForwardRecipient: effectiveBossSecondaryForwardRecipient,
     bossSecondaryEmail: effectiveBossSecondaryEmail,
     bossSecondaryCc: effectiveBossSecondaryCc,
+    resultRoutingEnabled: effectiveResultRoutingEnabled,
+    resultRoutingPolicyFile: effectiveResultRoutingPolicyFile,
+    secondaryEmail: effectiveSecondaryEmail,
+    secondaryCc: effectiveSecondaryCc,
     bossSecondaryForwardCc: effectiveBossSecondaryForwardCc,
     bossCaptureSettingsSnapshot: itemBossCaptureSettingsSnapshot,
     bossCaptureTaskSnapshot: itemBossCaptureTaskSnapshot,
@@ -1073,6 +1124,16 @@ function parseArgs(argv: readonly string[]): CliInput {
   const bossSecondaryCc = flagPresence.has('boss-secondary-cc')
     ? parseEmailList(values.get('boss-secondary-cc'))
     : undefined;
+  const resultRoutingEnabled = flagPresence.has('result-routing-enabled')
+    ? parseOptionalBoolean(values.get('result-routing-enabled'), '--result-routing-enabled')
+    : undefined;
+  const resultRoutingPolicyFile = values.get('result-routing-policy-file')
+    ? path.resolve(values.get('result-routing-policy-file')!)
+    : undefined;
+  const secondaryEmail = values.get('secondary-email')?.trim();
+  const secondaryCc = flagPresence.has('secondary-cc')
+    ? parseEmailList(values.get('secondary-cc'))
+    : undefined;
   const bossCaptureSettingsSnapshot = flagPresence.has('boss-capture-settings-json')
     ? (() => {
       try {
@@ -1100,6 +1161,10 @@ function parseArgs(argv: readonly string[]): CliInput {
     || flagPresence.has('boss-secondary-forward-cc')
     || flagPresence.has('boss-capture-settings-json')
     || flagPresence.has('boss-capture-task-snapshot-json');
+  const hasResultRoutingInput = flagPresence.has('result-routing-enabled')
+    || flagPresence.has('result-routing-policy-file')
+    || flagPresence.has('secondary-email')
+    || flagPresence.has('secondary-cc');
   const hasBossForwardingInput = flagPresence.has('boss-forward-mode')
     || flagPresence.has('boss-forward-recipient')
     || flagPresence.has('boss-forward-cc');
@@ -1220,6 +1285,16 @@ function parseArgs(argv: readonly string[]): CliInput {
     throw new Error('--boss-forward-mode and --boss-forward-recipient can only be used with --platform boss or --platform all --include-boss true; --boss-forward-cc follows the same boundary');
   }
   assertBossScreeningArgumentsAllowed({ platform, includeBoss, hasScreeningInput: hasBossScreeningInput });
+
+  if (flagPresence.has('result-routing-policy-file') && !resultRoutingPolicyFile) {
+    throw new Error('--result-routing-policy-file must be a non-empty path');
+  }
+  if (flagPresence.has('secondary-email') && !secondaryEmail) {
+    throw new Error('--secondary-email must be a non-empty email address');
+  }
+  if (hasResultRoutingInput && platform === 'boss') {
+    throw new Error('Generic result-routing flags cannot be used with platform=boss; use Boss screening flags so native forwarding remains explicit.');
+  }
 
   if (talentMappingFilePath) {
     const allowedFlags = new Set([
@@ -1560,6 +1635,10 @@ function parseArgs(argv: readonly string[]): CliInput {
       bossSecondaryForwardCc,
       bossSecondaryEmail,
       bossSecondaryCc,
+      resultRoutingEnabled,
+      resultRoutingPolicyFile,
+      secondaryEmail,
+      secondaryCc,
       searchSource,
       searchSourceExplicit,
       applicationFilterInputFilePath,
@@ -1627,6 +1706,10 @@ function parseArgs(argv: readonly string[]): CliInput {
     bossSecondaryForwardCc,
     bossSecondaryEmail,
     bossSecondaryCc,
+    resultRoutingEnabled,
+    resultRoutingPolicyFile,
+    secondaryEmail,
+    secondaryCc,
     bossCaptureSettingsSnapshot,
     bossCaptureTaskSnapshot,
     searchSource,
@@ -1665,6 +1748,12 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
       bossCaptureSettingsSnapshot: input.bossCaptureSettingsSnapshot,
       bossCaptureTaskSnapshot: input.bossCaptureTaskSnapshot,
     } : {}),
+    ...(platform === 'boss' ? {} : {
+      resultRoutingEnabled: input.resultRoutingEnabled,
+      resultRoutingPolicyFile: input.resultRoutingPolicyFile,
+      secondaryEmail: input.secondaryEmail,
+      secondaryCc: input.secondaryCc,
+    }),
     searchSource: input.searchSource,
     searchSourceExplicit: input.searchSourceExplicit,
     applicationFilterInputFilePath: input.applicationFilterInputFilePath,
@@ -2511,21 +2600,33 @@ async function scoreCapturedResumes(
   job: NormalizedJob,
   store: JobStore,
   capturedCandidateIds: string[],
+  options: {
+    postScoreRouting?: PostScoreRoutingSettings;
+    pendingCandidateIds?: string[];
+    fetchedAt?: string;
+  } = {},
 ): Promise<CandidateScoringResult> {
-  if (capturedCandidateIds.length === 0) {
+  const routingEnabled = platform !== 'boss' && options.postScoreRouting?.enabled === true;
+  const candidateIds = [...new Set([
+    ...capturedCandidateIds,
+    ...(routingEnabled ? options.pendingCandidateIds ?? [] : []),
+  ])];
+  if (candidateIds.length === 0) {
     return {
       scoredCandidates: [],
       failedCandidates: [],
+      ...(routingEnabled ? { routingArtifacts: [] } : {}),
     };
   }
 
-  const capturedCandidateIdSet = new Set(capturedCandidateIds);
+  const capturedCandidateIdSet = new Set(candidateIds);
   const storedResumes = await store.listStoredResumes(platform, jobKey);
   const resumesById = new Map(storedResumes.map((resume) => [resume.candidateId, resume]));
   const scoredCandidates: string[] = [];
   const failedCandidates: Array<{ candidateId: string; error: string }> = [];
+  const routingArtifacts: CandidateRoutingArtifact[] = [];
 
-  for (const candidateId of capturedCandidateIds) {
+  for (const candidateId of candidateIds) {
     const resume = resumesById.get(candidateId);
 
     if (!resume) {
@@ -2545,27 +2646,126 @@ async function scoreCapturedResumes(
     };
 
     try {
-      const score = await scoreResumeAgainstJobRef.fn(job, resume);
-      await store.saveCandidateScoreArtifact(platform, jobKey, {
+      let score: CandidateScore;
+      let evaluations: CandidateRoutingArtifact['requirementEvaluations'] = [];
+      let resumeInputHash: string | undefined;
+      if (routingEnabled) {
+        const result = await scoreAndEvaluatePostScoreRoutingRef.fn({
+          job,
+          resume,
+          policy: options.postScoreRouting!,
+        });
+        score = result.score;
+        evaluations = result.evaluations;
+        resumeInputHash = result.resumeInputHash;
+      } else {
+        score = await scoreResumeAgainstJobRef.fn(job, resume);
+      }
+      const scoreArtifact: CandidateScoreArtifact = {
         ...scoreArtifactBase,
+        ...(resumeInputHash ? { resumeInputHash } : {}),
         status: 'success',
         score,
+      };
+      await store.saveCandidateScoreArtifact(platform, jobKey, {
+        ...scoreArtifact,
       });
+      if (routingEnabled) {
+        const policy = options.postScoreRouting!;
+        const policyHash = hashPostScoreRoutingPolicy(policy);
+        const scoredAt = scoreArtifact.scoredAt;
+        const decidedAt = new Date().toISOString();
+        const decision = resolvePostScoreRoutingDecision(scoreArtifact, evaluations, policy);
+        const routingDecisionId = createHash('sha256').update(JSON.stringify({
+          platform,
+          jobKey,
+          candidateId: resume.candidateId,
+          policyHash,
+          scoredAt,
+          classification: decision.classification,
+          audience: decision.audience,
+          matchedRequirementIds: decision.matchedRequirementIds,
+          unknownRequirementIds: decision.unknownRequirementIds,
+          reason: decision.reason,
+        })).digest('hex');
+        const artifact: CandidateRoutingArtifact = {
+          routingDecisionId,
+          candidateId: resume.candidateId,
+          fetchedAt: options.fetchedAt ?? scoredAt,
+          scoredAt,
+          decidedAt,
+          policyHash,
+          scoreStatus: scoreArtifact.status,
+          classification: decision.classification,
+          audience: decision.audience,
+          requirementEvaluations: evaluations,
+          matchedRequirementIds: decision.matchedRequirementIds,
+          unknownRequirementIds: decision.unknownRequirementIds,
+          reason: decision.reason,
+        };
+        await store.saveCandidateRoutingArtifact(platform, jobKey, artifact);
+        await store.deletePostScoreRoutingWorkItem(platform, jobKey, resume.candidateId);
+        routingArtifacts.push(artifact);
+      }
       scoredCandidates.push(resume.candidateId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await store.saveCandidateScoreArtifact(platform, jobKey, {
+      const failedScoreArtifact: CandidateScoreArtifact = {
         ...scoreArtifactBase,
         status: 'failed',
         error: message,
-      });
+      };
+      await store.saveCandidateScoreArtifact(platform, jobKey, failedScoreArtifact);
+      if (routingEnabled) {
+        const policy = options.postScoreRouting!;
+        const policyHash = hashPostScoreRoutingPolicy(policy);
+        const scoredAt = failedScoreArtifact.scoredAt;
+        const decidedAt = new Date().toISOString();
+        const decision = resolvePostScoreRoutingDecision(failedScoreArtifact, [], policy);
+        const routingDecisionId = createHash('sha256').update(JSON.stringify({
+          platform,
+          jobKey,
+          candidateId: resume.candidateId,
+          policyHash,
+          scoredAt,
+          classification: decision.classification,
+          audience: decision.audience,
+          reason: decision.reason,
+        })).digest('hex');
+        const artifact: CandidateRoutingArtifact = {
+          routingDecisionId,
+          candidateId: resume.candidateId,
+          fetchedAt: options.fetchedAt ?? scoredAt,
+          scoredAt,
+          decidedAt,
+          policyHash,
+          scoreStatus: 'failed',
+          scoreError: message,
+          classification: decision.classification,
+          audience: decision.audience,
+          requirementEvaluations: [],
+          matchedRequirementIds: decision.matchedRequirementIds,
+          unknownRequirementIds: decision.unknownRequirementIds,
+          reason: decision.reason,
+        };
+        await store.saveCandidateRoutingArtifact(platform, jobKey, artifact);
+        await store.deletePostScoreRoutingWorkItem(platform, jobKey, resume.candidateId);
+        routingArtifacts.push(artifact);
+      }
       failedCandidates.push({ candidateId: resume.candidateId, error: message });
     }
+  }
+
+  if (routingEnabled) {
+    // A pending work item means the detail was already opened and persisted;
+    // this marks it captured during recovery without re-opening the page.
+    await store.markCapturedCandidatesSeen(platform, jobKey, candidateIds.filter((candidateId) => resumesById.has(candidateId)));
   }
 
   return {
     scoredCandidates: scoredCandidates.filter((candidateId) => capturedCandidateIdSet.has(candidateId)),
     failedCandidates,
+    ...(routingEnabled ? { routingArtifacts } : {}),
   };
 }
 
@@ -2971,6 +3171,8 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   bossForwardCc?: string[];
   /** Enabled only for ordinary Boss capture; other platform stages ignore it. */
   bossScreening?: BossScreeningSettings;
+  /** Generic post-score result routing for non-Boss capture stages. */
+  postScoreRouting?: PostScoreRoutingSettings;
   searchSource?: SearchSource;
   searchConditions?: SearchCondition[];
   /** Immutable report targets captured before the run; used by routed replay. */
@@ -2981,6 +3183,10 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   const bossScreeningEnabled = platform === 'boss' && options.bossScreening?.enabled === true;
   const bossScreeningPolicyHash = bossScreeningEnabled
     ? hashBossScreeningPolicy(options.bossScreening!)
+    : undefined;
+  const postScoreRoutingEnabled = platform !== 'boss' && options.postScoreRouting?.enabled === true;
+  const postScoreRoutingPolicyHash = postScoreRoutingEnabled
+    ? hashPostScoreRoutingPolicy(options.postScoreRouting!)
     : undefined;
   if (bossScreeningEnabled && (!options.bossForwardMode || !options.bossForwardRecipient)) {
     throw new Error('Enabled Boss screening requires a primary Boss forwarding mode and recipient.');
@@ -3004,6 +3210,57 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
       );
     }
     preloadedScreeningWorkItems = pendingItems;
+  }
+  let preloadedPostScoreRoutingWorkItems: PostScoreRoutingWorkItem[] = [];
+  let recoveredPostScoreRoutingArtifacts: CandidateRoutingArtifact[] = [];
+  if (postScoreRoutingEnabled) {
+    const [pendingItems, existingArtifacts, priorRuns] = await Promise.all([
+      store.listPostScoreRoutingWorkItems(platform, jobKey),
+      store.listCandidateRoutingArtifacts(platform, jobKey),
+      store.listRunResults(platform, jobKey),
+    ]);
+    const incompatibleCount = pendingItems.filter((item) => item.policyHash !== postScoreRoutingPolicyHash).length;
+    if (incompatibleCount > 0) {
+      throw new Error(
+        `Job ${platform}/${jobKey} has ${incompatibleCount} pending result-routing score item(s) from an older policy; resolve or migrate them before rerunning.`,
+      );
+    }
+    const indexedCandidateIds = new Set(priorRuns.flatMap((run) => run.postScoreRouting?.enabled
+      ? [
+        ...run.postScoreRouting.qualifiedCandidateIds,
+        ...run.postScoreRouting.reviewCandidateIds,
+        ...run.postScoreRouting.rejectedCandidateIds,
+      ]
+      : []));
+    const orphanArtifacts = existingArtifacts.filter((artifact) =>
+      artifact.policyHash === postScoreRoutingPolicyHash && !indexedCandidateIds.has(artifact.candidateId));
+    const artifactByCandidateId = new Map<string, CandidateRoutingArtifact>();
+    for (const artifact of orphanArtifacts) {
+      if (artifactByCandidateId.has(artifact.candidateId)) {
+        throw new Error(`Job ${platform}/${jobKey} has multiple unreported result-routing decisions for ${artifact.candidateId}; refusing to reprocess it.`);
+      }
+      artifactByCandidateId.set(artifact.candidateId, artifact);
+    }
+    recoveredPostScoreRoutingArtifacts = [...artifactByCandidateId.values()];
+    if (recoveredPostScoreRoutingArtifacts.length > 0) {
+      await store.markCapturedCandidatesSeen(
+        platform,
+        jobKey,
+        recoveredPostScoreRoutingArtifacts.map((artifact) => artifact.candidateId),
+      );
+    }
+    const stalePendingItems = pendingItems.filter((item) => {
+      const matches = existingArtifacts.filter((artifact) =>
+        artifact.policyHash === postScoreRoutingPolicyHash && artifact.candidateId === item.candidateId);
+      if (matches.length > 1) {
+        throw new Error(`Job ${platform}/${jobKey} has multiple result-routing decisions for pending candidate ${item.candidateId}; refusing to reprocess it.`);
+      }
+      return matches.length === 0;
+    });
+    await Promise.all(pendingItems
+      .filter((item) => !stalePendingItems.includes(item))
+      .map((item) => store.deletePostScoreRoutingWorkItem(platform, jobKey, item.candidateId)));
+    preloadedPostScoreRoutingWorkItems = stalePendingItems;
   }
   if (platform === 'boss') {
     await store.assertSeenIdsHaveResumes('boss', jobKey);
@@ -3059,12 +3316,14 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   const candidateIdsInRun = new Set(candidates.map((candidate) => candidate.candidateId));
   const seenCandidateIdsBeforeRun = await store.readSeenIds(platform, jobKey);
   const seenCandidateIdsSet = new Set(seenCandidateIdsBeforeRun);
-  const outboxRecovery = await recoverBossScreeningOutbox(
-    store,
-    jobKey,
-    candidateIdsInRun,
-    bossScreeningEnabled ? 'post-score' : 'pre-capture',
-  );
+  const outboxRecovery: BossScreeningOutboxRecovery = platform === 'boss'
+    ? await recoverBossScreeningOutbox(
+      store,
+      jobKey,
+      candidateIdsInRun,
+      bossScreeningEnabled ? 'post-score' : 'pre-capture',
+    )
+    : { entries: [], recoveredUncertainEntries: [] };
   const unreportedRecoveryRoutingArtifacts: BossCandidateRoutingArtifact[] = bossScreeningEnabled
     ? await (async () => {
       const policyHash = hashBossScreeningPolicy(options.bossScreening!);
@@ -3116,6 +3375,9 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
     ? candidates.filter((candidate) => screeningWorkByCandidateId.has(candidate.candidateId))
     : [];
   const pendingScoreCandidateIds = new Set(pendingScoreCandidates.map((candidate) => candidate.candidateId));
+  const postScoreRoutingWorkByCandidateId = new Map(preloadedPostScoreRoutingWorkItems
+    .map((item) => [item.candidateId, item]));
+  const pendingPostScoreRoutingCandidateIds = new Set(preloadedPostScoreRoutingWorkItems.map((item) => item.candidateId));
   const preCaptureForwardingCompletedCandidateIds = new Set(outboxRecovery.entries
     .filter((entry) => entry.workflow === 'pre-capture'
       && entry.forwarding.status === 'sent'
@@ -3125,6 +3387,7 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
     !seenCandidateIdsSet.has(candidate.candidateId)
     && !retryCandidateIds.has(candidate.candidateId)
     && !pendingScoreCandidateIds.has(candidate.candidateId)
+    && !pendingPostScoreRoutingCandidateIds.has(candidate.candidateId)
     && (!existingOutboxCandidateIds.has(candidate.candidateId)
       || preCaptureForwardingCompletedCandidateIds.has(candidate.candidateId)));
   const bossSeenEligibleCandidates = platform === 'boss'
@@ -3419,7 +3682,20 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
         searchPage,
         platformAdapter,
         postOpenActions,
-        undefined,
+        postScoreRoutingEnabled
+          ? async ({ resume }) => {
+            if (postScoreRoutingWorkByCandidateId.has(resume.candidateId)) return;
+            const now = new Date().toISOString();
+            const workItem: PostScoreRoutingWorkItem = {
+              candidateId: resume.candidateId,
+              policyHash: postScoreRoutingPolicyHash,
+              createdAt: now,
+              updatedAt: now,
+            };
+            await store.savePostScoreRoutingWorkItem(platform, jobKey, workItem);
+            postScoreRoutingWorkByCandidateId.set(resume.candidateId, workItem);
+          }
+          : undefined,
         beforeResumeParsed,
       ));
       const result = candidateResults[candidateResults.length - 1]!;
@@ -3462,7 +3738,34 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
         ...bossScreeningFailures,
       ],
     }
-    : await scoreCapturedResumes(platform, jobKey, job, store, capturedCandidateIds);
+    : await scoreCapturedResumes(platform, jobKey, job, store, capturedCandidateIds, {
+      ...(postScoreRoutingEnabled ? { postScoreRouting: options.postScoreRouting } : {}),
+      ...(postScoreRoutingEnabled ? {
+        pendingCandidateIds: [...pendingPostScoreRoutingCandidateIds],
+        fetchedAt,
+      } : {}),
+    });
+  if (postScoreRoutingEnabled && recoveredPostScoreRoutingArtifacts.length > 0) {
+    scoringResult.scoredCandidates = [...new Set([
+      ...recoveredPostScoreRoutingArtifacts
+        .filter((artifact) => artifact.scoreStatus === 'success')
+        .map((artifact) => artifact.candidateId),
+      ...scoringResult.scoredCandidates,
+    ])];
+    scoringResult.failedCandidates = [
+      ...recoveredPostScoreRoutingArtifacts
+        .filter((artifact) => artifact.scoreStatus === 'failed')
+        .map((artifact) => ({
+          candidateId: artifact.candidateId,
+          error: artifact.scoreError ?? 'Unknown result-routing score error',
+        })),
+      ...scoringResult.failedCandidates,
+    ];
+    scoringResult.routingArtifacts = [
+      ...recoveredPostScoreRoutingArtifacts,
+      ...(scoringResult.routingArtifacts ?? []),
+    ];
+  }
   const latestForwardingEntries = new Map<string, BossForwardingOutboxEntry>();
   for (const entry of [
     ...outboxRecovery.recoveredUncertainEntries,
@@ -3551,6 +3854,25 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
     })()
     : undefined;
 
+  const postScoreRouting = postScoreRoutingEnabled
+    ? (() => {
+      const artifacts = scoringResult.routingArtifacts ?? [];
+      return {
+        enabled: true as const,
+        policyHash: postScoreRoutingPolicyHash!,
+        ...(options.reportDelivery || options.secondaryReportDelivery ? {
+          reportDelivery: {
+            ...(options.reportDelivery ? { primary: options.reportDelivery } : {}),
+            ...(options.secondaryReportDelivery ? { secondary: options.secondaryReportDelivery } : {}),
+          },
+        } : {}),
+        qualifiedCandidateIds: artifacts.filter((artifact) => artifact.classification === 'qualified').map((artifact) => artifact.candidateId),
+        reviewCandidateIds: artifacts.filter((artifact) => artifact.classification === 'review').map((artifact) => artifact.candidateId),
+        rejectedCandidateIds: artifacts.filter((artifact) => artifact.classification === 'rejected').map((artifact) => artifact.candidateId),
+      };
+    })()
+    : undefined;
+
   const runResult: RunResult = {
     jobKey,
     platform: platformAdapter.platform,
@@ -3574,6 +3896,7 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
     scoredCandidates: scoringResult.scoredCandidates,
     failedCandidates,
     ...(bossRouting ? { bossRouting } : {}),
+    ...(postScoreRouting ? { postScoreRouting } : {}),
     ...(options.searchExecution ? {
       searchExecution: {
         ...options.searchExecution,
@@ -3789,6 +4112,51 @@ async function resolveBossScreeningSettings(
     : resolveBossCaptureScreeningSettings(input, existingJobRecord);
 }
 
+/**
+ * Resolves the platform-neutral post-score routing policy. Boss intentionally
+ * keeps its legacy screening/forwarding contract; generic flags are rejected
+ * for a standalone Boss stage instead of being silently ignored.
+ */
+async function resolvePostScoreRoutingSettings(
+  input: SinglePlatformCliInput,
+  existingJobRecord?: JobRecord,
+): Promise<PostScoreRoutingSettings | undefined> {
+  const hasExplicitInput = input.resultRoutingEnabled !== undefined
+    || input.resultRoutingPolicyFile !== undefined
+    || input.secondaryEmail !== undefined
+    || input.secondaryCc !== undefined;
+  if (input.platform === 'boss') {
+    if (hasExplicitInput) {
+      throw new Error('Generic result-routing flags cannot be used for platform=boss; use Boss screening flags so native forwarding targets remain explicit.');
+    }
+    return undefined;
+  }
+  const stored = existingJobRecord?.postScoreRouting;
+  if (!stored && !hasExplicitInput) return undefined;
+  const policy = input.resultRoutingPolicyFile
+    ? await loadPostScoreRoutingPolicyFile(input.resultRoutingPolicyFile)
+    : undefined;
+  const secondaryRecipient = input.secondaryEmail ?? stored?.secondaryDelivery?.recipientEmail;
+  const secondaryCc = input.secondaryCc === undefined
+    ? stored?.secondaryDelivery?.ccEmails
+    : input.secondaryCc;
+  if (input.secondaryCc !== undefined && !secondaryRecipient) {
+    throw new Error('Result-routing secondary CC requires an existing or explicit --secondary-email.');
+  }
+  return normalizePostScoreRoutingSettings({
+    enabled: input.resultRoutingEnabled ?? stored?.enabled ?? false,
+    policyVersion: policy?.version ?? stored?.policyVersion ?? 2,
+    decisionMode: policy?.decisionMode ?? stored?.decisionMode ?? 'reject-on-any-missing',
+    requirements: policy?.requirements ?? stored?.requirements ?? [],
+    ...(secondaryRecipient ? {
+      secondaryDelivery: {
+        recipientEmail: secondaryRecipient,
+        ...(secondaryCc === undefined ? {} : { ccEmails: secondaryCc }),
+      },
+    } : {}),
+  });
+}
+
 function assertBossScreeningPreflight(
   platform: SupportedPlatform,
   forwarding: BossForwardingSettings | undefined,
@@ -3802,6 +4170,23 @@ function assertBossScreeningPreflight(
     recipientEmail: delivery.recipientEmail,
     bossScreening: screening,
   });
+}
+
+function assertPostScoreRoutingPreflight(
+  platform: SupportedPlatform,
+  delivery: ReportDeliveryOptions,
+  routing: PostScoreRoutingSettings | undefined,
+): void {
+  if (!routing?.enabled) return;
+  if (platform === 'boss') {
+    throw new Error('Post-score routing settings must not be attached to the Boss stage; use Boss screening.');
+  }
+  if (!delivery.recipientEmail?.trim()) {
+    throw new Error(`Enabled post-score routing for ${platform} requires a primary report recipient.`);
+  }
+  if (!routing.secondaryDelivery?.recipientEmail.trim()) {
+    throw new Error(`Enabled post-score routing for ${platform} requires a secondary report recipient.`);
+  }
 }
 
 async function preflightCaptureRun(
@@ -3823,6 +4208,7 @@ async function preflightCaptureRun(
       }
       const forwarding = resolveBossForwardingSettings(platformInput, context.existingJobRecord);
       const screening = await resolveBossScreeningSettings(platformInput, context.existingJobRecord);
+      const postScoreRouting = await resolvePostScoreRoutingSettings(platformInput, context.existingJobRecord);
       const storedDelivery: ReportDeliveryOptions = context.existingJobRecord
         ? {
           recipientEmail: context.existingJobRecord.recipientEmail,
@@ -3830,6 +4216,7 @@ async function preflightCaptureRun(
         }
         : {};
       assertBossScreeningPreflight(platform, forwarding, resolveReportDelivery(storedDelivery, platformInput), screening);
+      assertPostScoreRoutingPreflight(platform, resolveReportDelivery(storedDelivery, platformInput), postScoreRouting);
       return undefined;
     } catch (error) {
       return { keyword: input.searchKeyword, platform, error };
@@ -3881,6 +4268,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
   }
   const bossForwarding = resolveBossForwardingSettings(input, existingJobRecord);
   const bossScreening = await resolveBossScreeningSettings(input, existingJobRecord);
+  const postScoreRouting = await resolvePostScoreRoutingSettings(input, existingJobRecord);
 
   if (!existingJobRecord && !input.jobDescriptionText && !input.jobDescriptionFilePath) {
     throw new Error('Missing required argument --jd or --jd-file');
@@ -3906,6 +4294,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       searchSettings,
       bossForwarding: input.bossCaptureSettingsSnapshot ? existingJobRecord.bossForwarding : bossForwarding,
       bossScreening: input.bossCaptureSettingsSnapshot ? existingJobRecord.bossScreening : bossScreening,
+      postScoreRouting,
     }
     : {
       jobKey,
@@ -3916,6 +4305,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       searchSettings,
       bossForwarding,
       ...(bossScreening ? { bossScreening } : {}),
+      ...(postScoreRouting ? { postScoreRouting } : {}),
       rawText: jobDescriptionText,
       normalizedJob,
       createdAt: fetchedAt,
@@ -3940,6 +4330,7 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
   };
 
   assertBossScreeningPreflight(input.platform, bossForwarding, delivery, bossScreening);
+  assertPostScoreRoutingPreflight(input.platform, delivery, postScoreRouting);
 
   // A queued immutable snapshot has already applied its explicit canonical
   // patch with CAS. Do not rewrite the full stale JobRecord and resurrect a
@@ -3976,10 +4367,11 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
         bossForwardRecipient: bossForwarding?.recipient,
         bossForwardCc: bossForwarding?.ccEmails,
         bossScreening,
+        postScoreRouting,
         searchSource: searchSettings.source,
         searchConditions: searchSettings.conditions,
         reportDelivery: delivery,
-        secondaryReportDelivery: bossScreening?.secondaryDelivery,
+        secondaryReportDelivery: bossScreening?.secondaryDelivery ?? postScoreRouting?.secondaryDelivery,
         searchExecution: captureContext.searchExecution,
       },
     );
@@ -3988,12 +4380,15 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
     let exportError: string | undefined;
     let emailSummary: SendJobReportSummary | undefined;
     let routedReportSummary: SendBossRoutedReportsSummary | undefined;
+    let genericRoutedReportSummary: SendPostScoreRoutedReportsSummary | undefined;
     let routedMainRunEmailSummary: ReturnType<typeof buildBossRoutedMainRunEmailSummary> | undefined;
     let emailError: string | undefined;
 
     const exportPromise = exportJobResultsRef.fn(input.platform, jobKey);
-    const emailPromise: Promise<SendJobReportSummary | SendBossRoutedReportsSummary> | undefined = runResult.bossRouting?.enabled
+    const emailPromise: Promise<SendJobReportSummary | SendBossRoutedReportsSummary | SendPostScoreRoutedReportsSummary> | undefined = runResult.bossRouting?.enabled
       ? sendBossRoutedReportsRef.fn(jobKey)
+      : runResult.postScoreRouting?.enabled
+        ? sendPostScoreRoutedReports(input.platform, jobKey)
       : delivery.recipientEmail
         ? sendJobReportRef.fn(input.platform, jobKey, delivery)
         : undefined;
@@ -4012,8 +4407,13 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
 
     if (emailResult?.status === 'fulfilled' && emailResult.value) {
       if ('reportDeliveries' in emailResult.value) {
-        routedReportSummary = emailResult.value;
-        routedMainRunEmailSummary = buildBossRoutedMainRunEmailSummary(routedReportSummary.reportDeliveries);
+        if (runResult.bossRouting?.enabled) {
+          routedReportSummary = emailResult.value;
+          routedMainRunEmailSummary = buildBossRoutedMainRunEmailSummary(routedReportSummary.reportDeliveries);
+        } else {
+          genericRoutedReportSummary = emailResult.value;
+          routedMainRunEmailSummary = buildBossRoutedMainRunEmailSummary(genericRoutedReportSummary.reportDeliveries);
+        }
       } else {
         emailSummary = emailResult.value;
       }
@@ -4033,18 +4433,20 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
       resultPath,
       exportPath: exportSummary?.exportPath,
       exportError,
-      emailAttempted: runResult.bossRouting?.enabled
+      emailAttempted: runResult.bossRouting?.enabled || runResult.postScoreRouting?.enabled
         ? routedMainRunEmailSummary?.emailAttempted ?? false
         : Boolean(delivery.recipientEmail),
-      emailDelivered: runResult.bossRouting?.enabled
+      emailDelivered: runResult.bossRouting?.enabled || runResult.postScoreRouting?.enabled
         ? routedMainRunEmailSummary?.emailDelivered ?? false
         : Boolean(emailSummary),
       emailRecipient: routedMainRunEmailSummary?.emailRecipient ?? emailSummary?.recipient,
       emailSubject: routedMainRunEmailSummary?.emailSubject ?? emailSummary?.subject,
       emailError: emailError ?? routedMainRunEmailSummary?.emailError ?? emailSummary?.error,
       ...(runResult.bossRouting ? { bossRouting: runResult.bossRouting } : {}),
+      ...(runResult.postScoreRouting ? { postScoreRouting: runResult.postScoreRouting } : {}),
       ...(runResult.bossSeenViewSync ? { bossSeenViewSync: runResult.bossSeenViewSync } : {}),
       ...(routedReportSummary ? { reportDeliveries: routedReportSummary.reportDeliveries } : {}),
+      ...(genericRoutedReportSummary ? { reportDeliveries: genericRoutedReportSummary.reportDeliveries } : {}),
       sampleCandidateIds: capturedCandidateIds.slice(0, 10),
       ...(captureContext.searchExecution ? {
         searchExecution: runResult.searchExecution,

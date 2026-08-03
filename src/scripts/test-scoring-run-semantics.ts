@@ -5587,6 +5587,117 @@ describe('scoring run semantics', () => {
     }]);
   });
 
+  it('routes a non-Boss candidate after detail persistence and keeps native forwarding out of the flow', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-liepin-post-score-routing';
+    const candidateId = 'liepin-rejected';
+    const callOrder: string[] = [];
+    indexModule.openSubscribeSearchRef.fn = (async () => createSearchPage()) as typeof indexModule.openSubscribeSearchRef.fn;
+    indexModule.extractCandidateListRef.fn = async () => ({ candidates: [{ candidateId }] });
+    indexModule.openResumeDetailRef.fn = (async () => {
+      callOrder.push('open');
+      return createDetailPage();
+    }) as typeof indexModule.openResumeDetailRef.fn;
+    indexModule.extractResumeFromPageRef.fn = async () => {
+      callOrder.push('parse');
+      return { resume: { ...buildResume(candidateId), pr: [candidateId] }, domSnapshot: { workLines: [] } };
+    };
+    indexModule.scoreAndEvaluatePostScoreRoutingRef.fn = async ({ resume }) => {
+      callOrder.push('score');
+      return {
+        score: buildScore(),
+        evaluations: [buildModelRequirementEvaluation('missing', resume.candidateId)],
+      };
+    };
+    const result = await indexModule.runResumeCaptureFlow(
+      '51job',
+      jobKey,
+      buildNormalizedJob(),
+      'search keyword',
+      store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-02T12:34:56.000Z',
+      indexModule.resolvePlatformAdapter('51job'),
+      {
+        postScoreRouting: {
+          enabled: true,
+          policyVersion: 2,
+          decisionMode: 'reject-on-any-missing',
+          requirements: [{
+            id: 'must-have-model-requirement',
+            enabled: true,
+            kind: 'modelRequirement',
+            requirement: '候选人明确满足测试岗位要求。',
+            criteria: ['简历存在明确证据。'],
+            insufficientEvidence: ['缺少明确证据。'],
+          }],
+          secondaryDelivery: { recipientEmail: 'secondary-report@example.com' },
+        },
+        reportDelivery: { recipientEmail: 'primary-report@example.com' },
+      },
+    );
+
+    assert.deepStrictEqual(callOrder, ['open', 'parse', 'score']);
+    assert.deepStrictEqual(await store.readSeenIds('51job', jobKey), [candidateId]);
+    const artifacts = await store.listCandidateRoutingArtifacts('51job', jobKey);
+    assert.deepStrictEqual(artifacts.map((artifact) => [artifact.candidateId, artifact.classification, artifact.audience]), [[candidateId, 'rejected', 'secondary']]);
+    assert.deepStrictEqual(result.runResult.postScoreRouting?.rejectedCandidateIds, [candidateId]);
+    assert.deepStrictEqual(await store.listPostScoreRoutingWorkItems('51job', jobKey), []);
+  });
+
+  it('recovers an orphaned non-Boss routing artifact without requiring the candidate to reappear', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-routing-recovery';
+    const candidateId = '51job-orphaned-route';
+    const policy = {
+      enabled: true as const,
+      policyVersion: 2 as const,
+      decisionMode: 'reject-on-any-missing' as const,
+      requirements: [{
+        id: 'must-have-model-requirement', enabled: true, kind: 'modelRequirement' as const,
+        requirement: '候选人明确满足测试岗位要求。', criteria: ['简历存在明确证据。'], insufficientEvidence: ['缺少明确证据。'],
+      }],
+      secondaryDelivery: { recipientEmail: 'secondary-report@example.com' },
+    };
+    const fetchedAt = '2026-08-02T13:34:56.000Z';
+    const scoreArtifact = {
+      candidateId,
+      model: 'test-model',
+      scoredAt: '2026-08-02T13:35:00.000Z',
+      status: 'success' as const,
+      score: buildScore(),
+    };
+    await store.saveCandidateResume('51job', jobKey, buildResume(candidateId), 'orphaned resume');
+    await store.markCapturedCandidatesSeen('51job', jobKey, [candidateId]);
+    await store.saveCandidateScoreArtifact('51job', jobKey, scoreArtifact);
+    const policyHash = hashBossScreeningPolicy(policy);
+    await store.saveCandidateRoutingArtifact('51job', jobKey, {
+      routingDecisionId: 'orphaned-routing-decision', candidateId, fetchedAt, scoredAt: scoreArtifact.scoredAt,
+      decidedAt: '2026-08-02T13:35:01.000Z', policyHash, scoreStatus: 'success', classification: 'rejected', audience: 'secondary',
+      requirementEvaluations: [buildModelRequirementEvaluation('missing', candidateId)], matchedRequirementIds: ['must-have-model-requirement'],
+      unknownRequirementIds: [], reason: '明确否定',
+    });
+    await store.savePostScoreRoutingWorkItem('51job', jobKey, {
+      candidateId, policyHash, createdAt: fetchedAt, updatedAt: fetchedAt,
+    });
+    indexModule.openSubscribeSearchRef.fn = (async () => createSearchPage()) as typeof indexModule.openSubscribeSearchRef.fn;
+    indexModule.extractCandidateListRef.fn = async () => ({ candidates: [] });
+    indexModule.scoreAndEvaluatePostScoreRoutingRef.fn = async () => {
+      throw new Error('orphaned candidate must not be rescored');
+    };
+    const result = await indexModule.runResumeCaptureFlow(
+      '51job', jobKey, buildNormalizedJob(), 'search keyword', store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      fetchedAt, indexModule.resolvePlatformAdapter('51job'), { postScoreRouting: policy },
+    );
+    assert.deepStrictEqual(result.runResult.postScoreRouting?.rejectedCandidateIds, [candidateId]);
+    assert.deepStrictEqual(await store.listPostScoreRoutingWorkItems('51job', jobKey), []);
+  });
+
   it('persists disabled-screening Boss deliveries per address and resumes only the failed copy before capture', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);

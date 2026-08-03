@@ -93,6 +93,29 @@ export interface BossScreeningSettings {
   };
 }
 
+/**
+ * Platform-neutral post-score result routing policy.  Unlike the historical
+ * Boss screening settings this policy has no forwarding target: downstream
+ * platforms only classify/report candidates, while native forwarding remains
+ * owned by the Boss adapter.
+ */
+export interface PostScoreRoutingSettings {
+  enabled: boolean;
+  policyVersion: 2;
+  decisionMode: 'reject-on-any-missing';
+  requirements: BossModelRequirement[];
+  secondaryDelivery?: ReportDeliveryOptions & {
+    recipientEmail: string;
+  };
+}
+
+/** Portable policy-only shape accepted by all capture platforms. */
+export interface PostScoreRoutingPolicyFile {
+  version: 2;
+  decisionMode: 'reject-on-any-missing';
+  requirements: BossModelRequirement[];
+}
+
 /** The portable JSON shape accepted by --boss-screening-policy-file. */
 export interface BossScreeningPolicyFile {
   version: 2;
@@ -131,6 +154,7 @@ export interface BossCaptureCanonicalPatch {
   ccEmails?: string[];
   bossForwarding?: BossForwardingSettings | null;
   bossScreening?: BossScreeningSettings | null;
+  postScoreRouting?: PostScoreRoutingSettings | null;
   searchSource?: JobSearchSource;
   pageKeyword?: string | null;
   applicationFilterInput?: Record<string, unknown> | null;
@@ -239,6 +263,25 @@ export interface BossCandidateRoutingArtifact {
   forwarding: BossForwardingState;
 }
 
+/** Immutable, platform-neutral routing decision written after score/evaluation. */
+export interface CandidateRoutingArtifact {
+  /** Stable id used for idempotent recovery of a routing decision. */
+  routingDecisionId?: string;
+  candidateId: string;
+  fetchedAt: string;
+  scoredAt?: string;
+  decidedAt: string;
+  policyHash: string;
+  scoreStatus: CandidateScoreArtifact['status'];
+  scoreError?: string;
+  classification: BossRoutingClassification;
+  audience: BossRoutingAudience;
+  requirementEvaluations: BossModelRequirementEvaluation[];
+  matchedRequirementIds: string[];
+  unknownRequirementIds: string[];
+  reason: string;
+}
+
 /** Current, mutable forwarding state used for recovery without rewriting history. */
 export interface BossForwardingOutboxEntry {
   candidateId: string;
@@ -286,6 +329,14 @@ export interface BossForwardingOutboxEntry {
 export interface BossScreeningWorkItem {
   candidateId: string;
   /** Policy hash captured before model work; absent only on pre-v2 legacy work items. */
+  policyHash?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Durable hand-off for generic platforms before score/routing completes. */
+export interface PostScoreRoutingWorkItem {
+  candidateId: string;
   policyHash?: string;
   createdAt: string;
   updatedAt: string;
@@ -394,6 +445,8 @@ export interface JobRecord {
   bossForwarding?: BossForwardingSettings;
   /** Optional Boss-only post-score negative-condition routing policy. */
   bossScreening?: BossScreeningSettings;
+  /** Optional platform-neutral post-score routing policy. */
+  postScoreRouting?: PostScoreRoutingSettings;
   bossPosition?: {
     bossJobId: string;
     status: 'open' | 'pending' | 'closed' | 'unknown';
@@ -584,6 +637,15 @@ export interface RunResult {
     reviewCandidateIds: string[];
     rejectedCandidateIds: string[];
     forwardingStatusCounts: Record<string, number>;
+  };
+  /** Lightweight routing index for non-Boss post-score routing runs. */
+  postScoreRouting?: {
+    enabled: true;
+    policyHash: string;
+    reportDelivery?: Partial<Record<BossRoutingAudience, ReportDeliveryOptions>>;
+    qualifiedCandidateIds: string[];
+    reviewCandidateIds: string[];
+    rejectedCandidateIds: string[];
   };
   /** Lightweight evidence of the search that produced this run. */
   searchExecution?: {

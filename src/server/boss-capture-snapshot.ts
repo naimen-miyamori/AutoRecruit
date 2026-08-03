@@ -280,6 +280,19 @@ function resolvedItemPolicyPath(
     : value;
 }
 
+function resolvedItemResultRoutingPolicyPath(
+  item: Record<string, unknown>,
+  jobsFilePath: string,
+  fallback: string | undefined,
+): unknown {
+  const value = item.resultRoutingPolicyFile;
+  if (value === undefined) {
+    return fallback === undefined ? undefined : path.resolve(fallback);
+  }
+  if (typeof value !== 'string' || !value.trim()) return value;
+  return path.resolve(path.dirname(jobsFilePath), value);
+}
+
 function resolvedItemInputPath(
   item: Record<string, unknown>,
   jobsFilePath: string,
@@ -427,6 +440,9 @@ export async function snapshotBossBatchCaptureSettings(
         : {}),
       ...(synthetic.input.bossScreeningPolicyFile
         ? { bossScreeningPolicyFile: path.resolve(synthetic.input.bossScreeningPolicyFile) }
+        : {}),
+      ...(item.resultRoutingPolicyFile !== undefined || normalized.input.resultRoutingPolicyFile !== undefined
+        ? { resultRoutingPolicyFile: resolvedItemResultRoutingPolicyPath(item, jobsFilePath, normalized.input.resultRoutingPolicyFile) }
         : {}),
       bossCaptureSettingsSnapshot: snapshot,
       bossCaptureTaskSnapshot: taskSnapshot,

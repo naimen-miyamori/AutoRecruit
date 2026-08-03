@@ -99,6 +99,10 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'bossSecondaryForwardCc',
     'bossSecondaryEmail',
     'bossSecondaryCc',
+    'resultRoutingEnabled',
+    'resultRoutingPolicyFile',
+    'secondaryEmail',
+    'secondaryCc',
   ],
   batch: [
     'platform',
@@ -121,6 +125,10 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'bossSecondaryForwardCc',
     'bossSecondaryEmail',
     'bossSecondaryCc',
+    'resultRoutingEnabled',
+    'resultRoutingPolicyFile',
+    'secondaryEmail',
+    'secondaryCc',
   ],
   'talent-mapping': [
     'platform', 'talentMappingFile', 'mappingStage', 'confirmedDetailOpen', 'mappingRunId',
@@ -200,7 +208,7 @@ function coerceScalar(field: string, value: unknown): unknown {
     return undefined;
   }
 
-  if ((field === 'includeViewed' || field === 'includeBoss' || field === 'bossScreeningEnabled' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates' || field === 'syncJobsBeforeReview' || field === 'triggerMatch' || field === 'confirmed' || field === 'confirmedDetailOpen' || field === 'unreadOnly' || field === 'includeClosed') && typeof value === 'string') {
+  if ((field === 'includeViewed' || field === 'includeBoss' || field === 'bossScreeningEnabled' || field === 'resultRoutingEnabled' || field === 'saveSearchSubscription' || field === 'includeReviewed' || field === 'failOnIssue' || field === 'autoIndex' || field === 'logAnswer' || field === 'requireAllHardRequirements' || field === 'replyToUnqualifiedCandidates' || field === 'syncJobsBeforeReview' || field === 'triggerMatch' || field === 'confirmed' || field === 'confirmedDetailOpen' || field === 'unreadOnly' || field === 'includeClosed') && typeof value === 'string') {
     const normalized = value.trim().toLowerCase();
     if (normalized === 'true') {
       return true;
@@ -220,6 +228,7 @@ function coerceScalar(field: string, value: unknown): unknown {
     || field === 'bossForwardCc'
     || field === 'bossSecondaryForwardCc'
     || field === 'bossSecondaryCc'
+    || field === 'secondaryCc'
     || field === 'summaryCc'
     || field === 'coreRequirements'
     || field === 'bonusRequirements'

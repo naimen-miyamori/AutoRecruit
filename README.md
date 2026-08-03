@@ -378,6 +378,25 @@ revision、交付目标、筛选策略和岗位配置 revision 都随任务保�
 
 模型要求文件只保存版本化业务规则，不能包含收件人、脚本或候选人数据。当前只接受版本 2 的 `modelRequirement`：
 
+#### 三个平台的评分后结果分流
+
+51job、猎聘和智联也支持同一套“先保存详情、再评分、再分流”的模型要求策略，但只扩展结果分流，不扩展平台原生转发：
+
+```bash
+npm run dev -- \
+  --platform all \
+  --keyword "工业设计师" \
+  --jd-file ./jd.txt \
+  --result-routing-enabled true \
+  --result-routing-policy-file ./post-score-routing-policy.json \
+  --email primary@example.com \
+  --cc audit@example.com \
+  --secondary-email review@example.com \
+  --secondary-cc review-audit@example.com
+```
+
+模型明确满足的候选人和证据不足需复核的候选人进入主报告；模型明确判断要求缺失的候选人进入副报告。没有主组候选人时不发主报告；副报告仍可单独发送。`--result-routing-enabled false` 可停用，省略开关会复用岗位已保存设置。51job 和猎聘报告使用稳定简历 ID，智联报告要求详情页得到唯一可直达简历链接；任一证据缺失都会在 SMTP 前失败关闭。猎聘现有站内联系人转发和 Boss 原生转发均保持原平台边界，不会被这套结果分流替换或扩展。
+
 ```json
 {
   "version": 2,

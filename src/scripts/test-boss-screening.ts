@@ -18,6 +18,8 @@ import {
   loadBossScreeningPolicyFile,
   normalizeBossCaptureSettingsSnapshot,
   normalizeBossScreeningSettings,
+  normalizePostScoreRoutingSettings,
+  hashPostScoreRoutingPolicy,
   resolveBossRoutingDecision,
   scoreAndEvaluateBossScreening,
 } from '../scoring/boss-screening.js';
@@ -27,6 +29,7 @@ import type {
   BossForwardingOutboxEntry,
   BossModelRequirementEvaluation,
   BossScreeningSettings,
+  CandidateRoutingArtifact,
   CandidateResume,
   CandidateScoreArtifact,
   CandidateScoreSuccessArtifact,
@@ -512,5 +515,64 @@ describe('JobStore Boss model screening facts', () => {
     await store.saveBossForwardingOutboxEntry('boss', jobKey, sent);
     assert.deepEqual(await store.readBossForwardingOutboxEntry('boss', jobKey, resume.candidateId), sent);
     assert.deepEqual(await store.listBossForwardingOutboxEntries('boss', jobKey), [sent]);
+  });
+});
+
+describe('platform-neutral post-score routing', () => {
+  it('does not require native forwarding and routes missing/unknown evidence safely', () => {
+    const policy = normalizePostScoreRoutingSettings({
+      enabled: true,
+      policyVersion: 2,
+      decisionMode: 'reject-on-any-missing',
+      requirements: [modelRequirement()],
+      secondaryDelivery: { recipientEmail: 'secondary-report@example.test' },
+    });
+    assert.equal(hashPostScoreRoutingPolicy(policy), hashBossScreeningPolicy(policy));
+    const rejected = resolveBossRoutingDecision(successArtifact(genericBoxResume), [evaluation('aluminum-luggage-experience', 'missing')], policy);
+    assert.deepEqual(rejected, {
+      classification: 'rejected',
+      audience: 'secondary',
+      matchedRequirementIds: ['aluminum-luggage-experience'],
+      unknownRequirementIds: [],
+      reason: '模型明确判断以下要求缺失：aluminum-luggage-experience。',
+    });
+    const review = resolveBossRoutingDecision(successArtifact(), [evaluation('aluminum-luggage-experience', 'unknown')], policy);
+    assert.equal(review.classification, 'review');
+    assert.equal(review.audience, 'primary');
+    assert.throws(() => normalizePostScoreRoutingSettings({
+      enabled: true,
+      policyVersion: 2,
+      decisionMode: 'reject-on-any-missing',
+      requirements: [modelRequirement()],
+    }), /secondaryDelivery/);
+  });
+
+  it('persists generic routing artifacts and pending score work on a non-Boss platform', async () => {
+    const store = new JobStore();
+    const jobKey = 'generic-routing-store';
+    const artifact: CandidateRoutingArtifact = {
+      routingDecisionId: 'generic-decision-1',
+      candidateId: '51job-candidate-1',
+      fetchedAt: '2026-08-02T01:00:00.000Z',
+      scoredAt: '2026-08-02T01:01:00.000Z',
+      decidedAt: '2026-08-02T01:02:00.000Z',
+      policyHash: 'generic-policy',
+      scoreStatus: 'success',
+      classification: 'qualified',
+      audience: 'primary',
+      requirementEvaluations: [],
+      matchedRequirementIds: [],
+      unknownRequirementIds: [],
+      reason: '符合。',
+    };
+    await store.saveCandidateRoutingArtifact('51job', jobKey, artifact);
+    await store.savePostScoreRoutingWorkItem('51job', jobKey, {
+      candidateId: '51job-candidate-2',
+      policyHash: 'generic-policy',
+      createdAt: artifact.fetchedAt,
+      updatedAt: artifact.fetchedAt,
+    });
+    assert.deepEqual(await store.listCandidateRoutingArtifacts('51job', jobKey), [artifact]);
+    assert.deepEqual((await store.listPostScoreRoutingWorkItems('51job', jobKey)).map((item) => item.candidateId), ['51job-candidate-2']);
   });
 });

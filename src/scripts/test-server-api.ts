@@ -403,6 +403,47 @@ describe('console API routes', () => {
     assert.equal(completed.outputSummary?.jobKey, '优衣库-店长');
   });
 
+  it('queues non-Boss post-score routing without adding any forwarding action', async () => {
+    const taskDir = await makeTempDir();
+    const policyPath = path.join(taskDir, 'post-score-routing.json');
+    await writeJson(policyPath, modelPolicyForApi());
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      body: {
+        platform: 'liepin',
+        keyword: '箱包设计',
+        jd: '负责箱包设计',
+        email: 'primary@example.com',
+        cc: ['audit@example.com'],
+        resultRoutingEnabled: true,
+        resultRoutingPolicyFile: policyPath,
+        secondaryEmail: 'secondary@example.com',
+        secondaryCc: ['secondary-audit@example.com'],
+      },
+    });
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+    assert.equal(completed.status, 'succeeded');
+    assert.deepStrictEqual(calls[0], [
+      '--platform', 'liepin', '--keyword', '箱包设计', '--jd', '负责箱包设计',
+      '--email', 'primary@example.com', '--cc', 'audit@example.com',
+      '--result-routing-enabled', 'true', '--result-routing-policy-file', policyPath,
+      '--secondary-email', 'secondary@example.com', '--secondary-cc', 'secondary-audit@example.com',
+    ]);
+    assert.equal(calls[0]?.some((arg) => arg.includes('boss-forward')), false);
+  });
+
   it('keeps the Boss job identity separate from the talent-page query in queued capture tasks', async () => {
     const taskDir = await makeTempDir();
     const calls: string[][] = [];

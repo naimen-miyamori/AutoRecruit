@@ -3,7 +3,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { config } from '../config.js';
 import type { SupportedPlatform } from '../platforms/types.js';
-import { normalizeBossScreeningSettings } from '../scoring/boss-screening.js';
+import { normalizeBossScreeningSettings, normalizePostScoreRoutingSettings } from '../scoring/boss-screening.js';
 import type { SearchFilterCatalog } from '../search/filter-catalog.js';
 import type { BossJobSyncRun, BossPositionSummary } from '../types/boss.js';
 import {
@@ -16,6 +16,8 @@ import {
   BossChatReviewRun,
   BossForwardingOutboxEntry,
   BossScreeningWorkItem,
+  CandidateRoutingArtifact,
+  PostScoreRoutingWorkItem,
   CandidateScoreArtifact,
   JobRecord,
   ResumeDomSnapshot,
@@ -163,11 +165,11 @@ async function listJsonFiles(dirPath: string): Promise<string[]> {
   }
 }
 
-function bossRoutingCandidateFileName(candidateId: string): string {
+function routingCandidateFileName(candidateId: string): string {
   return encodeURIComponent(candidateId);
 }
 
-function bossRoutingTimestamp(value: string): string {
+function routingTimestamp(value: string): string {
   return value.replace(/[:.]/g, '-');
 }
 
@@ -177,6 +179,7 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
     ccEmails,
     bossForwarding,
     bossScreening,
+    postScoreRouting,
     searchSettings,
     ...rest
   } = jobRecord;
@@ -196,6 +199,9 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
   const normalizedBossScreening = bossScreening === undefined
     ? undefined
     : normalizeBossScreeningSettings(bossScreening);
+  const normalizedPostScoreRouting = postScoreRouting === undefined
+    ? undefined
+    : normalizePostScoreRoutingSettings(postScoreRouting);
   const normalizedPageKeyword = searchSettings?.pageKeyword
     ?.normalize('NFKC')
     .replace(/\s+/gu, ' ')
@@ -221,6 +227,7 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
     ...(normalizedSearchSettings ? { searchSettings: normalizedSearchSettings } : {}),
     ...(normalizedBossForwarding ? { bossForwarding: normalizedBossForwarding } : {}),
     ...(normalizedBossScreening ? { bossScreening: normalizedBossScreening } : {}),
+    ...(normalizedPostScoreRouting ? { postScoreRouting: normalizedPostScoreRouting } : {}),
   };
 }
 
@@ -347,6 +354,9 @@ export class JobStore {
     const bossScreening = jobRecord.bossScreening === undefined
       ? undefined
       : normalizeBossScreeningSettings(jobRecord.bossScreening);
+    const postScoreRouting = jobRecord.postScoreRouting === undefined
+      ? undefined
+      : normalizePostScoreRoutingSettings(jobRecord.postScoreRouting);
     await writeJsonIfChanged(paths.jdPath, {
       ...jobRecord,
       platform,
@@ -366,6 +376,7 @@ export class JobStore {
         }
         : undefined,
       bossScreening,
+      postScoreRouting,
     });
   }
 
@@ -416,6 +427,10 @@ export class JobStore {
       if (patch.bossScreening !== undefined) {
         if (patch.bossScreening === null) delete next.bossScreening;
         else next.bossScreening = normalizeBossScreeningSettings(patch.bossScreening);
+      }
+      if (patch.postScoreRouting !== undefined) {
+        if (patch.postScoreRouting === null) delete next.postScoreRouting;
+        else next.postScoreRouting = normalizePostScoreRoutingSettings(patch.postScoreRouting);
       }
       if (patch.searchSource !== undefined
         || patch.pageKeyword !== undefined
@@ -628,6 +643,111 @@ export class JobStore {
     }
   }
 
+  /**
+   * Stores a platform-neutral post-score routing decision.  Boss keeps its
+   * historical artifact API below because its record additionally owns
+   * native-forwarding state; non-Boss adapters use this API only.
+   */
+  async saveCandidateRoutingArtifact(
+    platform: SupportedPlatform,
+    jobKey: string,
+    artifact: CandidateRoutingArtifact,
+  ): Promise<string> {
+    const paths = await this.initializeJob(platform, jobKey);
+    if (artifact.routingDecisionId) {
+      const filePath = path.join(
+        paths.routingArtifactsDir,
+        `${routingCandidateFileName(artifact.routingDecisionId)}.json`,
+      );
+      try {
+        const existing = await readJsonFile<CandidateRoutingArtifact>(filePath);
+        if (!isDeepStrictEqual(existing, artifact)) {
+          throw new Error(`Routing decision ${artifact.routingDecisionId} already exists with different content.`);
+        }
+        return filePath;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      await writeJson(filePath, artifact);
+      const persisted = await readJsonFile<CandidateRoutingArtifact>(filePath);
+      if (!isDeepStrictEqual(persisted, artifact)) {
+        throw new Error(`Routing decision ${artifact.routingDecisionId} changed during idempotent write.`);
+      }
+      return filePath;
+    }
+    const stem = `${routingTimestamp(artifact.decidedAt)}-${routingCandidateFileName(artifact.candidateId)}`;
+    let filePath = path.join(paths.routingArtifactsDir, `${stem}.json`);
+    let suffix = 0;
+    while (true) {
+      try {
+        await fs.access(filePath);
+        suffix += 1;
+        filePath = path.join(paths.routingArtifactsDir, `${stem}-${suffix}.json`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        break;
+      }
+    }
+    await writeJson(filePath, artifact);
+    return filePath;
+  }
+
+  async listCandidateRoutingArtifacts(
+    platform: SupportedPlatform,
+    jobKey: string,
+  ): Promise<CandidateRoutingArtifact[]> {
+    const { routingArtifactsDir } = this.getJobPaths(platform, jobKey);
+    const files = await listJsonFiles(routingArtifactsDir);
+    const artifacts = await Promise.all(files.map((file) =>
+      readJsonFile<CandidateRoutingArtifact>(path.join(routingArtifactsDir, file)),
+    ));
+    return artifacts.sort((left, right) => left.decidedAt.localeCompare(right.decidedAt)
+      || (left.routingDecisionId ?? left.candidateId).localeCompare(right.routingDecisionId ?? right.candidateId));
+  }
+
+  async readCandidateRoutingArtifactByDecisionId(
+    platform: SupportedPlatform,
+    jobKey: string,
+    routingDecisionId: string,
+  ): Promise<CandidateRoutingArtifact | undefined> {
+    const { routingArtifactsDir } = this.getJobPaths(platform, jobKey);
+    return readJsonFile<CandidateRoutingArtifact | undefined>(
+      path.join(routingArtifactsDir, `${routingCandidateFileName(routingDecisionId)}.json`),
+      undefined,
+    );
+  }
+
+  async savePostScoreRoutingWorkItem(
+    platform: SupportedPlatform,
+    jobKey: string,
+    item: PostScoreRoutingWorkItem,
+  ): Promise<string> {
+    const paths = await this.initializeJob(platform, jobKey);
+    const filePath = path.join(paths.screeningWorkDir, `${routingCandidateFileName(item.candidateId)}.json`);
+    await writeJsonIfChanged(filePath, item);
+    return filePath;
+  }
+
+  async deletePostScoreRoutingWorkItem(
+    platform: SupportedPlatform,
+    jobKey: string,
+    candidateId: string,
+  ): Promise<void> {
+    const { screeningWorkDir } = this.getJobPaths(platform, jobKey);
+    await fs.rm(path.join(screeningWorkDir, `${routingCandidateFileName(candidateId)}.json`), { force: true });
+  }
+
+  async listPostScoreRoutingWorkItems(
+    platform: SupportedPlatform,
+    jobKey: string,
+  ): Promise<PostScoreRoutingWorkItem[]> {
+    const { screeningWorkDir } = this.getJobPaths(platform, jobKey);
+    const files = await listJsonFiles(screeningWorkDir);
+    return Promise.all(files.map((file) =>
+      readJsonFile<PostScoreRoutingWorkItem>(path.join(screeningWorkDir, file)),
+    ));
+  }
+
   async saveCandidateResumeDocx(platform: SupportedPlatform, jobKey: string, fileName: string, content: Buffer): Promise<string> {
     const paths = await this.initializeJob(platform, jobKey);
     const resumeExportsDir = path.join(paths.exportsDir, 'resumes');
@@ -658,7 +778,7 @@ export class JobStore {
     if (artifact.routingDecisionId) {
       const filePath = path.join(
         paths.routingArtifactsDir,
-        `${bossRoutingCandidateFileName(artifact.routingDecisionId)}.json`,
+        `${routingCandidateFileName(artifact.routingDecisionId)}.json`,
       );
       try {
         const existing = await readJsonFile<BossCandidateRoutingArtifact>(filePath);
@@ -676,7 +796,7 @@ export class JobStore {
       }
       return filePath;
     }
-    const stem = `${bossRoutingTimestamp(artifact.decidedAt)}-${bossRoutingCandidateFileName(artifact.candidateId)}`;
+    const stem = `${routingTimestamp(artifact.decidedAt)}-${routingCandidateFileName(artifact.candidateId)}`;
     let suffix = 0;
     let filePath = path.join(paths.routingArtifactsDir, `${stem}.json`);
 
@@ -716,7 +836,7 @@ export class JobStore {
     routingDecisionId: string,
   ): Promise<BossCandidateRoutingArtifact | undefined> {
     const { routingArtifactsDir } = this.getJobPaths(platform, jobKey);
-    const filePath = path.join(routingArtifactsDir, `${bossRoutingCandidateFileName(routingDecisionId)}.json`);
+    const filePath = path.join(routingArtifactsDir, `${routingCandidateFileName(routingDecisionId)}.json`);
     return readJsonFile<BossCandidateRoutingArtifact | undefined>(filePath, undefined);
   }
 
@@ -726,7 +846,7 @@ export class JobStore {
     item: BossScreeningWorkItem,
   ): Promise<string> {
     const paths = await this.initializeJob(platform, jobKey);
-    const filePath = path.join(paths.screeningWorkDir, `${bossRoutingCandidateFileName(item.candidateId)}.json`);
+    const filePath = path.join(paths.screeningWorkDir, `${routingCandidateFileName(item.candidateId)}.json`);
     await writeJsonIfChanged(filePath, item);
     return filePath;
   }
@@ -737,7 +857,7 @@ export class JobStore {
     candidateId: string,
   ): Promise<void> {
     const { screeningWorkDir } = this.getJobPaths(platform, jobKey);
-    await fs.rm(path.join(screeningWorkDir, `${bossRoutingCandidateFileName(candidateId)}.json`), { force: true });
+    await fs.rm(path.join(screeningWorkDir, `${routingCandidateFileName(candidateId)}.json`), { force: true });
   }
 
   async listBossScreeningWorkItems(
@@ -757,7 +877,7 @@ export class JobStore {
     entry: BossForwardingOutboxEntry,
   ): Promise<string> {
     const paths = await this.initializeJob(platform, jobKey);
-    const filePath = path.join(paths.forwardingOutboxDir, `${bossRoutingCandidateFileName(entry.candidateId)}.json`);
+    const filePath = path.join(paths.forwardingOutboxDir, `${routingCandidateFileName(entry.candidateId)}.json`);
     await writeJsonIfChanged(filePath, entry);
     return filePath;
   }
@@ -769,7 +889,7 @@ export class JobStore {
   ): Promise<BossForwardingOutboxEntry | undefined> {
     const { forwardingOutboxDir } = this.getJobPaths(platform, jobKey);
     return readJsonFile<BossForwardingOutboxEntry | undefined>(
-      path.join(forwardingOutboxDir, `${bossRoutingCandidateFileName(candidateId)}.json`),
+      path.join(forwardingOutboxDir, `${routingCandidateFileName(candidateId)}.json`),
       undefined,
     );
   }

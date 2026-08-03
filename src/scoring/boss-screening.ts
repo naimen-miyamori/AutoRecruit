@@ -13,6 +13,8 @@ import type {
   BossRoutingDecision,
   BossScreeningPolicyFile,
   BossScreeningSettings,
+  PostScoreRoutingPolicyFile,
+  PostScoreRoutingSettings,
   CandidateResume,
   CandidateScore,
   CandidateScoreArtifact,
@@ -74,6 +76,14 @@ const rawScreeningSettingsSchema = z.object({
   decisionMode: z.literal('reject-on-any-missing'),
   requirements: z.array(rawModelRequirementSchema).max(MAX_CONDITIONS),
   secondaryForwarding: rawForwardingSchema.optional(),
+  secondaryDelivery: rawDeliverySchema.optional(),
+}).strict();
+
+const rawPostScoreRoutingSettingsSchema = z.object({
+  enabled: z.boolean(),
+  policyVersion: z.literal(BOSS_SCREENING_POLICY_VERSION),
+  decisionMode: z.literal('reject-on-any-missing'),
+  requirements: z.array(rawModelRequirementSchema).max(MAX_CONDITIONS),
   secondaryDelivery: rawDeliverySchema.optional(),
 }).strict();
 
@@ -304,6 +314,36 @@ export function normalizeBossScreeningSettings(value: unknown): BossScreeningSet
   return settings;
 }
 
+/**
+ * Validates and canonicalizes the platform-neutral post-score routing
+ * settings.  This deliberately does not accept any platform forwarding
+ * fields; native forwarding remains an adapter-owned capability.
+ */
+export function normalizePostScoreRoutingSettings(value: unknown): PostScoreRoutingSettings {
+  const parsed = rawPostScoreRoutingSettingsSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(`Invalid post-score routing settings: ${describeZodError(parsed.error)}`);
+  }
+  const requirements = normalizeModelRequirements(parsed.data.requirements);
+  const secondaryDelivery = normalizeDelivery(parsed.data.secondaryDelivery, 'secondaryDelivery');
+  const settings: PostScoreRoutingSettings = {
+    enabled: parsed.data.enabled,
+    policyVersion: BOSS_SCREENING_POLICY_VERSION,
+    decisionMode: 'reject-on-any-missing',
+    requirements,
+    ...(secondaryDelivery ? { secondaryDelivery } : {}),
+  };
+  if (settings.enabled) {
+    if (!requirements.some((requirement) => requirement.enabled)) {
+      throw new Error('An enabled post-score routing policy must contain at least one enabled model requirement');
+    }
+    if (!settings.secondaryDelivery?.recipientEmail) {
+      throw new Error('An enabled post-score routing policy requires secondaryDelivery.recipientEmail');
+    }
+  }
+  return settings;
+}
+
 /** Validates the policy-file-only fields and returns their canonical form. */
 export function normalizeBossScreeningPolicyFile(value: unknown): BossScreeningPolicyFile {
   const parsed = rawPolicyFileSchema.safeParse(value);
@@ -313,6 +353,23 @@ export function normalizeBossScreeningPolicyFile(value: unknown): BossScreeningP
   const requirements = normalizeModelRequirements(parsed.data.requirements);
   if (!requirements.some((requirement) => requirement.enabled)) {
     throw new Error('Boss screening policy file must contain at least one enabled model requirement');
+  }
+  return {
+    version: BOSS_SCREENING_POLICY_VERSION,
+    decisionMode: 'reject-on-any-missing',
+    requirements,
+  };
+}
+
+/** Validates a generic policy file without exposing Boss forwarding fields. */
+export function normalizePostScoreRoutingPolicyFile(value: unknown): PostScoreRoutingPolicyFile {
+  const parsed = rawPolicyFileSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(`Invalid post-score routing policy file: ${describeZodError(parsed.error)}`);
+  }
+  const requirements = normalizeModelRequirements(parsed.data.requirements);
+  if (!requirements.some((requirement) => requirement.enabled)) {
+    throw new Error('Invalid post-score routing policy file: policy must contain at least one enabled model requirement');
   }
   return {
     version: BOSS_SCREENING_POLICY_VERSION,
@@ -337,6 +394,28 @@ export async function loadBossScreeningPolicyFile(
     throw error;
   }
   return normalizeBossScreeningPolicyFile(payload);
+}
+
+/** Reads the same portable model policy for a non-Boss capture platform. */
+export async function loadPostScoreRoutingPolicyFile(
+  filePath: string,
+  label = '--result-routing-policy-file',
+): Promise<PostScoreRoutingPolicyFile> {
+  const resolvedPath = path.resolve(filePath);
+  let payload: unknown;
+  try {
+    payload = JSON.parse(await readFile(resolvedPath, 'utf8'));
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Invalid JSON in ${label} ${filePath}: ${error.message}`);
+    }
+    throw error;
+  }
+  try {
+    return normalizePostScoreRoutingPolicyFile(payload);
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message.replace(/^Invalid Boss screening policy file/u, 'Invalid post-score routing policy file') : String(error));
+  }
 }
 
 function canonicalize(value: unknown): unknown {
@@ -548,6 +627,13 @@ export function hashBossScreeningPolicy(
       .sort((left, right) => left.id.localeCompare(right.id)),
   };
   return createHash('sha256').update(JSON.stringify(canonicalize(canonical))).digest('hex');
+}
+
+/** Hashes only enabled, classification-affecting rules for generic routing. */
+export function hashPostScoreRoutingPolicy(
+  policy: Pick<PostScoreRoutingSettings, 'policyVersion' | 'decisionMode' | 'requirements'>,
+): string {
+  return hashBossScreeningPolicy(policy);
 }
 
 export interface BossCaptureSettingsOverrides extends ReportDeliveryOptions {
@@ -990,8 +1076,15 @@ export const completeBossScreeningJsonRef: {
 export async function scoreAndEvaluateBossScreening(
   input: BossScreeningScoreInput,
 ): Promise<BossScreeningScoreResult> {
+  return scoreAndEvaluateScreening(input, 'boss-screening');
+}
+
+async function scoreAndEvaluateScreening(
+  input: BossScreeningScoreInput,
+  featureName: string,
+): Promise<BossScreeningScoreResult> {
   const responseText = await completeBossScreeningJsonRef.fn({
-    featureName: 'boss-screening',
+    featureName,
     modelEnvName: 'SCORING_MODEL',
     completionRoute: config.scoring.completionRoute,
     input: buildBossScreeningScorePrompt(input),
@@ -1006,6 +1099,13 @@ export async function scoreAndEvaluateBossScreening(
     outputSchema: z.toJSONSchema(bossScreeningScorePayloadSchema),
   });
   return extractBossScreeningScoreFromTextResponse(responseText, input);
+}
+
+/** Generic scoring/evaluation entry point used by 51job, Liepin and Zhilian. */
+export async function scoreAndEvaluatePostScoreRouting(
+  input: BossScreeningScoreInput,
+): Promise<BossScreeningScoreResult> {
+  return scoreAndEvaluateScreening(input, 'post-score-routing');
 }
 
 function reviewDecision(reason: string, unknownRequirementIds: string[]): BossRoutingDecision {
@@ -1099,4 +1199,13 @@ export function resolveBossRoutingDecision(
     unknownRequirementIds: [],
     reason: '所有启用的模型要求均明确满足。',
   };
+}
+
+/** Generic alias for the pure, fail-closed routing decision reducer. */
+export function resolvePostScoreRoutingDecision(
+  scoreArtifact: CandidateScoreArtifact,
+  evaluations: readonly BossModelRequirementEvaluation[],
+  policy: Pick<PostScoreRoutingSettings, 'policyVersion' | 'decisionMode' | 'requirements'>,
+): BossRoutingDecision {
+  return resolveBossRoutingDecision(scoreArtifact, evaluations, policy);
 }

@@ -107,6 +107,11 @@ export interface ResumeCaptureTaskInput {
   bossSecondaryForwardCc?: string[];
   bossSecondaryEmail?: string;
   bossSecondaryCc?: string[];
+  /** Platform-neutral post-score model routing; no native forwarding. */
+  resultRoutingEnabled?: boolean;
+  resultRoutingPolicyFile?: string;
+  secondaryEmail?: string;
+  secondaryCc?: string[];
   /** Private queue/scheduler fact; public HTTP bodies cannot provide it. */
   bossCaptureSettingsSnapshot?: BossCaptureSettingsSnapshot;
   /** Complete immutable Boss identity/search/config snapshot; server-only. */
@@ -134,6 +139,10 @@ export interface BatchTaskInput {
   bossSecondaryForwardCc?: string[];
   bossSecondaryEmail?: string;
   bossSecondaryCc?: string[];
+  resultRoutingEnabled?: boolean;
+  resultRoutingPolicyFile?: string;
+  secondaryEmail?: string;
+  secondaryCc?: string[];
 }
 
 export interface TalentMappingTaskInput {

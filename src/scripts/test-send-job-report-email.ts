@@ -19,12 +19,13 @@ import { JobStore } from '../storage/job-store.js';
 import type { MainResult, MainRunSummary } from '../index.js';
 import type {
   BossCandidateRoutingArtifact,
+  CandidateRoutingArtifact,
   CandidateScoreArtifact,
   JobRecord,
   ReportDeliveryOptions,
   RunResult,
 } from '../types/job.js';
-import { sendBossRoutedReports, sendJobReport, sendJobReportEmailRef } from './send-job-report-email.js';
+import { sendBossRoutedReports, sendJobReport, sendJobReportEmailRef, sendPostScoreRoutedReports } from './send-job-report-email.js';
 
 let tempDir: string;
 let originalDataDir: string;
@@ -1083,5 +1084,64 @@ describe('sendJobReport', () => {
     });
 
     await assert.rejects(() => sendJobReport('51job', jobKey), /No run results found for job key/);
+  });
+
+  it('routes non-Boss Liepin reports by model result without invoking native forwarding', async () => {
+    const jobKey = `liepin-routing-report-${Date.now()}`;
+    const { store } = await seedJobRecord(jobKey, {
+      recipientEmail: 'primary@example.com',
+      ccEmails: ['primary-cc@example.com'],
+    }, 'liepin');
+    const current = await store.readJobRecord('liepin', jobKey);
+    await store.saveJobRecord('liepin', {
+      ...current,
+      postScoreRouting: {
+        enabled: true,
+        policyVersion: 2,
+        decisionMode: 'reject-on-any-missing',
+        requirements: [{
+          id: 'requirement-1', enabled: true, kind: 'modelRequirement', requirement: '测试要求',
+          criteria: ['明确证据'], insufficientEvidence: ['无证据'],
+        }],
+        secondaryDelivery: { recipientEmail: 'secondary@example.com', ccEmails: ['secondary-cc@example.com'] },
+      },
+    });
+    const qualified = bossScoreArtifact('qualified-liepin');
+    const rejected = { ...bossScoreArtifact('rejected-liepin'), scoredAt: '2026-07-31T00:00:02.000Z' };
+    await store.saveCandidateScoreArtifact('liepin', jobKey, qualified);
+    await store.saveCandidateScoreArtifact('liepin', jobKey, rejected);
+    const saveRoutingArtifact = async (artifact: CandidateRoutingArtifact) => store.saveCandidateRoutingArtifact('liepin', jobKey, artifact);
+    await saveRoutingArtifact({
+      routingDecisionId: 'liepin-routing-qualified', candidateId: qualified.candidateId, fetchedAt: '2026-07-31T00:00:00.000Z', scoredAt: qualified.scoredAt, decidedAt: '2026-07-31T00:00:03.000Z', policyHash: 'liepin-policy', scoreStatus: 'success', classification: 'qualified', audience: 'primary', requirementEvaluations: [{ requirementId: 'requirement-1', outcome: 'satisfied', evidence: ['明确证据'], missingCriteria: [], reason: 'ok' }], matchedRequirementIds: [], unknownRequirementIds: [], reason: '满足',
+    });
+    await saveRoutingArtifact({
+      routingDecisionId: 'liepin-routing-rejected', candidateId: rejected.candidateId, fetchedAt: '2026-07-31T00:00:00.000Z', scoredAt: rejected.scoredAt, decidedAt: '2026-07-31T00:00:04.000Z', policyHash: 'liepin-policy', scoreStatus: 'success', classification: 'rejected', audience: 'secondary', requirementEvaluations: [{ requirementId: 'requirement-1', outcome: 'missing', evidence: [], missingCriteria: ['明确证据'], reason: 'missing' }], matchedRequirementIds: ['requirement-1'], unknownRequirementIds: [], reason: '明确否定',
+    });
+    await store.saveRunResult('liepin', jobKey, {
+      jobKey, platform: 'liepin', fetchedAt: '2026-07-31T00:00:00.000Z', totalCandidates: 2,
+      capturedCandidateIds: [qualified.candidateId, rejected.candidateId], runResultVersion: 2,
+      scoredCandidates: [qualified.candidateId, rejected.candidateId], failedCandidates: [],
+      postScoreRouting: {
+        enabled: true, policyHash: 'liepin-policy',
+        reportDelivery: {
+          primary: { recipientEmail: 'primary@example.com', ccEmails: ['primary-cc@example.com'] },
+          secondary: { recipientEmail: 'secondary@example.com', ccEmails: ['secondary-cc@example.com'] },
+        },
+        qualifiedCandidateIds: [qualified.candidateId], reviewCandidateIds: [], rejectedCandidateIds: [rejected.candidateId],
+      },
+    });
+    const sent: Array<{ recipient: string; ccEmails?: string[]; subject: string; markdown: string }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, ccEmails, subject, markdown }) => {
+      sent.push({ recipient, ccEmails, subject, markdown });
+      return { recipient, subject };
+    };
+    const result = await sendPostScoreRoutedReports('liepin', jobKey);
+    assert.equal(result.reportDeliveries.primary.delivered, true);
+    assert.equal(result.reportDeliveries.secondary.delivered, true);
+    assert.deepEqual(sent.map((item) => item.recipient), ['primary@example.com', 'secondary@example.com']);
+    assert.match(sent[0]!.subject, /^【猎聘】/);
+    assert.match(sent[0]!.markdown, /qualified-liepin/);
+    assert.doesNotMatch(sent[0]!.markdown, /rejected-liepin/);
+    assert.match(sent[1]!.markdown, /rejected-liepin/);
   });
 });

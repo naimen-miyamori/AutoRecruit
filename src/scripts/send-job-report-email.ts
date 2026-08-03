@@ -14,6 +14,7 @@ import { JobStore } from '../storage/job-store.js';
 import {
   parseEmailList,
   resolveReportDelivery,
+  type CandidateRoutingArtifact,
   type BossCandidateRoutingArtifact,
   type CandidateScoreArtifact,
   type ReportDeliveryOptions,
@@ -59,6 +60,9 @@ export interface SendBossRoutedReportsSummary {
     secondary: RoutedReportDeliverySummary;
   };
 }
+
+/** Same delivery shape for platform-neutral post-score routing. */
+export type SendPostScoreRoutedReportsSummary = SendBossRoutedReportsSummary;
 
 export interface SendJobReportOptions {
   /**
@@ -499,6 +503,261 @@ export async function sendBossRoutedReports(
   return { jobKey, reportDeliveries: { primary, secondary } };
 }
 
+interface PostScoreRoutedReportInputs {
+  latestRun: RunResult;
+  primaryArtifacts: CandidateScoreArtifact[];
+  secondaryArtifacts: CandidateScoreArtifact[];
+  qualifiedArtifacts: CandidateScoreArtifact[];
+  reviewArtifacts: CandidateScoreArtifact[];
+  routingByCandidateId: Map<string, CandidateRoutingArtifact>;
+}
+
+function platformReportLabel(platform: SupportedPlatform): string {
+  return platform === '51job' ? '51JOB' : platform === 'liepin' ? '猎聘' : platform === 'zhilian' ? '智联' : 'BOSS';
+}
+
+async function loadPostScoreRoutedReportInputs(
+  platform: SupportedPlatform,
+  store: JobStore,
+  jobKey: string,
+  latestRun: RunResult,
+  scoreArtifacts: CandidateScoreArtifact[],
+): Promise<PostScoreRoutedReportInputs> {
+  const routing = latestRun.postScoreRouting;
+  if (!routing?.enabled) {
+    throw new Error(`Post-score routing facts are missing for the latest run of ${platform}/${jobKey}; refusing to send an unfiltered report`);
+  }
+  const qualifiedCandidateIds = routing.qualifiedCandidateIds;
+  const reviewCandidateIds = routing.reviewCandidateIds;
+  const rejectedCandidateIds = routing.rejectedCandidateIds;
+  const primaryCandidateIds = [...qualifiedCandidateIds, ...reviewCandidateIds];
+  const allAudienceIds = [...primaryCandidateIds, ...rejectedCandidateIds];
+  assertSameCandidateIds(allAudienceIds, [...new Set(allAudienceIds)], 'candidate groups');
+  const allAudienceIdSet = new Set(allAudienceIds);
+  const routingArtifacts = (await store.listCandidateRoutingArtifacts(platform, jobKey))
+    .filter((artifact) => artifact.policyHash === routing.policyHash && allAudienceIdSet.has(artifact.candidateId));
+  const routingByCandidateId = new Map<string, CandidateRoutingArtifact>();
+  for (const artifact of routingArtifacts) {
+    if (routingByCandidateId.has(artifact.candidateId)) {
+      throw new Error(`Multiple ${platform} routing facts exist for current candidate ${artifact.candidateId}; refusing to send a report`);
+    }
+    routingByCandidateId.set(artifact.candidateId, artifact);
+  }
+  assertSameCandidateIds([...routingByCandidateId.keys()], allAudienceIds, 'facts');
+  const assertAudience = (
+    candidateIds: readonly string[],
+    audience: ReportAudience,
+    classifications: readonly CandidateRoutingArtifact['classification'][],
+  ) => {
+    for (const candidateId of candidateIds) {
+      const artifact = routingByCandidateId.get(candidateId);
+      if (!artifact || artifact.audience !== audience || !classifications.includes(artifact.classification)) {
+        throw new Error(`${platform} routing fact for ${candidateId} is inconsistent with the ${audience} report`);
+      }
+    }
+  };
+  assertAudience(qualifiedCandidateIds, 'primary', ['qualified']);
+  assertAudience(reviewCandidateIds, 'primary', ['review']);
+  assertAudience(rejectedCandidateIds, 'secondary', ['rejected']);
+
+  const routedScoreArtifacts = scoreArtifacts.filter((artifact) => allAudienceIdSet.has(artifact.candidateId));
+  const artifactsByCandidateId = new Map(routedScoreArtifacts.map((artifact) => [artifact.candidateId, artifact]));
+  assertSameCandidateIds([...artifactsByCandidateId.keys()], allAudienceIds, 'score artifacts');
+  const artifactsFor = (candidateIds: readonly string[]) => candidateIds.map((candidateId) => {
+    const artifact = artifactsByCandidateId.get(candidateId);
+    const routingArtifact = routingByCandidateId.get(candidateId);
+    if (!artifact || !routingArtifact) throw new Error(`Missing current ${platform} score/routing artifact for ${candidateId}`);
+    if (!routingArtifact.scoredAt || artifact.scoredAt !== routingArtifact.scoredAt || artifact.status !== routingArtifact.scoreStatus) {
+      throw new Error(`${platform} score artifact for ${candidateId} is inconsistent with its routing fact`);
+    }
+    return artifact;
+  });
+  if (platform === 'zhilian') {
+    assertZhilianShareLinksAvailable(routedScoreArtifacts);
+    assertZhilianShareLinksUnique(routedScoreArtifacts);
+  }
+  return {
+    latestRun,
+    primaryArtifacts: artifactsFor(primaryCandidateIds),
+    secondaryArtifacts: artifactsFor(rejectedCandidateIds),
+    qualifiedArtifacts: artifactsFor(qualifiedCandidateIds),
+    reviewArtifacts: artifactsFor(reviewCandidateIds),
+    routingByCandidateId,
+  };
+}
+
+function renderCompactPostScoreRoutedCandidate(
+  platform: SupportedPlatform,
+  scoreArtifact: CandidateScoreArtifact,
+  routingArtifact: CandidateRoutingArtifact,
+  rank: number,
+): string {
+  const classificationLabel = routingArtifact.classification === 'qualified'
+    ? '明确符合'
+    : routingArtifact.classification === 'review' ? '需复核' : '明确否定';
+  const scoreLabel = scoreArtifact.status === 'success' ? `${scoreArtifact.score.totalScore} 分` : '评分失败';
+  const relevantOutcome = routingArtifact.classification === 'qualified'
+    ? 'satisfied' : routingArtifact.classification === 'review' ? 'unknown' : 'missing';
+  const relevantEvaluations = routingArtifact.requirementEvaluations.filter((evaluation) => evaluation.outcome === relevantOutcome);
+  const evidence = compactBossReportItems(relevantEvaluations.flatMap((evaluation) => evaluation.evidence));
+  const missingCriteria = compactBossReportItems(relevantEvaluations.flatMap((evaluation) => evaluation.missingCriteria));
+  const identity = platform === 'zhilian'
+    ? scoreArtifact.candidateShareUrl ?? scoreArtifact.candidateId
+    : scoreArtifact.candidateId;
+  const lines = [`${rank}. ${identity} ｜ ${scoreLabel} ｜ ${classificationLabel}`];
+  if (routingArtifact.classification === 'qualified') {
+    lines.push(`   - 满足依据：${evidence.length > 0 ? evidence.join('；') : compactBossReportText(routingArtifact.reason)}`);
+  } else if (routingArtifact.classification === 'review') {
+    lines.push(`   - 复核原因：${compactBossReportText(routingArtifact.reason)}`);
+    if (evidence.length > 0) lines.push(`   - 已有信息：${evidence.join('；')}`);
+  } else {
+    lines.push(`   - 缺失条件：${missingCriteria.length > 0 ? missingCriteria.join('；') : compactBossReportText(routingArtifact.reason)}`);
+    if (evidence.length > 0) lines.push(`   - 简历信息：${evidence.join('；')}`);
+  }
+  if (scoreArtifact.status === 'failed') {
+    lines.push(`   - 评分异常：${compactBossReportText(scoreArtifact.error)}`);
+  } else {
+    const risks = compactBossReportItems(scoreArtifact.score.risks);
+    if (risks.length > 0) lines.push(`   - 主要风险：${risks.join('；')}`);
+  }
+  return lines.join('\n');
+}
+
+function renderCompactPostScoreRoutedCandidates(
+  platform: SupportedPlatform,
+  scoreArtifacts: readonly CandidateScoreArtifact[],
+  routingByCandidateId: Map<string, CandidateRoutingArtifact>,
+): string {
+  if (scoreArtifacts.length === 0) return '本组没有候选人。';
+  return [...scoreArtifacts]
+    .sort(compareBossCompactReportArtifacts)
+    .map((scoreArtifact, index) => {
+      const routingArtifact = routingByCandidateId.get(scoreArtifact.candidateId);
+      if (!routingArtifact) throw new Error(`Missing ${platform} routing fact for ${scoreArtifact.candidateId}`);
+      return renderCompactPostScoreRoutedCandidate(platform, scoreArtifact, routingArtifact, index + 1);
+    })
+    .join('\n\n');
+}
+
+function buildPostScoreRoutedReportMarkdown(
+  platform: SupportedPlatform,
+  audience: ReportAudience,
+  jobRecord: Awaited<ReturnType<JobStore['readJobRecord']>>,
+  inputs: PostScoreRoutedReportInputs,
+): string {
+  const routing = inputs.latestRun.postScoreRouting!;
+  const label = platformReportLabel(platform);
+  if (audience === 'primary') {
+    return [
+      `# ${jobRecord.normalizedJob.title} ${label} 评分后分流报告（主）`,
+      '',
+      `- 明确符合：${routing.qualifiedCandidateIds.length}`,
+      `- 需复核：${routing.reviewCandidateIds.length}`,
+      '- 说明：本邮件仅保留分流依据和主要风险，完整评分仍保存在本地导出。',
+      '',
+      `## 明确符合（${routing.qualifiedCandidateIds.length}）`, '',
+      renderCompactPostScoreRoutedCandidates(platform, inputs.qualifiedArtifacts, inputs.routingByCandidateId),
+      '',
+      `## 需复核（${routing.reviewCandidateIds.length}）`, '',
+      renderCompactPostScoreRoutedCandidates(platform, inputs.reviewArtifacts, inputs.routingByCandidateId),
+      '',
+    ].join('\n');
+  }
+  return [
+    `# ${jobRecord.normalizedJob.title} ${label} 评分后分流报告（副）`, '',
+    `- 明确否定：${routing.rejectedCandidateIds.length}`,
+    '- 说明：本邮件仅保留分流依据和主要风险，完整评分仍保存在本地导出。', '',
+    `## 明确否定候选人（${routing.rejectedCandidateIds.length}）`, '',
+    renderCompactPostScoreRoutedCandidates(platform, inputs.secondaryArtifacts, inputs.routingByCandidateId), '',
+  ].join('\n');
+}
+
+async function sendPostScoreRoutedAudienceReport(input: {
+  platform: SupportedPlatform;
+  audience: ReportAudience;
+  jobRecord: Awaited<ReturnType<JobStore['readJobRecord']>>;
+  inputs: PostScoreRoutedReportInputs;
+  deliveryOverrides?: ReportDeliveryOptions;
+}): Promise<RoutedReportDeliverySummary> {
+  const { platform, audience, jobRecord, inputs, deliveryOverrides = {} } = input;
+  const artifacts = audience === 'primary' ? inputs.primaryArtifacts : inputs.secondaryArtifacts;
+  if (artifacts.length === 0) {
+    return {
+      jobKey: jobRecord.jobKey,
+      audience,
+      attempted: false,
+      delivered: false,
+      skipReason: audience === 'primary' ? 'no-primary-audience-candidates' : 'no-rejected-candidates',
+      summary: emptySummary(),
+    };
+  }
+  const routingFacts = inputs.latestRun.postScoreRouting!;
+  const immutableDelivery = routingFacts.reportDelivery?.[audience];
+  const storedDelivery = immutableDelivery ?? (audience === 'primary'
+    ? { recipientEmail: jobRecord.recipientEmail, ccEmails: jobRecord.ccEmails }
+    : jobRecord.postScoreRouting?.secondaryDelivery ?? {});
+  const delivery = resolveReportDelivery(storedDelivery, deliveryOverrides);
+  const exportData = aggregateJobResults({ jobRecord, scoreArtifacts: artifacts });
+  const subject = `【${platformReportLabel(platform)}】${buildJobReportEmailSubject(exportData.jobTitle, exportData.summary)}（${audience === 'primary' ? '主' : '副'}）`;
+  if (!delivery.recipientEmail) {
+    return {
+      jobKey: jobRecord.jobKey, audience, attempted: false, delivered: false, subject,
+      summary: exportData.summary,
+      error: `No ${audience} report recipient email found for ${platform} job ${jobRecord.jobKey}`,
+    };
+  }
+  try {
+    const result = await sendJobReportEmailRef.fn({
+      recipient: delivery.recipientEmail,
+      ccEmails: delivery.ccEmails,
+      subject,
+      markdown: buildPostScoreRoutedReportMarkdown(platform, audience, jobRecord, inputs),
+    });
+    return { jobKey: jobRecord.jobKey, audience, attempted: true, delivered: true, recipient: result.recipient, subject: result.subject, summary: exportData.summary };
+  } catch (error) {
+    return { jobKey: jobRecord.jobKey, audience, attempted: true, delivered: false, recipient: delivery.recipientEmail, subject, summary: exportData.summary, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** Sends primary (qualified + review) and secondary (rejected) reports for non-Boss platforms. */
+export async function sendPostScoreRoutedReportAudience(
+  platform: SupportedPlatform,
+  jobKey: string,
+  audience: ReportAudience,
+  deliveryOverrides: ReportDeliveryOptions = {},
+): Promise<RoutedReportDeliverySummary> {
+  const store = new JobStore();
+  const [jobRecord, runResults, scoreArtifacts] = await Promise.all([
+    store.readJobRecord(platform, jobKey),
+    store.listRunResults(platform, jobKey),
+    store.listStoredScoreArtifacts(platform, jobKey),
+  ]);
+  const latestRun = getLatestRunResult(runResults, jobKey);
+  const inputs = await loadPostScoreRoutedReportInputs(platform, store, jobKey, latestRun, scoreArtifacts);
+  return sendPostScoreRoutedAudienceReport({ platform, audience, jobRecord, inputs, deliveryOverrides });
+}
+
+export async function sendPostScoreRoutedReports(
+  platform: SupportedPlatform,
+  jobKey: string,
+  primaryDeliveryOverrides: ReportDeliveryOptions = {},
+  secondaryDeliveryOverrides: ReportDeliveryOptions = {},
+): Promise<SendPostScoreRoutedReportsSummary> {
+  const store = new JobStore();
+  const [jobRecord, runResults, scoreArtifacts] = await Promise.all([
+    store.readJobRecord(platform, jobKey),
+    store.listRunResults(platform, jobKey),
+    store.listStoredScoreArtifacts(platform, jobKey),
+  ]);
+  const latestRun = getLatestRunResult(runResults, jobKey);
+  const inputs = await loadPostScoreRoutedReportInputs(platform, store, jobKey, latestRun, scoreArtifacts);
+  const [primary, secondary] = await Promise.all([
+    sendPostScoreRoutedAudienceReport({ platform, audience: 'primary', jobRecord, inputs, deliveryOverrides: primaryDeliveryOverrides }),
+    sendPostScoreRoutedAudienceReport({ platform, audience: 'secondary', jobRecord, inputs, deliveryOverrides: secondaryDeliveryOverrides }),
+  ]);
+  return { jobKey, reportDeliveries: { primary, secondary } };
+}
+
 export async function sendJobReport(
   platform: SupportedPlatform,
   jobKey: string,
@@ -520,6 +779,11 @@ export async function sendJobReport(
   if (platform === 'boss' && latestRun.bossRouting?.enabled) {
     const audience = options.audience ?? 'primary';
     return sendBossRoutedReportAudience(jobKey, audience, deliveryOverrides);
+  }
+
+  if (platform !== 'boss' && latestRun.postScoreRouting?.enabled) {
+    const audience = options.audience ?? 'primary';
+    return sendPostScoreRoutedReportAudience(platform, jobKey, audience, deliveryOverrides);
   }
 
   const delivery = resolveReportDelivery({
