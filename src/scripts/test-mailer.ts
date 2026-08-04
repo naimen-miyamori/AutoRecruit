@@ -15,6 +15,7 @@ test('mailer accepts real mailbox domains and preserves CC recipients', async ()
       ccEmails: ['audit@163.com'],
       subject: 'subject',
       markdown: '# report',
+      messageId: '<stable-message-id@example.local>',
     },
     {
       sendMail: async (nextPayload) => {
@@ -37,6 +38,7 @@ test('mailer accepts real mailbox domains and preserves CC recipients', async ()
     cc: ['audit@163.com'],
     subject: 'subject',
     text: '# report',
+    messageId: '<stable-message-id@example.local>',
   });
 });
 

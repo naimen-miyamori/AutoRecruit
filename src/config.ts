@@ -248,7 +248,8 @@ export const config = {
   llm: {
     completionRoute: resolveLlmCompletionRoute(),
     codexSessionModel,
-    codexSessionTimeoutMs: getPositiveIntegerEnv('CODEX_SESSION_TIMEOUT_MS', 120000),
+    /** Bounds only app-server/process/protocol handshake phases, never model turn runtime. */
+    codexSessionConnectTimeoutMs: getPositiveIntegerEnv('CODEX_SESSION_CONNECT_TIMEOUT_MS', 30000),
     codexSessionMaxConcurrency: getPositiveIntegerEnv('CODEX_SESSION_MAX_CONCURRENCY', 1),
   },
   jdParsing: {

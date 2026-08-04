@@ -4,6 +4,11 @@ import path from 'node:path';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { config } from '../config.js';
+import type {
+  CodexSessionFailureDiagnostic,
+  CodexSessionFailureKind,
+  CodexSessionPhase,
+} from '../types/job.js';
 
 export interface CodexSessionCompletionRequest {
   featureName: string;
@@ -33,7 +38,25 @@ interface CodexAppServerSession {
   request(method: string, params: Record<string, unknown>): Promise<unknown>;
   notify(method: string, params: Record<string, unknown>): void;
   waitForTurn(threadId: string): Promise<string>;
+  setPhase(phase: CodexSessionPhase): void;
+  markTurnRunning(): void;
+  wrapError(error: unknown): CodexSessionProviderError;
   close(): Promise<void>;
+}
+
+export class CodexSessionProviderError extends Error {
+  constructor(
+    featureName: string,
+    detail: string,
+    readonly diagnostic: CodexSessionFailureDiagnostic,
+  ) {
+    super(`${featureName} Codex-session request failed: ${detail}`);
+    this.name = 'CodexSessionProviderError';
+  }
+}
+
+export function getCodexSessionFailureDiagnostic(error: unknown): CodexSessionFailureDiagnostic | undefined {
+  return error instanceof CodexSessionProviderError ? error.diagnostic : undefined;
 }
 
 const ALLOWED_ITEM_TYPES = new Set([
@@ -202,17 +225,13 @@ function getThreadId(result: unknown): string {
   return getString((thread as { id?: unknown }).id, '');
 }
 
-function makeProviderError(featureName: string, detail: string): Error {
-  return new Error(`${featureName} Codex-session request failed: ${detail}`);
-}
-
-function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
+function spawnCodexAppServer(): ChildProcessWithoutNullStreams {
   const environment = { ...process.env };
   delete environment.OPENAI_API_KEY;
   delete environment.OPENAI_BASE_URL;
   delete environment.OPENAI_MODEL;
 
-  const child = spawn('codex', [
+  return spawn('codex', [
     'app-server',
     '--stdio',
     '--disable', 'web_search_request',
@@ -223,8 +242,24 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
     windowsHide: true,
     env: environment,
   }) as ChildProcessWithoutNullStreams;
+}
+
+/** Narrow injection seam for protocol lifecycle tests; production always uses the local Codex binary. */
+export const codexSessionRuntimeRef: {
+  spawn: () => ChildProcessWithoutNullStreams;
+  connectTimeoutMs: () => number;
+  now: () => number;
+} = {
+  spawn: spawnCodexAppServer,
+  connectTimeoutMs: () => config.llm.codexSessionConnectTimeoutMs,
+  now: () => Date.now(),
+};
+
+function createCodexAppServerSession(featureName: string, connectTimeoutMs: number): CodexAppServerSession {
+  const child = codexSessionRuntimeRef.spawn();
 
   let closed = false;
+  let terminal = false;
   let requestId = 0;
   let turnComplete: ((value: string) => void) | undefined;
   let turnFailed: ((reason: Error) => void) | undefined;
@@ -232,8 +267,41 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
   let activeThreadId = '';
   const pending = new Map<number, PendingRequest>();
   let stderr = '';
+  const startedAtMs = codexSessionRuntimeRef.now();
+  let phase: CodexSessionPhase = 'process-starting';
+  let firstOutputObserved = false;
+  let lastProtocolActivityAt: string | undefined;
+  let connectionTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearConnectionTimer = () => {
+    if (connectionTimer) clearTimeout(connectionTimer);
+    connectionTimer = undefined;
+  };
+
+  const diagnostic = (
+    kind: CodexSessionFailureKind,
+    retryable: boolean,
+  ): CodexSessionFailureDiagnostic => ({
+    provider: 'codex-session',
+    kind,
+    phase,
+    retryable,
+    firstOutputObserved,
+    elapsedMs: Math.max(0, codexSessionRuntimeRef.now() - startedAtMs),
+    occurredAt: new Date(codexSessionRuntimeRef.now()).toISOString(),
+    ...(lastProtocolActivityAt ? { lastProtocolActivityAt } : {}),
+  });
+
+  const providerError = (
+    kind: CodexSessionFailureKind,
+    detail: string,
+    retryable = true,
+  ) => new CodexSessionProviderError(featureName, detail, diagnostic(kind, retryable));
 
   const rejectAll = (error: Error) => {
+    if (terminal) return;
+    terminal = true;
+    clearConnectionTimer();
     for (const pendingRequest of pending.values()) {
       pendingRequest.reject(error);
     }
@@ -243,8 +311,32 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
     turnComplete = undefined;
   };
 
+  const armConnectionTimer = () => {
+    clearConnectionTimer();
+    if (closed || terminal || phase === 'turn-running' || phase === 'completed') return;
+    connectionTimer = setTimeout(() => {
+      rejectAll(providerError(
+        'connection-timeout',
+        `Codex App Server did not complete phase ${phase} within ${connectTimeoutMs}ms`,
+      ));
+      child.kill();
+    }, connectTimeoutMs);
+  };
+
+  const setPhase = (nextPhase: CodexSessionPhase) => {
+    if (phase === 'completed' || terminal) return;
+    phase = nextPhase;
+    armConnectionTimer();
+  };
+
+  const markTurnRunning = () => {
+    if (phase === 'completed' || terminal) return;
+    phase = 'turn-running';
+    clearConnectionTimer();
+  };
+
   const failForToolUse = () => {
-    const error = new Error('Codex session attempted a disabled tool');
+    const error = providerError('policy-violation', 'Codex session attempted a disabled tool', false);
     if (activeThreadId) {
       try {
         write({ method: 'turn/interrupt', params: { threadId: activeThreadId } });
@@ -257,18 +349,32 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
 
   const write = (message: JsonRpcMessage) => {
     if (closed || !child.stdin.writable) {
-      throw new Error('Codex App Server is not available');
+      throw providerError('process-error', 'Codex App Server is not available');
     }
     child.stdin.write(`${JSON.stringify(message)}\n`);
   };
 
   const handleMessage = (message: JsonRpcMessage) => {
+    lastProtocolActivityAt = new Date(codexSessionRuntimeRef.now()).toISOString();
+
+    if (message.method === 'turn/started') {
+      markTurnRunning();
+      return;
+    }
+
     if (typeof message.id === 'number') {
       const pendingRequest = pending.get(message.id);
       if (!pendingRequest) return;
       pending.delete(message.id);
+      // A response completes this handshake phase. The caller immediately
+      // advances to the next phase (or marks the turn running); unrelated
+      // notifications must never extend the phase's absolute timeout.
+      clearConnectionTimer();
       if (message.error) {
-        pendingRequest.reject(new Error(getString(message.error.message, 'Codex App Server request failed')));
+        pendingRequest.reject(providerError(
+          'request-error',
+          getString(message.error.message, 'Codex App Server request failed'),
+        ));
       } else {
         pendingRequest.resolve(message.result);
       }
@@ -276,6 +382,7 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
     }
 
     if (message.method === 'item/started' || message.method === 'item/completed') {
+      markTurnRunning();
       const item = message.params?.item;
       if (isForbiddenCodexToolItem(item)) {
         failForToolUse();
@@ -283,28 +390,41 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
       }
 
       const text = getItemText(item);
-      if (text) turnText = text;
+      if (text) {
+        firstOutputObserved = true;
+        turnText = text;
+      }
       return;
     }
 
     if (message.method === 'item/agentMessage/delta') {
+      markTurnRunning();
       const delta = message.params?.delta;
-      if (typeof delta === 'string') turnText += delta;
+      if (typeof delta === 'string') {
+        firstOutputObserved = firstOutputObserved || delta.length > 0;
+        turnText += delta;
+      }
       return;
     }
 
     if (message.method === 'turn/completed') {
+      markTurnRunning();
       const turn = message.params?.turn as { status?: unknown; error?: unknown } | undefined;
       const status = getString(turn?.status, 'failed');
       if (status !== 'completed') {
-        turnFailed?.(new Error(getErrorMessage(turn?.error, `Codex turn ended with status ${status}`)));
+        turnFailed?.(providerError(
+          'turn-failed',
+          getErrorMessage(turn?.error, `Codex turn ended with status ${status}`),
+        ));
       } else if (turnText.trim()) {
         turnComplete?.(turnText.trim());
       } else {
-        turnFailed?.(new Error('Codex session returned empty text output'));
+        turnFailed?.(providerError('empty-output', 'Codex session returned empty text output'));
       }
       turnFailed = undefined;
       turnComplete = undefined;
+      phase = 'completed';
+      clearConnectionTimer();
     }
   };
 
@@ -312,23 +432,26 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
     try {
       handleMessage(JSON.parse(line) as JsonRpcMessage);
     } catch {
-      rejectAll(new Error('Codex App Server produced an invalid protocol message'));
+      rejectAll(providerError('protocol-error', 'Codex App Server produced an invalid protocol message'));
     }
   });
   createInterface({ input: child.stderr }).on('line', (line) => {
     stderr = `${stderr}${line}\n`.slice(-1000);
   });
-  child.once('error', (error) => rejectAll(error));
+  child.once('error', (error) => rejectAll(providerError('process-error', error.message)));
   child.once('exit', (code) => {
     if (!closed) {
-      rejectAll(new Error(`Codex App Server exited (${code ?? 'unknown'}): ${stderr.trim() || 'no diagnostic available'}`));
+      const kind: CodexSessionFailureKind = phase === 'turn-running'
+        ? 'turn-interrupted'
+        : 'process-exit';
+      rejectAll(providerError(
+        kind,
+        `Codex App Server exited (${code ?? 'unknown'}): ${stderr.trim() || 'no diagnostic available'}`,
+      ));
     }
   });
 
-  const deadline = setTimeout(() => {
-    rejectAll(new Error(`Codex session exceeded ${timeoutMs}ms`));
-    child.kill();
-  }, timeoutMs);
+  armConnectionTimer();
 
   return {
     request(method, params) {
@@ -340,7 +463,9 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
           write({ id, method, params });
         } catch (error) {
           pending.delete(id);
-          reject(error instanceof Error ? error : new Error(String(error)));
+          reject(error instanceof CodexSessionProviderError
+            ? error
+            : providerError('process-error', getErrorMessage(error, 'Codex App Server write failed')));
         }
       });
     },
@@ -354,10 +479,17 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
         turnFailed = reject;
       });
     },
+    setPhase,
+    markTurnRunning,
+    wrapError(error) {
+      return error instanceof CodexSessionProviderError
+        ? error
+        : providerError('request-error', getErrorMessage(error, 'unknown error'));
+    },
     async close() {
       if (closed) return;
       closed = true;
-      clearTimeout(deadline);
+      clearConnectionTimer();
       child.stdin.end();
       child.kill();
     },
@@ -367,9 +499,10 @@ function createCodexAppServerSession(timeoutMs: number): CodexAppServerSession {
 async function completeTextFromCodexSessionImpl(request: CodexSessionCompletionRequest): Promise<string> {
   const release = await semaphore.acquire();
   const scratchDirectory = await mkdtemp(path.join(tmpdir(), 'autorecruit-codex-session-'));
-  const session = createCodexAppServerSession(config.llm.codexSessionTimeoutMs);
+  const session = createCodexAppServerSession(request.featureName, codexSessionRuntimeRef.connectTimeoutMs());
 
   try {
+    session.setPhase('initializing');
     await session.request('initialize', {
       clientInfo: {
         name: 'autorecruit',
@@ -378,6 +511,7 @@ async function completeTextFromCodexSessionImpl(request: CodexSessionCompletionR
       },
     });
     session.notify('initialized', {});
+    session.setPhase('thread-starting');
     const started = await session.request('thread/start', {
       serviceName: 'autorecruit_llm_route',
       approvalPolicy: 'never',
@@ -398,6 +532,7 @@ async function completeTextFromCodexSessionImpl(request: CodexSessionCompletionR
       throw new Error('Codex session did not return a usable thread ID');
     }
 
+    session.setPhase('turn-starting');
     const turn = session.waitForTurn(threadId);
     await session.request('turn/start', {
       threadId,
@@ -414,9 +549,13 @@ async function completeTextFromCodexSessionImpl(request: CodexSessionCompletionR
       ...(config.llm.codexSessionModel ? { model: config.llm.codexSessionModel } : {}),
       ...(request.outputSchema ? { outputSchema: toCodexStrictOutputSchema(request.outputSchema) } : {}),
     });
+    // The request acknowledgement is sufficient evidence that the turn is in
+    // progress. Once here there is deliberately no wall-clock model timeout;
+    // only explicit protocol/process outcomes can end the operation.
+    session.markTurnRunning();
     return normalizeStructuredOutputText(await turn, request.outputSchema);
   } catch (error) {
-    throw makeProviderError(request.featureName, getErrorMessage(error, 'unknown error'));
+    throw session.wrapError(error);
   } finally {
     await session.close();
     await rm(scratchDirectory, { recursive: true, force: true });

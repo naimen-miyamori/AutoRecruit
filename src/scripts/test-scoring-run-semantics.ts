@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +15,7 @@ import { clickSearchTriggerRef, findSubscriptionCardRef, openAuthenticatedSubscr
 import { BrowserSession, closeBrowserSessionRef, createFreshBrowserSessionRef, createPersistentBrowserSessionRef, isLiepinReusableBrowserEnabled, isReusableBrowserEnabled, openLoginSessionRef, persistBrowserSessionRef, openAuthenticatedSubscribePageRef as openAuthenticatedSubscribePageSessionRef, resolveBrowserHeadless, verifyPersistedBrowserSessionRef } from '../browser/session.js';
 import { validateCandidateListExtraction } from '../extraction/extractor.js';
 import { resolveOpenAISettings } from '../llm/openai-client.js';
+import { CodexSessionProviderError } from '../llm/codex-session-provider.js';
 import { liepinAdapter } from '../platforms/liepin-adapter.js';
 import {
   BossForwardPreConfirmationError,
@@ -29,7 +31,9 @@ import { hashBossScreeningPolicy } from '../scoring/boss-screening.js';
 import { extractCandidateScoreFromTextResponse } from '../scoring/score-resume.js';
 import { openResumeByUrl } from './capture-resume-dom-snapshot.js';
 import { runManualLoginSessionSave } from './login-and-save-session.js';
+import { sendJobReportEmailRef } from './send-job-report-email.js';
 import type { AllPlatformsRunSummary, BatchJobRunSummary, MainResult } from '../index.js';
+import type { BossCandidateRoutingArtifact, BossRejectionEmailOutboxEntry } from '../types/job.js';
 
 const tempDirs: string[] = [];
 const originalDataDir = config.dataDir;
@@ -141,12 +145,8 @@ function buildModelScreeningSettings() {
       criteria: ['简历存在明确证据。'],
       insufficientEvidence: ['缺少明确证据。'],
     }],
-    secondaryForwarding: {
-      mode: 'email' as const,
-      recipient: 'secondary@example.com',
-    },
     secondaryDelivery: {
-      recipientEmail: 'secondary-report@example.com',
+      recipientEmail: 'secondary-report@outlook.com',
     },
   };
 }
@@ -5686,7 +5686,7 @@ describe('scoring run semantics', () => {
     assert.deepEqual(result.runResult.scoredCandidates, []);
   });
 
-  it('routes enabled Boss screening after parse, seen, and scoring without using the legacy forwarding hook', async () => {
+  it('closes Boss capture detail before scoring, reopens only decided primary routes, and keeps score failures pending', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
     const store = new indexModule.JobStore();
@@ -5726,11 +5726,28 @@ describe('scoring run semantics', () => {
           pr: [candidate.candidateId],
         };
       },
+      closeResumeDetail: async (_searchPage, _detailPage, candidate) => {
+        callOrder.push(`close:${candidate.candidateId}`);
+      },
     } satisfies import('../platforms/types.js').PlatformAdapter;
+    const interruptedDiagnostic = {
+      provider: 'codex-session' as const,
+      kind: 'turn-interrupted' as const,
+      phase: 'turn-running' as const,
+      retryable: true,
+      firstOutputObserved: true,
+      elapsedMs: 125_000,
+      occurredAt: '2026-07-31T12:36:00.000Z',
+      lastProtocolActivityAt: '2026-07-31T12:35:59.000Z',
+    };
     indexModule.scoreAndEvaluateBossScreeningRef.fn = async ({ resume }) => {
       callOrder.push(`score:${resume.candidateId}`);
       if (resume.candidateId === 'boss-score-failed') {
-        throw new Error('screening model unavailable');
+        throw new CodexSessionProviderError(
+          'boss-screening',
+          'Codex App Server exited while the turn was running',
+          interruptedDiagnostic,
+        );
       }
       const outcome = resume.candidateId === 'boss-rejected'
         ? 'missing'
@@ -5745,69 +5762,121 @@ describe('scoring run semantics', () => {
     indexModule.forwardBossResumeRef.fn = async (_page, candidate, mode, recipient, _actionMode, ccEmails) => {
       callOrder.push(`forward:${candidate.candidateId}:${mode}:${recipient}:${ccEmails?.join(',') ?? ''}`);
     };
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    const rejectionEmails: Array<{ recipient: string; subject: string; markdown: string; messageId?: string }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, subject, markdown, messageId }) => {
+      const persisted = (await store.listBossRejectionEmailOutboxEntries('boss', jobKey))
+        .find((entry) => entry.candidateId === 'boss-rejected');
+      assert.ok(persisted?.detailClosedAt, 'verified detail-close proof must be persisted before SMTP');
+      assert.equal(persisted.status, 'sending');
+      rejectionEmails.push({ recipient, subject, markdown, messageId });
+      return { recipient, subject };
+    };
 
-    const result = await indexModule.runResumeCaptureFlow(
-      'boss',
-      jobKey,
-      buildNormalizedJob(),
-      '物业电工',
-      store,
-      {
-        page: { id: 'root-page' },
-        context: { id: 'browser-context' },
-      } as never,
-      fetchedAt,
-      adapter,
-      {
-        searchSource: 'direct',
-        bossForwardMode: 'email',
-        bossForwardRecipient: 'primary-forward@example.com',
-        bossForwardCc: ['primary-forward-audit@example.com'],
-        bossScreening: {
-          ...buildModelScreeningSettings(),
-          secondaryForwarding: {
-            ...buildModelScreeningSettings().secondaryForwarding,
-            ccEmails: ['secondary-forward-audit@example.com'],
+    let result: Awaited<ReturnType<typeof indexModule.runResumeCaptureFlow>>;
+    try {
+      result = await indexModule.runResumeCaptureFlow(
+        'boss',
+        jobKey,
+        buildNormalizedJob(),
+        '物业电工',
+        store,
+        {
+          page: { id: 'root-page' },
+          context: { id: 'browser-context' },
+        } as never,
+        fetchedAt,
+        adapter,
+        {
+          searchSource: 'direct',
+          bossForwardMode: 'email',
+          bossForwardRecipient: 'primary-forward@example.com',
+          bossForwardCc: ['primary-forward-audit@example.com'],
+          bossScreening: {
+            ...buildModelScreeningSettings(),
           },
         },
-      },
-    );
+      );
+      const rerun = await indexModule.runResumeCaptureFlow(
+        'boss',
+        jobKey,
+        buildNormalizedJob(),
+        '物业电工',
+        store,
+        {
+          page: { id: 'root-page' },
+          context: { id: 'browser-context' },
+        } as never,
+        fetchedAt,
+        adapter,
+        {
+          searchSource: 'direct',
+          bossForwardMode: 'email',
+          bossForwardRecipient: 'primary-forward@example.com',
+          bossForwardCc: ['primary-forward-audit@example.com'],
+          bossScreening: buildModelScreeningSettings(),
+        },
+      );
+      assert.equal(rejectionEmails.length, 1);
+      assert.deepEqual(rerun.runResult.bossRouting?.rejectionEmailStatusCounts, {});
+    } finally {
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+    }
 
     assert.deepStrictEqual(callOrder, [
       'open:boss-qualified',
       'parse:boss-qualified',
       'seen:boss-qualified',
+      'close:boss-qualified',
       'score:boss-qualified',
+      'open:boss-qualified',
       'forward:boss-qualified:email:primary-forward@example.com:',
       'forward:boss-qualified:email:primary-forward-audit@example.com:',
+      'close:boss-qualified',
       'open:boss-review',
       'parse:boss-review',
       'seen:boss-review',
+      'close:boss-review',
       'score:boss-review',
+      'open:boss-review',
       'forward:boss-review:email:primary-forward@example.com:',
       'forward:boss-review:email:primary-forward-audit@example.com:',
+      'close:boss-review',
       'open:boss-rejected',
       'parse:boss-rejected',
       'seen:boss-rejected',
+      'close:boss-rejected',
       'score:boss-rejected',
-      'forward:boss-rejected:email:secondary@example.com:',
-      'forward:boss-rejected:email:secondary-forward-audit@example.com:',
       'open:boss-score-failed',
       'parse:boss-score-failed',
       'seen:boss-score-failed',
+      'close:boss-score-failed',
       'score:boss-score-failed',
-      'forward:boss-score-failed:email:primary-forward@example.com:',
-      'forward:boss-score-failed:email:primary-forward-audit@example.com:',
+      'open:boss-score-failed',
+      'parse:boss-score-failed',
+      'seen:boss-score-failed',
+      'close:boss-score-failed',
+      'score:boss-score-failed',
     ]);
     assert.equal(callOrder.includes('legacy-forward'), false);
     assert.deepStrictEqual(result.runResult.bossRouting, {
       enabled: true,
       policyHash: result.runResult.bossRouting?.policyHash,
       qualifiedCandidateIds: ['boss-qualified'],
-      reviewCandidateIds: ['boss-review', 'boss-score-failed'],
+      reviewCandidateIds: ['boss-review'],
       rejectedCandidateIds: ['boss-rejected'],
-      forwardingStatusCounts: { sent: 4 },
+      pendingScoreCandidateIds: ['boss-score-failed'],
+      scoreFailureStatusCounts: { 'turn-interrupted@turn-running': 1 },
+      forwardingStatusCounts: { sent: 2 },
+      rejectionEmailStatusCounts: { sent: 1 },
     });
+    assert.equal(result.runResult.detailAttemptCount, 6);
+    assert.equal(rejectionEmails.length, 1);
+    assert.equal(rejectionEmails[0]?.recipient, 'secondary-report@outlook.com');
+    assert.match(rejectionEmails[0]?.subject ?? '', /明确否定/);
+    assert.match(rejectionEmails[0]?.markdown ?? '', /模型明确判断/);
+    assert.match(rejectionEmails[0]?.markdown ?? '', /boss-rejected/);
+    assert.match(rejectionEmails[0]?.messageId ?? '', /autorecruit-boss-rejection/);
     assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), [
       'boss-qualified',
       'boss-review',
@@ -5819,12 +5888,461 @@ describe('scoring run semantics', () => {
       ['boss-qualified', 'qualified', 'primary'],
       ['boss-review', 'review', 'primary'],
       ['boss-rejected', 'rejected', 'secondary'],
-      ['boss-score-failed', 'review', 'primary'],
     ]);
+    assert.equal(await store.readBossForwardingOutboxEntry('boss', jobKey, 'boss-score-failed'), undefined);
+    assert.equal((await store.listBossRejectionEmailOutboxEntries('boss', jobKey))
+      .some((entry) => entry.candidateId === 'boss-score-failed'), false);
+    const pendingItems = await store.listBossScreeningWorkItems('boss', jobKey);
+    assert.deepStrictEqual(pendingItems.map((item) => ({
+      candidateId: item.candidateId,
+      scoreAttemptCount: item.scoreAttemptCount,
+      lastError: item.lastScoreFailure?.error,
+      diagnostic: item.lastScoreFailure?.diagnostic,
+    })), [{
+      candidateId: 'boss-score-failed',
+      scoreAttemptCount: 2,
+      lastError: 'boss-screening Codex-session request failed: Codex App Server exited while the turn was running',
+      diagnostic: interruptedDiagnostic,
+    }]);
     assert.deepStrictEqual(result.runResult.failedCandidates, [{
       candidateId: 'boss-score-failed',
-      error: 'screening model unavailable',
+      error: 'boss-screening Codex-session request failed: Codex App Server exited while the turn was running',
+      diagnostic: interruptedDiagnostic,
     }]);
+  });
+
+  it('fails rejection-email preflight before SMTP and never retries an uncertain send', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-rejection-email-recovery';
+    const routingArtifact: BossCandidateRoutingArtifact = {
+      routingDecisionId: 'rejection-recovery-decision',
+      candidateId: 'rejection-recovery-candidate',
+      fetchedAt: '2026-08-01T01:00:00.000Z',
+      decidedAt: '2026-08-01T01:01:00.000Z',
+      policyHash: 'rejection-recovery-policy',
+      scoreStatus: 'success',
+      classification: 'rejected',
+      audience: 'secondary',
+      requirementEvaluations: [],
+      matchedRequirementIds: [],
+      unknownRequirementIds: [],
+      reason: '明确否定。',
+      deliveryKind: 'rejection-email',
+    };
+    const baseEntry: BossRejectionEmailOutboxEntry = {
+      version: 1,
+      deliveryId: 'rejection-recovery-delivery',
+      candidateId: routingArtifact.candidateId,
+      routingDecisionId: routingArtifact.routingDecisionId!,
+      routingArtifact,
+      policyHash: routingArtifact.policyHash,
+      recipientEmail: 'secondary@outlook.com',
+      ccEmails: [],
+      messageId: '<rejection-recovery-delivery@autorecruit.local>',
+      subject: '明确否定',
+      markdown: '完整简历',
+      contentHash: 'content-hash',
+      status: 'pending',
+      createdAt: routingArtifact.decidedAt,
+      updatedAt: routingArtifact.decidedAt,
+    };
+    let sendCalls = 0;
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    sendJobReportEmailRef.fn = async () => {
+      sendCalls += 1;
+      return { recipient: baseEntry.recipientEmail, subject: baseEntry.subject };
+    };
+    try {
+      await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, baseEntry);
+      const invalid = await indexModule.executeBossRejectionEmailDeliveryRef.fn(
+        store,
+        jobKey,
+        { ...baseEntry, deliveryId: 'rejection-preflight-delivery', recipientEmail: 'invalid-address' },
+      );
+      assert.equal(invalid.status, 'superseded');
+      assert.equal(sendCalls, 0);
+      assert.match(invalid.error ?? '', /no SMTP call was attempted/);
+      assert.doesNotMatch(invalid.error ?? '', /invalid-address/);
+
+      const smtpConfig = { ...config.smtp };
+      try {
+        Object.assign(config.smtp, { host: '', user: '', pass: '', from: '' });
+        sendJobReportEmailRef.fn = originalSendJobReportEmail;
+        const smtpFailure = await indexModule.executeBossRejectionEmailDeliveryRef.fn(
+          store,
+          jobKey,
+          {
+            ...baseEntry,
+            deliveryId: 'rejection-smtp-config-delivery',
+            contentHash: createHash('sha256').update(baseEntry.markdown).digest('hex'),
+          },
+        );
+        assert.equal(smtpFailure.status, 'retryable-failed');
+        assert.match(smtpFailure.error ?? '', /SMTP configuration is incomplete/);
+      } finally {
+        Object.assign(config.smtp, smtpConfig);
+      }
+      sendJobReportEmailRef.fn = async () => {
+        sendCalls += 1;
+        return { recipient: baseEntry.recipientEmail, subject: baseEntry.subject };
+      };
+
+      const sending = { ...baseEntry, status: 'sending' as const, deliveryId: 'rejection-uncertain-delivery' };
+      await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, sending);
+      const recovered = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, sending);
+      assert.equal(recovered.status, 'uncertain');
+      const retried = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, recovered);
+      assert.equal(retried.status, 'uncertain');
+      assert.equal(sendCalls, 0);
+    } finally {
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+    }
+  });
+
+  it('requires formal policy migration for an old in-flight rejection email before browser work', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-old-policy-email';
+    const candidateId = 'boss-old-policy-email';
+    const decidedAt = '2026-08-01T02:30:00.000Z';
+    const routingArtifact: BossCandidateRoutingArtifact = {
+      routingDecisionId: 'old-policy-email-decision',
+      candidateId,
+      fetchedAt: decidedAt,
+      decidedAt,
+      policyHash: 'old-policy-hash',
+      scoreStatus: 'success',
+      classification: 'rejected',
+      audience: 'secondary',
+      requirementEvaluations: [],
+      matchedRequirementIds: [],
+      unknownRequirementIds: [],
+      reason: '明确否定。',
+      deliveryKind: 'rejection-email',
+    };
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, {
+      version: 1,
+      deliveryId: 'old-policy-email-delivery',
+      candidateId,
+      routingDecisionId: routingArtifact.routingDecisionId!,
+      routingArtifact,
+      policyHash: routingArtifact.policyHash,
+      recipientEmail: 'secondary-report@outlook.com',
+      ccEmails: [],
+      messageId: '<old-policy-email-delivery@autorecruit.local>',
+      subject: '明确否定',
+      markdown: '完整简历',
+      contentHash: createHash('sha256').update('完整简历').digest('hex'),
+      status: 'sending',
+      createdAt: decidedAt,
+      updatedAt: decidedAt,
+      attemptedAt: decidedAt,
+      detailClosedAt: decidedAt,
+    });
+    let searchCalls = 0;
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => {
+        searchCalls += 1;
+        return createSearchPage();
+      },
+      openSubscribeSearch: async () => createSearchPage(),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    await assert.rejects(
+      indexModule.runResumeCaptureFlow(
+        'boss', jobKey, buildNormalizedJob(), '物业电工', store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        decidedAt, adapter, {
+          searchSource: 'direct',
+          bossForwardMode: 'email',
+          bossForwardRecipient: 'primary-forward@example.com',
+          bossScreening: buildModelScreeningSettings(),
+        },
+      ),
+      /migrate:boss-model-screening before opening the browser/,
+    );
+    assert.equal(searchCalls, 0);
+    assert.equal((await store.readBossRejectionEmailOutboxEntry('boss', jobKey, 'old-policy-email-delivery'))?.status, 'sending');
+  });
+
+  it('does not send a rejection email when persisting the closed-detail delivery outbox fails', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-close-proof-failure';
+    const candidateId = 'boss-close-proof-failure';
+    const originalSave = store.saveBossRejectionEmailOutboxEntry.bind(store);
+    store.saveBossRejectionEmailOutboxEntry = async (platform, key, entry) => {
+      if (entry.detailClosedAt) throw new Error('simulated detail-close proof persistence failure');
+      return originalSave(platform, key, entry);
+    };
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [{ candidateId }] }),
+      openResumeDetail: async () => createDetailPage(),
+      parseResumeDetail: async () => buildResume(candidateId),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async () => ({
+      score: buildScore(),
+      evaluations: [buildModelRequirementEvaluation('missing', candidateId)],
+    });
+    let sendCalls = 0;
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    sendJobReportEmailRef.fn = async ({ recipient, subject }) => {
+      sendCalls += 1;
+      return { recipient, subject };
+    };
+
+    try {
+      const result = await indexModule.runResumeCaptureFlow(
+        'boss',
+        jobKey,
+        buildNormalizedJob(),
+        '物业电工',
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-01T03:00:00.000Z',
+        adapter,
+        {
+          searchSource: 'direct',
+          bossForwardMode: 'email',
+          bossForwardRecipient: 'primary-forward@example.com',
+          bossScreening: buildModelScreeningSettings(),
+        },
+      );
+      assert.equal(sendCalls, 0);
+      const entries = await store.listBossRejectionEmailOutboxEntries('boss', jobKey);
+      assert.equal(entries.length, 0);
+      assert.deepStrictEqual(result.runResult.processingFailures, [{
+        candidateId,
+        stage: 'routing',
+        error: 'simulated detail-close proof persistence failure',
+      }]);
+      assert.equal((await store.listBossScreeningWorkItems('boss', jobKey)).length, 1);
+    } finally {
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+    }
+  });
+
+  it('recovers a rejected email after its embedded routing artifact write was interrupted', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-rejection-artifact-recovery';
+    const candidate = { candidateId: 'boss-rejection-artifact-recovery' };
+    let visibleCandidates = [candidate];
+    let scoreCalls = 0;
+    let sendCalls = 0;
+    let failArtifactWrite = true;
+    const originalSaveArtifact = store.saveBossCandidateRoutingArtifact.bind(store);
+    store.saveBossCandidateRoutingArtifact = async (...args) => {
+      if (failArtifactWrite) throw new Error('simulated rejection routing artifact interruption');
+      return originalSaveArtifact(...args);
+    };
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: visibleCandidates }),
+      openResumeDetail: async () => createDetailPage(),
+      parseResumeDetail: async () => buildResume(candidate.candidateId),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async () => {
+      scoreCalls += 1;
+      return {
+        score: buildScore(),
+        evaluations: [buildModelRequirementEvaluation('missing', candidate.candidateId)],
+      };
+    };
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    sendJobReportEmailRef.fn = async ({ recipient, subject }) => {
+      sendCalls += 1;
+      return { recipient, subject };
+    };
+    const options = {
+      searchSource: 'direct' as const,
+      bossForwardMode: 'email' as const,
+      bossForwardRecipient: 'primary-forward@example.com',
+      bossScreening: buildModelScreeningSettings(),
+    };
+
+    try {
+      const first = await indexModule.runResumeCaptureFlow(
+        'boss', jobKey, buildNormalizedJob(), '物业电工', store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-01T03:10:00.000Z', adapter, options,
+      );
+      assert.equal(scoreCalls, 1);
+      assert.equal(sendCalls, 0);
+      assert.match(first.runResult.failedCandidates.at(-1)?.error ?? '', /routing artifact interruption/);
+      assert.deepStrictEqual(first.runResult.processingFailures, [{
+        candidateId: candidate.candidateId,
+        stage: 'routing',
+        error: 'simulated rejection routing artifact interruption',
+      }]);
+      const pending = (await store.listBossRejectionEmailOutboxEntries('boss', jobKey))[0];
+      assert.equal(pending?.status, 'pending');
+      assert.ok(pending?.detailClosedAt, 'the close proof must survive a later routing-artifact failure');
+      assert.equal((await store.listBossCandidateRoutingArtifacts('boss', jobKey)).length, 0);
+
+      failArtifactWrite = false;
+      visibleCandidates = [];
+      const recovered = await indexModule.runResumeCaptureFlow(
+        'boss', jobKey, buildNormalizedJob(), '物业电工', store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-01T03:11:00.000Z', adapter, options,
+      );
+      assert.equal(scoreCalls, 1);
+      assert.equal(sendCalls, 1);
+      assert.deepStrictEqual(recovered.runResult.bossRouting?.rejectedCandidateIds, [candidate.candidateId]);
+      assert.deepStrictEqual(recovered.runResult.bossRouting?.rejectionEmailStatusCounts, { sent: 1 });
+      assert.equal((await store.listBossCandidateRoutingArtifacts('boss', jobKey)).length, 1);
+      assert.equal((await store.listBossRejectionEmailOutboxEntries('boss', jobKey))[0]?.status, 'sent');
+    } finally {
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+    }
+  });
+
+  it('reports recovered rejection email outcomes even when the candidate is absent and already indexed', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-recovered-email-audit';
+    const candidateId = 'boss-recovered-email-off-page';
+    const screening = buildModelScreeningSettings();
+    const policyHash = hashBossScreeningPolicy(screening);
+    const decidedAt = '2026-08-01T04:00:00.000Z';
+    const routingDecisionId = 'recovered-email-routing-decision';
+    const routingArtifact: BossCandidateRoutingArtifact = {
+      routingDecisionId,
+      candidateId,
+      fetchedAt: decidedAt,
+      decidedAt,
+      policyHash,
+      scoreStatus: 'success',
+      classification: 'rejected',
+      audience: 'secondary',
+      requirementEvaluations: [],
+      matchedRequirementIds: [],
+      unknownRequirementIds: [],
+      reason: '明确否定。',
+      deliveryKind: 'rejection-email',
+    };
+    const markdown = '完整结构化简历';
+    const outbox: BossRejectionEmailOutboxEntry = {
+      version: 1,
+      deliveryId: 'recovered-email-delivery',
+      candidateId,
+      routingDecisionId,
+      routingArtifact,
+      policyHash,
+      recipientEmail: 'secondary-report@outlook.com',
+      ccEmails: [],
+      messageId: '<recovered-email-delivery@autorecruit.local>',
+      subject: '明确否定',
+      markdown,
+      contentHash: createHash('sha256').update(markdown).digest('hex'),
+      status: 'retryable-failed',
+      createdAt: decidedAt,
+      updatedAt: decidedAt,
+      detailClosedAt: decidedAt,
+      error: 'previous pre-SMTP failure',
+    };
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, outbox);
+    await store.saveRunResult('boss', jobKey, {
+      platform: 'boss',
+      jobKey,
+      fetchedAt: '2026-08-01T04:01:00.000Z',
+      totalCandidates: 1,
+      runResultVersion: 2,
+      capturedCandidateIds: [candidateId],
+      captureAttemptCount: 1,
+      detailAttemptCount: 1,
+      captureFailures: [],
+      processingFailures: [],
+      scoredCandidates: [candidateId],
+      failedCandidates: [],
+      bossRouting: {
+        enabled: true,
+        policyHash,
+        qualifiedCandidateIds: [],
+        reviewCandidateIds: [],
+        rejectedCandidateIds: [candidateId],
+        forwardingStatusCounts: {},
+        rejectionEmailStatusCounts: { 'retryable-failed': 1 },
+      },
+    });
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [] }),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    let sendCalls = 0;
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    sendJobReportEmailRef.fn = async () => {
+      sendCalls += 1;
+      throw new Error('SMTP result unknown for private@example.com');
+    };
+
+    try {
+      const result = await indexModule.runResumeCaptureFlow(
+        'boss',
+        jobKey,
+        buildNormalizedJob(),
+        '物业电工',
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-01T04:02:00.000Z',
+        adapter,
+        {
+          searchSource: 'direct',
+          bossForwardMode: 'email',
+          bossForwardRecipient: 'primary-forward@example.com',
+          bossScreening: screening,
+        },
+      );
+      assert.equal(sendCalls, 1);
+      assert.deepStrictEqual(result.candidates, []);
+      assert.deepStrictEqual(result.runResult.bossRouting?.rejectedCandidateIds, [candidateId]);
+      assert.deepStrictEqual(result.runResult.bossRouting?.rejectionEmailStatusCounts, { uncertain: 1 });
+      assert.ok(result.runResult.processingFailures?.some((failure) =>
+        failure.candidateId === candidateId && failure.stage === 'rejection-email'));
+      assert.ok(result.runResult.failedCandidates.some((failure) => failure.candidateId === candidateId));
+      const persisted = await store.readBossRejectionEmailOutboxEntry('boss', jobKey, outbox.deliveryId);
+      assert.equal(persisted?.status, 'uncertain');
+      assert.doesNotMatch(persisted?.error ?? '', /private@example.com/);
+
+      const emailSummary = indexModule.buildBossRoutedMainRunEmailSummary({
+        primary: {
+          jobKey,
+          audience: 'primary',
+          attempted: true,
+          delivered: true,
+          recipient: 'primary@example.com',
+          subject: 'primary report',
+          summary: { candidateCount: 0, successCount: 0, failureCount: 0 },
+        },
+        secondary: {
+          jobKey,
+          audience: 'secondary',
+          attempted: false,
+          delivered: false,
+          skipReason: 'rejected-candidates-delivered-individually',
+          summary: { candidateCount: 0, successCount: 0, failureCount: 0 },
+        },
+      }, result.runResult.bossRouting);
+      assert.equal(emailSummary.emailDelivered, false);
+      assert.match(emailSummary.emailError ?? '', /not confirmed sent/);
+    } finally {
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+    }
   });
 
   it('routes a non-Boss candidate after detail persistence and keeps native forwarding out of the flow', async () => {
@@ -5884,6 +6402,76 @@ describe('scoring run semantics', () => {
     const artifacts = await store.listCandidateRoutingArtifacts('51job', jobKey);
     assert.deepStrictEqual(artifacts.map((artifact) => [artifact.candidateId, artifact.classification, artifact.audience]), [[candidateId, 'rejected', 'secondary']]);
     assert.deepStrictEqual(result.runResult.postScoreRouting?.rejectedCandidateIds, [candidateId]);
+    assert.deepStrictEqual(await store.listPostScoreRoutingWorkItems('51job', jobKey), []);
+  });
+
+  it('keeps a non-Boss score failure pending without a routing decision and recovers from the stored resume', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-generic-pending-score';
+    const candidateId = 'generic-pending-score';
+    let visible = true;
+    let failScore = true;
+    indexModule.openSubscribeSearchRef.fn = (async () => createSearchPage()) as typeof indexModule.openSubscribeSearchRef.fn;
+    indexModule.extractCandidateListRef.fn = async () => ({ candidates: visible ? [{ candidateId }] : [] });
+    indexModule.openResumeDetailRef.fn = (async () => createDetailPage()) as typeof indexModule.openResumeDetailRef.fn;
+    indexModule.extractResumeFromPageRef.fn = async () => ({
+      resume: buildResume(candidateId),
+      domSnapshot: { workLines: [] },
+    });
+    indexModule.scoreAndEvaluatePostScoreRoutingRef.fn = async () => {
+      if (failScore) throw new Error('temporary scoring transport failure');
+      return {
+        score: buildScore(),
+        evaluations: [buildModelRequirementEvaluation('satisfied', candidateId)],
+      };
+    };
+    const routing = {
+      enabled: true as const,
+      policyVersion: 2 as const,
+      decisionMode: 'reject-on-any-missing' as const,
+      requirements: [{
+        id: 'must-have-model-requirement',
+        enabled: true,
+        kind: 'modelRequirement' as const,
+        requirement: '候选人明确满足测试岗位要求。',
+        criteria: ['简历存在明确证据。'],
+        insufficientEvidence: ['缺少明确证据。'],
+      }],
+      secondaryDelivery: { recipientEmail: 'secondary-report@example.com' },
+    };
+    const first = await indexModule.runResumeCaptureFlow(
+      '51job', jobKey, buildNormalizedJob(), 'search keyword', store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-02T12:40:00.000Z', indexModule.resolvePlatformAdapter('51job'),
+      { postScoreRouting: routing, reportDelivery: { recipientEmail: 'primary-report@example.com' } },
+    );
+    assert.deepStrictEqual(first.runResult.postScoreRouting?.qualifiedCandidateIds, []);
+    assert.deepStrictEqual(first.runResult.postScoreRouting?.reviewCandidateIds, []);
+    assert.deepStrictEqual(first.runResult.postScoreRouting?.rejectedCandidateIds, []);
+    assert.deepStrictEqual(first.runResult.postScoreRouting?.pendingScoreCandidateIds, [candidateId]);
+    assert.deepStrictEqual(first.runResult.postScoreRouting?.scoreFailureStatusCounts, {
+      'score-error@evaluation': 1,
+    });
+    assert.deepStrictEqual(await store.listCandidateRoutingArtifacts('51job', jobKey), []);
+    assert.deepStrictEqual((await store.listPostScoreRoutingWorkItems('51job', jobKey)).map((item) => ({
+      candidateId: item.candidateId,
+      scoreAttemptCount: item.scoreAttemptCount,
+      error: item.lastScoreFailure?.error,
+    })), [{ candidateId, scoreAttemptCount: 1, error: 'temporary scoring transport failure' }]);
+
+    visible = false;
+    failScore = false;
+    const second = await indexModule.runResumeCaptureFlow(
+      '51job', jobKey, buildNormalizedJob(), 'search keyword', store,
+      { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+      '2026-08-02T12:41:00.000Z', indexModule.resolvePlatformAdapter('51job'),
+      { postScoreRouting: routing, reportDelivery: { recipientEmail: 'primary-report@example.com' } },
+    );
+    assert.deepStrictEqual(second.runResult.postScoreRouting?.qualifiedCandidateIds, [candidateId]);
+    assert.equal(second.runResult.postScoreRouting?.pendingScoreCandidateIds, undefined);
+    assert.equal((await store.listCandidateRoutingArtifacts('51job', jobKey)).length, 1);
     assert.deepStrictEqual(await store.listPostScoreRoutingWorkItems('51job', jobKey), []);
   });
 
@@ -7868,7 +8456,7 @@ describe('scoring run semantics', () => {
     );
   });
 
-  it('keeps Boss screening arguments inside ordinary Boss capture and rejects incomplete secondary forwarding', async () => {
+  it('keeps Boss screening arguments inside ordinary Boss capture and rejects legacy secondary forwarding', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
 
@@ -7895,9 +8483,11 @@ describe('scoring run semantics', () => {
         '--jd',
         '职位名称：测试岗位',
         '--boss-secondary-forward-mode',
-        'colleague',
+        'email',
+        '--boss-secondary-forward-recipient',
+        'legacy@example.com',
       ]),
-      /--boss-secondary-forward-mode and --boss-secondary-forward-recipient must be provided together/,
+      /no longer supported.*--boss-secondary-email/,
     );
 
     await assert.rejects(
@@ -9007,7 +9597,7 @@ describe('scoring run semantics', () => {
     assert.equal(secondJobRecord.rawText, '职位名称：第二批量岗位');
   });
 
-  it('lets each Boss jobs-file item override both forwarding targets and all four CC lists', async () => {
+  it('lets each Boss jobs-file item override primary forwarding and rejection-email targets', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
     const jobsFilePath = path.join(tempDir, 'boss-routing-jobs.json');
@@ -9028,9 +9618,6 @@ describe('scoring run semantics', () => {
         bossForwardCc: ['primary-forward-audit-one@example.com'],
         bossScreeningEnabled: true,
         bossScreeningPolicyFile: './boss-negative-policy.json',
-        bossSecondaryForwardMode: 'email',
-        bossSecondaryForwardRecipient: 'secondary-forward-one@example.com',
-        bossSecondaryForwardCc: ['secondary-forward-audit-one@example.com'],
         bossSecondaryEmail: 'secondary-report-one@example.com',
         bossSecondaryCc: ['secondary-report-audit-one@example.com'],
       },
@@ -9044,29 +9631,37 @@ describe('scoring run semantics', () => {
         bossForwardCc: [],
         bossScreeningEnabled: true,
         bossScreeningPolicyFile: './boss-negative-policy.json',
-        bossSecondaryForwardMode: 'email',
-        bossSecondaryForwardRecipient: 'secondary-forward-two@example.com',
-        bossSecondaryForwardCc: [],
         bossSecondaryEmail: 'secondary-report-two@example.com',
         bossSecondaryCc: [],
       },
     ]), 'utf8');
 
     stubSuccessfulRun(indexModule);
-    await captureConsole(async () => {
-      await indexModule.main([
-        '--platform',
-        'boss',
-        '--jobs-file',
-        jobsFilePath,
-        '--search-source',
-        'direct',
-        '--boss-forward-mode',
-        'email',
-        '--boss-forward-recipient',
-        'run-level-should-not-win@example.com',
-      ]);
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async () => ({
+      score: buildScore(),
+      evaluations: [buildModelRequirementEvaluation('satisfied', 'batch routing evidence')],
     });
+    indexModule.forwardBossResumeRef.fn = async () => undefined;
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    sendJobReportEmailRef.fn = async ({ recipient, subject }) => ({ recipient, subject });
+    try {
+      await captureConsole(async () => {
+        await indexModule.main([
+          '--platform',
+          'boss',
+          '--jobs-file',
+          jobsFilePath,
+          '--search-source',
+          'direct',
+          '--boss-forward-mode',
+          'email',
+          '--boss-forward-recipient',
+          'run-level-should-not-win@example.com',
+        ]);
+      });
+    } finally {
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+    }
 
     const store = new indexModule.JobStore();
     const first = await store.readJobRecord('boss', 'boss-batch-routing-one');
@@ -9077,11 +9672,6 @@ describe('scoring run semantics', () => {
       ccEmails: ['primary-forward-audit-one@example.com'],
     });
     assert.deepStrictEqual(first.ccEmails, ['primary-report-one@example.com']);
-    assert.deepStrictEqual(first.bossScreening?.secondaryForwarding, {
-      mode: 'email',
-      recipient: 'secondary-forward-one@example.com',
-      ccEmails: ['secondary-forward-audit-one@example.com'],
-    });
     assert.deepStrictEqual(first.bossScreening?.secondaryDelivery, {
       recipientEmail: 'secondary-report-one@example.com',
       ccEmails: ['secondary-report-audit-one@example.com'],
@@ -9092,7 +9682,6 @@ describe('scoring run semantics', () => {
       ccEmails: [],
     });
     assert.deepStrictEqual(second.ccEmails, []);
-    assert.deepStrictEqual(second.bossScreening?.secondaryForwarding?.ccEmails, []);
     assert.deepStrictEqual(second.bossScreening?.secondaryDelivery?.ccEmails, []);
   });
 

@@ -79,6 +79,7 @@ describe('Boss capture history audit', () => {
       pendingScoreItems: [],
       routingArtifacts: [routing('candidate-1')],
       outboxEntries: [outbox('candidate-1')],
+      rejectionEmailEntries: [],
     });
     assert.deepEqual(summary.anomalies, []);
     assert.deepEqual(summary, {
@@ -89,6 +90,7 @@ describe('Boss capture history audit', () => {
       pendingScoreCount: 0,
       routingCount: 1,
       outboxCount: 1,
+      rejectionEmailOutboxCount: 0,
       anomalies: [],
     });
   });

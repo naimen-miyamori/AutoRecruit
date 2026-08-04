@@ -8,6 +8,7 @@ import { JobStore } from '../storage/job-store.js';
 import type {
   BossCandidateRoutingArtifact,
   BossForwardingOutboxEntry,
+  BossRejectionEmailOutboxEntry,
   CandidateResume,
   CandidateScoreArtifact,
   BossScreeningWorkItem,
@@ -20,6 +21,7 @@ export interface BossCaptureHistoryAuditInput {
   pendingScoreItems: readonly BossScreeningWorkItem[];
   routingArtifacts: readonly BossCandidateRoutingArtifact[];
   outboxEntries: readonly BossForwardingOutboxEntry[];
+  rejectionEmailEntries?: readonly BossRejectionEmailOutboxEntry[];
 }
 
 export interface BossCaptureHistoryAuditAnomaly {
@@ -36,7 +38,10 @@ export interface BossCaptureHistoryAuditAnomaly {
     | 'outbox-without-routing'
     | 'routing-policy-mismatch'
     | 'outbox-policy-mismatch'
-    | 'outbox-audience-mismatch';
+    | 'outbox-audience-mismatch'
+    | 'rejection-email-without-routing'
+    | 'rejection-email-without-resume'
+    | 'rejection-email-audience-mismatch';
   count: number;
   candidateIdsHash?: string;
 }
@@ -49,6 +54,7 @@ export interface BossCaptureHistoryAuditSummary {
   pendingScoreCount: number;
   routingCount: number;
   outboxCount: number;
+  rejectionEmailOutboxCount: number;
   anomalies: BossCaptureHistoryAuditAnomaly[];
 }
 
@@ -99,6 +105,7 @@ export function auditBossCaptureHistory(
     routingByCandidateId.set(artifact.candidateId, artifact);
   }
   const outboxByCandidateId = new Map<string, BossForwardingOutboxEntry>();
+  const rejectionEmailEntries = input.rejectionEmailEntries ?? [];
   const outboxPolicyMismatches: string[] = [];
   const outboxAudienceMismatches: string[] = [];
   for (const entry of input.outboxEntries) {
@@ -142,6 +149,19 @@ export function auditBossCaptureHistory(
     anomaly('routing-policy-mismatch', routingPolicyMismatches),
     anomaly('outbox-policy-mismatch', outboxPolicyMismatches),
     anomaly('outbox-audience-mismatch', outboxAudienceMismatches),
+    anomaly('rejection-email-without-routing', rejectionEmailEntries
+      .map((entry) => entry.candidateId)
+      .filter((id) => !routingByCandidateId.has(id))),
+    anomaly('rejection-email-without-resume', rejectionEmailEntries
+      .map((entry) => entry.candidateId)
+      .filter((id) => !resumesById.has(id))),
+    anomaly('rejection-email-audience-mismatch', rejectionEmailEntries
+      .map((entry) => entry.candidateId)
+      .filter((id) => {
+        const routing = routingByCandidateId.get(id);
+        return routing !== undefined
+          && (routing.classification !== 'rejected' || routing.audience !== 'secondary');
+      })),
   ].filter((value): value is BossCaptureHistoryAuditAnomaly => Boolean(value));
 
   return {
@@ -152,6 +172,7 @@ export function auditBossCaptureHistory(
     pendingScoreCount: input.pendingScoreItems.length,
     routingCount: input.routingArtifacts.length,
     outboxCount: input.outboxEntries.length,
+    rejectionEmailOutboxCount: rejectionEmailEntries.length,
     anomalies,
   };
 }
@@ -183,13 +204,14 @@ async function listResumeFiles(jobKey: string): Promise<{ fileCandidateId: strin
 
 async function run(jobKey: string): Promise<void> {
   const store = new JobStore();
-  const [seenIds, resumeFiles, scoreArtifacts, pendingScoreItems, routingArtifacts, outboxEntries] = await Promise.all([
+  const [seenIds, resumeFiles, scoreArtifacts, pendingScoreItems, routingArtifacts, outboxEntries, rejectionEmailEntries] = await Promise.all([
     store.readSeenIds('boss', jobKey),
     listResumeFiles(jobKey),
     store.listStoredScoreArtifacts('boss', jobKey),
     store.listBossScreeningWorkItems('boss', jobKey),
     store.listBossCandidateRoutingArtifacts('boss', jobKey),
     store.listBossForwardingOutboxEntries('boss', jobKey),
+    store.listBossRejectionEmailOutboxEntries('boss', jobKey),
   ]);
   const summary = auditBossCaptureHistory(jobKey, {
     seenIds,
@@ -198,6 +220,7 @@ async function run(jobKey: string): Promise<void> {
     pendingScoreItems,
     routingArtifacts,
     outboxEntries,
+    rejectionEmailEntries,
   });
   console.log(JSON.stringify(summary, null, 2));
   if (summary.anomalies.length > 0) process.exitCode = 2;

@@ -86,15 +86,15 @@ export function normalizeJsonObject(value: unknown, label: string): JsonObject {
 }
 
 /**
- * Validate the shape of the private v3 Boss task snapshot.  Public callers
+ * Validate the shape of the private v4 Boss task snapshot.  Public callers
  * cannot opt into this field; keeping the structural check here still makes
  * persisted queue files fail closed instead of producing a partially pinned
  * execution plan.
  */
 export function normalizeBossCaptureTaskSnapshot(value: unknown): BossCaptureTaskSnapshot {
   const item = normalizeJsonObject(value, 'bossCaptureTaskSnapshot');
-  if (item.version !== 3) {
-    throw new Error('bossCaptureTaskSnapshot.version must be 3');
+  if (item.version !== 4) {
+    throw new Error('bossCaptureTaskSnapshot.version must be 4');
   }
   const resolvedAt = getRequiredString(item, 'resolvedAt');
   const sourceJobKey = getRequiredString(item, 'sourceJobKey');
@@ -439,9 +439,6 @@ function normalizeBossForwarding(
 interface BossScreeningTaskFields {
   bossScreeningEnabled?: boolean;
   bossScreeningPolicyFile?: string;
-  bossSecondaryForwardMode?: BossForwardMode;
-  bossSecondaryForwardRecipient?: string;
-  bossSecondaryForwardCc?: string[];
   bossSecondaryEmail?: string;
   bossSecondaryCc?: string[];
 }
@@ -487,37 +484,29 @@ function normalizeBossScreening(
   platform: ConsolePlatformSelection,
   includeBoss = false,
 ): BossScreeningTaskFields {
+  const legacyForwardFields = [
+    'bossSecondaryForwardMode',
+    'bossSecondaryForwardRecipient',
+    'bossSecondaryForwardCc',
+  ].filter((field) => field in item);
+  if (legacyForwardFields.length > 0) {
+    throw new Error(`${legacyForwardFields.join(', ')} are no longer supported; use bossSecondaryEmail/bossSecondaryCc for rejected resume emails`);
+  }
   const bossScreeningEnabled = getOptionalBoolean(item, 'bossScreeningEnabled');
   const bossScreeningPolicyFile = getOptionalString(item, 'bossScreeningPolicyFile');
-  const bossSecondaryForwardMode = normalizeBossForwardMode(getOptionalString(item, 'bossSecondaryForwardMode'));
-  const bossSecondaryForwardRecipient = getOptionalString(item, 'bossSecondaryForwardRecipient');
-  const bossSecondaryForwardCc = normalizeForwardCc(item.bossSecondaryForwardCc, 'bossSecondaryForwardCc');
   const bossSecondaryEmail = getOptionalString(item, 'bossSecondaryEmail');
   const bossSecondaryCc = normalizeCc(item.bossSecondaryCc);
   const hasScreeningInput = bossScreeningEnabled !== undefined
     || bossScreeningPolicyFile !== undefined
-    || bossSecondaryForwardMode !== undefined
-    || bossSecondaryForwardRecipient !== undefined
-    || bossSecondaryForwardCc !== undefined
     || bossSecondaryEmail !== undefined
     || bossSecondaryCc !== undefined;
 
   if (hasScreeningInput && platform !== 'boss' && !(platform === 'all' && includeBoss)) {
     throw new Error('Boss screening can only be used with platform boss or platform all with includeBoss=true');
   }
-  if (Boolean(bossSecondaryForwardMode) !== Boolean(bossSecondaryForwardRecipient)) {
-    throw new Error('bossSecondaryForwardMode and bossSecondaryForwardRecipient must be provided together');
-  }
-  if (bossSecondaryForwardCc?.length && bossSecondaryForwardMode === 'colleague') {
-    throw new Error('bossSecondaryForwardCc requires bossSecondaryForwardMode email');
-  }
-
   return {
     bossScreeningEnabled,
     bossScreeningPolicyFile,
-    bossSecondaryForwardMode,
-    bossSecondaryForwardRecipient,
-    bossSecondaryForwardCc,
     bossSecondaryEmail,
     bossSecondaryCc,
   };
@@ -907,9 +896,6 @@ export function normalizeResumeCaptureTask(
   pushOptional(argv, '--boss-forward-cc', bossForwardCc?.join(','));
   pushOptionalBoolean(argv, '--boss-screening-enabled', bossScreening.bossScreeningEnabled);
   pushOptional(argv, '--boss-screening-policy-file', bossScreening.bossScreeningPolicyFile);
-  pushOptional(argv, '--boss-secondary-forward-mode', bossScreening.bossSecondaryForwardMode);
-  pushOptional(argv, '--boss-secondary-forward-recipient', bossScreening.bossSecondaryForwardRecipient);
-  pushOptional(argv, '--boss-secondary-forward-cc', bossScreening.bossSecondaryForwardCc?.join(','));
   pushOptional(argv, '--boss-secondary-email', bossScreening.bossSecondaryEmail);
   pushOptional(argv, '--boss-secondary-cc', bossScreening.bossSecondaryCc?.join(','));
   pushOptionalBoolean(argv, '--result-routing-enabled', postScoreRouting.resultRoutingEnabled);
@@ -960,9 +946,6 @@ export function normalizeResumeCaptureTask(
       bossForwardCcCount: bossForwardCc?.length ?? 0,
       bossScreeningEnabled: bossScreening.bossScreeningEnabled,
       bossScreeningPolicyFile: bossScreening.bossScreeningPolicyFile,
-      bossSecondaryForwardMode: bossScreening.bossSecondaryForwardMode,
-      bossSecondaryForwardRecipient: bossScreening.bossSecondaryForwardRecipient,
-      bossSecondaryForwardCcCount: bossScreening.bossSecondaryForwardCc?.length ?? 0,
       bossSecondaryEmail: bossScreening.bossSecondaryEmail,
       bossSecondaryCcCount: bossScreening.bossSecondaryCc?.length ?? 0,
       resultRoutingEnabled: postScoreRouting.resultRoutingEnabled,
@@ -1058,9 +1041,6 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   pushOptional(argv, '--boss-forward-cc', bossForwardCc?.join(','));
   pushOptionalBoolean(argv, '--boss-screening-enabled', bossScreening.bossScreeningEnabled);
   pushOptional(argv, '--boss-screening-policy-file', bossScreening.bossScreeningPolicyFile);
-  pushOptional(argv, '--boss-secondary-forward-mode', bossScreening.bossSecondaryForwardMode);
-  pushOptional(argv, '--boss-secondary-forward-recipient', bossScreening.bossSecondaryForwardRecipient);
-  pushOptional(argv, '--boss-secondary-forward-cc', bossScreening.bossSecondaryForwardCc?.join(','));
   pushOptional(argv, '--boss-secondary-email', bossScreening.bossSecondaryEmail);
   pushOptional(argv, '--boss-secondary-cc', bossScreening.bossSecondaryCc?.join(','));
   pushOptionalBoolean(argv, '--result-routing-enabled', postScoreRouting.resultRoutingEnabled);
@@ -1087,9 +1067,6 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
       bossForwardCcCount: bossForwardCc?.length ?? 0,
       bossScreeningEnabled: bossScreening.bossScreeningEnabled,
       bossScreeningPolicyFile: bossScreening.bossScreeningPolicyFile,
-      bossSecondaryForwardMode: bossScreening.bossSecondaryForwardMode,
-      bossSecondaryForwardRecipient: bossScreening.bossSecondaryForwardRecipient,
-      bossSecondaryForwardCcCount: bossScreening.bossSecondaryForwardCc?.length ?? 0,
       bossSecondaryEmail: bossScreening.bossSecondaryEmail,
       bossSecondaryCcCount: bossScreening.bossSecondaryCc?.length ?? 0,
       resultRoutingEnabled: postScoreRouting.resultRoutingEnabled,

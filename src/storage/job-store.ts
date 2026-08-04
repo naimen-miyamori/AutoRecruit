@@ -15,6 +15,7 @@ import {
   BossChatReviewItem,
   BossChatReviewRun,
   BossForwardingOutboxEntry,
+  BossRejectionEmailOutboxEntry,
   BossScreeningWorkItem,
   CandidateRoutingArtifact,
   PostScoreRoutingWorkItem,
@@ -23,6 +24,11 @@ import {
   ResumeDomSnapshot,
   RunResult,
 } from '../types/job.js';
+
+interface JobRecordNormalizationOptions {
+  /** Migration-only compatibility; ordinary reads fail closed on legacy fields. */
+  allowLegacyBossScreening?: boolean;
+}
 
 interface JobPaths {
   jobDir: string;
@@ -33,6 +39,7 @@ interface JobPaths {
   routingArtifactsDir: string;
   screeningWorkDir: string;
   forwardingOutboxDir: string;
+  rejectionEmailOutboxDir: string;
   snapshotsDir: string;
   domSnapshotsDir: string;
   jdPath: string;
@@ -173,7 +180,7 @@ function routingTimestamp(value: string): string {
   return value.replace(/[:.]/g, '-');
 }
 
-function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
+function normalizeJobRecord(jobRecord: LegacyJobRecord, options: JobRecordNormalizationOptions = {}): JobRecord {
   const {
     recipientEmail,
     ccEmails,
@@ -198,7 +205,9 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord): JobRecord {
     : undefined;
   const normalizedBossScreening = bossScreening === undefined
     ? undefined
-    : normalizeBossScreeningSettings(bossScreening);
+    : normalizeBossScreeningSettings(bossScreening, {
+      allowLegacySecondaryForwarding: options.allowLegacyBossScreening,
+    });
   const normalizedPostScoreRouting = postScoreRouting === undefined
     ? undefined
     : normalizePostScoreRoutingSettings(postScoreRouting);
@@ -296,6 +305,7 @@ export class JobStore {
       routingArtifactsDir: path.join(jobDir, 'routing', 'artifacts'),
       screeningWorkDir: path.join(jobDir, 'routing', 'pending-score'),
       forwardingOutboxDir: path.join(jobDir, 'routing', 'outbox'),
+      rejectionEmailOutboxDir: path.join(jobDir, 'routing', 'rejection-email-outbox'),
       snapshotsDir: path.join(jobDir, 'snapshots'),
       domSnapshotsDir: path.join(jobDir, 'snapshots-dom'),
       jdPath: path.join(jobDir, 'jd.json'),
@@ -313,6 +323,7 @@ export class JobStore {
       ensureDir(paths.routingArtifactsDir),
       ensureDir(paths.screeningWorkDir),
       ensureDir(paths.forwardingOutboxDir),
+      ensureDir(paths.rejectionEmailOutboxDir),
       ensureDir(paths.snapshotsDir),
       ensureDir(paths.domSnapshotsDir),
     ]);
@@ -327,9 +338,9 @@ export class JobStore {
   async saveJobRecord(
     platform: SupportedPlatform,
     jobRecord: JobRecord,
-    options: { expectedRevision?: number } = {},
+    options: { expectedRevision?: number } & JobRecordNormalizationOptions = {},
   ): Promise<void> {
-    const current = await this.readJobRecordIfExists(platform, jobRecord.jobKey);
+    const current = await this.readJobRecordIfExists(platform, jobRecord.jobKey, options);
     const currentRevision = current?.revision ?? 1;
     if (options.expectedRevision !== undefined && currentRevision !== options.expectedRevision) {
       throw new JobConfigConflictError(platform, jobRecord.jobKey, options.expectedRevision, currentRevision);
@@ -353,7 +364,9 @@ export class JobStore {
     }
     const bossScreening = jobRecord.bossScreening === undefined
       ? undefined
-      : normalizeBossScreeningSettings(jobRecord.bossScreening);
+      : normalizeBossScreeningSettings(jobRecord.bossScreening, {
+        allowLegacySecondaryForwarding: options.allowLegacyBossScreening,
+      });
     const postScoreRouting = jobRecord.postScoreRouting === undefined
       ? undefined
       : normalizePostScoreRoutingSettings(jobRecord.postScoreRouting);
@@ -390,12 +403,13 @@ export class JobStore {
     jobKey: string,
     expectedRevision: number,
     patch: JobConfigPatch,
+    options: JobRecordNormalizationOptions = {},
   ): Promise<JobRecord> {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0) {
       throw new Error('expectedRevision must be a positive integer');
     }
     return this.withConfigLock(platform, jobKey, async () => {
-      const current = await this.readJobRecordIfExists(platform, jobKey);
+      const current = await this.readJobRecordIfExists(platform, jobKey, options);
       if (!current) {
         throw new Error(`Missing job record for job key ${jobKey}`);
       }
@@ -469,8 +483,8 @@ export class JobStore {
       }
 
       next.revision = currentRevision + 1;
-      await this.saveJobRecord(platform, next, { expectedRevision: currentRevision });
-      return (await this.readJobRecord(platform, jobKey));
+      await this.saveJobRecord(platform, next, { expectedRevision: currentRevision, ...options });
+      return (await this.readJobRecord(platform, jobKey, options));
     });
   }
 
@@ -484,8 +498,12 @@ export class JobStore {
     return this.applyJobConfigPatch(platform, jobKey, expectedRevision, patch);
   }
 
-  async readJobRecord(platform: SupportedPlatform, jobKey: string): Promise<JobRecord> {
-    const jobRecord = await this.readJobRecordIfExists(platform, jobKey);
+  async readJobRecord(
+    platform: SupportedPlatform,
+    jobKey: string,
+    options: JobRecordNormalizationOptions = {},
+  ): Promise<JobRecord> {
+    const jobRecord = await this.readJobRecordIfExists(platform, jobKey, options);
 
     if (!jobRecord) {
       throw new Error(`Missing job record for job key ${jobKey}`);
@@ -494,10 +512,14 @@ export class JobStore {
     return jobRecord;
   }
 
-  async readJobRecordIfExists(platform: SupportedPlatform, jobKey: string): Promise<JobRecord | undefined> {
+  async readJobRecordIfExists(
+    platform: SupportedPlatform,
+    jobKey: string,
+    options: JobRecordNormalizationOptions = {},
+  ): Promise<JobRecord | undefined> {
     const { jdPath } = this.getJobPaths(platform, jobKey);
     const jobRecord = await readJsonFile<LegacyJobRecord | undefined>(jdPath, undefined);
-    return jobRecord ? normalizeJobRecord(jobRecord) : undefined;
+    return jobRecord ? normalizeJobRecord(jobRecord, options) : undefined;
   }
 
   async listJobRecords(platform: SupportedPlatform): Promise<JobRecord[]> {
@@ -907,6 +929,85 @@ export class JobStore {
     const files = await listJsonFiles(forwardingOutboxDir);
     return Promise.all(files.map((file) =>
       readJsonFile<BossForwardingOutboxEntry>(path.join(forwardingOutboxDir, file)),
+    ));
+  }
+
+  async saveBossRejectionEmailOutboxEntry(
+    platform: 'boss',
+    jobKey: string,
+    entry: BossRejectionEmailOutboxEntry,
+  ): Promise<string> {
+    const paths = await this.initializeJob(platform, jobKey);
+    const filePath = path.join(paths.rejectionEmailOutboxDir, `${routingCandidateFileName(entry.deliveryId)}.json`);
+    const existing = await readJsonFile<BossRejectionEmailOutboxEntry | undefined>(filePath, undefined);
+    if (existing) {
+      const immutableExisting = {
+        version: existing.version,
+        deliveryId: existing.deliveryId,
+        candidateId: existing.candidateId,
+        routingDecisionId: existing.routingDecisionId,
+        routingArtifact: existing.routingArtifact,
+        policyHash: existing.policyHash,
+        recipientEmail: existing.recipientEmail,
+        ccEmails: existing.ccEmails,
+        messageId: existing.messageId,
+        subject: existing.subject,
+        markdown: existing.markdown,
+        contentHash: existing.contentHash,
+      };
+      const immutableIncoming = {
+        version: entry.version,
+        deliveryId: entry.deliveryId,
+        candidateId: entry.candidateId,
+        routingDecisionId: entry.routingDecisionId,
+        routingArtifact: entry.routingArtifact,
+        policyHash: entry.policyHash,
+        recipientEmail: entry.recipientEmail,
+        ccEmails: entry.ccEmails,
+        messageId: entry.messageId,
+        subject: entry.subject,
+        markdown: entry.markdown,
+        contentHash: entry.contentHash,
+      };
+      if (!isDeepStrictEqual(immutableExisting, immutableIncoming)) {
+        throw new Error(`Rejection email delivery ${entry.deliveryId} already exists with different immutable content.`);
+      }
+      const allowedTransitions: Record<BossRejectionEmailOutboxEntry['status'], ReadonlySet<BossRejectionEmailOutboxEntry['status']>> = {
+        pending: new Set(['pending', 'sending', 'retryable-failed', 'superseded']),
+        sending: new Set(['sending', 'sent', 'uncertain']),
+        sent: new Set(['sent']),
+        'retryable-failed': new Set(['retryable-failed', 'sending', 'superseded']),
+        uncertain: new Set(['uncertain']),
+        superseded: new Set(['superseded']),
+      };
+      if (!allowedTransitions[existing.status].has(entry.status)) {
+        throw new Error(`Invalid rejection email delivery transition ${existing.status} -> ${entry.status} for ${entry.deliveryId}.`);
+      }
+    }
+    await writeJsonIfChanged(filePath, entry);
+    return filePath;
+  }
+
+  async readBossRejectionEmailOutboxEntry(
+    platform: 'boss',
+    jobKey: string,
+    deliveryId: string,
+  ): Promise<BossRejectionEmailOutboxEntry | undefined> {
+    const { rejectionEmailOutboxDir } = this.getJobPaths(platform, jobKey);
+    return readJsonFile<BossRejectionEmailOutboxEntry | undefined>(
+      path.join(rejectionEmailOutboxDir, `${routingCandidateFileName(deliveryId)}.json`),
+      undefined,
+    );
+  }
+
+  async listBossRejectionEmailOutboxEntries(
+    platform: 'boss',
+    jobKey: string,
+  ): Promise<BossRejectionEmailOutboxEntry[]> {
+    const { rejectionEmailOutboxDir } = this.getJobPaths(platform, jobKey);
+    const files = await listJsonFiles(rejectionEmailOutboxDir);
+    return Promise.all(files.map((file) =>
+      readJsonFile<BossRejectionEmailOutboxEntry>(path.join(rejectionEmailOutboxDir, file)),
     ));
   }
 

@@ -15,6 +15,35 @@ function text(value: unknown): string {
   return value === undefined || value === null || value === '' ? '-' : String(value);
 }
 
+function count(value: unknown, key: string): number {
+  if (!isRecord(value)) return 0;
+  const parsed = Number(value[key]);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+}
+
+function rejectionDeliveryTargetsFromInput(value: unknown): Array<{ recipientEmail: string; ccEmails: string[] }> {
+  if (!isRecord(value)) return [];
+  if (typeof value.bossSecondaryEmail === 'string' && value.bossSecondaryEmail.trim()) {
+    return [{ recipientEmail: value.bossSecondaryEmail, ccEmails: stringList(value.bossSecondaryCc) }];
+  }
+  const settings = isRecord(value.bossCaptureSettingsSnapshot) ? value.bossCaptureSettingsSnapshot : undefined;
+  const task = isRecord(value.bossCaptureTaskSnapshot) ? value.bossCaptureTaskSnapshot : undefined;
+  const deliveryAndScreening = task && isRecord(task.deliveryAndScreening) ? task.deliveryAndScreening : undefined;
+  const screening = settings && isRecord(settings.screening)
+    ? settings.screening
+    : deliveryAndScreening && isRecord(deliveryAndScreening.screening)
+      ? deliveryAndScreening.screening
+      : undefined;
+  const delivery = screening && isRecord(screening.secondaryDelivery) ? screening.secondaryDelivery : undefined;
+  return delivery && typeof delivery.recipientEmail === 'string' && delivery.recipientEmail.trim()
+    ? [{ recipientEmail: delivery.recipientEmail, ccEmails: stringList(delivery.ccEmails) }]
+    : [];
+}
+
 function artifact(value: unknown): ArtifactDescriptor | undefined {
   if (!isRecord(value)) return undefined;
   if (typeof value.artifactId !== 'string' || typeof value.label !== 'string' || typeof value.fileName !== 'string' || typeof value.contentType !== 'string') {
@@ -28,12 +57,21 @@ function artifact(value: unknown): ArtifactDescriptor | undefined {
   };
 }
 
-export function TaskOutput({ kind, output }: { kind: string; output: unknown }) {
+export function TaskOutput({ kind, input, output }: { kind: string; input?: unknown; output: unknown }) {
   if (!output) return <EmptyState title="任务尚无输出" description="运行完成后会在这里显示结构化结果。" />;
   if (Array.isArray(output)) {
-    return <div className="card-list">{output.map((item, index) => <TaskOutput key={index} kind={kind} output={item} />)}</div>;
+    return <div className="card-list">{output.map((item, index) => <TaskOutput key={index} kind={kind} input={input} output={item} />)}</div>;
   }
   if (!isRecord(output)) return <JsonViewer value={output} />;
+
+  if (isRecord(output.summary) && 'totalCandidates' in output.summary && ('platform' in output || 'keyword' in output)) {
+    return (
+      <div className="page-stack">
+        <div className="receipt-box"><strong>{text(output.platform)}{output.keyword ? ` · ${text(output.keyword)}` : ''}</strong></div>
+        <TaskOutput kind={kind} input={input} output={output.summary} />
+      </div>
+    );
+  }
 
   if (output.mode === 'search-subscription' && output.status === 'failed') {
     const results = array(output.results);
@@ -102,6 +140,76 @@ export function TaskOutput({ kind, output }: { kind: string; output: unknown }) 
           <div className="detail-cell"><span>无有效建议</span><strong>{text(output.skippedCandidates)}</strong></div>
         </div>
         {typeof output.mappingKey === 'string' && <Link className="primary-button" to={`/talent-mappings/${encodeURIComponent(output.mappingKey)}`}>进入分类审核</Link>}
+      </div>
+    );
+  }
+
+  if ('totalCandidates' in output && (isRecord(output.bossRouting) || isRecord(output.rejectionEmails))) {
+    const routing = isRecord(output.bossRouting) ? output.bossRouting : undefined;
+    const forwarding = routing && isRecord(routing.forwardingStatusCounts) ? routing.forwardingStatusCounts : undefined;
+    const pendingScoreCount = routing && Array.isArray(routing.pendingScoreCandidateIds)
+      ? routing.pendingScoreCandidateIds.length
+      : 0;
+    const scoreFailureCounts = routing && isRecord(routing.scoreFailureStatusCounts)
+      ? routing.scoreFailureStatusCounts
+      : undefined;
+    const scoreFailureSummary = scoreFailureCounts
+      ? Object.entries(scoreFailureCounts).map(([status, value]) => `${status}: ${text(value)}`).join('；')
+      : '';
+    const rejection = routing && isRecord(routing.rejectionEmailStatusCounts)
+      ? routing.rejectionEmailStatusCounts
+      : isRecord(output.rejectionEmails) ? output.rejectionEmails : undefined;
+    const rejectionSummary = isRecord(output.rejectionEmails) ? output.rejectionEmails : undefined;
+    const summaryTargets = array(rejectionSummary?.deliveryTargets)
+      .filter((target) => typeof target.recipientEmail === 'string' && target.recipientEmail.trim())
+      .map((target) => ({ recipientEmail: String(target.recipientEmail), ccEmails: stringList(target.ccEmails) }));
+    const rejectionTargets = summaryTargets.length > 0 ? summaryTargets : rejectionDeliveryTargetsFromInput(input);
+    const rejectionRecipients = [...new Set(rejectionTargets.map((target) => target.recipientEmail))];
+    const rejectionCc = [...new Set(rejectionTargets.flatMap((target) => target.ccEmails))];
+    const uncertain = count(rejection, 'uncertain');
+    const sending = count(rejection, 'sending');
+    const pending = count(rejection, 'pending');
+    const retryableFailed = count(rejection, 'retryableFailed') + count(rejection, 'retryable-failed');
+    const superseded = count(rejection, 'superseded');
+    const failedCandidateIds = stringList(rejectionSummary?.failedCandidateIds);
+    const eligible = count(rejectionSummary, 'eligible') || (Array.isArray(routing?.rejectedCandidateIds) ? routing.rejectedCandidateIds.length : 0);
+    const sent = rejectionSummary ? count(rejectionSummary, 'sent') : count(rejection, 'sent');
+    return (
+      <div className="page-stack">
+        <div className="detail-grid">
+          <div className="detail-cell"><span>岗位</span><strong>{text(output.jobKey)}</strong></div>
+          <div className="detail-cell"><span>候选人总数</span><strong>{text(output.totalCandidates)}</strong></div>
+          <div className="detail-cell"><span>已抓取</span><strong>{text(output.capturedCandidates ?? output.newCandidates)}</strong></div>
+          <div className="detail-cell"><span>已评分</span><strong>{text(output.scoredCandidates)}</strong></div>
+          <div className="detail-cell"><span>失败</span><strong>{text(output.failedCandidates)}</strong></div>
+        </div>
+        {routing && <Section title="Boss 评分后分流" description="页面转发与否定简历邮件是两个独立交付通道。">
+          <div className="detail-grid">
+            <div className="detail-cell"><span>明确符合</span><strong>{Array.isArray(routing.qualifiedCandidateIds) ? routing.qualifiedCandidateIds.length : 0}</strong></div>
+            <div className="detail-cell"><span>需复核</span><strong>{Array.isArray(routing.reviewCandidateIds) ? routing.reviewCandidateIds.length : 0}</strong></div>
+            <div className="detail-cell"><span>明确否定</span><strong>{Array.isArray(routing.rejectedCandidateIds) ? routing.rejectedCandidateIds.length : 0}</strong></div>
+            <div className="detail-cell"><span>评分未决</span><strong>{pendingScoreCount}</strong></div>
+            <div className="detail-cell"><span>Boss 转发已发送</span><strong>{count(forwarding, 'sent')}</strong></div>
+            <div className="detail-cell"><span>Boss 转发待处理</span><strong>{count(forwarding, 'pending') + count(forwarding, 'retryable-failed') + count(forwarding, 'uncertain')}</strong></div>
+          </div>
+          {pendingScoreCount > 0 && <div className="stale-banner"><strong>存在尚未形成分流决定的评分</strong><span>{scoreFailureSummary || '失败阶段已记录在运行结果中'}；这些候选人不会转发或发送否定邮件，将保留 pending-score 等待重试。</span></div>}
+        </Section>}
+        {(rejection || rejectionSummary) && <Section title="否定简历邮件" description="每位明确否定候选人对应一封邮件；同候选人重跑不会自动重发已发送或结果不确定的邮件。">
+          <div className="detail-grid">
+            <div className="detail-cell"><span>副收件人</span><strong>{rejectionRecipients.length > 0 ? rejectionRecipients.join('、') : '已固化在任务快照'}</strong></div>
+            <div className="detail-cell"><span>邮件抄送</span><strong>{rejectionCc.length > 0 ? rejectionCc.join('、') : '无 / 已固化在任务快照'}</strong></div>
+            <div className="detail-cell"><span>应发份数</span><strong>{eligible}</strong></div>
+            <div className="detail-cell"><span>已发送</span><strong>{sent}</strong></div>
+            <div className="detail-cell"><span>待处理 / 可重试</span><strong>{pending + retryableFailed}</strong></div>
+            <div className="detail-cell"><span>发送中断待核对</span><strong>{sending}</strong></div>
+            <div className="detail-cell"><span>结果不确定</span><strong>{uncertain}</strong></div>
+            <div className="detail-cell"><span>已终止 / 废弃</span><strong>{superseded}</strong></div>
+          </div>
+          {sending > 0 && <div className="stale-banner"><strong>存在停留在 sending 的否定邮件</strong><span>请勿人工重发；下一次 Boss 运行会将其转为 uncertain 后要求人工核对。</span></div>}
+          {uncertain > 0 && <div className="stale-banner"><strong>存在结果不确定的否定邮件</strong><span>系统不会自动重发；请先人工核对 SMTP 收件箱和投递日志。</span></div>}
+          {failedCandidateIds.length > 0 && <div className="receipt-box"><strong>需要人工处理的候选人</strong><div className="mono">{failedCandidateIds.join('、')}</div></div>}
+        </Section>}
+        {typeof output.resultPath === 'string' && <div className="receipt-box"><strong>运行结果</strong><div className="mono">{output.resultPath}</div></div>}
       </div>
     );
   }

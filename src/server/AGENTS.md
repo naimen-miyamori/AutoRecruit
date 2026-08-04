@@ -41,6 +41,10 @@ when they are affected.
   native subscription search/save and never authorizes capture, forwarding, chat, or job sync.
   Preview warnings must disclose possible reuse of saved Boss forwarding for capture, but preview
   remains non-authoritative.
+- Boss screening input uses the primary Boss forwarding target plus `bossSecondaryEmail`/
+  `bossSecondaryCc` for candidate-level rejected-resume email. Legacy secondary-forward mode,
+  recipient, and CC fields are accepted only far enough to return a clear rejection; they must
+  never enter a normalized task, snapshot, argv, or scheduler record.
 - Assistant rag-answer is standalone: no task, browser, capture, scoring, export, or email.
   Stored-job and temporary-JD answers preserve the RAG fact, isolation, and no-answer contracts.
 - Internal HTTP endpoints are not a full auth gateway. Host binding, body limits, static paths, and
@@ -57,6 +61,10 @@ when they are affected.
 - A failed all-platform search-subscription task retains structured summaries for completed stages
   and the exact stopped platform while remaining failed. Earlier external saves are never rolled
   back or hidden by a later-stage error.
+- Dashboard health includes aggregate Boss rejection-email outbox counts, including `sending`, only;
+  task detail owns immutable recipients, candidate-level delivery states, and the
+  `sending`/`uncertain` manual-verification warnings. Neither read
+  model exposes rejection-email body content or SMTP credentials.
 
 ## Verification
 

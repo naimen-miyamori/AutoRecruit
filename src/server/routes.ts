@@ -563,6 +563,7 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
         sessions: await jobReadModel.getSessionHealth(tasks, platform),
         filters: await jobReadModel.getFilterHealth(platform),
         tasks: await taskQueue.getHealth(),
+        bossRejectionEmails: await jobReadModel.getBossRejectionEmailHealth(platform),
       };
       return jsonResponse(200, body);
     }

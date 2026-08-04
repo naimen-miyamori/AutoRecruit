@@ -94,9 +94,6 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'bossForwardCc',
     'bossScreeningEnabled',
     'bossScreeningPolicyFile',
-    'bossSecondaryForwardMode',
-    'bossSecondaryForwardRecipient',
-    'bossSecondaryForwardCc',
     'bossSecondaryEmail',
     'bossSecondaryCc',
     'resultRoutingEnabled',
@@ -120,9 +117,6 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
     'bossForwardCc',
     'bossScreeningEnabled',
     'bossScreeningPolicyFile',
-    'bossSecondaryForwardMode',
-    'bossSecondaryForwardRecipient',
-    'bossSecondaryForwardCc',
     'bossSecondaryEmail',
     'bossSecondaryCc',
     'resultRoutingEnabled',
@@ -227,7 +221,6 @@ function coerceScalar(field: string, value: unknown): unknown {
   if (Array.isArray(value) && (
     field === 'cc'
     || field === 'bossForwardCc'
-    || field === 'bossSecondaryForwardCc'
     || field === 'bossSecondaryCc'
     || field === 'secondaryCc'
     || field === 'summaryCc'
@@ -286,17 +279,9 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
     missing.push(isPresent(input.bossForwardMode) ? 'bossForwardRecipient' : 'bossForwardMode');
   }
 
-  if ((kind === 'resume-capture' || kind === 'batch')
-    && isPresent(input.bossSecondaryForwardMode) !== isPresent(input.bossSecondaryForwardRecipient)) {
-    missing.push(isPresent(input.bossSecondaryForwardMode) ? 'bossSecondaryForwardRecipient' : 'bossSecondaryForwardMode');
-  }
-
   if (kind === 'resume-capture' || kind === 'batch') {
     if (Array.isArray(input.bossForwardCc) && input.bossForwardCc.length > 0 && input.bossForwardMode === 'colleague') {
       missing.push('bossForwardMode=email');
-    }
-    if (Array.isArray(input.bossSecondaryForwardCc) && input.bossSecondaryForwardCc.length > 0 && input.bossSecondaryForwardMode === 'colleague') {
-      missing.push('bossSecondaryForwardMode=email');
     }
   }
 
@@ -306,9 +291,6 @@ function computeMissingFields(kind: AssistantDraft['kind'], input: Record<string
       || isPresent(input.bossForwardCc)
       || isPresent(input.bossScreeningEnabled)
       || isPresent(input.bossScreeningPolicyFile)
-      || isPresent(input.bossSecondaryForwardMode)
-      || isPresent(input.bossSecondaryForwardRecipient)
-      || isPresent(input.bossSecondaryForwardCc)
       || isPresent(input.bossSecondaryEmail)
       || isPresent(input.bossSecondaryCc))
     && input.includeBoss !== true) {
@@ -424,14 +406,12 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
   if ((kind === 'resume-capture' || kind === 'batch') && (
     isPresent(input.bossForwardMode)
     || isPresent(input.bossForwardCc)
-    || isPresent(input.bossSecondaryForwardMode)
-    || isPresent(input.bossSecondaryForwardCc)
   )) {
     warnings.push('风险：Boss 会把简历转发给指定站内同事或邮箱。');
   }
 
   if ((kind === 'resume-capture' || kind === 'batch') && input.bossScreeningEnabled === true) {
-    warnings.push('风险：Boss 将在评分后按模型要求分流：明确满足和需复核候选人转发并报告给主受众，模型明确判断要求缺失的候选人只转发并报告给副受众；主受众为空时不会发送主报告。');
+    warnings.push('风险：Boss 将在评分后按模型要求分流：明确满足和需复核候选人转发并报告给主受众，模型明确判断要求缺失的候选人不做 Boss 转发，而向副收件人逐份发送否定原因和完整简历。');
   }
 
   if (kind === 'boss-auto-chat') {
@@ -696,9 +676,6 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   pushPreview(argv, '--boss-forward-cc', Array.isArray(input.bossForwardCc) ? input.bossForwardCc.join(',') : input.bossForwardCc);
   pushBooleanPreview(argv, '--boss-screening-enabled', input.bossScreeningEnabled);
   pushPreview(argv, '--boss-screening-policy-file', input.bossScreeningPolicyFile);
-  pushPreview(argv, '--boss-secondary-forward-mode', input.bossSecondaryForwardMode);
-  pushPreview(argv, '--boss-secondary-forward-recipient', input.bossSecondaryForwardRecipient);
-  pushPreview(argv, '--boss-secondary-forward-cc', Array.isArray(input.bossSecondaryForwardCc) ? input.bossSecondaryForwardCc.join(',') : input.bossSecondaryForwardCc);
   pushPreview(argv, '--boss-secondary-email', input.bossSecondaryEmail);
   pushPreview(argv, '--boss-secondary-cc', Array.isArray(input.bossSecondaryCc) ? input.bossSecondaryCc.join(',') : input.bossSecondaryCc);
   return argv;
@@ -790,10 +767,10 @@ function buildSystemPrompt(): string {
     '允许的 kind 只有：resume-capture、batch、talent-mapping、search-subscription、boss-auto-chat、boss-talent-search、boss-greet、boss-chat-operation、boss-job-sync、login-refresh、rag-ops、rag-answer。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
     'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
-    'resume-capture 字段：platform, keyword, bossJobId, bossSearchKeyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient, bossForwardCc, bossScreeningEnabled, bossScreeningPolicyFile, bossSecondaryForwardMode, bossSecondaryForwardRecipient, bossSecondaryForwardCc, bossSecondaryEmail, bossSecondaryCc。bossJobId 只用于 platform=boss 或 all 且 includeBoss=true 的普通抓取，必须是精确的已同步职位 ID；bossSearchKeyword 只覆盖 Boss 人才页查询词，不改变岗位身份或其他平台关键词。只要 platform=boss 且提供 bossJobId，就可复用岗位已保存 JD/搜索设置而省略 jd 和 jdFile。searchConditionSetRefs 是 {平台:{conditionSetId,platform,revision}}，revision 必须固定。',
-    'batch 字段：platform, jobsFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient, bossForwardCc, bossScreeningEnabled, bossScreeningPolicyFile, bossSecondaryForwardMode, bossSecondaryForwardRecipient, bossSecondaryForwardCc, bossSecondaryEmail, bossSecondaryCc；不要包含 keyword、jd、jdFile。',
+    'resume-capture 字段：platform, keyword, bossJobId, bossSearchKeyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient, bossForwardCc, bossScreeningEnabled, bossScreeningPolicyFile, bossSecondaryEmail, bossSecondaryCc。bossJobId 只用于 platform=boss 或 all 且 includeBoss=true 的普通抓取，必须是精确的已同步职位 ID；bossSearchKeyword 只覆盖 Boss 人才页查询词，不改变岗位身份或其他平台关键词。只要 platform=boss 且提供 bossJobId，就可复用岗位已保存 JD/搜索设置而省略 jd 和 jdFile。searchConditionSetRefs 是 {平台:{conditionSetId,platform,revision}}，revision 必须固定。',
+    'batch 字段：platform, jobsFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient, bossForwardCc, bossScreeningEnabled, bossScreeningPolicyFile, bossSecondaryEmail, bossSecondaryCc；不要包含 keyword、jd、jdFile。',
     'talent-mapping 字段：platform, talentMappingFile, mappingStage, confirmedDetailOpen, mappingRunId；mappingStage 只能 scan、enrich、all，详情阶段必须 confirmedDetailOpen=true；只允许 51job、liepin、zhilian 或 all，不允许 Boss；不与普通抓取、JD、邮件、转发、订阅或 RAG 参数组合。',
-    'Boss 转发和评分后模型要求分流仅允许 platform=boss，或 platform=all 且 includeBoss=true；bossForwardMode、bossSecondaryForwardMode 只能是 colleague 或 email，出现时各自必须与对应 recipient 同时提供。bossScreeningPolicyFile 只引用版本 2 模型要求 JSON，不接受旧版本、脚本、表达式或收件人；bossScreeningEnabled=true 时，明确满足和需复核候选人属于主受众，模型明确判断要求缺失的候选人属于副受众。',
+    'Boss 转发和评分后模型要求分流仅允许 platform=boss，或 platform=all 且 includeBoss=true；bossForwardMode 只能是 colleague 或 email，出现时必须与 recipient 同时提供。bossScreeningPolicyFile 只引用版本 2 模型要求 JSON，不接受旧版本、脚本、表达式或收件人；bossScreeningEnabled=true 时，明确满足和需复核候选人转发给主受众，模型明确判断要求缺失的候选人不做 Boss 转发，而向 bossSecondaryEmail 逐份发送否定原因和完整简历。',
     'boss-auto-chat 字段：platform, scoreThreshold, requireAllHardRequirements, replyToUnqualifiedCandidates, bossForwardMode, bossForwardRecipient, bossForwardCc, summaryEmail, summaryCc, syncJobsBeforeReview；platform 必须是 boss。replyToUnqualifiedCandidates 默认 false，仅显式设为 true 时才向不合适候选人发送固定拒绝常用语。转发和总结邮件参数可省略以复用已保存配置；syncJobsBeforeReview 默认 false。',
     'boss-talent-search 字段：platform, source, bossJobId, expectedJobName, coreRequirements, bonusRequirements, triggerMatch, confirmed；source 只能 recommend 或 deep-search。triggerMatch 默认 false，设为 true 时 confirmed 必须为 true。',
     'boss-greet 字段：platform, source, candidateId, expectedCandidateName, expectedJobName, bossJobId, intentId, confirmed；必须提供精确候选人 ID、预期姓名、预期职位，confirmed 必须为 true。',

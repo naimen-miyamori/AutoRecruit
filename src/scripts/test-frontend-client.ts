@@ -33,6 +33,15 @@ function dashboardHealth(): Record<string, unknown> {
     sessions: [],
     filters: [],
     tasks: { queued: 0, running: 0, succeeded: 0, failed: 0, cancelled: 0 },
+    bossRejectionEmails: {
+      outboxCount: 3,
+      pending: 0,
+      sending: 1,
+      sent: 1,
+      retryableFailed: 0,
+      uncertain: 1,
+      superseded: 0,
+    },
   };
 }
 
@@ -54,6 +63,145 @@ async function mockApi(page: Page): Promise<void> {
       body = { taskId: 'task-classification-1', kind: 'talent-mapping-classification', status: 'queued' };
     } else if (request.method() === 'POST' && pathname === '/api/talent-mappings/mapping-1/entity-links') {
       body = { entityId: 'entity-1', platformCandidateKeys: ['51job:candidate-1', 'liepin:candidate-2'], confirmedAt: '2026-07-28T00:02:00.000Z', confirmedBy: '审核员', evidence: '人工核对' };
+    } else if (pathname === '/api/tasks/task-capture-1') {
+      body = {
+        taskId: 'task-capture-1',
+        kind: 'resume-capture',
+        status: 'succeeded',
+        createdAt: '2026-08-04T00:00:00.000Z',
+        updatedAt: '2026-08-04T00:01:00.000Z',
+        logs: [],
+        input: {
+          platform: 'boss',
+          keyword: '全铝箱包设计',
+          bossSecondaryEmail: 'secondary@example.com',
+          bossSecondaryCc: ['audit@example.com'],
+        },
+        output: {
+          jobKey: 'boss-job-1',
+          totalCandidates: 5,
+          capturedCandidates: 5,
+          scoredCandidates: 4,
+          failedCandidates: 1,
+          resultPath: 'data/boss/jobs/boss-job-1/runs/run.json',
+          bossRouting: {
+            enabled: true,
+            qualifiedCandidateIds: ['qualified-1'],
+            reviewCandidateIds: ['review-1'],
+            rejectedCandidateIds: ['rejected-1', 'rejected-2'],
+            pendingScoreCandidateIds: ['pending-score-1'],
+            scoreFailureStatusCounts: { 'connection-timeout@initializing': 1 },
+            forwardingStatusCounts: { sent: 2 },
+            rejectionEmailStatusCounts: { sent: 1, uncertain: 1 },
+          },
+          rejectionEmails: {
+            eligible: 2,
+            pending: 0,
+            sending: 0,
+            sent: 1,
+            retryableFailed: 0,
+            uncertain: 1,
+            superseded: 0,
+            failedCandidateIds: ['rejected-2'],
+            deliveryTargets: [{
+              recipientEmail: 'secondary@example.com',
+              ccEmails: ['audit@example.com'],
+            }],
+          },
+        },
+      };
+    } else if (pathname === '/api/tasks/task-capture-inherited') {
+      body = {
+        taskId: 'task-capture-inherited',
+        kind: 'resume-capture',
+        status: 'succeeded',
+        createdAt: '2026-08-04T00:00:00.000Z',
+        updatedAt: '2026-08-04T00:01:00.000Z',
+        logs: [],
+        input: {
+          platform: 'boss',
+          keyword: '全铝箱包设计',
+          bossCaptureTaskSnapshot: {
+            version: 4,
+            deliveryAndScreening: {
+              screening: {
+                secondaryDelivery: {
+                  recipientEmail: 'snapshot-secondary@example.com',
+                  ccEmails: ['snapshot-audit@example.com'],
+                },
+              },
+            },
+          },
+        },
+        output: {
+          jobKey: 'boss-job-inherited',
+          totalCandidates: 1,
+          capturedCandidates: 0,
+          scoredCandidates: 0,
+          failedCandidates: 1,
+          bossRouting: {
+            enabled: true,
+            qualifiedCandidateIds: [],
+            reviewCandidateIds: [],
+            rejectedCandidateIds: ['rejected-sending'],
+            forwardingStatusCounts: {},
+            rejectionEmailStatusCounts: { sending: 1 },
+          },
+          rejectionEmails: {
+            eligible: 1,
+            pending: 0,
+            sending: 1,
+            sent: 0,
+            retryableFailed: 0,
+            uncertain: 0,
+            superseded: 0,
+            failedCandidateIds: ['rejected-sending'],
+          },
+        },
+      };
+    } else if (pathname === '/api/tasks/task-capture-batch') {
+      body = {
+        taskId: 'task-capture-batch',
+        kind: 'resume-capture',
+        status: 'succeeded',
+        createdAt: '2026-08-04T00:00:00.000Z',
+        updatedAt: '2026-08-04T00:01:00.000Z',
+        logs: [],
+        input: { platform: 'all', includeBoss: true, jobsFile: './jobs.json' },
+        output: [{
+          platform: 'boss',
+          keyword: '全铝箱包设计',
+          summary: {
+            jobKey: 'boss-job-batch',
+            totalCandidates: 1,
+            capturedCandidates: 1,
+            scoredCandidates: 1,
+            failedCandidates: 0,
+            bossRouting: {
+              enabled: true,
+              qualifiedCandidateIds: [],
+              reviewCandidateIds: [],
+              rejectedCandidateIds: ['batch-rejected'],
+              forwardingStatusCounts: {},
+              rejectionEmailStatusCounts: { sent: 1 },
+            },
+            rejectionEmails: {
+              eligible: 1,
+              pending: 0,
+              sending: 0,
+              sent: 1,
+              retryableFailed: 0,
+              uncertain: 0,
+              superseded: 0,
+              failedCandidateIds: [],
+              deliveryTargets: [{
+                recipientEmail: 'batch-secondary@example.com',
+                ccEmails: ['batch-audit@example.com'],
+              }],
+            },
+          },
+        }],
+      };
     } else if (pathname === '/api/tasks/task-talent-1') {
       body = {
         taskId: 'task-talent-1',
@@ -382,6 +530,56 @@ describe('frontend client', () => {
     await page.close();
   });
 
+  it('shows Boss rejection email targets, counts, and uncertain delivery warning', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/tasks/task-capture-1`, { waitUntil: 'networkidle' });
+    const body = await page.locator('body').innerText();
+    assert.match(body, /否定简历邮件/);
+    assert.match(body, /secondary@example.com/);
+    assert.match(body, /audit@example.com/);
+    assert.match(body, /应发份数\s*2/);
+    assert.match(body, /已发送\s*1/);
+    assert.match(body, /评分未决\s*1/);
+    assert.match(body, /connection-timeout@initializing: 1/);
+    assert.match(body, /不会转发或发送否定邮件/);
+    assert.doesNotMatch(body, /pending-score-1/);
+    assert.match(body, /结果不确定\s*1/);
+    assert.match(body, /系统不会自动重发/);
+    assert.match(body, /rejected-2/);
+    await page.close();
+  });
+
+  it('shows inherited snapshot targets, sending state, and wrapped batch Boss output', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/tasks/task-capture-inherited`, { waitUntil: 'networkidle' });
+    let body = await page.locator('body').innerText();
+    assert.match(body, /snapshot-secondary@example.com/);
+    assert.match(body, /snapshot-audit@example.com/);
+    assert.match(body, /发送中断待核对\s*1/);
+    assert.match(body, /停留在 sending/);
+
+    await page.goto(`${baseUrl}/tasks/task-capture-batch`, { waitUntil: 'networkidle' });
+    body = await page.locator('body').innerText();
+    assert.match(body, /boss · 全铝箱包设计/);
+    assert.match(body, /batch-secondary@example.com/);
+    assert.match(body, /batch-audit@example.com/);
+    assert.match(body, /已发送\s*1/);
+    await page.close();
+  });
+
+  it('shows sending and uncertain Boss rejection emails as dashboard alerts', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/`, { waitUntil: 'networkidle' });
+    const body = await page.locator('body').innerText();
+    assert.match(body, /1 封停留在 sending/);
+    assert.match(body, /1 封结果不确定/);
+    assert.match(body, /发送中\s*1/);
+    await page.close();
+  });
+
   it('shows completed platforms and the stop platform for a failed all-platform subscription', async () => {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await mockApi(page);
@@ -394,7 +592,7 @@ describe('frontend client', () => {
     await page.close();
   });
 
-  it('submits Boss post-score screening with separate primary and secondary delivery targets', async () => {
+  it('submits Boss post-score screening with primary forwarding and rejection email targets', async () => {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await mockApi(page);
     await page.goto(`${baseUrl}/run`, { waitUntil: 'networkidle' });
@@ -405,16 +603,13 @@ describe('frontend client', () => {
     const screeningSwitch = page.getByLabel('启用 Boss 评分后模型要求分流', { exact: true });
     await screeningSwitch.check();
     assert.equal(await screeningSwitch.isChecked(), true);
-    await page.getByText(/需复核者发给主受众/).waitFor({ state: 'visible' });
-    assert.match(await page.locator('body').innerText(), /Boss 副转发方式/);
+    await page.getByText(/需复核者转发给主受众/).waitFor({ state: 'visible' });
+    assert.match(await page.locator('body').innerText(), /明确否定简历逐份邮件/);
     await page.getByLabel('模型要求策略文件（可选，留空复用岗位已保存策略）', { exact: true }).fill('./boss-model-requirements.json');
     await page.getByLabel(/^(主)?报告邮箱$/).fill('primary@example.com');
     const bossScreeningFields = page.locator('.form-grid');
-    await bossScreeningFields.locator('label').filter({ hasText: 'Boss 副转发方式' }).locator('select').selectOption('email');
-    await bossScreeningFields.locator('label').filter({ hasText: 'Boss 副转发收件人' }).locator('input').fill('secondary-forward@example.com');
-    await bossScreeningFields.locator('label').filter({ hasText: 'Boss 副转发抄送' }).locator('input').fill('secondary-forward-audit@example.com');
-    await bossScreeningFields.locator('label').filter({ hasText: '副报告邮箱' }).locator('input').fill('secondary@example.com');
-    await bossScreeningFields.locator('label').filter({ hasText: '副报告抄送' }).locator('input').fill('audit@example.com');
+    await bossScreeningFields.locator('label').filter({ hasText: '否定简历副收件人' }).locator('input').fill('secondary@example.com');
+    await bossScreeningFields.locator('label').filter({ hasText: '否定简历邮件抄送' }).locator('input').fill('audit@example.com');
 
     const submitted = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/resume-capture');
     await page.getByRole('button', { name: '提交任务', exact: true }).click();
@@ -423,9 +618,6 @@ describe('frontend client', () => {
     assert.equal(payload.bossScreeningEnabled, true);
     assert.equal(payload.bossScreeningPolicyFile, './boss-model-requirements.json');
     assert.equal(payload.email, 'primary@example.com');
-    assert.equal(payload.bossSecondaryForwardMode, 'email');
-    assert.equal(payload.bossSecondaryForwardRecipient, 'secondary-forward@example.com');
-    assert.deepStrictEqual(payload.bossSecondaryForwardCc, ['secondary-forward-audit@example.com']);
     assert.equal(payload.bossSecondaryEmail, 'secondary@example.com');
     assert.deepStrictEqual(payload.bossSecondaryCc, ['audit@example.com']);
     await page.close();

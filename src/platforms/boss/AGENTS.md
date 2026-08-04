@@ -61,20 +61,31 @@ scheduled work.
   written and verified in every message. CC is valid only for email forwarding. With Boss
   post-score screening disabled, retain the legacy order: forward
   before parsing or seen marking, so a pre-capture failure remains retryable. With enabled
-  post-score screening, skip that legacy forwarding hook: parse and persist the exact resume, mark
-  it seen, score and evaluate the version 2 model requirements while the same detail remains
-  open, persist the routing decision/outbox, then forward `qualified` and `review` to the primary
-  target and proven `rejected` candidates to the secondary target. Page actions never decide this
-  route or write its facts. Persist a pending-score work item before seen so an interruption before
-  the first decision can recover only that exact candidate. A pending or known pre-confirmation
-  failed outbox may retry only while the exact candidate is visible and must use its stored target
-  deliveries. The primary address and every copy address have separate durable states; sent and
-  uncertain external confirmations are never auto-retried, and a failed copy must not repeat a
-  successful primary delivery. A policy-version migration may mark unfinished old-policy
-  deliveries as `superseded`; that terminal state is never retried. Explicit
+  post-score screening, skip that legacy forwarding hook: parse and persist the exact resume, write
+  pending-score/seen, and strictly close the bounded capture detail before model work. Score only
+  from that persisted resume. A model/provider/schema failure remains pending, records de-identified
+  phase diagnostics, and must not create a routing artifact, forwarding outbox, rejection email, or
+  report audience. After a successful decision, persist the routing decision/outbox; only
+  `qualified` and `review` reopen the exact candidate in a second bounded detail lifecycle and
+  forward to the primary target. A proven `rejected` candidate must never call the Boss forwarding
+  action; a separate candidate-level rejection-email outbox carrying the verified first-detail close sends one SMTP
+  message containing all missing reasons and the complete structured resume to the configured
+  secondary email/CC. Page actions never decide this route or write its facts. Persist a
+  pending-score work item before seen so an interruption or scoring failure before the first decision can recover
+  only that exact candidate under the same policy. A pending or known pre-confirmation failed forwarding outbox may
+  retry only while the exact candidate is visible and must use its stored target deliveries.
+  Rejection email recovery uses only its persisted resume/routing facts and never reopens detail.
+  Persist the verified `detailClosedAt` before the detail lifecycle returns and start SMTP only
+  afterward. A missing close proof never authorizes SMTP but remains visible in the current run;
+  recovered outcomes remain reportable even when the candidate is absent or already indexed by a
+  historical run.
+  The primary address and every copy address have separate durable states; sent and uncertain
+  external confirmations are never auto-retried, and a failed copy must not repeat a successful
+  primary delivery. A policy-version migration may mark unfinished old-policy deliveries as
+  `superseded`; that terminal state is never retried. Explicit
   normal-capture forwarding and screening settings persist only on that Boss job record; they must
   not rewrite the auto-chat platform default. Only explicit auto-chat input may update the latter.
-- HTTP, assistant, batch, and scheduler capture tasks use the server-created Boss v3 snapshot:
+- HTTP, assistant, batch, and scheduler capture tasks use the server-created Boss settings v3/task v4 snapshot:
   stable identity, complete search plan, immutable delivery targets, screening policy, and source
   configuration revision. Explicit patches use JobStore CAS before browser work; a revision
   conflict fails closed. RunResult routing facts own report recipients and CC, so manual replay
@@ -83,8 +94,9 @@ scheduled work.
   before seen, recovery, detail, scoring, forwarding, or persistence work. Seen candidates inside
   that window do not backfill from position 21 onward. For each stable ID in that bounded window
   already present in the validated current-job `seen-ids.json`, ordinary capture performs exactly
-  one detail open/identity-check/close lifecycle unless an outbox-retry or pending-score lifecycle
-  already covers it. This history-view action is read-only: it never parses, scores, forwards,
+  one read-only detail open/identity-check/close lifecycle unless an outbox-retry or pending-score lifecycle
+  already covers it. A successfully decided qualified/review candidate may then use a separate
+  forwarding-only detail lifecycle; that is not a history-view action. History view never parses, scores, forwards,
   contacts, or writes history, and a failed close stops later card operations. Boss standalone modes
   and other platforms do not inherit this cap or view-sync contract.
 - A candidate enters captured history only after the current detail identity is verified, the parsed
@@ -109,8 +121,10 @@ scheduled work.
   structure again immediately before clicking. The current no-close forwarding dialog is dismissed
   only through a unique uncovered layer point with a verified postcondition. Never use Escape for
   that cleanup: it can close the underlying resume while leaving the forwarding dialog visible.
-- A normal Boss detail lifecycle uses one absolute deadline created by the workflow and passed
-  through open, identity verification, parsing, every recipient delivery, and strict close. Actions
+- Each normal Boss detail lifecycle uses one absolute deadline created by the workflow and passed
+  through its own open, identity verification, parsing or recipient delivery, and strict close.
+  Model evaluation never runs inside a page-detail deadline. Post-score qualified/review forwarding
+  uses a second exact-candidate lifecycle and never reuses or resets the capture deadline. Actions
   reserve cleanup time before spending user-like pace, recompute remaining timeout after pacing, and
   revalidate the exact candidate/control again after pointer movement immediately before dispatch.
   Actions must not create a fresh detail deadline for a later lifecycle phase; unfinished deliveries

@@ -9,6 +9,8 @@ export interface SendJobReportEmailParams {
   ccEmails?: string[];
   subject: string;
   markdown: string;
+  /** Stable caller-owned identity for candidate-level idempotent delivery. */
+  messageId?: string;
 }
 
 export interface SendJobReportEmailResult {
@@ -22,6 +24,7 @@ export interface MailTransportPayload {
   cc?: string[];
   subject: string;
   text: string;
+  messageId?: string;
 }
 
 export interface MailTransport {
@@ -63,10 +66,7 @@ function isReservedEmailDomain(domain: string): boolean {
  * generating a bounce for a known placeholder domain.
  */
 export function assertDeliverableEmailAddress(value: string, label = 'email address'): void {
-  const normalized = value.trim();
-  if (!normalized || !EMAIL_ADDRESS_PATTERN.test(normalized)) {
-    throw new Error(`Invalid ${label}: ${JSON.stringify(value)}`);
-  }
+  const normalized = assertEmailAddressSyntax(value, label);
 
   const atIndex = normalized.lastIndexOf('@');
   const domain = normalized.slice(atIndex + 1);
@@ -75,6 +75,15 @@ export function assertDeliverableEmailAddress(value: string, label = 'email addr
       `Refusing to send ${label} ${JSON.stringify(value)}: reserved/test email domain ${JSON.stringify(domain)}`,
     );
   }
+}
+
+/** Validates mailbox syntax without rejecting reserved domains used by offline fixtures. */
+export function assertEmailAddressSyntax(value: string, label = 'email address'): string {
+  const normalized = value.trim();
+  if (!normalized || !EMAIL_ADDRESS_PATTERN.test(normalized)) {
+    throw new Error(`Invalid ${label}: ${JSON.stringify(value)}`);
+  }
+  return normalized;
 }
 
 function assertDeliverableRecipients(recipient: string, ccEmails?: string[]): void {
@@ -92,6 +101,11 @@ function getSmtpConfig(): SmtpConfig {
   }
 
   return { host, port, user, pass, from };
+}
+
+/** Fails before browser work or outbox dispatch without exposing SMTP values. */
+export function assertSmtpConfigurationReady(): void {
+  void getSmtpConfig();
 }
 
 export function createSmtpTransport(): MailTransport {
@@ -149,6 +163,7 @@ export async function sendJobReportEmail(
     ...(params.ccEmails?.length ? { cc: params.ccEmails } : {}),
     subject: params.subject,
     text: params.markdown,
+    ...(params.messageId ? { messageId: params.messageId } : {}),
   });
 
   return {

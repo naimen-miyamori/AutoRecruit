@@ -46,6 +46,17 @@ owning domain instructions for screens that expose platform, RAG, Boss, or Talen
   explain the detail-open side effect and possible saved-forwarding reuse. Search subscription
   must explain native “我的订阅” selection/save side effects and must not expose Boss independent
   modes as part of that control.
+- Boss screening forms expose primary forwarding and the rejected-resume secondary email/CC only.
+  The UI must state that `qualified/review` use Boss forwarding while `rejected` never uses Boss
+  forwarding and receives one candidate-level email containing the reason and complete resume;
+  legacy secondary-forward controls must not be rendered.
+- Task details and dashboard health render candidate-level rejection-email counts, recipients/CC
+  from the reviewed task input or immutable snapshot, and explicit `sending`/`uncertain`
+  manual-verification warnings without
+  rendering email body content or SMTP credentials.
+- Boss task details render pending-score count and de-identified provider `kind@phase` counts.
+  Pending candidates are not review candidates and the UI must state that they received neither
+  Boss forwarding nor rejection email; never render their IDs merely to explain a model failure.
 - Automation may offer a Talent Mapping schedule only as scan stage. The form must submit the
   card-only-compatible input shape and must not offer enrich or all as scheduled Mapping stages.
 - Do not infer candidate identity, link entities, apply classifications, or turn a later absence

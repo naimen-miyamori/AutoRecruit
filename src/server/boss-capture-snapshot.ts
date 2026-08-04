@@ -82,9 +82,6 @@ function canonicalPatchFromInput(
 
   const hasScreeningInput = input.bossScreeningEnabled !== undefined
     || input.bossScreeningPolicyFile !== undefined
-    || input.bossSecondaryForwardMode !== undefined
-    || input.bossSecondaryForwardRecipient !== undefined
-    || input.bossSecondaryForwardCc !== undefined
     || input.bossSecondaryEmail !== undefined
     || input.bossSecondaryCc !== undefined;
   if (hasScreeningInput) {
@@ -134,7 +131,7 @@ function makeBossCaptureTaskSnapshot(input: {
   const { normalizedInput, plan, settings } = input;
   const canonicalPatch = canonicalPatchFromInput(normalizedInput, plan, settings);
   const unsigned: Omit<BossCaptureTaskSnapshot, 'snapshotHash'> = {
-    version: 3,
+    version: 4,
     resolvedAt: settings.resolvedAt,
     sourceJobKey: plan.jobKey,
     ...(plan.jobRecord?.revision !== undefined ? { sourceJobRevision: plan.jobRecord.revision } : {}),
@@ -224,9 +221,6 @@ export async function snapshotBossCaptureSettings(
       bossForwardCc: normalized.input.bossForwardCc,
       bossScreeningEnabled: normalized.input.bossScreeningEnabled,
       bossScreeningPolicyFile: normalized.input.bossScreeningPolicyFile,
-      bossSecondaryForwardMode: normalized.input.bossSecondaryForwardMode,
-      bossSecondaryForwardRecipient: normalized.input.bossSecondaryForwardRecipient,
-      bossSecondaryForwardCc: normalized.input.bossSecondaryForwardCc,
       bossSecondaryEmail: normalized.input.bossSecondaryEmail,
       bossSecondaryCc: normalized.input.bossSecondaryCc,
     },
@@ -396,9 +390,6 @@ export async function snapshotBossBatchCaptureSettings(
       bossForwardCc: itemValue(item, 'bossForwardCc', normalized.input.bossForwardCc),
       bossScreeningEnabled: itemValue(item, 'bossScreeningEnabled', normalized.input.bossScreeningEnabled),
       bossScreeningPolicyFile: resolvedItemPolicyPath(item, jobsFilePath, normalized.input.bossScreeningPolicyFile),
-      bossSecondaryForwardMode: itemValue(item, 'bossSecondaryForwardMode', normalized.input.bossSecondaryForwardMode),
-      bossSecondaryForwardRecipient: itemValue(item, 'bossSecondaryForwardRecipient', normalized.input.bossSecondaryForwardRecipient),
-      bossSecondaryForwardCc: itemValue(item, 'bossSecondaryForwardCc', normalized.input.bossSecondaryForwardCc),
       bossSecondaryEmail: itemValue(item, 'bossSecondaryEmail', normalized.input.bossSecondaryEmail),
       bossSecondaryCc: itemValue(item, 'bossSecondaryCc', normalized.input.bossSecondaryCc),
     });
@@ -437,9 +428,6 @@ export async function snapshotBossBatchCaptureSettings(
         bossForwardCc: synthetic.input.bossForwardCc,
         bossScreeningEnabled: synthetic.input.bossScreeningEnabled,
         bossScreeningPolicyFile: synthetic.input.bossScreeningPolicyFile,
-        bossSecondaryForwardMode: synthetic.input.bossSecondaryForwardMode,
-        bossSecondaryForwardRecipient: synthetic.input.bossSecondaryForwardRecipient,
-        bossSecondaryForwardCc: synthetic.input.bossSecondaryForwardCc,
         bossSecondaryEmail: synthetic.input.bossSecondaryEmail,
         bossSecondaryCc: synthetic.input.bossSecondaryCc,
       },

@@ -17,6 +17,7 @@ import {
   type CandidateRoutingArtifact,
   type BossCandidateRoutingArtifact,
   type CandidateScoreArtifact,
+  type BossRejectionEmailOutboxEntry,
   type ReportDeliveryOptions,
   type RunResult,
 } from '../types/job.js';
@@ -58,6 +59,21 @@ export interface SendBossRoutedReportsSummary {
   reportDeliveries: {
     primary: RoutedReportDeliverySummary;
     secondary: RoutedReportDeliverySummary;
+  };
+  /** Candidate-level rejection email state for the new Boss delivery contract. */
+  rejectionEmails?: {
+    eligible: number;
+    pending: number;
+    sending: number;
+    sent: number;
+    retryableFailed: number;
+    uncertain: number;
+    superseded: number;
+    failedCandidateIds: string[];
+    deliveryTargets: Array<{
+      recipientEmail: string;
+      ccEmails: string[];
+    }>;
   };
 }
 
@@ -342,7 +358,7 @@ function buildBossRoutedReportMarkdown(
       '',
       `## 需复核（${routing.reviewCandidateIds.length}）`,
       '',
-      '以下候选人因证据不足、条件无法确定或评分失败而需要人工复核；他们不代表明确符合。',
+      '以下候选人已完成评分，但因证据不足或条件无法确定而需要人工复核；他们不代表明确符合。技术性评分失败保持未决，不进入本报告。',
       '',
       renderCompactBossRoutedCandidates(inputs.reviewArtifacts, inputs.routingByCandidateId),
       '',
@@ -387,6 +403,17 @@ async function sendBossRoutedAudienceReport(input: {
       delivered: false,
       skipReason: emptyReason,
       summary: emptySummary(),
+    };
+  }
+
+  if (audience === 'secondary' && inputs.latestRun.bossRouting?.rejectionEmailStatusCounts) {
+    return {
+      jobKey: jobRecord.jobKey,
+      audience,
+      attempted: false,
+      delivered: false,
+      skipReason: 'rejected-candidates-delivered-individually',
+      summary: aggregateJobResults({ jobRecord, scoreArtifacts: artifacts }).summary,
     };
   }
 
@@ -446,6 +473,57 @@ async function sendBossRoutedAudienceReport(input: {
   }
 }
 
+function summarizeBossRejectionEmails(
+  latestRun: RunResult,
+  entries: readonly BossRejectionEmailOutboxEntry[],
+): NonNullable<SendBossRoutedReportsSummary['rejectionEmails']> | undefined {
+  const routing = latestRun.bossRouting;
+  if (!routing?.enabled || !routing.rejectionEmailStatusCounts) return undefined;
+  const rejectedIds = [...new Set(routing.rejectedCandidateIds)];
+  const rejectedIdSet = new Set(rejectedIds);
+  const entriesByCandidateId = new Map(entries
+    .filter((entry) => rejectedIdSet.has(entry.candidateId) && entry.policyHash === routing.policyHash)
+    .map((entry) => [entry.candidateId, entry]));
+  const targetByIdentity = new Map<string, { recipientEmail: string; ccEmails: string[] }>();
+  for (const entry of entriesByCandidateId.values()) {
+    const target = { recipientEmail: entry.recipientEmail, ccEmails: [...entry.ccEmails] };
+    targetByIdentity.set(JSON.stringify(target), target);
+  }
+  if (targetByIdentity.size === 0) {
+    const configured = routing.reportDelivery?.secondary ?? routing.delivery?.secondary;
+    if (configured?.recipientEmail) {
+      const target = { recipientEmail: configured.recipientEmail, ccEmails: [...(configured.ccEmails ?? [])] };
+      targetByIdentity.set(JSON.stringify(target), target);
+    }
+  }
+  const counts = {
+    eligible: rejectedIds.length,
+    pending: 0,
+    sending: 0,
+    sent: 0,
+    retryableFailed: 0,
+    uncertain: 0,
+    superseded: 0,
+    failedCandidateIds: [] as string[],
+    deliveryTargets: [...targetByIdentity.values()],
+  };
+  for (const candidateId of rejectedIds) {
+    const entry = entriesByCandidateId.get(candidateId);
+    const status = entry?.status;
+    if (status === 'pending') counts.pending += 1;
+    else if (status === 'sending') counts.sending += 1;
+    else if (status === 'sent') counts.sent += 1;
+    else if (status === 'retryable-failed') counts.retryableFailed += 1;
+    else if (status === 'uncertain') counts.uncertain += 1;
+    else if (status === 'superseded') counts.superseded += 1;
+    else counts.failedCandidateIds.push(candidateId);
+    if (status && status !== 'sent' && !counts.failedCandidateIds.includes(candidateId)) {
+      counts.failedCandidateIds.push(candidateId);
+    }
+  }
+  return counts;
+}
+
 /** Sends exactly one audience for an explicit, safe manual replay. */
 export async function sendBossRoutedReportAudience(
   jobKey: string,
@@ -467,8 +545,9 @@ export async function sendBossRoutedReportAudience(
 }
 
 /**
- * Sends the two mutually exclusive reports independently. A primary failure
- * never prevents an eligible secondary report, and vice versa.
+ * Sends the primary report and the version-compatible secondary audience
+ * independently. New Boss rejection-email runs fail closed for secondary;
+ * legacy Boss runs and non-Boss routing retain their historical report path.
  */
 export async function sendBossRoutedReports(
   jobKey: string,
@@ -486,6 +565,7 @@ export async function sendBossRoutedReports(
     throw new Error(`The latest Boss run for job key ${jobKey} does not contain enabled screening facts`);
   }
   const inputs = await loadBossRoutedReportInputs(store, jobKey, latestRun, scoreArtifacts);
+  const rejectionEmailEntries = await store.listBossRejectionEmailOutboxEntries('boss', jobKey);
   const [primary, secondary] = await Promise.all([
     sendBossRoutedAudienceReport({
       audience: 'primary',
@@ -500,7 +580,11 @@ export async function sendBossRoutedReports(
       deliveryOverrides: secondaryDeliveryOverrides,
     }),
   ]);
-  return { jobKey, reportDeliveries: { primary, secondary } };
+  return {
+    jobKey,
+    reportDeliveries: { primary, secondary },
+    rejectionEmails: summarizeBossRejectionEmails(latestRun, rejectionEmailEntries),
+  };
 }
 
 interface PostScoreRoutedReportInputs {

@@ -19,6 +19,7 @@ import { JobStore } from '../storage/job-store.js';
 import type { MainResult, MainRunSummary } from '../index.js';
 import type {
   BossCandidateRoutingArtifact,
+  BossRejectionEmailOutboxEntry,
   CandidateRoutingArtifact,
   CandidateScoreArtifact,
   JobRecord,
@@ -136,7 +137,7 @@ interface BossRoutingSeed {
 async function seedBossRoutedRun(
   jobKey: string,
   candidates: BossRoutingSeed[],
-  options: { unroutedNewCandidateIds?: string[] } = {},
+  options: { unroutedNewCandidateIds?: string[]; newContract?: boolean } = {},
 ): Promise<{ store: JobStore; fetchedAt: string }> {
   const store = new JobStore();
   const fetchedAt = '2026-07-31T00:00:02.000Z';
@@ -163,7 +164,6 @@ async function seedBossRoutedRun(
         criteria: ['明确证据'],
         insufficientEvidence: ['无证据'],
       }],
-      secondaryForwarding: { mode: 'email', recipient: 'secondary-forward@example.com' },
       secondaryDelivery: { recipientEmail: 'secondary@example.com', ccEmails: ['secondary-cc@example.com'] },
     },
     rawText: 'raw jd',
@@ -238,6 +238,7 @@ async function seedBossRoutedRun(
       reviewCandidateIds,
       rejectedCandidateIds,
       forwardingStatusCounts: { sent: candidates.length },
+      ...(options.newContract ? { rejectionEmailStatusCounts: { sent: rejectedCandidateIds.length } } : {}),
     },
   });
   return { store, fetchedAt };
@@ -890,6 +891,81 @@ describe('sendJobReport', () => {
     });
   });
 
+  it('skips the new rejected aggregate report and summarizes candidate-level email receipts', async () => {
+    const jobKey = `boss-rejection-email-report-${Date.now()}`;
+    const { store } = await seedBossRoutedRun(jobKey, [
+      { candidateId: 'qualified-email-candidate', classification: 'qualified' },
+      {
+        candidateId: 'rejected-email-candidate',
+        classification: 'rejected',
+        missingCriteria: ['缺少明确证据'],
+      },
+      {
+        candidateId: 'rejected-email-sending',
+        classification: 'rejected',
+        missingCriteria: ['发送状态待核对'],
+      },
+    ], { newContract: true });
+    const routingArtifacts = await store.listBossCandidateRoutingArtifacts('boss', jobKey);
+    const routingArtifact = routingArtifacts
+      .find((artifact) => artifact.candidateId === 'rejected-email-candidate')!;
+    const emailEntry: BossRejectionEmailOutboxEntry = {
+      version: 1,
+      deliveryId: 'rejection-report-delivery-1',
+      candidateId: routingArtifact.candidateId,
+      routingDecisionId: routingArtifact.routingDecisionId ?? 'rejection-report-decision-1',
+      routingArtifact,
+      policyHash: routingArtifact.policyHash,
+      recipientEmail: 'secondary@example.com',
+      ccEmails: ['secondary-cc@example.com'],
+      messageId: '<rejection-report-delivery-1@autorecruit.local>',
+      subject: '明确否定',
+      markdown: '完整简历',
+      contentHash: 'content-hash',
+      status: 'sent',
+      createdAt: routingArtifact.decidedAt,
+      updatedAt: routingArtifact.decidedAt,
+      completedAt: routingArtifact.decidedAt,
+    };
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, emailEntry);
+    const sendingArtifact = routingArtifacts
+      .find((artifact) => artifact.candidateId === 'rejected-email-sending')!;
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, {
+      ...emailEntry,
+      deliveryId: 'rejection-report-delivery-sending',
+      candidateId: sendingArtifact.candidateId,
+      routingDecisionId: sendingArtifact.routingDecisionId ?? 'rejection-report-decision-sending',
+      routingArtifact: sendingArtifact,
+      messageId: '<rejection-report-delivery-sending@autorecruit.local>',
+      status: 'sending',
+      completedAt: undefined,
+    });
+    const sent: Array<{ recipient: string; subject: string }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, subject }) => {
+      sent.push({ recipient, subject });
+      return { recipient, subject };
+    };
+
+    const result = await sendBossRoutedReports(jobKey);
+
+    assert.deepStrictEqual(sent.map((item) => item.recipient), ['primary@example.com']);
+    assert.equal(result.reportDeliveries.secondary.skipReason, 'rejected-candidates-delivered-individually');
+    assert.deepStrictEqual(result.rejectionEmails, {
+      eligible: 2,
+      pending: 0,
+      sending: 1,
+      sent: 1,
+      retryableFailed: 0,
+      uncertain: 0,
+      superseded: 0,
+      failedCandidateIds: ['rejected-email-sending'],
+      deliveryTargets: [{
+        recipientEmail: 'secondary@example.com',
+        ccEmails: ['secondary-cc@example.com'],
+      }],
+    });
+  });
+
   it('keeps aggregate Boss email delivery false when any required audience report fails', () => {
     const summary = buildBossRoutedMainRunEmailSummary({
       primary: {
@@ -917,6 +993,36 @@ describe('sendJobReport', () => {
     assert.equal(summary.emailDelivered, false);
     assert.equal(summary.emailRecipient, 'primary@example.com');
     assert.equal(summary.emailError, 'smtp failed');
+
+    const immutableFailure = buildBossRoutedMainRunEmailSummary({
+      primary: {
+        jobKey: 'boss-immutable-rejection-failure',
+        audience: 'primary',
+        attempted: true,
+        delivered: true,
+        recipient: 'primary@example.com',
+        subject: 'primary report',
+        summary: { candidateCount: 1, successCount: 1, failureCount: 0 },
+      },
+      secondary: {
+        jobKey: 'boss-immutable-rejection-failure',
+        audience: 'secondary',
+        attempted: false,
+        delivered: false,
+        skipReason: 'rejected-candidates-delivered-individually',
+        summary: { candidateCount: 0, successCount: 0, failureCount: 0 },
+      },
+    }, {
+      enabled: true,
+      policyHash: 'policy-hash',
+      qualifiedCandidateIds: [],
+      reviewCandidateIds: [],
+      rejectedCandidateIds: ['invalid-immutable-target'],
+      forwardingStatusCounts: {},
+      rejectionEmailStatusCounts: { superseded: 1 },
+    });
+    assert.equal(immutableFailure.emailDelivered, false);
+    assert.match(immutableFailure.emailError ?? '', /not confirmed sent/);
   });
 
   it('reports routed Boss candidates when another attempted candidate failed before scoring and routing', async () => {

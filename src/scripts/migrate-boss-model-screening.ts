@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { config } from '../config.js';
 import { hashBossScreeningPolicy } from '../scoring/boss-screening.js';
@@ -9,14 +10,31 @@ import type {
   BossForwardingDeliveryState,
   BossForwardingOutboxEntry,
   BossForwardingStatus,
+  BossRejectionEmailOutboxEntry,
 } from '../types/job.js';
 
-interface MigrationOptions {
+export interface BossModelScreeningPolicyMigrationOptions {
   jobKey: string;
   dryRun: boolean;
 }
 
-function parseArgs(argv: readonly string[]): MigrationOptions {
+export interface BossModelScreeningPolicyMigrationSummary {
+  jobKey: string;
+  dryRun: boolean;
+  newPolicyHash: string;
+  oldPolicyHashes: string[];
+  outboxEntries: number;
+  supersededDeliveries: number;
+  preservedSentDeliveries: number;
+  preservedUncertainDeliveries: number;
+  rejectionEmailEntries: number;
+  supersededRejectionEmails: number;
+  uncertainRejectionEmails: number;
+  pendingScoreItems: number;
+  preservedPendingScoreItems: number;
+}
+
+function parseArgs(argv: readonly string[]): BossModelScreeningPolicyMigrationOptions {
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
@@ -33,6 +51,35 @@ function parseArgs(argv: readonly string[]): MigrationOptions {
   const jobKey = values.get('--job-key')?.trim();
   if (!jobKey) throw new Error('Missing required argument --job-key');
   return { jobKey, dryRun: values.get('--dry-run') === 'true' };
+}
+
+function migrateRejectionEmailEntry(
+  entry: BossRejectionEmailOutboxEntry,
+  newPolicyHash: string,
+  migratedAt: string,
+): BossRejectionEmailOutboxEntry | undefined {
+  if (entry.policyHash === newPolicyHash
+    || entry.status === 'sent'
+    || entry.status === 'uncertain'
+    || entry.status === 'superseded') {
+    return undefined;
+  }
+  if (entry.status === 'sending') {
+    return {
+      ...entry,
+      status: 'uncertain',
+      updatedAt: migratedAt,
+      error: entry.error
+        ?? 'Converted from an in-flight rejection email during Boss screening policy migration; verify the mailbox manually.',
+    };
+  }
+  return {
+    ...entry,
+    status: 'superseded',
+    updatedAt: migratedAt,
+    error: entry.error
+      ?? 'Superseded because the Boss screening policy changed before this rejection email was delivered.',
+  };
 }
 
 function hashCandidateIds(candidateIds: readonly string[]): string {
@@ -141,17 +188,25 @@ function supersedeOutboxEntry(entry: BossForwardingOutboxEntry, migratedAt: stri
   };
 }
 
-async function run(options: MigrationOptions): Promise<void> {
+export async function migrateBossModelScreeningPolicy(
+  options: BossModelScreeningPolicyMigrationOptions,
+): Promise<BossModelScreeningPolicyMigrationSummary> {
   const store = new JobStore();
   const job = await store.readJobRecord('boss', options.jobKey);
   if (!job.bossScreening || job.bossScreening.policyVersion !== 2) {
     throw new Error(`Boss job ${options.jobKey} is not using model screening policy v2`);
   }
   const newPolicyHash = hashBossScreeningPolicy(job.bossScreening);
-  const entries = await store.listBossForwardingOutboxEntries('boss', options.jobKey);
-  const workItems = await store.listBossScreeningWorkItems('boss', options.jobKey);
+  const [entries, rejectionEmailEntries, workItems] = await Promise.all([
+    store.listBossForwardingOutboxEntries('boss', options.jobKey),
+    store.listBossRejectionEmailOutboxEntries('boss', options.jobKey),
+    store.listBossScreeningWorkItems('boss', options.jobKey),
+  ]);
   const migratedAt = new Date().toISOString();
-  const oldPolicyHashes = [...new Set(entries.map((entry) => entry.policyHash).filter((hash) => hash !== newPolicyHash))];
+  const oldPolicyHashes = [...new Set([
+    ...entries.map((entry) => entry.policyHash),
+    ...rejectionEmailEntries.map((entry) => entry.policyHash),
+  ].filter((hash) => hash !== newPolicyHash))];
   const pendingScoreItemsToMigrate = workItems.filter((item) => item.policyHash !== newPolicyHash);
   const summary = entries.reduce((total, entry) => {
     if (!requiresOutboxMigration(entry, newPolicyHash)) {
@@ -170,6 +225,14 @@ async function run(options: MigrationOptions): Promise<void> {
     preservedSentDeliveries: 0,
     preservedUncertainDeliveries: 0,
   });
+  const migratedRejectionEmails = rejectionEmailEntries
+    .map((entry) => migrateRejectionEmailEntry(entry, newPolicyHash, migratedAt))
+    .filter((entry): entry is BossRejectionEmailOutboxEntry => entry !== undefined);
+  const rejectionEmailSummary = {
+    rejectionEmailEntries: migratedRejectionEmails.length,
+    supersededRejectionEmails: migratedRejectionEmails.filter((entry) => entry.status === 'superseded').length,
+    uncertainRejectionEmails: migratedRejectionEmails.filter((entry) => entry.status === 'uncertain').length,
+  };
 
   if (!options.dryRun) {
     for (const entry of entries) {
@@ -181,6 +244,9 @@ async function run(options: MigrationOptions): Promise<void> {
         options.jobKey,
         supersedeOutboxEntry(entry, migratedAt).entry,
       );
+    }
+    for (const entry of migratedRejectionEmails) {
+      await store.saveBossRejectionEmailOutboxEntry('boss', options.jobKey, entry);
     }
     for (const item of pendingScoreItemsToMigrate) {
       await store.deleteBossScreeningWorkItem('boss', options.jobKey, item.candidateId);
@@ -195,23 +261,29 @@ async function run(options: MigrationOptions): Promise<void> {
       newPolicyHash,
       oldPolicyHashes,
       ...summary,
+      ...rejectionEmailSummary,
       pendingScoreItems: pendingScoreItemsToMigrate.length,
       pendingScoreCandidateIdsHash: hashCandidateIds(pendingScoreItemsToMigrate.map((item) => item.candidateId)),
     }, null, 2)}\n`, 'utf8');
   }
 
-  console.log(JSON.stringify({
+  return {
     jobKey: options.jobKey,
     dryRun: options.dryRun,
     newPolicyHash,
     oldPolicyHashes,
     ...summary,
+    ...rejectionEmailSummary,
     pendingScoreItems: pendingScoreItemsToMigrate.length,
     preservedPendingScoreItems: workItems.length - pendingScoreItemsToMigrate.length,
-  }, null, 2));
+  };
 }
 
-run(parseArgs(process.argv.slice(2))).catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  migrateBossModelScreeningPolicy(parseArgs(process.argv.slice(2)))
+    .then((summary) => console.log(JSON.stringify(summary, null, 2)))
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    });
+}

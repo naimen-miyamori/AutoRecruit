@@ -55,6 +55,10 @@ async function main(): Promise<void> {
     model: modelDescription() ?? (config.llm.completionRoute === 'codex-session' ? 'account-default' : undefined),
     scoringRoute: config.scoring.completionRoute,
     scoringModel: config.scoring.model,
+    codexSessionLifecycle: {
+      handshakeTimeoutMsPerPhase: config.llm.codexSessionConnectTimeoutMs,
+      activeTurnTimeout: 'none',
+    },
     verified: args.verify,
     autoFallback: false,
   }, null, 2));

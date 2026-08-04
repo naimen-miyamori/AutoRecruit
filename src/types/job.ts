@@ -116,7 +116,6 @@ export interface BossScreeningSettings {
   policyVersion: 2;
   decisionMode: 'reject-on-any-missing';
   requirements: BossModelRequirement[];
-  secondaryForwarding?: BossForwardingSettings;
   secondaryDelivery?: ReportDeliveryOptions & {
     recipientEmail: string;
   };
@@ -159,7 +158,8 @@ export interface BossScreeningPolicyFile {
  * the confirmed snapshot and must not be inherited later at execution time.
  */
 export interface BossCaptureSettingsSnapshot {
-  version: 2;
+  /** Delivery contract version; distinct from the screening policy version. */
+  version: 3;
   resolvedAt: string;
   sourceJobKey?: string;
   primaryForwarding?: BossForwardingSettings & { ccEmails: string[] };
@@ -204,7 +204,8 @@ export type JobConfigPatch = BossCaptureCanonicalPatch;
  * record.  It is never accepted from a public HTTP/assistant request.
  */
 export interface BossCaptureTaskSnapshot {
-  version: 3;
+  /** Delivery/search task contract version. */
+  version: 4;
   resolvedAt: string;
   sourceJobKey: string;
   sourceJobRevision?: number;
@@ -292,7 +293,34 @@ export interface BossCandidateRoutingArtifact {
   matchedRequirementIds: string[];
   unknownRequirementIds: string[];
   reason: string;
-  forwarding: BossForwardingState;
+  /** New runs identify which external delivery owns this decision. */
+  deliveryKind?: 'boss-forwarding' | 'rejection-email';
+  /** Present for legacy and non-rejected Boss forwarding decisions. */
+  forwarding?: BossForwardingState;
+}
+
+/** Candidate-level SMTP delivery for an explicit Boss rejection. */
+export interface BossRejectionEmailOutboxEntry {
+  version: 1;
+  deliveryId: string;
+  candidateId: string;
+  routingDecisionId: string;
+  routingArtifact: BossCandidateRoutingArtifact;
+  policyHash: string;
+  recipientEmail: string;
+  ccEmails: string[];
+  messageId: string;
+  subject: string;
+  markdown: string;
+  contentHash: string;
+  status: BossForwardingStatus;
+  createdAt: string;
+  updatedAt: string;
+  /** Set only after the verified Boss detail lifecycle has closed. */
+  detailClosedAt?: string;
+  attemptedAt?: string;
+  completedAt?: string;
+  error?: string;
 }
 
 /** Immutable, platform-neutral routing decision written after score/evaluation. */
@@ -364,6 +392,14 @@ export interface BossScreeningWorkItem {
   policyHash?: string;
   createdAt: string;
   updatedAt: string;
+  /** Number of persisted scoring attempts; absent on legacy work items. */
+  scoreAttemptCount?: number;
+  /** Last technical/model failure while no immutable routing decision exists. */
+  lastScoreFailure?: {
+    failedAt: string;
+    error: string;
+    diagnostic?: CodexSessionFailureDiagnostic;
+  };
 }
 
 /** Durable hand-off for generic platforms before score/routing completes. */
@@ -372,6 +408,12 @@ export interface PostScoreRoutingWorkItem {
   policyHash?: string;
   createdAt: string;
   updatedAt: string;
+  scoreAttemptCount?: number;
+  lastScoreFailure?: {
+    failedAt: string;
+    error: string;
+    diagnostic?: CodexSessionFailureDiagnostic;
+  };
 }
 
 export interface BossAutomationSettings {
@@ -621,7 +663,7 @@ export interface CandidateResume {
 }
 
 export type CaptureFailureStage = 'detail-open' | 'identity-verify' | 'forward' | 'parse' | 'persist';
-export type ProcessingFailureStage = 'score' | 'routing' | 'forward';
+export type ProcessingFailureStage = 'score' | 'routing' | 'forward' | 'rejection-email';
 
 export interface RunCaptureFailure {
   candidateId: string;
@@ -634,6 +676,7 @@ export interface RunProcessingFailure {
   candidateId: string;
   stage: ProcessingFailureStage;
   error: string;
+  diagnostic?: CodexSessionFailureDiagnostic;
 }
 
 export type BossSeenViewSyncFailureStage = 'card-resolve' | 'detail-open' | 'identity-verify' | 'detail-close';
@@ -686,6 +729,7 @@ export interface RunResult {
   failedCandidates: Array<{
     candidateId: string;
     error: string;
+    diagnostic?: CodexSessionFailureDiagnostic;
   }>;
   /** Lightweight Boss-only routing index for one enabled screening run. */
   bossRouting?: {
@@ -697,7 +741,12 @@ export interface RunResult {
     qualifiedCandidateIds: string[];
     reviewCandidateIds: string[];
     rejectedCandidateIds: string[];
+    /** Captured resumes that still have no immutable routing decision. */
+    pendingScoreCandidateIds?: string[];
+    /** De-identified `kind@phase` counts for pending Codex failures. */
+    scoreFailureStatusCounts?: Record<string, number>;
     forwardingStatusCounts: Record<string, number>;
+    rejectionEmailStatusCounts?: Record<string, number>;
   };
   /** Lightweight routing index for non-Boss post-score routing runs. */
   postScoreRouting?: {
@@ -707,6 +756,8 @@ export interface RunResult {
     qualifiedCandidateIds: string[];
     reviewCandidateIds: string[];
     rejectedCandidateIds: string[];
+    pendingScoreCandidateIds?: string[];
+    scoreFailureStatusCounts?: Record<string, number>;
   };
   /** Lightweight evidence of the search that produced this run. */
   searchExecution?: {
@@ -905,6 +956,37 @@ export interface CandidateScoreArtifactBase {
   resumeInputHash?: string;
 }
 
+export type CodexSessionPhase =
+  | 'process-starting'
+  | 'initializing'
+  | 'thread-starting'
+  | 'turn-starting'
+  | 'turn-running'
+  | 'completed';
+
+export type CodexSessionFailureKind =
+  | 'connection-timeout'
+  | 'process-error'
+  | 'process-exit'
+  | 'turn-interrupted'
+  | 'request-error'
+  | 'protocol-error'
+  | 'policy-violation'
+  | 'turn-failed'
+  | 'empty-output';
+
+/** Safe operational metadata only; never contains prompt, output, or candidate text. */
+export interface CodexSessionFailureDiagnostic {
+  provider: 'codex-session';
+  kind: CodexSessionFailureKind;
+  phase: CodexSessionPhase;
+  retryable: boolean;
+  firstOutputObserved: boolean;
+  elapsedMs: number;
+  occurredAt: string;
+  lastProtocolActivityAt?: string;
+}
+
 export interface CandidateScoreSuccessArtifact extends CandidateScoreArtifactBase {
   status: 'success';
   score: CandidateScore;
@@ -913,6 +995,7 @@ export interface CandidateScoreSuccessArtifact extends CandidateScoreArtifactBas
 export interface CandidateScoreFailureArtifact extends CandidateScoreArtifactBase {
   status: 'failed';
   error: string;
+  diagnostic?: CodexSessionFailureDiagnostic;
 }
 
 export type CandidateScoreArtifact = CandidateScoreSuccessArtifact | CandidateScoreFailureArtifact;

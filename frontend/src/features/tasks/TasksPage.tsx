@@ -46,7 +46,7 @@ export function TasksPage() {
               <div className="detail-grid"><div className="detail-cell"><span>创建</span><strong>{formatDate(detail.createdAt)}</strong></div><div className="detail-cell"><span>开始</span><strong>{formatDate(detail.startedAt)}</strong></div><div className="detail-cell"><span>结束</span><strong>{formatDate(detail.finishedAt)}</strong></div><div className="detail-cell"><span>来源</span><strong>{detail.schedule ? `计划 ${detail.schedule.scheduleId}` : '手工 / 助手'}</strong></div></div>
               {detail.error && <div className="error-banner"><span>{detail.error}</span></div>}
             </Section>
-            <Section title="任务结果" description="按任务类型展示完整输出，不仅显示摘要。"><TaskOutput kind={detail.kind} output={detail.output} /></Section>
+            <Section title="任务结果" description="按任务类型展示完整输出，不仅显示摘要。"><TaskOutput kind={detail.kind} input={detail.input} output={detail.output} /></Section>
             <Section title="运行日志" description={`${detail.logs.length} 条`}><div className="timeline">{detail.logs.map((log, index) => <div className="timeline-item" key={`${log.at}-${index}`}><time>{formatCompactDate(log.at)}</time><StatusPill status={log.level === 'error' ? 'failed' : log.level === 'warn' ? 'warning' : 'neutral'} label={log.level} /><p>{log.message}</p></div>)}{detail.logs.length === 0 && <EmptyState title="暂无日志" />}</div></Section>
           </>}
         </div>

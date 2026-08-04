@@ -78,7 +78,7 @@ describe('Boss capture task snapshots', () => {
     });
     const taskSnapshot = snapshot.input.bossCaptureTaskSnapshot;
     assert.ok(taskSnapshot);
-    assert.equal(taskSnapshot.version, 3);
+    assert.equal(taskSnapshot.version, 4);
     assert.equal(taskSnapshot.sourceJobRevision, 7);
     assert.equal(taskSnapshot.jobIdentity.bossJobId, 'boss-position-1');
     assert.equal(taskSnapshot.searchPlan.pageKeyword, '铝箱包');
@@ -88,6 +88,18 @@ describe('Boss capture task snapshots', () => {
     assert.equal(snapshotHash, hashBossCaptureTaskSnapshot(unsigned));
     assert.equal(snapshotHash, hashBossCaptureTaskSnapshot({ ...unsigned, resolvedAt: '2026-08-02T00:00:00.000Z' }));
     assert.equal(snapshot.inputSummary.bossCaptureTaskSnapshotHash, snapshotHash);
+    assert.throws(() => normalizeResumeCaptureTask({
+      ...snapshot.input,
+      bossCaptureTaskSnapshot: {
+        ...taskSnapshot,
+        version: 3,
+      },
+    }, {
+      allowBossSearchConditionSetRef: true,
+      allowBossSavedSearchReference: true,
+      allowBossCaptureSettingsSnapshot: true,
+      allowBossCaptureTaskSnapshot: true,
+    }), /bossCaptureTaskSnapshot.version must be 4/);
   });
 
   it('clears an incompatible stored saved-search reference when the queued task explicitly switches to direct', async () => {

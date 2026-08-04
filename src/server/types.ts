@@ -106,9 +106,6 @@ export interface ResumeCaptureTaskInput {
   bossScreeningEnabled?: boolean;
   /** JSON policy file containing only the negative-condition definitions. */
   bossScreeningPolicyFile?: string;
-  bossSecondaryForwardMode?: BossForwardMode;
-  bossSecondaryForwardRecipient?: string;
-  bossSecondaryForwardCc?: string[];
   bossSecondaryEmail?: string;
   bossSecondaryCc?: string[];
   /** Platform-neutral post-score model routing; no native forwarding. */
@@ -138,9 +135,6 @@ export interface BatchTaskInput {
   bossForwardCc?: string[];
   bossScreeningEnabled?: boolean;
   bossScreeningPolicyFile?: string;
-  bossSecondaryForwardMode?: BossForwardMode;
-  bossSecondaryForwardRecipient?: string;
-  bossSecondaryForwardCc?: string[];
   bossSecondaryEmail?: string;
   bossSecondaryCc?: string[];
   resultRoutingEnabled?: boolean;
@@ -624,6 +618,16 @@ export interface TaskQueueHealth {
   latestFailureDetail?: string;
 }
 
+export interface BossRejectionEmailHealth {
+  outboxCount: number;
+  pending: number;
+  sending: number;
+  sent: number;
+  retryableFailed: number;
+  uncertain: number;
+  superseded: number;
+}
+
 export interface DashboardHealth {
   generatedAt: string;
   dataAnomalies: DataAnomalySummary[];
@@ -632,4 +636,5 @@ export interface DashboardHealth {
   sessions: SessionHealth[];
   filters: FilterCatalogHealth[];
   tasks: TaskQueueHealth;
+  bossRejectionEmails: BossRejectionEmailHealth;
 }

@@ -22,6 +22,11 @@ export function DashboardPage() {
   const totalScored = health?.candidateFunnels.reduce((sum, item) => sum + item.scoredCandidates, 0) ?? 0;
   const sessionProblems = health?.sessions.filter((item) => !item.exists || item.recentLoginRefreshStatus === 'failed') ?? [];
   const runProblems = health?.platformRuns.filter((item) => item.consecutiveFailures > 0) ?? [];
+  const rejectionEmailHealth = health?.bossRejectionEmails;
+  const unresolvedRejectionEmails = (rejectionEmailHealth?.pending ?? 0)
+    + (rejectionEmailHealth?.sending ?? 0)
+    + (rejectionEmailHealth?.retryableFailed ?? 0)
+    + (rejectionEmailHealth?.uncertain ?? 0);
 
   return (
     <div className="page-stack">
@@ -34,6 +39,7 @@ export function DashboardPage() {
         <Metric label="已抓取简历" value={totalCandidates} note="本地权威数据" icon={<UsersRound size={16} />} />
         <Metric label="已评分" value={totalScored} note="运行累计" tone="success" />
         <Metric label="会话异常" value={sessionProblems.length} note="登录态或刷新失败" tone={sessionProblems.length ? 'warning' : 'success'} />
+        <Metric label="否定邮件待处理" value={unresolvedRejectionEmails} note={rejectionEmailHealth?.uncertain ? `${rejectionEmailHealth.uncertain} 封结果不确定` : rejectionEmailHealth?.sending ? `${rejectionEmailHealth.sending} 封发送中断待核对` : 'Boss 候选人级 outbox'} tone={rejectionEmailHealth?.uncertain || rejectionEmailHealth?.sending ? 'danger' : unresolvedRejectionEmails ? 'warning' : 'success'} />
       </div>
       <div className="two-column">
         <Section title="优先处理" description="失败、登录态和连续失败会集中在这里。">
@@ -41,7 +47,10 @@ export function DashboardPage() {
             {failed.slice(0, 4).map((task) => <div className="attention-item danger" key={task.taskId}><AlertTriangle size={17} /><div><strong>{TASK_LABELS[task.kind]}</strong><small>{task.error ?? '任务执行失败'}</small></div><Link className="text-link" to={`/tasks/${encodeURIComponent(task.taskId)}`}>查看</Link></div>)}
             {sessionProblems.map((item) => <div className="attention-item warning" key={item.platform}><AlertTriangle size={17} /><div><strong>{PLATFORM_LABELS[item.platform]} 会话</strong><small>{item.recentLoginRefreshError ?? '未找到可用登录态'}</small></div><Link className="text-link" to="/automation">刷新登录</Link></div>)}
             {runProblems.map((item) => <div className="attention-item warning" key={item.platform}><AlertTriangle size={17} /><div><strong>{PLATFORM_LABELS[item.platform]} 连续失败 {item.consecutiveFailures} 次</strong><small>{item.latestFailureMessage ?? '查看最近运行'}</small></div><Link className="text-link" to="/tasks">任务</Link></div>)}
-            {failed.length === 0 && sessionProblems.length === 0 && runProblems.length === 0 && <EmptyState title="暂无待处理异常" description="最近任务与平台会话状态正常。" />}
+            {rejectionEmailHealth && rejectionEmailHealth.uncertain > 0 && <div className="attention-item danger"><AlertTriangle size={17} /><div><strong>Boss 否定邮件有 {rejectionEmailHealth.uncertain} 封结果不确定</strong><small>不会自动重发，请人工核对 SMTP 收件箱和投递日志。</small></div><Link className="text-link" to="/tasks">任务</Link></div>}
+            {rejectionEmailHealth && rejectionEmailHealth.sending > 0 && <div className="attention-item danger"><AlertTriangle size={17} /><div><strong>Boss 否定邮件有 {rejectionEmailHealth.sending} 封停留在 sending</strong><small>上次进程可能在 SMTP 调用期间中断；下次 Boss 运行会转为 uncertain，期间请勿人工重发。</small></div><Link className="text-link" to="/tasks">任务</Link></div>}
+            {rejectionEmailHealth && rejectionEmailHealth.uncertain === 0 && rejectionEmailHealth.sending === 0 && (rejectionEmailHealth.pending > 0 || rejectionEmailHealth.retryableFailed > 0) && <div className="attention-item warning"><AlertTriangle size={17} /><div><strong>Boss 否定邮件有 {rejectionEmailHealth.pending + rejectionEmailHealth.retryableFailed} 封待处理</strong><small>已关闭详情的 pending/retryable-failed 邮件会在下一轮恢复。</small></div><Link className="text-link" to="/tasks">任务</Link></div>}
+            {failed.length === 0 && sessionProblems.length === 0 && runProblems.length === 0 && unresolvedRejectionEmails === 0 && <EmptyState title="暂无待处理异常" description="最近任务与平台会话状态正常。" />}
           </div>
         </Section>
         <Section title="运行轨道" description="运行中页面每 3 秒自动更新。" actions={<Link className="text-link" to="/tasks">全部任务</Link>}>
@@ -51,6 +60,7 @@ export function DashboardPage() {
           </div>
         </Section>
       </div>
+      {rejectionEmailHealth && <Section title="Boss 否定邮件交付" description="按本地 outbox 统计，不显示候选人正文或 SMTP 凭据。"><div className="detail-grid"><div className="detail-cell"><span>Outbox 总数</span><strong>{rejectionEmailHealth.outboxCount}</strong></div><div className="detail-cell"><span>已发送</span><strong>{rejectionEmailHealth.sent}</strong></div><div className="detail-cell"><span>待处理</span><strong>{rejectionEmailHealth.pending}</strong></div><div className="detail-cell"><span>发送中</span><strong>{rejectionEmailHealth.sending}</strong></div><div className="detail-cell"><span>可重试失败</span><strong>{rejectionEmailHealth.retryableFailed}</strong></div><div className="detail-cell"><span>结果不确定</span><strong>{rejectionEmailHealth.uncertain}</strong></div><div className="detail-cell"><span>已废弃</span><strong>{rejectionEmailHealth.superseded}</strong></div></div></Section>}
       {health && <Section title="平台健康矩阵" description={`生成于 ${formatCompactDate(health.generatedAt)}`}><div className="table-wrap"><table><thead><tr><th>平台</th><th>岗位 / 运行</th><th>最近成功</th><th>连续失败</th><th>零候选率</th><th>会话</th><th>筛选目录</th></tr></thead><tbody>{health.platformRuns.map((item) => { const session = health.sessions.find((entry) => entry.platform === item.platform); const filter = health.filters.find((entry) => entry.platform === item.platform); return <tr key={item.platform}><td><span className={`platform-mark platform-${item.platform}`}>{PLATFORM_LABELS[item.platform]}</span></td><td>{item.jobCount} / {item.runCount}</td><td>{formatCompactDate(item.latestSuccessAt)}</td><td><StatusPill status={item.consecutiveFailures ? 'failed' : 'ok'} label={String(item.consecutiveFailures)} /></td><td>{Math.round(item.zeroCandidateRate * 100)}%</td><td><StatusPill status={session?.exists ? 'ok' : 'warning'} label={session?.exists ? '可用' : '缺失'} /></td><td><StatusPill status={filter?.exists && !filter.failedControls ? 'ok' : 'warning'} label={filter?.exists ? `${filter.fieldCount} 字段` : '缺失'} /></td></tr>; })}</tbody></table></div></Section>}
     </div>
   );

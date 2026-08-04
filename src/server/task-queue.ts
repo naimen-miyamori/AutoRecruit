@@ -314,6 +314,7 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
       failedCandidates: output.failedCandidates,
       resultPath: output.resultPath,
       ...('bossRouting' in output && output.bossRouting ? { bossRouting: output.bossRouting } : {}),
+      ...('rejectionEmails' in output && output.rejectionEmails ? { rejectionEmails: output.rejectionEmails } : {}),
       ...('bossSeenViewSync' in output && output.bossSeenViewSync ? { bossSeenViewSync: output.bossSeenViewSync } : {}),
       ...summarizeCaptureSearchExecution(output),
     };

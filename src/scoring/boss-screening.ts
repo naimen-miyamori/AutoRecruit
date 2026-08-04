@@ -26,6 +26,7 @@ import { candidateScorePayloadSchema, toCandidateScore } from './score-schema.js
 
 export const BOSS_SCREENING_POLICY_VERSION = 2 as const;
 export const BOSS_SCREENING_EVALUATOR_VERSION = 1 as const;
+export const BOSS_CAPTURE_SETTINGS_SNAPSHOT_VERSION = 3 as const;
 
 const MAX_CONDITIONS = 50;
 const MAX_CONDITION_ID_LENGTH = 120;
@@ -39,7 +40,7 @@ const MAX_REASON_LENGTH = 1_000;
 /**
  * Boss screening must never silently discard resume details.  Keep a generous
  * upper bound for the canonical JSON sent to the model; a resume that exceeds
- * it fails scoring and is therefore routed to review by the workflow.
+ * it remains pending without creating a routing decision.
  */
 export const BOSS_SCREENING_RESUME_INPUT_MAX_CHARS = 120_000;
 
@@ -88,7 +89,7 @@ const rawPostScoreRoutingSettingsSchema = z.object({
 }).strict();
 
 const rawCaptureSettingsSnapshotSchema = z.object({
-  version: z.literal(BOSS_SCREENING_POLICY_VERSION),
+  version: z.literal(BOSS_CAPTURE_SETTINGS_SNAPSHOT_VERSION),
   resolvedAt: z.string().trim().min(1),
   sourceJobKey: z.string().trim().min(1).optional(),
   primaryForwarding: rawForwardingSchema.optional(),
@@ -245,7 +246,7 @@ function normalizeModelRequirements(values: RawModelRequirement[]): BossModelReq
 function normalizeForwarding(
   value: z.infer<typeof rawForwardingSchema> | undefined,
   label: string,
-): BossScreeningSettings['secondaryForwarding'] {
+): BossForwardingSettings | undefined {
   if (!value) return undefined;
   const recipient = normalizeText(value.recipient, `${label}.recipient`, 320)!;
   const ccEmails = value.ccEmails?.map((email, index) =>
@@ -281,33 +282,45 @@ function assertEnabledPolicyIsComplete(settings: BossScreeningSettings): void {
   if (!settings.requirements.some((requirement) => requirement.enabled)) {
     throw new Error('An enabled Boss screening policy must contain at least one enabled model requirement');
   }
-  if (!settings.secondaryForwarding) {
-    throw new Error('An enabled Boss screening policy requires secondaryForwarding');
-  }
   if (!settings.secondaryDelivery?.recipientEmail) {
-    throw new Error('An enabled Boss screening policy requires secondaryDelivery.recipientEmail');
+    throw new Error('An enabled Boss screening policy requires secondaryDelivery.recipientEmail for rejection emails');
   }
+}
+
+export interface NormalizeBossScreeningSettingsOptions {
+  /** Migration-only read compatibility for a legacy persisted job record. */
+  allowLegacySecondaryForwarding?: boolean;
 }
 
 /**
  * Validates and canonicalizes the version 2 policy persisted on a Boss job. Disabled
  * policies intentionally retain their requirements and optional secondary
  * targets, so an explicit one-run disable does not discard future settings.
+ * Legacy secondary forwarding is rejected by normal runtime callers; the
+ * migration command is the only caller allowed to read it long enough to
+ * remove it through a JobStore CAS write.
  */
-export function normalizeBossScreeningSettings(value: unknown): BossScreeningSettings {
+export function normalizeBossScreeningSettings(
+  value: unknown,
+  options: NormalizeBossScreeningSettingsOptions = {},
+): BossScreeningSettings {
   const parsed = rawScreeningSettingsSchema.safeParse(value);
   if (!parsed.success) {
     throw new Error(`Invalid Boss screening settings: ${describeZodError(parsed.error)}`);
   }
 
-  const secondaryForwarding = normalizeForwarding(parsed.data.secondaryForwarding, 'secondaryForwarding');
+  if (parsed.data.secondaryForwarding) {
+    if (!options.allowLegacySecondaryForwarding) {
+      throw new Error('Boss screening setting secondaryForwarding is no longer supported; use secondaryDelivery for rejection emails.');
+    }
+    normalizeForwarding(parsed.data.secondaryForwarding, 'secondaryForwarding');
+  }
   const secondaryDelivery = normalizeDelivery(parsed.data.secondaryDelivery, 'secondaryDelivery');
   const settings: BossScreeningSettings = {
     enabled: parsed.data.enabled,
     policyVersion: BOSS_SCREENING_POLICY_VERSION,
     decisionMode: 'reject-on-any-missing',
     requirements: normalizeModelRequirements(parsed.data.requirements),
-    ...(secondaryForwarding ? { secondaryForwarding } : {}),
     ...(secondaryDelivery ? { secondaryDelivery } : {}),
   };
   assertEnabledPolicyIsComplete(settings);
@@ -642,9 +655,6 @@ export interface BossCaptureSettingsOverrides extends ReportDeliveryOptions {
   bossForwardCc?: string[];
   bossScreeningEnabled?: boolean;
   bossScreeningPolicyFile?: string;
-  bossSecondaryForwardMode?: BossForwardingSettings['mode'];
-  bossSecondaryForwardRecipient?: string;
-  bossSecondaryForwardCc?: string[];
   bossSecondaryEmail?: string;
   bossSecondaryCc?: string[];
 }
@@ -668,12 +678,6 @@ function exactScreening(
       criteria: [...requirement.criteria],
       insufficientEvidence: [...requirement.insufficientEvidence],
     })),
-    ...(value.secondaryForwarding ? {
-      secondaryForwarding: {
-        ...value.secondaryForwarding,
-        ccEmails: value.secondaryForwarding.ccEmails ?? [],
-      },
-    } : {}),
     ...(value.secondaryDelivery ? {
       secondaryDelivery: {
         ...value.secondaryDelivery,
@@ -715,7 +719,7 @@ export function normalizeBossCaptureSettingsSnapshot(value: unknown): BossCaptur
     ? normalizeBossScreeningSettings(parsed.data.screening)
     : undefined);
   const normalized: Omit<BossCaptureSettingsSnapshot, 'settingsHash'> = {
-    version: BOSS_SCREENING_POLICY_VERSION,
+    version: BOSS_CAPTURE_SETTINGS_SNAPSHOT_VERSION,
     resolvedAt: parsed.data.resolvedAt,
     ...(parsed.data.sourceJobKey ? { sourceJobKey: parsed.data.sourceJobKey } : {}),
     ...(primaryForwarding ? { primaryForwarding } : {}),
@@ -769,30 +773,10 @@ export async function resolveBossCaptureScreeningSettings(
     : undefined;
   const hasExplicitInput = input.bossScreeningEnabled !== undefined
     || input.bossScreeningPolicyFile !== undefined
-    || input.bossSecondaryForwardMode !== undefined
-    || input.bossSecondaryForwardRecipient !== undefined
-    || input.bossSecondaryForwardCc !== undefined
     || input.bossSecondaryEmail !== undefined
     || input.bossSecondaryCc !== undefined;
   if (!stored && !hasExplicitInput) return undefined;
 
-  const storedSecondaryForwarding = stored?.secondaryForwarding;
-  const secondaryForwarding = input.bossSecondaryForwardMode && input.bossSecondaryForwardRecipient
-    ? {
-      mode: input.bossSecondaryForwardMode,
-      recipient: input.bossSecondaryForwardRecipient,
-      ...(input.bossSecondaryForwardCc === undefined
-        ? (storedSecondaryForwarding?.ccEmails === undefined ? {} : { ccEmails: storedSecondaryForwarding.ccEmails })
-        : { ccEmails: input.bossSecondaryForwardCc }),
-    }
-    : input.bossSecondaryForwardCc === undefined
-      ? storedSecondaryForwarding
-      : storedSecondaryForwarding
-        ? { ...storedSecondaryForwarding, ccEmails: input.bossSecondaryForwardCc }
-        : undefined;
-  if (input.bossSecondaryForwardCc !== undefined && !secondaryForwarding) {
-    throw new Error('Boss secondary forward CC requires an existing or explicit secondary forwarding target.');
-  }
   const secondaryRecipientEmail = input.bossSecondaryEmail ?? stored?.secondaryDelivery?.recipientEmail;
   const secondaryCcEmails = input.bossSecondaryCc === undefined
     ? stored?.secondaryDelivery?.ccEmails
@@ -806,7 +790,6 @@ export async function resolveBossCaptureScreeningSettings(
     policyVersion: policy?.version ?? (stored ? stored.policyVersion : BOSS_SCREENING_POLICY_VERSION),
     decisionMode: policy?.decisionMode ?? (stored ? stored.decisionMode : 'reject-on-any-missing'),
     requirements: policy?.requirements ?? stored?.requirements ?? [],
-    ...(secondaryForwarding ? { secondaryForwarding } : {}),
     ...(secondaryRecipientEmail ? {
       secondaryDelivery: {
         recipientEmail: secondaryRecipientEmail,
@@ -845,7 +828,7 @@ export async function createBossCaptureSettingsSnapshot(input: {
     });
   }
   const snapshotWithoutHash: Omit<BossCaptureSettingsSnapshot, 'settingsHash'> = {
-    version: BOSS_SCREENING_POLICY_VERSION,
+    version: BOSS_CAPTURE_SETTINGS_SNAPSHOT_VERSION,
     resolvedAt: input.resolvedAt ?? new Date().toISOString(),
     ...(input.sourceJobKey ? { sourceJobKey: input.sourceJobKey } : {}),
     ...(primaryForwarding ? { primaryForwarding } : {}),
@@ -871,7 +854,6 @@ export function assertBossScreeningJobRecordReady(jobRecord: Pick<
   recipientEmail: string;
   bossScreening: BossScreeningSettings & {
     enabled: true;
-    secondaryForwarding: NonNullable<BossScreeningSettings['secondaryForwarding']>;
     secondaryDelivery: NonNullable<BossScreeningSettings['secondaryDelivery']>;
   };
 } {
@@ -1119,9 +1101,8 @@ function reviewDecision(reason: string, unknownRequirementIds: string[]): BossRo
 }
 
 /**
- * Reduces structured facts to a routing decision. It is intentionally pure:
- * score failure and malformed/incomplete evaluations always fail closed to
- * review → primary; only a proven negative match goes to secondary.
+ * Reduces a successful score and structured facts to a routing decision. A
+ * failed score is not a business decision and must remain pending upstream.
  */
 export function resolveBossRoutingDecision(
   scoreArtifact: CandidateScoreArtifact,
@@ -1135,7 +1116,7 @@ export function resolveBossRoutingDecision(
     return reviewDecision('模型要求集合为空，无法安全完成分流。', []);
   }
   if (scoreArtifact.status === 'failed') {
-    return reviewDecision(`评分失败，需人工复核：${scoreArtifact.error}`, requirements.map((requirement) => requirement.id));
+    throw new Error('A failed score artifact cannot produce a routing decision; keep the candidate pending.');
   }
 
   const byId = new Map<string, BossModelRequirementEvaluation>();

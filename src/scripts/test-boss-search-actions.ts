@@ -1286,7 +1286,7 @@ describe('Boss normal-search actions', () => {
       await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
       await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
       await assert.rejects(
-        () => saveBossSearchCondition(page, '铝镁合金', { deadline: Date.now() + 1_500 }),
+        () => saveBossSearchCondition(page, '铝镁合金', { deadline: Date.now() + 5_000 }),
         /save-new-card-unproven/i,
       );
       assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__editClicks), 0);

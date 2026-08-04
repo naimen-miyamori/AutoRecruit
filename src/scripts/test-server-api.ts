@@ -867,7 +867,7 @@ describe('console API routes', () => {
     assert.equal(completed.inputSummary.bossForwardCcCount, 1);
   });
 
-  it('queues Boss post-score screening with separate secondary forwarding and report targets', async () => {
+  it('queues Boss post-score screening with primary forwarding and rejection email targets', async () => {
     const taskDir = await makeTempDir();
     const policyPath = path.join(taskDir, 'boss-model-requirements.json');
     await writeJson(policyPath, modelPolicyForApi());
@@ -894,9 +894,6 @@ describe('console API routes', () => {
         bossForwardRecipient: '主招聘同事',
         bossScreeningEnabled: true,
         bossScreeningPolicyFile: policyPath,
-        bossSecondaryForwardMode: 'email',
-        bossSecondaryForwardRecipient: 'secondary-forward@example.com',
-        bossSecondaryForwardCc: ['secondary-forward-audit@example.com'],
         bossSecondaryEmail: 'secondary@example.com',
         bossSecondaryCc: ['audit@example.com'],
       },
@@ -917,17 +914,12 @@ describe('console API routes', () => {
       '--boss-forward-recipient', '主招聘同事',
       '--boss-screening-enabled', 'true',
       '--boss-screening-policy-file', policyPath,
-      '--boss-secondary-forward-mode', 'email',
-      '--boss-secondary-forward-recipient', 'secondary-forward@example.com',
-      '--boss-secondary-forward-cc', 'secondary-forward-audit@example.com',
       '--boss-secondary-email', 'secondary@example.com',
       '--boss-secondary-cc', 'audit@example.com',
     ]);
     assert.equal(completed.inputSummary.bossScreeningEnabled, true);
     assert.equal(completed.inputSummary.bossScreeningPolicyFile, policyPath);
-    assert.equal(completed.inputSummary.bossSecondaryForwardMode, 'email');
     assert.equal(completed.inputSummary.bossSecondaryEmail, 'secondary@example.com');
-    assert.equal(completed.inputSummary.bossSecondaryForwardCcCount, 1);
     assert.equal(completed.inputSummary.bossSecondaryCcCount, 1);
   });
 
@@ -946,9 +938,6 @@ describe('console API routes', () => {
       bossForwardCc: [],
       bossScreeningEnabled: true,
       bossScreeningPolicyFile: './policy.json',
-      bossSecondaryForwardMode: 'email',
-      bossSecondaryForwardRecipient: 'secondary-forward@example.com',
-      bossSecondaryForwardCc: [],
       bossSecondaryEmail: 'secondary@example.com',
       bossSecondaryCc: [],
     }]);
@@ -986,7 +975,8 @@ describe('console API routes', () => {
     assert.equal(snapshot?.screening?.enabled, true);
     assert.deepStrictEqual(snapshot?.primaryForwarding?.ccEmails, []);
     assert.deepStrictEqual(snapshot?.primaryDelivery.ccEmails, []);
-    assert.deepStrictEqual(snapshot?.screening?.secondaryForwarding?.ccEmails, []);
+    assert.equal(snapshot?.version, 3);
+    assert.equal('secondaryForwarding' in (snapshot?.screening ?? {}), false);
     assert.deepStrictEqual(snapshot?.screening?.secondaryDelivery?.ccEmails, []);
     assert.equal(completed.inputSummary.bossCaptureSettingsSnapshotCount, 1);
   });
@@ -1912,6 +1902,17 @@ describe('console API routes', () => {
         bossForwardRecipient: 'recruiter@example.com',
       },
     });
+    const legacyBossSecondaryForwarding = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      body: {
+        platform: 'boss',
+        keyword: '物业电工',
+        bossSecondaryForwardMode: 'email',
+        bossSecondaryForwardRecipient: 'legacy@example.com',
+      },
+    });
 
     assert.equal(filterWithoutDirect.statusCode, 400);
     assert.match((filterWithoutDirect.body as { error?: { message?: string } }).error?.message ?? '', /searchSource direct/);
@@ -1923,6 +1924,8 @@ describe('console API routes', () => {
     assert.match((bossForwardWithoutRecipient.body as { error?: { message?: string } }).error?.message ?? '', /must be provided together/);
     assert.equal(bossForwardOnOtherPlatform.statusCode, 400);
     assert.match((bossForwardOnOtherPlatform.body as { error?: { message?: string } }).error?.message ?? '', /only be used with platform boss/);
+    assert.equal(legacyBossSecondaryForwarding.statusCode, 400);
+    assert.match((legacyBossSecondaryForwarding.body as { error?: { message?: string } }).error?.message ?? '', /no longer supported.*bossSecondaryEmail/);
   });
 
   it('adds Boss to search-subscription only when all-platform opt-in is explicit', async () => {
@@ -2638,6 +2641,7 @@ describe('console API routes', () => {
       filters: Array<{ fieldCount: number; failedControls: number; unknownControls: number }>;
       sessions: Array<{ recentLoginRefreshStatus?: string; recentLoginRefreshError?: string }>;
       tasks: { failed: number; latestFailureMessage?: string };
+      bossRejectionEmails: { outboxCount: number; pending: number; sending: number; sent: number; retryableFailed: number; uncertain: number; superseded: number };
     };
     assert.equal(health.dataAnomalies[0]?.missingJd, 1);
     assert.equal(health.dataAnomalies[0]?.exportOnlyDirectories, 1);
@@ -2660,6 +2664,48 @@ describe('console API routes', () => {
     assert.equal(health.sessions[0]?.recentLoginRefreshError, 'login expired');
     assert.equal(health.tasks.failed, 1);
     assert.equal(health.tasks.latestFailureMessage, 'login expired');
+    assert.deepStrictEqual(health.bossRejectionEmails, {
+      outboxCount: 0,
+      pending: 0,
+      sending: 0,
+      sent: 0,
+      retryableFailed: 0,
+      uncertain: 0,
+      superseded: 0,
+    });
+  });
+
+  it('counts in-flight Boss rejection emails in dashboard health', async () => {
+    const dataDir = await makeTempDir();
+    const taskDir = await makeTempDir();
+    await writeJson(
+      path.join(dataDir, 'boss', 'jobs', 'boss-email-health', 'routing', 'rejection-email-outbox', 'sending.json'),
+      { status: 'sending' },
+    );
+    await writeJson(
+      path.join(dataDir, 'boss', 'jobs', 'boss-email-health', 'routing', 'rejection-email-outbox', 'sent.json'),
+      { status: 'sent' },
+    );
+    const queue = new TaskQueue({ taskDir, runner: async () => buildRunSummary() });
+    const response = await handleApiRequest({
+      method: 'GET',
+      pathname: '/api/dashboard/health',
+      searchParams: new URLSearchParams({ platform: 'boss' }),
+      dataDir,
+      taskQueue: queue,
+      jobReadModel: new JobReadModel({ dataDir }),
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepStrictEqual((response.body as { bossRejectionEmails: unknown }).bossRejectionEmails, {
+      outboxCount: 2,
+      pending: 0,
+      sending: 1,
+      sent: 1,
+      retryableFailed: 0,
+      uncertain: 0,
+      superseded: 0,
+    });
   });
 
   it('passes through RAG no-answer results without rewriting them', async () => {
