@@ -279,7 +279,7 @@ async function reactivateSubscriptionCardHover(
     x: cardCenter.x,
     y: Math.max(0, cardBox.y - Math.max(24, cardBox.height / 2)),
   };
-  const movedOut = await moveMouseThroughWaypoints(page, [cardCenter, resetPoint]);
+  const movedOut = await moveMouseThroughWaypoints(page, [cardCenter, resetPoint], { deadline });
   if (!movedOut) {
     throw new Error(`Could not safely reset the 51job saved-search card hover for "${searchKeyword}".`);
   }
@@ -292,7 +292,7 @@ async function reactivateSubscriptionCardHover(
     await page.waitForTimeout(Math.min(subscriptionPanelPollMs, getRemainingTimeout(deadline))).catch(() => undefined);
   }
 
-  const movedBack = await moveMouseThroughWaypoints(page, [cardCenter]);
+  const movedBack = await moveMouseThroughWaypoints(page, [cardCenter], { deadline });
   if (!movedBack) {
     throw new Error(`Could not safely reactivate the 51job saved-search card hover for "${searchKeyword}".`);
   }
@@ -388,7 +388,7 @@ async function movePointerThroughActiveSubscriptionPanel(
     { x: bridgeX, y: panelTransitY },
     { x: triggerTarget.x, y: panelTransitY },
     triggerTarget,
-  ]);
+  ], { deadline });
   if (!moved) {
     throw new Error(`Could not move the pointer safely through the active 51job subscription panel for "${searchKeyword}".`);
   }

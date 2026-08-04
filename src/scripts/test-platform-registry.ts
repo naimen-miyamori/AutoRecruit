@@ -4,7 +4,9 @@ import type { Page } from 'playwright';
 
 import {
   buildContinuousMouseTrajectory,
+  buildHumanMouseStepDelays,
   getBossTypingDelayMs,
+  getHumanMouseMoveDurationMs,
   getPlatformActionPaceDelayMs,
   getPlatformCandidatePaceDelayMs,
   moveMouseContinuously,
@@ -152,6 +154,8 @@ test('browser pacing and reuse defaults are platform-specific', () => {
   });
   assert.equal(config.playwright.bossTypingDelayMinMs, 80);
   assert.equal(config.playwright.bossTypingDelayMaxMs, 180);
+  assert.equal(config.playwright.mouseSpeedMinPxPerSecond, 700);
+  assert.equal(config.playwright.mouseSpeedMaxPxPerSecond, 1200);
   assert.equal(config.playwright.searchPageTimeoutMs, 30000);
 });
 
@@ -257,6 +261,51 @@ test('mouse trajectories remain continuous across operations and pages in one br
   for (const segment of wideSegments) {
     assert.ok(Math.hypot(segment.x - segmentStart.x, segment.y - segmentStart.y) / segment.steps <= 28.01);
     segmentStart = segment;
+  }
+
+  const originalMouseSpeedMin = config.playwright.mouseSpeedMinPxPerSecond;
+  const originalMouseSpeedMax = config.playwright.mouseSpeedMaxPxPerSecond;
+  config.playwright.mouseSpeedMinPxPerSecond = 1000;
+  config.playwright.mouseSpeedMaxPxPerSecond = 1000;
+  try {
+    assert.equal(getHumanMouseMoveDurationMs(20), 160);
+    assert.equal(getHumanMouseMoveDurationMs(1000), 1000);
+    assert.equal(getHumanMouseMoveDurationMs(5000), 5000);
+    const speedProfile = buildHumanMouseStepDelays(21, 700);
+    assert.ok(Math.abs(speedProfile.reduce((sum, delay) => sum + delay, 0) - 700) < 0.001);
+    assert.ok(speedProfile[0]! > speedProfile[10]!);
+    assert.ok(speedProfile.at(-1)! > speedProfile[10]!);
+
+    const humanMoves: Array<{ x: number; y: number }> = [];
+    const humanDelays: number[] = [];
+    const humanPage = {
+      context: () => ({}),
+      mouse: {
+        move: async (x: number, y: number) => humanMoves.push({ x, y }),
+      },
+      waitForTimeout: async (delayMs: number) => { humanDelays.push(delayMs); },
+    } as unknown as Page;
+    await moveMouseContinuously(humanPage, { x: 640, y: 360 });
+    assert.deepEqual(humanMoves.at(-1), { x: 640, y: 360 });
+    assert.equal(humanDelays.length, humanMoves.length);
+    assert.ok(humanDelays.reduce((sum, delay) => sum + delay, 0) >= 160);
+
+    const deadlineMoves: Array<{ x: number; y: number }> = [];
+    const deadlinePage = {
+      context: () => ({}),
+      mouse: {
+        move: async (x: number, y: number) => deadlineMoves.push({ x, y }),
+      },
+      waitForTimeout: async () => undefined,
+    } as unknown as Page;
+    await assert.rejects(
+      () => moveMouseContinuously(deadlinePage, { x: 500, y: 300 }, { deadline: Date.now() + 50 }),
+      /Human-like mouse movement requires .* exceed its deadline/,
+    );
+    assert.equal(deadlineMoves.length, 0);
+  } finally {
+    config.playwright.mouseSpeedMinPxPerSecond = originalMouseSpeedMin;
+    config.playwright.mouseSpeedMaxPxPerSecond = originalMouseSpeedMax;
   }
 
   const interruptedContext = {};

@@ -1289,7 +1289,7 @@ async function openControl(
 
 async function restorePageState(page: Page, options: ResolvedDiscoveryOptions): Promise<void> {
   await page.keyboard.press('Escape').catch(() => undefined);
-  await clickPagePointWithMouse(page, { x: 4, y: 4 }).catch(() => false);
+  await clickPagePointWithMouse(page, { x: 4, y: 4 }, { deadline: options.deadline }).catch(() => false);
   await waitForUiStability(page, options);
 }
 

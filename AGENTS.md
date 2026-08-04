@@ -219,7 +219,9 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
   Navigation, clicks, input, keys, forwarding, and candidate transitions use shared pacing;
   detailed platform typing and post-detail dwell rules live in scoped platform documents.
 - Pointer-driven actions preserve one continuous path across operations and pages. Compatibility
-  locator/DOM clicks move the shared pointer first; never teleport or reset it.
+  locator/DOM clicks move the shared pointer first; never teleport or reset it. Movement uses a
+  timed human-speed acceleration/deceleration profile inside the caller's deadline; insufficient
+  budget fails instead of compressing the path into an instant jump.
 
 See src/browser/AGENTS.md and the matching platform document before changing these flows.
 

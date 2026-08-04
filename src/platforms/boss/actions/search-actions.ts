@@ -2247,7 +2247,11 @@ async function dragBossCustomSliderHandle(
     throw new Error('Boss custom slider handle is not measurable.');
   }
   await runBossPageAction(page, async () => undefined);
-  await moveMouseContinuously(page, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+  await moveMouseContinuously(
+    page,
+    { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+    { deadline },
+  );
   if (domFallback) {
     await runBossPageAction(page, () => handle.evaluate((element, ratio) => {
       const slider = element.closest<HTMLElement>('.ui-slider');
@@ -2262,7 +2266,7 @@ async function dragBossCustomSliderHandle(
     }, targetRatio));
   } else {
     await page.mouse.down();
-    await moveMouseContinuously(page, target);
+    await moveMouseContinuously(page, target, { deadline });
     await page.mouse.up();
   }
   if (remainingTime(deadline) <= 1) {

@@ -11,6 +11,11 @@ export interface MouseTrajectorySegment extends MousePointerPoint {
   steps: number;
 }
 
+export interface MouseMovementOptions {
+  /** Absolute caller-owned deadline. Human timing is never compressed to fit it. */
+  deadline?: number;
+}
+
 export interface BossSequentialTypingOptions {
   replaceExisting?: boolean;
   delayMinMs?: number;
@@ -20,6 +25,8 @@ export interface BossSequentialTypingOptions {
 const pointerPositionByScope = new WeakMap<object, MousePointerPoint>();
 const continuousMouseBridgePages = new WeakSet<Page>();
 export const continuousMouseBridgeName = '__autorecruitMoveMouseContinuously';
+const humanMouseMaxStepPx = 16;
+const humanMouseMinDurationMs = 160;
 const bossTypingPunctuationPattern = /^[，。！？；：、,.!?;:]$/u;
 const bossPunctuationDelayMinMs = 120;
 const bossPunctuationDelayMaxMs = 300;
@@ -52,7 +59,34 @@ function distanceBetween(start: MousePointerPoint, end: MousePointerPoint): numb
 }
 
 function trajectorySteps(start: MousePointerPoint, end: MousePointerPoint): number {
-  return Math.max(3, Math.ceil(distanceBetween(start, end) / 28));
+  return Math.max(3, Math.ceil(distanceBetween(start, end) / humanMouseMaxStepPx));
+}
+
+export function getHumanMouseMoveDurationMs(distancePx: number): number {
+  const distance = Math.max(Number.isFinite(distancePx) ? distancePx : 0, 0);
+  if (distance < 1) return 0;
+  const speed = randomIntBetween(
+    config.playwright.mouseSpeedMinPxPerSecond,
+    config.playwright.mouseSpeedMaxPxPerSecond,
+  );
+  return Math.max(humanMouseMinDurationMs, Math.round((distance / Math.max(speed, 1)) * 1000));
+}
+
+/**
+ * Keeps event density high while varying cadence like a hand movement:
+ * slower on departure and arrival, faster through the middle of the path.
+ */
+export function buildHumanMouseStepDelays(stepCount: number, durationMs: number): number[] {
+  const count = Math.max(Math.floor(stepCount), 0);
+  const duration = Math.max(durationMs, 0);
+  if (count === 0 || duration === 0) return Array.from({ length: count }, () => 0);
+  const weights = Array.from({ length: count }, (_, index) => {
+    const phase = (index + 0.5) / count;
+    const edgeDistance = Math.abs(phase - 0.5) * 2;
+    return 0.65 + 1.35 * edgeDistance ** 1.7;
+  });
+  const weightTotal = weights.reduce((sum, weight) => sum + weight, 0);
+  return weights.map((weight) => duration * weight / weightTotal);
 }
 
 export function buildContinuousMouseTrajectory(
@@ -86,9 +120,74 @@ export function buildContinuousMouseTrajectory(
   ];
 }
 
+async function moveMouseAlongSegments(
+  page: Page,
+  mouse: Page['mouse'],
+  pointerScope: object,
+  start: MousePointerPoint,
+  segments: MouseTrajectorySegment[],
+  options: MouseMovementOptions,
+): Promise<boolean> {
+  const pathDistance = segments.reduce((sum, segment, index) => sum + distanceBetween(
+    index === 0 ? start : segments[index - 1]!,
+    segment,
+  ), 0);
+  const stepCount = segments.reduce((sum, segment) => sum + segment.steps, 0);
+  const durationMs = getHumanMouseMoveDurationMs(pathDistance);
+  const delays = buildHumanMouseStepDelays(stepCount, durationMs);
+  if (options.deadline !== undefined && Date.now() + durationMs >= options.deadline) {
+    throw new Error(`Human-like mouse movement requires ${durationMs}ms but would exceed its deadline.`);
+  }
+
+  let segmentStart = start;
+  let delayIndex = 0;
+  for (const segment of segments) {
+    for (let step = 1; step <= segment.steps; step += 1) {
+      const progress = step / segment.steps;
+      const point = {
+        x: segmentStart.x + (segment.x - segmentStart.x) * progress,
+        y: segmentStart.y + (segment.y - segmentStart.y) * progress,
+      };
+      const delayMs = delays[delayIndex++] ?? 0;
+      if (options.deadline !== undefined && Date.now() + delayMs >= options.deadline) {
+        throw new Error('Human-like mouse movement exhausted its deadline before reaching the target.');
+      }
+      await waitOnPageOrTimer(page, delayMs);
+      await mouse.move(point.x, point.y);
+      pointerPositionByScope.set(pointerScope, point);
+    }
+    segmentStart = segment;
+  }
+  return true;
+}
+
 export async function moveMouseContinuously(
   page: Page,
   target: MousePointerPoint,
+  options: MouseMovementOptions = {},
+): Promise<boolean> {
+  const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
+  if (!mouse) {
+    return false;
+  }
+
+  const context = (page as Partial<Pick<Page, 'context'>>).context?.();
+  const pointerScope = context ?? page;
+  const start = pointerPositionByScope.get(pointerScope) ?? { x: 0, y: 0 };
+  return moveMouseAlongSegments(
+    page,
+    mouse,
+    pointerScope,
+    start,
+    buildContinuousMouseTrajectory(start, target),
+    options,
+  );
+}
+
+export async function moveMouseThroughWaypoints(
+  page: Page,
+  waypoints: MousePointerPoint[],
+  options: MouseMovementOptions = {},
 ): Promise<boolean> {
   const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
   if (!mouse) {
@@ -99,54 +198,15 @@ export async function moveMouseContinuously(
   const pointerScope = context ?? page;
   const start = pointerPositionByScope.get(pointerScope) ?? { x: 0, y: 0 };
   let segmentStart = start;
-  for (const segment of buildContinuousMouseTrajectory(start, target)) {
-    for (let step = 1; step <= segment.steps; step += 1) {
-      const progress = step / segment.steps;
-      await mouse.move(
-        segmentStart.x + (segment.x - segmentStart.x) * progress,
-        segmentStart.y + (segment.y - segmentStart.y) * progress,
-      );
-      pointerPositionByScope.set(pointerScope, {
-        x: segmentStart.x + (segment.x - segmentStart.x) * progress,
-        y: segmentStart.y + (segment.y - segmentStart.y) * progress,
-      });
-    }
-    segmentStart = segment;
-  }
-  pointerPositionByScope.set(pointerScope, target);
-  return true;
-}
-
-export async function moveMouseThroughWaypoints(
-  page: Page,
-  waypoints: MousePointerPoint[],
-): Promise<boolean> {
-  const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
-  if (!mouse) {
-    return false;
-  }
-
-  const context = (page as Partial<Pick<Page, 'context'>>).context?.();
-  const pointerScope = context ?? page;
-  let segmentStart = pointerPositionByScope.get(pointerScope) ?? { x: 0, y: 0 };
-
+  const segments: MouseTrajectorySegment[] = [];
   for (const target of waypoints) {
     const steps = distanceBetween(segmentStart, target) < 1
       ? 1
       : trajectorySteps(segmentStart, target);
-    for (let step = 1; step <= steps; step += 1) {
-      const progress = step / steps;
-      const point = {
-        x: segmentStart.x + (target.x - segmentStart.x) * progress,
-        y: segmentStart.y + (target.y - segmentStart.y) * progress,
-      };
-      await mouse.move(point.x, point.y);
-      pointerPositionByScope.set(pointerScope, point);
-    }
+    segments.push({ ...target, steps });
     segmentStart = target;
   }
-
-  return true;
+  return moveMouseAlongSegments(page, mouse, pointerScope, start, segments, options);
 }
 
 export async function ensureContinuousMouseBridge(page: Page): Promise<void> {
@@ -266,6 +326,7 @@ export async function clickLocatorWithMouse(
   timeoutMs: number,
   options: { position?: MousePointerPoint } = {},
 ): Promise<boolean> {
+  const deadline = Date.now() + Math.max(timeoutMs, 1);
   const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
   const boundingBox = (locator as Partial<Pick<Locator, 'boundingBox'>>).boundingBox?.bind(locator);
   const scrollIntoViewIfNeeded = (locator as Partial<Pick<Locator, 'scrollIntoViewIfNeeded'>>).scrollIntoViewIfNeeded?.bind(locator);
@@ -294,7 +355,7 @@ export async function clickLocatorWithMouse(
       Math.round(box.y + verticalInset),
       Math.round(box.y + box.height - verticalInset),
     );
-  await moveMouseContinuously(page, { x: targetX, y: targetY });
+  await moveMouseContinuously(page, { x: targetX, y: targetY }, { deadline });
   await mouse.click(targetX, targetY);
   return true;
 }
@@ -313,6 +374,7 @@ export async function moveMouseToLocatorPosition(
   timeoutMs: number,
   position?: MousePointerPoint,
 ): Promise<boolean> {
+  const deadline = Date.now() + Math.max(timeoutMs, 1);
   const boundingBox = (locator as Partial<Pick<Locator, 'boundingBox'>>).boundingBox?.bind(locator);
   const scrollIntoViewIfNeeded = (locator as Partial<Pick<Locator, 'scrollIntoViewIfNeeded'>>).scrollIntoViewIfNeeded?.bind(locator);
   if (!boundingBox) {
@@ -332,15 +394,16 @@ export async function moveMouseToLocatorPosition(
     y: position
       ? Math.min(box.y + box.height, Math.max(box.y, box.y + position.y))
       : box.y + box.height / 2,
-  });
+  }, { deadline });
 }
 
 export async function clickPagePointWithMouse(
   page: Page,
   point: MousePointerPoint,
+  options: MouseMovementOptions = {},
 ): Promise<boolean> {
   const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
-  if (!mouse || !await moveMouseContinuously(page, point)) {
+  if (!mouse || !await moveMouseContinuously(page, point, options)) {
     return false;
   }
 

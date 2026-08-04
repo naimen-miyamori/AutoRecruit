@@ -184,6 +184,11 @@ const candidateDelayMaxMsByPlatform: Record<SupportedPlatform, number> = {
   zhilian: getPlatformNumberEnv('zhilian', 'CANDIDATE_DELAY_MAX_MS', 4000),
   boss: getPlatformNumberEnv('boss', 'CANDIDATE_DELAY_MAX_MS', 4000),
 };
+const mouseSpeedMinPxPerSecond = getPositiveIntegerEnv('PLAYWRIGHT_MOUSE_SPEED_MIN_PX_PER_SECOND', 700);
+const mouseSpeedMaxPxPerSecond = getPositiveIntegerEnv('PLAYWRIGHT_MOUSE_SPEED_MAX_PX_PER_SECOND', 1200);
+if (mouseSpeedMinPxPerSecond > mouseSpeedMaxPxPerSecond) {
+  throw new Error('PLAYWRIGHT_MOUSE_SPEED_MIN_PX_PER_SECOND must not exceed PLAYWRIGHT_MOUSE_SPEED_MAX_PX_PER_SECOND');
+}
 const reuseBrowserByPlatform: Record<SupportedPlatform, boolean> = {
   '51job': getPlatformBooleanEnv('51job', 'REUSE_BROWSER', true),
   liepin: getPlatformBooleanEnv('liepin', 'REUSE_BROWSER', true),
@@ -222,6 +227,8 @@ export const config = {
     actionDelayMaxMsByPlatform,
     candidateDelayMinMsByPlatform,
     candidateDelayMaxMsByPlatform,
+    mouseSpeedMinPxPerSecond,
+    mouseSpeedMaxPxPerSecond,
     bossTypingDelayMinMs,
     bossTypingDelayMaxMs,
     reuseBrowserByPlatform,

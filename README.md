@@ -839,6 +839,7 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 | `PLAYWRIGHT_<PLATFORM>_REUSE_BROWSER` | 平台级浏览器复用开关 |
 | `PLAYWRIGHT_<PLATFORM>_ACTION_DELAY_MIN_MS/MAX_MS` | 平台网页动作间隔 |
 | `PLAYWRIGHT_<PLATFORM>_CANDIDATE_DELAY_MIN_MS/MAX_MS` | 平台候选人切换间隔 |
+| `PLAYWRIGHT_MOUSE_SPEED_MIN_PX_PER_SECOND/MAX_PX_PER_SECOND` | 全平台共享指针移动速度，默认 `700-1200 CSS px/s` |
 | `PLAYWRIGHT_BOSS_TYPING_DELAY_MIN_MS/MAX_MS` | Boss 搜索关键词、直接聊天文本和备注的逐字间隔，默认 `80-180ms` |
 | `LLM_COMPLETION_ROUTE` | `default`（默认）或 `codex-session`；只选择调用路径，不做失败自动切换 |
 | `SCORING_LLM_COMPLETION_ROUTE` | 简历评分专属路由；默认 `codex-session`，显式 `default` 切回原 OpenAI 兼容接口 |
@@ -848,7 +849,7 @@ npm run schedule:control -- run-now --schedule-id <scheduleId>
 | `QDRANT_URL` / `QDRANT_API_KEY` | Qdrant 连接配置 |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | 报告邮件配置 |
 
-正常多平台运行建议不要设置 `STORAGE_STATE_PATH`，让程序自动选择平台登录态。51job、Liepin、Zhilian 和 Boss 的操作与候选人间隔默认均为加权 `2–4 秒`：约 80% 落在 `2–3 秒`、20% 落在 `3–4 秒`。简历详情就绪后会先停留一个动作间隔再转发或解析，处理完成后再等待一个动作间隔才关闭详情页或模态框。Boss 搜索关键词、直接聊天文本和备注会在输入框获得焦点后按 `80-180ms` 的随机间隔逐字输入，标点处额外短暂停顿；常用语仍通过页面选项直接选择。鼠标点击在同一浏览器上下文中共享上一次落点，并沿分步轨迹连续移动到下一目标；必须使用原生或 DOM 点击的兼容路径也会先完成这段移动。
+正常多平台运行建议不要设置 `STORAGE_STATE_PATH`，让程序自动选择平台登录态。51job、Liepin、Zhilian 和 Boss 的操作与候选人间隔默认均为加权 `2–4 秒`：约 80% 落在 `2–3 秒`、20% 落在 `3–4 秒`。简历详情就绪后会先停留一个动作间隔再转发或解析，处理完成后再等待一个动作间隔才关闭详情页或模态框。Boss 搜索关键词、直接聊天文本和备注会在输入框获得焦点后按 `80-180ms` 的随机间隔逐字输入，标点处额外短暂停顿；常用语仍通过页面选项直接选择。鼠标点击在同一浏览器上下文中共享上一次落点，并沿分步轨迹以默认 `700-1200 CSS px/s` 移动到下一目标；移动采用起止减速、中段加速的时间曲线，短距离移动至少持续 `160ms`，长距离不会通过压缩时长来提速。必须使用原生或 DOM 点击的兼容路径也会先完成这段移动；剩余 deadline 不足时动作失败，不会瞬移或临时加速。
 
 ---
 

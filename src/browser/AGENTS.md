@@ -48,6 +48,9 @@ to the matching src/platforms/<platform>/AGENTS.md.
 - Pointer-driven operations preserve one context-scoped continuous trajectory across pages and
   popup/modal transitions. Native locator, forced, or DOM-event compatibility paths first move the
   shared pointer to the target; no helper may teleport or bypass the tracker.
+- Pointer steps use a visible human-speed cadence with slower departure/arrival and a faster middle
+  phase. The whole timed movement belongs to the caller's existing deadline; never drop delays,
+  increase speed, or jump to the destination when the remaining budget is insufficient.
 - Shared typing helpers preserve intentional sequential input behavior. The owning platform decides
   when it is required and whether clearing an existing value is allowed; browser helpers must not
   silently degrade required typing to whole-value fill.
