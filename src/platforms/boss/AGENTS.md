@@ -9,9 +9,9 @@ scheduled work.
 
 ## Ownership and Boundaries
 
-- Boss is normally selected as platform boss. Ordinary capture and batch may opt into it as the
-  fourth `all` stage only with explicit `includeBoss`; Talent Mapping and every Boss independent
-  mode remain outside that loop. Its actions own page controls, selectors, compatibility paths,
+- Boss is normally selected as platform boss. Ordinary capture, batch, and search subscription may
+  opt into it as the fourth `all` stage only with explicit `includeBoss`; Talent Mapping and every
+  other Boss independent mode remain outside that loop. Its actions own page controls, selectors, compatibility paths,
   pacing, readiness, identity checks, and business postconditions; Boss adapter/workflow facades
   must not directly operate the page.
 - Action modules do not enter TaskQueue, write receipts or job records, call models, or decide
@@ -34,6 +34,22 @@ scheduled work.
 - Direct search applies the keyword once, after job scope, filters, and viewed policy are stable.
   The unique final search control may be an icon only when it shares the keyword input's nearest
   search-input wrapper; an unrelated global search icon is never a fallback.
+- Saved Boss search selects the native “我的订阅” card by typed identity evidence: name, page
+  keyword, and hydrated condition identity remain separate fields. Card click is once-only; the
+  action polls asynchronous condition hydration, applies runtime `match-priority` and any viewed
+  override, then performs the same one final global search submit. Native subscription sort is not
+  part of the saved condition fingerprint. Subscription-card enumeration must wait for the native
+  subscription region itself to hydrate; an available search iframe with no mounted subscription
+  region is not an empty subscription list. When the visible card omits native identity attributes,
+  the Boss action may use the card component's platform business data to cross-check the native
+  subscription ID, stable job ID/name, keyword, and keyed condition labels, but raw component state
+  never leaves the action or enters persistence. Save outcomes are typed; a successful native-name edit
+  is recorded as `renamed`, while same-name conflicts, ambiguous cards, hydration failure, and
+  uncertain clicks fail closed.
+- Native subscription save treats keyword as a separate exact identity field. Existing-card rename
+  requires complete hydrated or authoritative condition proof; a no-ID `after - before` delta is
+  valid only while every pre-click DOM identity remains continuous. Redraw, replacement, or lost
+  continuity is uncertain and never authorizes editing an old card.
 - Navigation, clicks, input, keys, forwarding, chat, contact, and candidate transitions use the
   shared paced continuous pointer path. Keyword, direct-chat, and remark typing use the sequential
   typing helper; search/remark replacement clears the prior value, direct chat preserves a
@@ -75,6 +91,11 @@ scheduled work.
   resume ID matches the requested card, and the resume file is written and read back successfully.
   RunResult v2 records `capturedCandidateIds` and stage-specific retryable failures; legacy v1
   `newCandidateIds` remain read-only attempt history and are never inferred to be captured.
+- Boss search details support both the legacy `/web/frame/c-resume/` canvas and the current parent-
+  page `.dialog-lib-resume` Vue detail. Native readiness and parsing use the currently hydrated
+  `resumeInfo.expectId` and resume fields from that exact detail instance; parent-page performance
+  history is not identity evidence because it may refer to an earlier candidate. A native detail's
+  own “搜索畅聊卡” footer never classifies the detail as a purchase dialog.
 - Opening or confirming forwarding must move the shared pointer and then use a freshly resolved
   native locator click, never a stale coordinate that can land on `联系Ta`. Detect a visible search-
   chat-card purchase dialog before and after opening forwarding, close its unique safe close control,
@@ -83,6 +104,11 @@ scheduled work.
   current run must stop rather than continue to another card. `sent` requires a dispatched confirm
   click plus a new visible Boss success indication; a known pre-confirmation failure is retryable,
   while a dispatched click without success evidence is `uncertain` and is never auto-retried.
+- In the current native detail, the forwarding action is the unique
+  `.share[aria-label="转发牛人"]` at the right edge of the 收藏/不合适/举报/转发行; verify that
+  structure again immediately before clicking. The current no-close forwarding dialog is dismissed
+  only through a unique uncovered layer point with a verified postcondition. Never use Escape for
+  that cleanup: it can close the underlying resume while leaving the forwarding dialog visible.
 - A normal Boss detail lifecycle uses one absolute deadline created by the workflow and passed
   through open, identity verification, parsing, every recipient delivery, and strict close. Actions
   reserve cleanup time before spending user-like pace, recompute remaining timeout after pacing, and

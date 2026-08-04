@@ -41,9 +41,11 @@ owning domain instructions for screens that expose platform, RAG, Boss, or Talen
 - Talent Mapping permits 51job, Liepin, Zhilian, or all only; Boss must not be offered. Detail
   opening requires the project's explicit confirmation contract. Classification generation is a
   queued task, and entity/classification acceptance or revocation remains a human-reviewed mutation.
-- For normal capture/batch, the `all` UI may offer a separate explicit `includeBoss` control. It
-  must explain the fourth-stage order, detail-open side effect, and possible saved-forwarding reuse;
-  it must not expose Boss independent modes as part of that control.
+- For normal capture/batch and search subscription, the `all` UI may offer a separate explicit
+  `includeBoss` control. It must explain the fourth-stage order; capture/batch must additionally
+  explain the detail-open side effect and possible saved-forwarding reuse. Search subscription
+  must explain native “我的订阅” selection/save side effects and must not expose Boss independent
+  modes as part of that control.
 - Automation may offer a Talent Mapping schedule only as scan stage. The form must submit the
   card-only-compatible input shape and must not offer enrich or all as scheduled Mapping stages.
 - Do not infer candidate identity, link entities, apply classifications, or turn a later absence

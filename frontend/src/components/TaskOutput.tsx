@@ -35,6 +35,38 @@ export function TaskOutput({ kind, output }: { kind: string; output: unknown }) 
   }
   if (!isRecord(output)) return <JsonViewer value={output} />;
 
+  if (output.mode === 'search-subscription' && output.status === 'failed') {
+    const results = array(output.results);
+    return (
+      <div className="page-stack">
+        <div className="stale-banner"><strong>订阅管理在 {text(output.stoppedPlatform)} 停止</strong><span>{text(output.error)}</span></div>
+        <div className="detail-grid">
+          <div className="detail-cell"><span>已完成平台</span><strong>{Array.isArray(output.completedPlatforms) ? output.completedPlatforms.map(text).join(' → ') || '-' : '-'}</strong></div>
+          <div className="detail-cell"><span>停止平台</span><strong>{text(output.stoppedPlatform)}</strong></div>
+        </div>
+        {results.length > 0 && <div className="card-list">{results.map((item, index) => <TaskOutput key={`${text(item.platform)}-${index}`} kind={kind} output={item} />)}</div>}
+      </div>
+    );
+  }
+
+  if ('resultTotal' in output && 'saveRequested' in output && 'conditionStatusCounts' in output) {
+    const savedSearch = isRecord(output.savedSearch) ? output.savedSearch : undefined;
+    const identity = savedSearch && isRecord(savedSearch.conditionIdentity) ? savedSearch.conditionIdentity : undefined;
+    return (
+      <div className="page-stack">
+        <div className="detail-grid">
+          <div className="detail-cell"><span>平台 / 关键词</span><strong>{text(output.platform)} · {text(output.keyword)}</strong></div>
+          <div className="detail-cell"><span>搜索结果</span><strong>{text(output.resultTotal)}（{text(output.resultTotalSource)}）</strong></div>
+          <div className="detail-cell"><span>条件应用</span><strong>{output.allConditionsApplied === true ? '全部成功' : '存在跳过或失败'}</strong></div>
+          <div className="detail-cell"><span>保存结果</span><strong>{output.saveRequested === true ? `${output.saved === true ? '已保存' : '未保存'} · ${text(output.saveOutcome)}` : '未请求保存'}</strong></div>
+          <div className="detail-cell"><span>排序策略</span><strong>{text(output.sortPolicy)}</strong></div>
+        </div>
+        {savedSearch && <div className="receipt-box"><strong>Boss 原生订阅引用</strong><div>名称：{text(savedSearch.name)} · 页面关键词：{text(savedSearch.expectedKeyword)}</div><div>职位范围：{text(identity?.jobScope)} · Native ID：{text(savedSearch.nativeId)}</div><div className="mono">条件指纹：{text(savedSearch.conditionFingerprint)}</div></div>}
+        {output.saveRequested === true && <div className="security-note">这是平台原生订阅保存/改名结果；本任务不会抓取候选、打开详情、写 seen/评分/报告或发送邮件。</div>}
+      </div>
+    );
+  }
+
   if (kind === 'talent-mapping') {
     const hasGaps = output.status === 'completed-with-gaps'
       || Number(output.failedProfiles ?? 0) > 0

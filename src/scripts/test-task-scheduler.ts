@@ -265,7 +265,7 @@ describe('TaskScheduler', () => {
           taskKey: 'opt-in-boss',
           name: '含直猎邦抓取',
           kind: 'resume-capture',
-          input: { platform: 'all', includeBoss: true, keyword: '店长' },
+          input: { platform: 'all', includeBoss: true, keyword: '店长', searchSource: 'direct' },
         },
       ]));
       await waitFor(async () => {
@@ -277,8 +277,51 @@ describe('TaskScheduler', () => {
       assert.equal(captured[1]?.snapshot?.sourceJobKey, '店长');
       assert.deepStrictEqual(captured.map((item) => item.argv), [
         ['--platform', 'all', '--keyword', '店长'],
-        ['--platform', 'all', '--keyword', '店长', '--include-boss', 'true'],
+        ['--platform', 'all', '--keyword', '店长', '--include-boss', 'true', '--search-source', 'direct'],
       ]);
+    } finally {
+      scheduler.close();
+    }
+  });
+
+  it('preserves explicit Boss opt-in for scheduled search-subscription tasks', async () => {
+    const dataDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return output();
+      },
+    });
+    const scheduler = new TaskScheduler({ taskQueue: queue, dataDir, now: () => new Date('2026-07-20T02:00:00.000Z') });
+
+    try {
+      const schedule = await scheduler.createSchedule({
+        ...baseSchedule([{
+          taskKey: 'search-subscription-boss',
+      name: '全平台订阅管理',
+          kind: 'search-subscription',
+          input: {
+            platform: 'all',
+            includeBoss: true,
+            searchSubscriptionFile: './subscription.json',
+          },
+        }]),
+        enabled: false,
+      });
+      assert.equal((schedule.tasks[0]?.input as { includeBoss?: boolean }).includeBoss, true);
+
+      await scheduler.startSchedule(schedule.scheduleId);
+      await waitFor(async () => {
+        const runs = await scheduler.listRuns(schedule.scheduleId);
+        return runs.find((run) => run.status === 'succeeded');
+      }, 'scheduled search-subscription Boss opt-in round');
+      assert.deepEqual(calls, [[
+        '--platform', 'all',
+        '--search-subscription-file', './subscription.json',
+        '--include-boss', 'true',
+      ]]);
     } finally {
       scheduler.close();
     }

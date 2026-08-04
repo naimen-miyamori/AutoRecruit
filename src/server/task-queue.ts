@@ -14,6 +14,7 @@ import { waitForManualLoginAndPersistSession } from '../browser/manual-login-ref
 import { runRagOpsTask } from './rag-ops-runner.js';
 import { runTalentMappingClassificationTask } from './talent-mapping-classification-runner.js';
 import { normalizeFailureMessage, summarizeFailureMessage } from './failure-summary.js';
+import { SearchSubscriptionRunError } from '../search/search-subscription.js';
 import type {
   LoginRefreshTaskInput,
   LoginRefreshTaskOutput,
@@ -31,6 +32,7 @@ import type {
   TaskInput,
   WorkflowFailurePolicy,
 } from './types.js';
+import type { SearchSubscriptionSummary } from '../types/job.js';
 
 export type TaskRunner = (argv: readonly string[], task: TaskRecord) => Promise<MainResult>;
 export type LoginRefreshRunner = (input: LoginRefreshTaskInput, task: TaskRecord) => Promise<LoginRefreshTaskOutput>;
@@ -146,12 +148,23 @@ function summarizeCaptureSearchExecution(output: TaskOutput): Record<string, unk
     'conditionSetRef',
     'selectedFieldsFingerprint',
     'includeViewedCandidates',
+    'savedSearch',
+    'sortPolicy',
   ]) {
     if (value[field] !== undefined) {
       summary[field] = value[field];
     }
   }
   return Object.keys(summary).length > 0 ? { searchExecution: summary } : {};
+}
+
+function isSearchSubscriptionSummary(value: unknown): value is SearchSubscriptionSummary {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && 'resultTotal' in value
+    && 'saveRequested' in value
+    && 'conditionStatusCounts' in value;
 }
 
 function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
@@ -183,6 +196,24 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
       consideredCandidates: output.consideredCandidates,
       generatedSuggestions: output.generatedSuggestions,
       skippedCandidates: output.skippedCandidates,
+    };
+  }
+
+  if ('mode' in output && output.mode === 'search-subscription' && output.status === 'failed') {
+    return {
+      mode: output.mode,
+      status: output.status,
+      completedPlatforms: output.completedPlatforms,
+      stoppedPlatform: output.stoppedPlatform,
+      error: output.error,
+      results: output.results.map((item) => ({
+        platform: item.platform,
+        keyword: item.keyword,
+        resultTotal: item.resultTotal,
+        saveRequested: item.saveRequested,
+        saved: item.saved,
+        ...(item.saveOutcome ? { saveOutcome: item.saveOutcome } : {}),
+      })),
     };
   }
 
@@ -228,9 +259,29 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
   }
 
   if (Array.isArray(output)) {
+    const subscriptionResults = output.filter(isSearchSubscriptionSummary);
+    if (subscriptionResults.length !== output.length) {
+      return {
+        itemCount: output.length,
+        platforms: [...new Set(output.map((item) => 'platform' in item ? item.platform : undefined).filter(Boolean))],
+      };
+    }
     return {
       itemCount: output.length,
-      platforms: [...new Set(output.map((item) => 'platform' in item ? item.platform : undefined).filter(Boolean))],
+      platforms: [...new Set(subscriptionResults.map((item) => item.platform))],
+      results: subscriptionResults.map((item) => ({
+        platform: item.platform,
+        keyword: item.keyword,
+        resultTotal: item.resultTotal,
+        resultTotalSource: item.resultTotalSource,
+        saveRequested: item.saveRequested,
+        saved: item.saved,
+        allConditionsApplied: item.allConditionsApplied,
+        conditionStatusCounts: item.conditionStatusCounts,
+        ...(item.savedSearch ? { savedSearch: item.savedSearch } : {}),
+        ...(item.saveOutcome ? { saveOutcome: item.saveOutcome } : {}),
+        ...(item.sortPolicy ? { sortPolicy: item.sortPolicy } : {}),
+      })),
     };
   }
 
@@ -273,7 +324,14 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
       platform: output.platform,
       keyword: output.keyword,
       resultTotal: output.resultTotal,
+      resultTotalSource: output.resultTotalSource,
+      saveRequested: output.saveRequested,
+      saved: output.saved,
       allConditionsApplied: output.allConditionsApplied,
+      conditionStatusCounts: output.conditionStatusCounts,
+      ...(output.savedSearch ? { savedSearch: output.savedSearch } : {}),
+      ...(output.saveOutcome ? { saveOutcome: output.saveOutcome } : {}),
+      ...(output.sortPolicy ? { sortPolicy: output.sortPolicy } : {}),
     };
   }
 
@@ -531,6 +589,10 @@ export class TaskQueue {
     } catch (error) {
       const finishedAt = new Date().toISOString();
       task.status = 'failed';
+      if (error instanceof SearchSubscriptionRunError) {
+        task.output = error.summary;
+        task.outputSummary = buildOutputSummary(error.summary);
+      }
       task.error = error instanceof Error ? error.message : String(error);
       task.finishedAt = finishedAt;
       task.updatedAt = finishedAt;

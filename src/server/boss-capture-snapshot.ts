@@ -93,6 +93,17 @@ function canonicalPatchFromInput(
 
   if (input.searchSource !== undefined) patch.searchSource = plan.search.source;
   if (input.bossSearchKeyword !== undefined) patch.pageKeyword = plan.search.pageKeyword;
+  const replacesSearchWithDirect = plan.search.source === 'direct' && (
+    input.searchSource !== undefined
+    || input.applicationFilterInputFile !== undefined
+    || input.bossSearchConditionSetRef !== undefined
+    || input.searchConditionSetRefs?.boss !== undefined
+  );
+  if (replacesSearchWithDirect) {
+    patch.savedSearch = null;
+  } else if (input.bossSavedSearchReference !== undefined) {
+    patch.savedSearch = plan.search.savedSearch ? clone(plan.search.savedSearch) : null;
+  }
   if (input.applicationFilterInputFile !== undefined) {
     patch.applicationFilterInput = plan.search.applicationFilterInput
       ? clone(plan.search.applicationFilterInput)
@@ -141,6 +152,8 @@ function makeBossCaptureTaskSnapshot(input: {
       ...(plan.search.selectedFieldsFingerprint
         ? { selectedFieldsFingerprint: plan.search.selectedFieldsFingerprint }
         : {}),
+      ...(plan.search.savedSearch ? { savedSearch: clone(plan.search.savedSearch) } : {}),
+      ...(plan.search.sortPolicy ? { sortPolicy: plan.search.sortPolicy } : {}),
       ...(plan.search.applicationFilterInput
         ? { applicationFilterInput: clone(plan.search.applicationFilterInput) }
         : {}),
@@ -190,6 +203,7 @@ export async function snapshotBossCaptureSettings(
     jobName: normalized.input.keyword,
     ...(normalized.input.bossJobId ? { bossJobId: normalized.input.bossJobId } : {}),
     ...(normalized.input.bossSearchKeyword ? { bossSearchKeyword: normalized.input.bossSearchKeyword } : {}),
+    ...(normalized.input.bossSavedSearchReference ? { savedSearchReference: clone(normalized.input.bossSavedSearchReference) } : {}),
     ...(normalized.input.searchSource ? { searchSource: normalized.input.searchSource } : {}),
     searchSourceExplicit: normalized.input.searchSource !== undefined,
     ...(explicitBossConditionSetRef ? { searchConditionSetRef: explicitBossConditionSetRef } : {}),
@@ -228,6 +242,7 @@ export async function snapshotBossCaptureSettings(
     ...normalized.input,
     ...(plan.bossJobId ? { bossJobId: plan.bossJobId } : {}),
     ...(needsBossPageKeywordSnapshot ? { bossSearchKeyword: plan.search.pageKeyword } : {}),
+    ...(plan.search.savedSearch ? { bossSavedSearchReference: clone(plan.search.savedSearch) } : {}),
     // An explicit client condition set already has an immutable public
     // representation. Only saved/reused settings require this private
     // Boss-only snapshot field.
@@ -239,6 +254,7 @@ export async function snapshotBossCaptureSettings(
   };
   const snapshot = normalizeResumeCaptureTask(input, {
     allowBossSearchConditionSetRef: true,
+    allowBossSavedSearchReference: true,
     allowBossCaptureSettingsSnapshot: true,
     allowBossCaptureTaskSnapshot: true,
   });
@@ -362,6 +378,7 @@ export async function snapshotBossBatchCaptureSettings(
       keyword: item.keyword,
       bossJobId: item.bossJobId,
       bossSearchKeyword: item.bossSearchKeyword,
+      bossSavedSearchReference: item.bossSavedSearchReference,
       searchSource: itemValue(item, 'searchSource', normalized.input.searchSource),
       applicationFilterInputFile: resolvedItemInputPath(
         item,
@@ -400,6 +417,9 @@ export async function snapshotBossBatchCaptureSettings(
       jobName: synthetic.input.keyword,
       ...(synthetic.input.bossJobId ? { bossJobId: synthetic.input.bossJobId } : {}),
       ...(synthetic.input.bossSearchKeyword ? { bossSearchKeyword: synthetic.input.bossSearchKeyword } : {}),
+      ...(synthetic.input.bossSavedSearchReference
+        ? { savedSearchReference: clone(synthetic.input.bossSavedSearchReference) }
+        : {}),
       ...(synthetic.input.searchSource ? { searchSource: synthetic.input.searchSource } : {}),
       searchSourceExplicit: item.searchSource !== undefined || normalized.input.searchSource !== undefined,
       ...(explicitBossConditionSetRef ? { searchConditionSetRef: explicitBossConditionSetRef } : {}),

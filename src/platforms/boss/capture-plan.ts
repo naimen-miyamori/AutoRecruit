@@ -4,7 +4,14 @@ import {
   type SearchConditionSetReference,
 } from '../../search/search-condition-sets.js';
 import { JobStore } from '../../storage/job-store.js';
-import type { JobRecord, JobSearchSource, SearchCondition } from '../../types/job.js';
+import type {
+  JobRecord,
+  JobSearchSource,
+  SavedSearchReference,
+  SearchCondition,
+  SearchSortPolicy,
+} from '../../types/job.js';
+import { fingerprintSavedSearchConditionIdentity, normalizeBossSavedSearchIdentity } from './saved-search-identity.js';
 
 /** Identifies why the exact query text was selected for a Boss search page. */
 export type BossCaptureKeywordSource =
@@ -21,6 +28,8 @@ export interface BossCaptureSearchPlan {
   conditions: SearchCondition[];
   conditionSetRef?: SearchConditionSetReference;
   selectedFieldsFingerprint?: string;
+  savedSearch?: SavedSearchReference;
+  sortPolicy?: SearchSortPolicy;
 }
 
 /**
@@ -32,6 +41,10 @@ export interface ResolveBossCapturePlanInput {
   bossJobId?: string;
   /** Explicit per-run query text for the Boss talent search page. */
   bossSearchKeyword?: string;
+  /** Complete reference produced by a verified native-subscription binding/save flow. */
+  savedSearchReference?: SavedSearchReference;
+  /** Optional name check; never synthesizes a reference by itself. */
+  bossSavedSearchName?: string;
   searchSource?: JobSearchSource;
   /** True only when this run explicitly replaces a saved search source. */
   searchSourceExplicit?: boolean;
@@ -99,7 +112,33 @@ function cloneSearchSettings(settings: NonNullable<JobRecord['searchSettings']>)
     conditions: [...settings.conditions],
     ...(settings.conditionSetRef ? { conditionSetRef: { ...settings.conditionSetRef } } : {}),
     ...(settings.resolution ? { resolution: { ...settings.resolution } } : {}),
+    ...(settings.savedSearch
+      ? {
+        savedSearch: {
+          ...settings.savedSearch,
+          conditionIdentity: normalizeBossSavedSearchIdentity(settings.savedSearch.conditionIdentity),
+        },
+      }
+      : {}),
   };
+}
+
+function assertSavedSearchReference(reference: SavedSearchReference, expectedJobName: string, expectedKeyword?: string): void {
+  if (reference.version !== 1 || reference.platform !== 'boss') {
+    throw new Error('Boss saved-reference-invalid: expected a versioned Boss saved-search reference.');
+  }
+  if (!normalizeOptionalText(reference.name) || !normalizeOptionalText(reference.expectedKeyword)) {
+    throw new Error('Boss saved-reference-invalid: name and expected keyword are required.');
+  }
+  if (reference.conditionIdentity.jobScope !== expectedJobName) {
+    throw new Error(`Boss saved-reference-invalid: reference job scope ${reference.conditionIdentity.jobScope} does not match ${expectedJobName}.`);
+  }
+  if (expectedKeyword !== undefined && reference.expectedKeyword !== expectedKeyword) {
+    throw new Error(`Boss saved-reference-invalid: reference keyword ${reference.expectedKeyword} does not match ${expectedKeyword}.`);
+  }
+  if (fingerprintSavedSearchConditionIdentity(reference.conditionIdentity) !== reference.conditionFingerprint) {
+    throw new Error('Boss saved-reference-invalid: condition fingerprint does not match condition identity.');
+  }
 }
 
 async function resolveStoredBossJob(
@@ -196,6 +235,16 @@ export async function resolveBossCapturePlan(
   const searchConditionSets = options.searchConditionSets ?? new SearchConditionSetService();
 
   let settings = baseSettings;
+  if (input.savedSearchReference) {
+    assertSavedSearchReference(input.savedSearchReference, expectedJobName, explicitPageKeyword);
+    if (baseSettings.source !== 'saved') {
+      throw new Error('Boss saved-reference-required: a native saved-search reference requires search source saved.');
+    }
+    settings = { ...settings, savedSearch: input.savedSearchReference };
+  }
+  if (input.bossSavedSearchName && settings.savedSearch?.name !== input.bossSavedSearchName) {
+    throw new Error('Boss saved-reference-required: name-only Boss saved input cannot replace a complete stored reference.');
+  }
   let conditionSetDefaultKeyword: string | undefined;
   if (conditionSetRef) {
     if (conditionSetRef.platform !== 'boss') {
@@ -214,6 +263,14 @@ export async function resolveBossCapturePlan(
     };
   }
 
+  // A native saved-search reference is meaningful only for source=saved.
+  // Legacy records or an earlier queued patch may still contain one after a
+  // direct-source switch; ignore it rather than leaking it into a direct run.
+  if (settings.source === 'direct' && settings.savedSearch) {
+    const { savedSearch: _savedSearch, sortPolicy: _sortPolicy, ...directSettings } = settings;
+    settings = directSettings;
+  }
+
   // A source override changes the search entry, not the stored page query.
   // Only an explicitly selected condition-set revision gets a fresh keyword
   // precedence and must not inherit another revision's saved query text.
@@ -226,6 +283,12 @@ export async function resolveBossCapturePlan(
     conditionSetDefaultKeyword,
     target.jobRecord?.searchKeyword ?? expectedJobName,
   );
+  if (settings.source === 'saved') {
+    if (!settings.savedSearch) {
+      throw new Error('Boss saved-reference-required: ordinary saved capture requires a complete verified native subscription reference.');
+    }
+    assertSavedSearchReference(settings.savedSearch, expectedJobName, keyword.pageKeyword);
+  }
   const search: BossCaptureSearchPlan = {
     source: settings.source,
     ...keyword,
@@ -233,6 +296,8 @@ export async function resolveBossCapturePlan(
     conditions: settings.conditions,
     ...(settings.conditionSetRef ? { conditionSetRef: settings.conditionSetRef } : {}),
     ...(settings.resolution ? { selectedFieldsFingerprint: settings.resolution.selectedFieldsFingerprint } : {}),
+    ...(settings.savedSearch ? { savedSearch: settings.savedSearch } : {}),
+    ...(settings.sortPolicy ? { sortPolicy: settings.sortPolicy } : settings.source === 'saved' ? { sortPolicy: 'match-priority' } : {}),
   };
   const shouldBackfillPageKeyword = Boolean(
     target.jobRecord

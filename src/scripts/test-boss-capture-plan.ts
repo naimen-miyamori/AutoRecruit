@@ -11,6 +11,7 @@ import {
 import type { SearchConditionSetReference } from '../search/search-condition-sets.js';
 import { JobStore } from '../storage/job-store.js';
 import type { JobRecord, NormalizedJob } from '../types/job.js';
+import { fingerprintSavedSearchConditionIdentity } from '../platforms/boss/saved-search-identity.js';
 
 const conditionSetRef: SearchConditionSetReference = {
   conditionSetId: 'scs-aluminium',
@@ -176,7 +177,11 @@ describe('Boss saved capture plan resolver', () => {
       /Ambiguous stored Boss JD.*provide --boss-job-id/,
     );
 
-    const newJob = await resolveBossCapturePlan({ jobName: '新岗位' }, {
+    const newJob = await resolveBossCapturePlan({
+      jobName: '新岗位',
+      searchSource: 'direct',
+      searchSourceExplicit: true,
+    }, {
       store: storeFor([]),
       searchConditionSets: conditionSetService(),
     });
@@ -204,16 +209,17 @@ describe('Boss saved capture plan resolver', () => {
     assert.equal(stored.search.pageKeyword, '保存的查询词');
     assert.equal(stored.search.keywordSource, 'stored-setting');
 
-    const sourceOverride = await resolveBossCapturePlan({
-      jobName: '全铝箱包设计',
-      searchSource: 'saved',
-      searchSourceExplicit: true,
-    }, {
-      store: storeFor([record]),
-      searchConditionSets: conditionSetService(),
-    });
-    assert.equal(sourceOverride.search.pageKeyword, '保存的查询词');
-    assert.equal(sourceOverride.search.keywordSource, 'stored-setting');
+    await assert.rejects(
+      () => resolveBossCapturePlan({
+        jobName: '全铝箱包设计',
+        searchSource: 'saved',
+        searchSourceExplicit: true,
+      }, {
+        store: storeFor([record]),
+        searchConditionSets: conditionSetService(),
+      }),
+      /saved-reference-required/i,
+    );
 
     const override = await resolveBossCapturePlan({
       jobName: '全铝箱包设计',
@@ -234,6 +240,41 @@ describe('Boss saved capture plan resolver', () => {
     });
     assert.equal(explicitSet.search.pageKeyword, '新条件集默认词');
     assert.equal(explicitSet.search.keywordSource, 'condition-set-default');
+  });
+
+  it('does not carry a stale native saved-search reference into a direct plan', async () => {
+    const conditionIdentity = {
+      jobScope: '全铝箱包设计',
+      city: '广东',
+      inline: { education: ['本科及以上'] },
+      more: {},
+      toggles: { filter_recent_viewed: false },
+    };
+    const staleSavedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '旧订阅',
+      expectedKeyword: '旧页面词',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+    const record = storedJob({
+      searchSettings: {
+        source: 'direct',
+        pageKeyword: '当前直接搜索词',
+        conditions: [],
+        savedSearch: staleSavedSearch,
+        sortPolicy: 'match-priority',
+      },
+    });
+    const plan = await resolveBossCapturePlan({ jobName: '全铝箱包设计' }, {
+      store: storeFor([record]),
+      searchConditionSets: conditionSetService(),
+    });
+    assert.equal(plan.search.source, 'direct');
+    assert.equal(plan.search.pageKeyword, '当前直接搜索词');
+    assert.equal(plan.search.savedSearch, undefined);
+    assert.equal(plan.search.sortPolicy, undefined);
   });
 
   it('preserves the fixed revision and fails closed when current catalog resolution drifts', async () => {

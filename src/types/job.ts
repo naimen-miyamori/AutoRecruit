@@ -39,6 +39,35 @@ export interface ReportDeliveryOptions {
 
 export type JobSearchSource = 'saved' | 'direct';
 
+/** Canonical hydrated condition identity for a platform-native saved search. */
+export interface SavedSearchConditionIdentity {
+  jobScope: string;
+  city?: string;
+  cityOptions?: string[];
+  company?: string;
+  inline: Record<string, string[]>;
+  more: Record<string, string>;
+  toggles: Record<string, boolean>;
+}
+
+/**
+ * Complete business identity of a native saved search.  A Boss saved search
+ * is not addressable by name alone; the condition identity and its derived
+ * fingerprint are required before normal capture may reuse it.
+ */
+export interface SavedSearchReference {
+  version: 1;
+  platform: SupportedPlatform;
+  name: string;
+  nativeId?: string;
+  expectedKeyword: string;
+  conditionIdentity: SavedSearchConditionIdentity;
+  conditionFingerprint: string;
+  selectedFieldsFingerprint?: string;
+}
+
+export type SearchSortPolicy = 'platform-default' | 'match-priority';
+
 export interface BossForwardingSettings {
   mode: 'colleague' | 'email';
   recipient: string;
@@ -161,6 +190,7 @@ export interface BossCaptureCanonicalPatch {
   conditions?: SearchCondition[];
   conditionSetRef?: SearchConditionSetReference | null;
   selectedFieldsFingerprint?: string | null;
+  savedSearch?: SavedSearchReference | null;
 }
 
 /** Field-level JobRecord patch applied with a source revision/CAS check. */
@@ -190,6 +220,8 @@ export interface BossCaptureTaskSnapshot {
     keywordSource: string;
     conditionSetRef?: SearchConditionSetReference;
     selectedFieldsFingerprint?: string;
+    savedSearch?: SavedSearchReference;
+    sortPolicy?: SearchSortPolicy;
     applicationFilterInput?: Record<string, unknown>;
     conditions: SearchCondition[];
   };
@@ -379,6 +411,18 @@ export interface SearchConditionPlan {
   conditions: SearchCondition[];
 }
 
+export interface SearchConditionPlanExecutionResult {
+  page: import('playwright').Page;
+  conditionResults: SearchConditionApplyResult[];
+  resultTotal: number;
+  resultTotalSource: 'page' | 'api';
+}
+
+export interface SearchConditionSaveResult {
+  outcome: 'already-saved' | 'saved' | 'renamed';
+  savedSearch: SavedSearchReference;
+}
+
 export interface SearchConditionApplyResult {
   platform: SupportedPlatform;
   condition: SearchCondition;
@@ -397,6 +441,19 @@ export interface SearchSubscriptionSummary {
   allConditionsApplied: boolean;
   conditionStatusCounts: Record<SearchConditionApplyResult['status'], number>;
   conditionResults: SearchConditionApplyResult[];
+  savedSearch?: SavedSearchReference;
+  saveOutcome?: SearchConditionSaveResult['outcome'];
+  sortPolicy?: SearchSortPolicy;
+}
+
+/** Structured evidence retained when an all-platform subscription run stops. */
+export interface SearchSubscriptionFailureSummary {
+  mode: 'search-subscription';
+  status: 'failed';
+  completedPlatforms: SupportedPlatform[];
+  stoppedPlatform: SupportedPlatform;
+  results: SearchSubscriptionSummary[];
+  error: string;
 }
 
 export function parseEmailList(value?: string): string[] | undefined {
@@ -441,6 +498,10 @@ export interface JobRecord {
     resolution?: {
       selectedFieldsFingerprint: string;
     };
+    /** Complete native subscription identity required when source is saved. */
+    savedSearch?: SavedSearchReference;
+    /** Runtime ordering overlay; never included in savedSearch.conditionFingerprint. */
+    sortPolicy?: SearchSortPolicy;
   };
   bossForwarding?: BossForwardingSettings;
   /** Optional Boss-only post-score negative-condition routing policy. */
@@ -655,6 +716,8 @@ export interface RunResult {
     conditionSetRef?: SearchConditionSetReference;
     selectedFieldsFingerprint?: string;
     includeViewedCandidates: boolean;
+    savedSearch?: SavedSearchReference;
+    sortPolicy?: SearchSortPolicy;
   };
 }
 

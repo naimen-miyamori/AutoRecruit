@@ -135,6 +135,7 @@ const allowedInputFields: Record<AssistantDraft['kind'], string[]> = {
   ],
   'search-subscription': [
     'platform',
+    'includeBoss',
     'searchSubscriptionFile',
     'keyword',
     'applicationFilterInputFile',
@@ -398,7 +399,11 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
     warnings.push(`已忽略不支持的字段：${droppedFields.join(', ')}`);
   }
 
-  if (input.platform === 'all') {
+  if (input.platform === 'all' && kind === 'search-subscription') {
+    warnings.push(input.includeBoss === true
+      ? '风险：订阅管理会按 51job -> 猎聘 -> 智联 -> Boss 直聘·直猎邦 Pro 顺序执行；只选择/保存平台“我的订阅”，不会抓取候选、打开详情、写 seen/评分/报告或发送邮件。'
+      : '提示：订阅管理默认只按 51job -> 猎聘 -> 智联执行；不会抓取候选、打开详情、写 seen/评分/报告或发送邮件。');
+  } else if (input.platform === 'all') {
     warnings.push(input.includeBoss === true
       ? '风险：全部主平台会按 51job -> 猎聘 -> 智联 -> Boss 直聘·直猎邦 Pro 顺序执行，任一平台失败会停止；Boss 阶段会打开简历详情，且可能复用已保存的转发配置。'
       : '风险：全部主平台会按 51job -> 猎聘 -> 智联顺序执行，任一平台失败会停止；未启用 includeBoss 时不会运行直猎邦。');
@@ -477,7 +482,9 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
   }
 
   if (kind === 'search-subscription' && input.saveSearchSubscription === true) {
-    warnings.push('风险：搜索订阅会保存到招聘平台。');
+    warnings.push(input.includeBoss === true || input.platform === 'boss'
+      ? '风险：会在 Boss“我的订阅”中创建或改名订阅；结果中的名称、关键词和完整条件指纹必须匹配后才会报告成功。'
+      : '风险：订阅管理会保存到招聘平台。');
   }
 
   if (kind === 'rag-ops' && input.action === 'rebuild') {
@@ -668,6 +675,7 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   }
   if (kind === 'search-subscription') {
     pushPreview(argv, '--search-subscription-file', input.searchSubscriptionFile);
+    pushBooleanPreview(argv, '--include-boss', input.includeBoss);
     pushPreview(argv, '--keyword', input.keyword);
     pushPreview(argv, '--search-condition-set', previewSearchConditionSetRefs(input.searchConditionSetRefs, input.platform));
     pushBooleanPreview(argv, '--save-search-subscription', input.saveSearchSubscription);
@@ -791,12 +799,12 @@ function buildSystemPrompt(): string {
     'boss-greet 字段：platform, source, candidateId, expectedCandidateName, expectedJobName, bossJobId, intentId, confirmed；必须提供精确候选人 ID、预期姓名、预期职位，confirmed 必须为 true。',
     'boss-chat-operation 字段：platform, action, conversationId, expectedCandidateName, expectedJobName, text, remark, intentId, unreadOnly, confirmed。只读 action 为 list-conversations、open-conversation、read-conversation、read-history、preview-resume；变更 action 为 send-text、remark、mark-not-fit、request-attachment-resume、accept-attachment-resume、exchange-phone、exchange-wechat，变更操作必须提供 intentId 且 confirmed=true。',
     'boss-job-sync 字段：platform, bossJobIds, includeClosed；默认同步全部职位并包含已关闭职位。',
-    'search-subscription 字段：platform, searchSubscriptionFile, keyword, applicationFilterInputFile, searchConditionSetRefs, saveSearchSubscription, searchSubscriptionName；不要包含 jd、email、includeViewed、searchSource。',
+    'search-subscription（用户界面名称“订阅管理”）字段：platform, includeBoss, searchSubscriptionFile, keyword, applicationFilterInputFile, searchConditionSetRefs, saveSearchSubscription, searchSubscriptionName；includeBoss 只可在 platform=all 时为 true，启用后按 51job、猎聘、智联、Boss 顺序执行；只选择/保存“我的订阅”，不会抓取候选、打开详情、写 seen/评分/报告或发送邮件；不要包含 jd、email、includeViewed、searchSource。',
     'login-refresh 字段：platform，只允许 51job、liepin、zhilian、boss。',
     'rag-ops 字段：action, platform, jobKey, keyword, question, file, policyFile, reviewer, limit, includeReviewed, failOnIssue；action 只能是 doctor、review、metrics、ops、rebuild。',
     'rag-answer 字段：platform, jobKey, keyword, jd, jdFile, question, topK, autoIndex, logAnswer, metadata。',
     '平台只能是 51job、liepin、zhilian、boss、all；普通抓取或批量任务的 all 在 includeBoss=true 时按 51job、liepin、zhilian、boss 执行，否则仍是前三个平台。其他模式的 all 不包含 boss；rag-answer 和 login-refresh 不能使用 all。',
-    'applicationFilterInputFile 只能用于 direct 普通简历抓取或批量任务，搜索订阅只作为订阅包装输入。searchConditionSetRefs 和 applicationFilterInputFile 不能同时使用；普通抓取/批量使用条件集时 searchSource 必须为 direct，平台映射不得超出任务实际选择的平台。',
+    'applicationFilterInputFile 只能用于 direct 普通简历抓取或批量任务，订阅管理只作为订阅包装输入。searchConditionSetRefs 和 applicationFilterInputFile 不能同时使用；普通抓取/批量使用条件集时 searchSource 必须为 direct，平台映射不得超出任务实际选择的平台。用户可见名称必须把 searchSource=saved 称为“订阅搜索”、searchSource=direct 称为“直接搜索”。',
     '如果信息不足，把字段名放到 missingFields，并用 clarificationQuestions 给出中文追问。',
   ].join('\n');
 }
@@ -841,7 +849,7 @@ export async function chatWithCliAssistant(
     return {
       message: {
         role: 'assistant',
-        content: '我不能生成或执行任意 shell 命令。请描述要执行的受控招聘任务，例如简历抓取、搜索订阅、登录刷新或 RAG 问答。',
+      content: '我不能生成或执行任意 shell 命令。请描述要执行的受控招聘任务，例如简历抓取、订阅管理、登录刷新或 RAG 问答。',
         createdAt: new Date().toISOString(),
       },
       clarificationQuestions: ['请改用受控功能描述你的目标，例如“刷新智联登录”或“用 JD 执行全部平台搜索”。'],

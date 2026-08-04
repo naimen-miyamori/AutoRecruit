@@ -437,7 +437,8 @@ export class JobStore {
         || patch.applicationFilterInput !== undefined
         || patch.conditions !== undefined
         || patch.conditionSetRef !== undefined
-        || patch.selectedFieldsFingerprint !== undefined) {
+        || patch.selectedFieldsFingerprint !== undefined
+        || patch.savedSearch !== undefined) {
         const existing = next.searchSettings ?? { source: patch.searchSource ?? 'saved', conditions: [] };
         const searchSettings: NonNullable<JobRecord['searchSettings']> = {
           ...existing,
@@ -455,11 +456,15 @@ export class JobStore {
             : patch.selectedFieldsFingerprint !== undefined
               ? { resolution: { selectedFieldsFingerprint: patch.selectedFieldsFingerprint } }
               : {}),
+          ...(patch.savedSearch === null
+            ? {}
+            : patch.savedSearch !== undefined ? { savedSearch: patch.savedSearch } : {}),
         };
         if (patch.pageKeyword === null) delete searchSettings.pageKeyword;
         if (patch.applicationFilterInput === null) delete searchSettings.applicationFilterInput;
         if (patch.conditionSetRef === null) delete searchSettings.conditionSetRef;
         if (patch.selectedFieldsFingerprint === null) delete searchSettings.resolution;
+        if (patch.savedSearch === null) delete searchSettings.savedSearch;
         next.searchSettings = searchSettings;
       }
 

@@ -33,12 +33,12 @@ npm run dev -- --platform 51job --keyword "店长" --jd-file ./jd.txt
 
 | 平台 | 是否属于 `--platform all` | 搜索入口 | 平台能力 |
 | --- | --- | --- | --- |
-| `51job` | 是，第 1 个 | 保存的订阅或直接搜索 | 候选卡片详情、简历抓取与评分、核心 Talent Mapping |
-| `liepin` | 是，第 2 个 | 招聘端找人或直接搜索 | 可配置常用联系人转发、核心 Talent Mapping |
-| `zhilian` | 是，第 3 个 | 快捷搜索或直接搜索 | 报告邮件可使用本轮复制的分享链接、核心 Talent Mapping |
-| `boss` | 可选第 4 个；仅普通抓取/批量的 `all + --include-boss true` | `https://www.zhipin.com/web/chat/search` 人才库及 Boss 专属入口 | 抓取、人才发现、聊天审核、原子操作、职位/JD 同步 |
+| `51job` | 是，第 1 个 | 订阅搜索或直接搜索 | 候选卡片详情、简历抓取与评分、核心 Talent Mapping |
+| `liepin` | 是，第 2 个 | 订阅搜索（招聘端找人/快捷搜索）或直接搜索 | 可配置常用联系人转发、核心 Talent Mapping |
+| `zhilian` | 是，第 3 个 | 订阅搜索（快捷搜索）或直接搜索 | 报告邮件可使用本轮复制的分享链接、核心 Talent Mapping |
+| `boss` | 可选第 4 个；普通抓取/批量/订阅管理的 `all + --include-boss true` | `https://www.zhipin.com/web/chat/search` 人才库及 Boss 专属入口 | 订阅搜索、原生订阅管理、抓取、人才发现、聊天审核、原子操作、职位/JD 同步 |
 
-普通 `--platform all` 串行执行前三个平台；普通抓取或批量明确加上 `--include-boss true` 后，顺序为 `51job → liepin → zhilian → boss`。任一平台失败会立即停止。搜索订阅、JD/RAG 问答、筛选发现和 Talent Mapping 的 `all` 仍只覆盖前三个平台，已有任务和自动运行计划未设置该字段时也保持三平台行为。
+普通 `--platform all` 串行执行前三个平台；普通抓取、批量或订阅管理明确加上 `--include-boss true` 后，顺序为 `51job → liepin → zhilian → boss`。任一平台失败会立即停止。JD/RAG 问答、筛选发现和 Talent Mapping 的 `all` 仍只覆盖前三个平台，已有任务和自动运行计划未设置该字段时也保持三平台行为。
 
 ---
 
@@ -128,7 +128,7 @@ storage-state.boss.json
 | 普通抓取 | `--platform <平台> --keyword ...` | 是 | 抓取；按配置转发或发送报告 |
 | 多平台/批量 | `--platform all [--include-boss true]` / `--jobs-file` | 是 | 同普通抓取 |
 | Talent Mapping | `--talent-mapping-file` | 是 | 卡片扫描较低风险；详情补全可能改变“已查看”状态并需本轮确认 |
-| 搜索订阅 | `--search-subscription-file` | 是 | 仅显式配置时保存订阅 |
+| 订阅管理 | `--search-subscription-file` | 是 | 默认三平台；`all + --include-boss true` 扩展 Boss 原生订阅，保存/改名是平台状态变更 |
 | JD/RAG 问答 | `--jd-question` / `--rag-question` | 否 | 否 |
 | Boss 自动聊天 | `--boss-auto-chat true` | 是 | 可按配置转发或回复 |
 | Boss 人才发现 | `--boss-talent-source` | 是 | 默认只读；立即匹配需确认 |
@@ -137,7 +137,7 @@ storage-state.boss.json
 | Boss 职位/JD 同步 | `--boss-job-sync true` | 是 | 只更新本地职位数据 |
 | 本地控制台/API | `npm run api` | 按任务决定 | 确认后的任务统一进入队列 |
 
-这些是互相隔离的运行模式。独立模式不能随意与普通抓取、批量、搜索订阅或问答参数混用。
+这些是互相隔离的运行模式。独立模式不能随意与普通抓取、批量、订阅管理或问答参数混用。
 
 ---
 
@@ -217,9 +217,10 @@ npm run web:dev
 
 ## 常用工作流
 
-### 普通抓取、直接搜索和报告
+### 普通抓取、订阅搜索、直接搜索和报告
 
-默认 `--search-source saved` 使用平台已保存的搜索入口。直接搜索必须显式指定 `direct`；如使用应用筛选输入文件，所有请求条件都必须成功应用，否则本轮停止，避免从部分筛选条件下误抓取：
+普通抓取中，用户可见名称“订阅搜索”对应内部 `--search-source saved`，“直接搜索”对应
+`--search-source direct`。订阅搜索使用平台已保存的订阅/快捷搜索入口；直接搜索必须显式指定 `direct`。如使用应用筛选输入文件，所有请求条件都必须成功应用，否则本轮停止，避免从部分筛选条件下误抓取：
 
 ```bash
 npm run dev -- \
@@ -268,8 +269,27 @@ npm run dev -- \
 
 `--boss-search-keyword "铝制行李箱"` 只覆盖 Boss 阶段的页面查询，不影响 `all + --include-boss true` 中的前三
 个平台。批量任务把 `bossJobId` 和可选 `bossSearchKeyword` 写在对应 jobs-file item；它们仅在该 item 实际选择
-Boss 阶段时有效。服务端队列会把复用到的 Boss ID、页面搜索词和固定条件集 revision 固化到该任务，后续修改
+Boss 阶段时有效。使用 Boss 订阅搜索（内部 `saved`）时，同一 item 还可以提供完整 `bossSavedSearchReference`；它会按单岗位
+同样的 schema、关键词、职位范围和指纹规则校验并固化，不能只写订阅名称。服务端队列会把复用到的 Boss ID、页面搜索词和固定条件集 revision 固化到该任务，后续修改
 岗位设置不会改变已经排队的任务。
+
+Boss 的 `searchSource=saved` 只能复用完整的原生订阅引用：名称、职位范围、页面关键词、条件身份和条件指纹必须同时存在，
+名称不能单独合成筛选条件。缺少引用或指纹不匹配会在浏览器前失败，不再回退到旧的“不限职位 + 重填关键词”入口。由 Boss
+订阅管理保存结果得到的引用可通过 `bossSavedSearchReference`（HTTP/队列输入）或
+`--boss-saved-search-reference-json`（CLI 单岗位）传入；执行前仍会按“名称 + 关键词 + 条件身份”重新定位并核对原生卡片。
+运行时的“匹配度优先”和本轮已查看覆盖不写入条件指纹；它们只属于本轮搜索策略。
+
+Legacy 岗位需要先绑定原生订阅时，使用独立的 Boss-only 绑定模式，把订阅管理结果中的完整 JSON 引用传入；它会在一次
+有界的原生卡片验证后用 JobStore CAS 写回岗位，不读取候选、不打开详情、不写 seen/评分/报告，且必须显式确认：
+
+```bash
+npm run dev -- \
+  --platform boss \
+  --keyword "全铝箱包设计" \
+  --boss-bind-saved-search true \
+  --boss-confirmed true \
+  --boss-saved-search-reference-json '<订阅管理输出中的完整 savedSearch JSON>'
+```
 
 如只需把固定 Boss 条件集应用到当前人才搜索页并取得最终验证结果，不要使用临时浏览器脚本或普通抓取。
 使用以下 Boss-only 命令；它不会读取候选详情、写 seen、评分或发送报告：
@@ -328,9 +348,11 @@ Boss 阶段复用 `data/boss/`、独立登录态和本地 `seen-ids.json`。普�
 
 每次 Boss 普通抓取固定只记录并操作平台当前顺序中的前 20 份简历。上限在 seen、恢复、打开详情、评分和转发前应用；若前 20 份中已有本地 seen，不会从第 21 份以后补位。本轮 `totalCandidates`、候选人 ID、简历、评分、分流和外部操作因此都不超过这 20 份；其他平台和 Boss 独立模式不受此上限影响。
 
-前 20 份中已经存在于当前岗位 `seen-ids.json` 的候选人，会执行一次精确卡片定位、详情打开、详情 API 身份核验和严格关闭，让 Boss 平台有机会在下一次默认搜索中隐藏该卡片。pending-score 或可重试 outbox 的候选人由原有详情处理覆盖，避免重复打开；纯查看不解析、评分、转发、联系或发送邮件。查看同步事实会写入 RunResult 的 `bossSeenViewSync`，并与抓取尝试、失败候选人和报告候选集分开统计；关闭无法验证时停止本轮后续卡片操作。
+前 20 份中已经存在于当前岗位 `seen-ids.json` 的候选人，会执行一次精确卡片定位、详情打开、详情身份核验和严格关闭，让 Boss 平台有机会在下一次默认搜索中隐藏该卡片。pending-score 或可重试 outbox 的候选人由原有详情处理覆盖，避免重复打开；纯查看不解析、评分、转发、联系或发送邮件。查看同步事实会写入 RunResult 的 `bossSeenViewSync`，并与抓取尝试、失败候选人和报告候选集分开统计；关闭无法验证时停止本轮后续卡片操作。
 
 Boss 详情打开、身份校验、解析、评分后转发和严格关闭共享同一个绝对 deadline；页面动作会在用户式节奏前为关闭预留预算，并在指针移动后再次核对候选人和控件身份。详情卡片或转发操作若意外打开“购买搜索畅聊卡”，会关闭弹窗后立即终止当前页面会话，不继续下一张卡片。转发只有在 click event 已派发且出现新的可见成功提示时才记为 `sent`；点击前失败可重试，点击已派发但无成功证据记为 `uncertain`，不会自动重发。
+
+Boss 搜索简历详情兼容旧 iframe/canvas 和当前父页面原生 Vue 布局。新布局直接使用当前详情实例的身份与简历数据，避免复用父页面里可能属于上一位候选人的旧请求；详情自身的“搜索畅聊卡”不会被当作购买弹窗。当前转发按钮是详情顶部收藏、不合适、举报、转发一行中最右侧的“转发牛人”，程序会在移动指针后再次验证它仍唯一且最右。无关闭按钮的新转发框通过已验证的遮罩空白点清理，不使用会误关底层详情的 Escape。
 
 只有详情身份验证通过、解析后的候选人 ID 与详情目标一致、简历文件成功落盘并回读通过，才会进入成功抓取历史和
 `seen-ids.json`。详情打开、身份、解析或落盘失败只写入可重试的阶段失败事实；新运行使用 `capturedCandidateIds`，
@@ -460,7 +482,7 @@ npm run dev -- \
 ```
 
 `--boss-screening-*` 和 `--boss-secondary-*` 只允许用于 `--platform boss`，或 `--platform all --include-boss true`
-的 Boss 第四阶段；不能用于自动沟通、人才发现、会话操作、职位同步、搜索订阅、Talent Mapping 或 JD/RAG 问答。
+的 Boss 第四阶段；不能用于自动沟通、人才发现、会话操作、职位同步、订阅管理、Talent Mapping 或 JD/RAG 问答。
 主转发的 `--boss-forward-cc` 还可随自动沟通自身显式提供的邮件转发目标使用，但不会从普通抓取岗位配置改写自动
 沟通默认值。批量 jobs-file 可在单个条目用同名 camelCase 字段覆盖运行级默认值，包括主/副转发方式、收件人和
 四组 CC；显式空数组表示清空该条目的已保存 CC，省略才表示复用。`bossScreeningPolicyFile` 的相对路径按
@@ -538,9 +560,10 @@ npm run dev -- \
 
 控制台“人才地图”还提供历次运行对比和分类审核。变化报告默认比较最近两次成功的 `scan`/`all`；只有扫描合同、平台/切片/覆盖范围一致且两次完整结束时才为 `ready` 并显示“本轮未再次观察”。`partial`、`incomparable` 和 `insufficient` 仍会说明可观察差异及原因，但不会把缺失观察列为人员变化；“未再次观察”绝不解释为离职、跳槽或不再求职。模型分类任务通过共享 `TaskQueue` 执行，使用 `TALENT_MAPPING_MODEL`（未设置时回退 `OPENAI_MODEL`）；输入只含截断的当前公司、当前职位和由确定性规则确认的标准化地域，不含姓名、平台候选 ID、卡片全文、简历或联系方式。模型输出只能引用计划 taxonomy，且只有人工接受后才能填补仍为空的分类字段；接受记录可按审核人和原因撤销或以新的建议替代，冲突提交返回 `409`。所有 CSV 单元格都会中和公式前缀，详情原文快照按内容哈希不可变保存。
 
-### 搜索订阅与 JD 问答
+### 订阅管理与 JD 问答
 
-搜索订阅模式只应用筛选、读取结果数，并可选择保存订阅；它不会解析 JD、抓取或评分候选人，也不会改变已查看状态。该模式不接受 `--include-boss`，其 `all` 仍只覆盖前三个平台：
+订阅管理（内部模式 `search-subscription`）只应用筛选、读取结果数，并可选择保存订阅；它不会解析 JD、抓取或评分候选人，也不会改变本地 seen 状态。普通
+`all` 仍只覆盖前三个平台；显式 `--include-boss true` 才追加 Boss 第四阶段：
 
 ```bash
 npm run dev -- \
@@ -548,6 +571,23 @@ npm run dev -- \
   --search-subscription-file ./search-plan.json \
   --save-search-subscription true
 ```
+
+全平台扩展示例：
+
+```bash
+npm run dev -- \
+  --platform all \
+  --include-boss true \
+  --search-subscription-file ./search-plan.json \
+  --save-search-subscription true \
+  --search-subscription-name "铝镁合金"
+```
+
+Boss 保存成功会返回 `savedSearch` 完整引用和 `saveOutcome`（`saved`、`already-saved` 或 `renamed`）。例如订阅名称“铝镁合金”、
+职位“全铝箱包设计”和页面关键词“铝镁合金 拉杆箱”是三个独立字段；保存/改名会改变 Boss“我的订阅”状态，因此前端和助手
+会单独提示这一外部变更。任务结果还显示条件应用状态、排序策略、native ID 和条件指纹，但不会显示候选资料。
+全平台任务若在某个平台失败仍保持 fail-fast；失败任务会另外保留已经完成的平台结果和明确的停止平台，便于确认此前已经发生的
+原生订阅保存或改名，不会自动回滚这些外部变更。
 
 对已保存职位提问：
 

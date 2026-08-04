@@ -29,6 +29,11 @@ export function listCapturePlatforms(includeBoss = false): SupportedPlatform[] {
   return includeBoss ? [...CAPTURE_PLATFORM_RUN_ORDER] : listSupportedPlatforms();
 }
 
+/** Search subscriptions have their own explicit fourth-stage opt-in. */
+export function listSearchSubscriptionPlatforms(includeBoss = false): SupportedPlatform[] {
+  return includeBoss ? [...CAPTURE_PLATFORM_RUN_ORDER] : listSupportedPlatforms();
+}
+
 export function parsePlatformArg(platform?: string): SupportedPlatform {
   if (platform === undefined) {
     return '51job';

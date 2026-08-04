@@ -8,7 +8,11 @@ import { isTalentMappingCorePlatform } from '../types/talent-mapping.js';
 import { loadTalentMappingPlanFile } from '../talent-mapping/plan.js';
 import { assertSafeSearchConditionSetId } from '../search/search-condition-set-store.js';
 import { normalizeBossCaptureSettingsSnapshot } from '../scoring/boss-screening.js';
-import type { BossCaptureTaskSnapshot } from '../types/job.js';
+import {
+  fingerprintSavedSearchConditionIdentity,
+  normalizeBossSavedSearchIdentity,
+} from '../platforms/boss/saved-search-identity.js';
+import type { BossCaptureTaskSnapshot, SavedSearchConditionIdentity, SavedSearchReference } from '../types/job.js';
 import type {
   BatchTaskInput,
   BossAutoChatTaskInput,
@@ -50,6 +54,7 @@ export type NormalizedTask<TInput> = {
  */
 export interface NormalizeResumeCaptureTaskOptions {
   allowBossSearchConditionSetRef?: boolean;
+  allowBossSavedSearchReference?: boolean;
   allowBossCaptureSettingsSnapshot?: boolean;
   allowBossCaptureTaskSnapshot?: boolean;
 }
@@ -121,6 +126,23 @@ export function normalizeBossCaptureTaskSnapshot(value: unknown): BossCaptureTas
   if (!Array.isArray(searchPlan.conditions)) {
     throw new Error('bossCaptureTaskSnapshot.searchPlan.conditions must be an array');
   }
+  const savedSearch = searchPlan.savedSearch === undefined
+    ? undefined
+    : normalizeBossSavedSearchReference(searchPlan.savedSearch, 'bossCaptureTaskSnapshot.searchPlan.savedSearch');
+  if (source === 'saved' && !savedSearch) {
+    throw new Error('bossCaptureTaskSnapshot.searchPlan.savedSearch is required for a saved Boss search');
+  }
+  if (savedSearch && savedSearch.expectedKeyword !== pageKeyword) {
+    throw new Error('bossCaptureTaskSnapshot.searchPlan.savedSearch.expectedKeyword must match pageKeyword');
+  }
+  if (savedSearch && savedSearch.conditionIdentity.jobScope !== expectedJobName) {
+    throw new Error('bossCaptureTaskSnapshot.searchPlan.savedSearch.jobScope must match expectedJobName');
+  }
+  if (searchPlan.sortPolicy !== undefined
+    && searchPlan.sortPolicy !== 'platform-default'
+    && searchPlan.sortPolicy !== 'match-priority') {
+    throw new Error('bossCaptureTaskSnapshot.searchPlan.sortPolicy is invalid');
+  }
   const delivery = normalizeJsonObject(item.deliveryAndScreening, 'bossCaptureTaskSnapshot.deliveryAndScreening');
   const primaryDelivery = normalizeJsonObject(delivery.primaryDelivery, 'bossCaptureTaskSnapshot.deliveryAndScreening.primaryDelivery');
   if (!Array.isArray(primaryDelivery.ccEmails)
@@ -176,6 +198,111 @@ export function getRequiredString(item: JsonObject, fieldName: string): string {
   }
 
   return value;
+}
+
+function normalizeSavedSearchRecord(
+  value: unknown,
+  fieldName: string,
+  kind: 'string' | 'boolean' | 'string-array',
+): Record<string, string> | Record<string, boolean> | Record<string, string[]> {
+  const record = normalizeJsonObject(value, fieldName);
+  const result: Record<string, string> | Record<string, boolean> | Record<string, string[]> = {};
+  for (const [key, child] of Object.entries(record)) {
+    const normalizedKey = key.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+    if (!normalizedKey) {
+      throw new Error(`${fieldName} contains an empty key`);
+    }
+    if (kind === 'string') {
+      if (typeof child !== 'string' || !child.trim()) {
+        throw new Error(`${fieldName}.${key} must be a non-empty string`);
+      }
+      (result as Record<string, string>)[normalizedKey] = child.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+    } else if (kind === 'boolean') {
+      if (typeof child !== 'boolean') {
+        throw new Error(`${fieldName}.${key} must be a boolean`);
+      }
+      (result as Record<string, boolean>)[normalizedKey] = child;
+    } else {
+      if (!Array.isArray(child) || !child.every((entry) => typeof entry === 'string' && entry.trim())) {
+        throw new Error(`${fieldName}.${key} must be an array of non-empty strings`);
+      }
+      (result as Record<string, string[]>)[normalizedKey] = [...new Set(
+        child.map((entry) => entry.normalize('NFKC').replace(/\s+/gu, ' ').trim()),
+      )];
+    }
+  }
+  return result;
+}
+
+/** Validate and normalize the complete identity required for a Boss saved search. */
+export function normalizeBossSavedSearchReference(
+  value: unknown,
+  label = 'bossSavedSearchReference',
+): SavedSearchReference {
+  const item = normalizeJsonObject(value, label);
+  if (item.version !== 1 || item.platform !== 'boss') {
+    throw new Error(`${label} must be a version 1 Boss saved-search reference`);
+  }
+  const name = getRequiredString(item, 'name').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const nativeId = getOptionalString(item, 'nativeId');
+  const expectedKeyword = getRequiredString(item, 'expectedKeyword').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const rawIdentity = normalizeJsonObject(item.conditionIdentity, `${label}.conditionIdentity`);
+  const jobScope = getRequiredString(rawIdentity, 'jobScope').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const city = rawIdentity.city === undefined
+    ? undefined
+    : getRequiredString(rawIdentity, 'city').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const cityOptions = rawIdentity.cityOptions === undefined
+    ? undefined
+    : (() => {
+      const values = rawIdentity.cityOptions;
+      if (!Array.isArray(values) || !values.every((entry) => typeof entry === 'string' && entry.trim())) {
+        throw new Error(`${label}.conditionIdentity.cityOptions must be an array of non-empty strings`);
+      }
+      return [...new Set(values.map((entry) => entry.normalize('NFKC').replace(/\s+/gu, ' ').trim()))].sort();
+    })();
+  const company = rawIdentity.company === undefined
+    ? undefined
+    : getRequiredString(rawIdentity, 'company').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const identity: SavedSearchConditionIdentity = {
+    jobScope,
+    ...(city ? { city } : {}),
+    ...(cityOptions ? { cityOptions } : {}),
+    ...(company ? { company } : {}),
+    inline: normalizeSavedSearchRecord(
+      rawIdentity.inline,
+      `${label}.conditionIdentity.inline`,
+      'string-array',
+    ) as Record<string, string[]>,
+    more: normalizeSavedSearchRecord(
+      rawIdentity.more,
+      `${label}.conditionIdentity.more`,
+      'string',
+    ) as Record<string, string>,
+    toggles: normalizeSavedSearchRecord(
+      rawIdentity.toggles,
+      `${label}.conditionIdentity.toggles`,
+      'boolean',
+    ) as Record<string, boolean>,
+  };
+  const conditionFingerprint = getRequiredString(item, 'conditionFingerprint');
+  if (!/^[a-f0-9]{64}$/u.test(conditionFingerprint)) {
+    throw new Error(`${label}.conditionFingerprint must be a SHA-256 hex digest`);
+  }
+  const normalizedIdentity = normalizeBossSavedSearchIdentity(identity);
+  if (fingerprintSavedSearchConditionIdentity(normalizedIdentity) !== conditionFingerprint) {
+    throw new Error(`${label}.conditionFingerprint does not match conditionIdentity`);
+  }
+  const selectedFieldsFingerprint = getOptionalString(item, 'selectedFieldsFingerprint');
+  return {
+    version: 1,
+    platform: 'boss',
+    name,
+    ...(nativeId ? { nativeId } : {}),
+    expectedKeyword,
+    conditionIdentity: normalizedIdentity,
+    conditionFingerprint,
+    ...(selectedFieldsFingerprint ? { selectedFieldsFingerprint } : {}),
+  };
 }
 
 export function getOptionalBoolean(item: JsonObject, fieldName: string): boolean | undefined {
@@ -406,22 +533,27 @@ function normalizeCaptureIncludeBoss(item: JsonObject, platform: ConsolePlatform
 
 const corePlatformOrder: SupportedPlatform[] = ['51job', 'liepin', 'zhilian'];
 const capturePlatformOrder: SupportedPlatform[] = [...corePlatformOrder, 'boss'];
+const searchSubscriptionPlatformOrder: SupportedPlatform[] = [...corePlatformOrder, 'boss'];
 
 function selectedPlatforms(
   platform: ConsolePlatformSelection,
   includeBoss = false,
+  purpose: 'capture' | 'search-subscription' = 'capture',
 ): SupportedPlatform[] {
   if (platform !== 'all') {
     return [platform];
   }
 
-  return includeBoss ? capturePlatformOrder : corePlatformOrder;
+  return includeBoss
+    ? purpose === 'search-subscription' ? searchSubscriptionPlatformOrder : capturePlatformOrder
+    : corePlatformOrder;
 }
 
 function normalizeSearchConditionSetRefs(
   item: JsonObject,
   platform: ConsolePlatformSelection,
   includeBoss = false,
+  purpose: 'capture' | 'search-subscription' = 'capture',
 ): SearchConditionSetReferenceMap | undefined {
   const raw = item.searchConditionSetRefs;
   if (raw === undefined) {
@@ -431,7 +563,7 @@ function normalizeSearchConditionSetRefs(
     throw new Error('searchConditionSetRefs must be an object keyed by platform');
   }
 
-  const allowedPlatforms = new Set(selectedPlatforms(platform, includeBoss));
+  const allowedPlatforms = new Set(selectedPlatforms(platform, includeBoss, purpose));
   const refs: SearchConditionSetReferenceMap = {};
   const entries = Object.entries(raw as Record<string, unknown>);
   if (entries.length === 0) {
@@ -626,6 +758,7 @@ export function normalizeResumeCaptureTask(
     'bossJobId',
     'bossSearchKeyword',
     ...(options.allowBossSearchConditionSetRef ? ['bossSearchConditionSetRef'] : []),
+    'bossSavedSearchReference',
     'jd',
     'jdFile',
     'includeViewed',
@@ -658,6 +791,9 @@ export function normalizeResumeCaptureTask(
   const bossJobId = getOptionalString(item, 'bossJobId');
   const bossSearchKeyword = getOptionalString(item, 'bossSearchKeyword');
   const bossSearchConditionSetRef = normalizeBossSearchConditionSetRef(item, options);
+  const bossSavedSearchReference = item.bossSavedSearchReference !== undefined
+    ? normalizeBossSavedSearchReference(item.bossSavedSearchReference)
+    : undefined;
   const jd = getOptionalString(item, 'jd');
   const jdFile = getOptionalString(item, 'jdFile');
   const includeViewed = getOptionalBoolean(item, 'includeViewed');
@@ -694,6 +830,21 @@ export function normalizeResumeCaptureTask(
     && !(platform === 'all' && includeBoss === true)) {
     throw new Error('bossJobId, bossSearchKeyword, and Boss search snapshots can only be used with platform boss or platform all with includeBoss=true');
   }
+  if (bossSavedSearchReference
+    && platform !== 'boss'
+    && !(platform === 'all' && includeBoss === true)) {
+    throw new Error('Boss saved-search references can only be used with platform boss or platform all with includeBoss=true');
+  }
+  if (bossSavedSearchReference && searchSource === 'direct') {
+    throw new Error('bossSavedSearchReference requires searchSource saved or an omitted searchSource');
+  }
+  if (bossSavedSearchReference && bossSavedSearchReference.conditionIdentity.jobScope !== keyword) {
+    throw new Error('bossSavedSearchReference.conditionIdentity.jobScope must match keyword');
+  }
+  if (bossSavedSearchReference && bossSearchKeyword
+    && bossSavedSearchReference.expectedKeyword !== bossSearchKeyword) {
+    throw new Error('bossSavedSearchReference.expectedKeyword must match bossSearchKeyword');
+  }
 
   if (bossSearchConditionSetRef && applicationFilterInputFile) {
     throw new Error('bossSearchConditionSetRef and applicationFilterInputFile are mutually exclusive');
@@ -715,6 +866,7 @@ export function normalizeResumeCaptureTask(
     bossJobId,
     bossSearchKeyword,
     bossSearchConditionSetRef,
+    bossSavedSearchReference,
     jd,
     jdFile,
     includeViewed,
@@ -785,6 +937,14 @@ export function normalizeResumeCaptureTask(
       bossJobId,
       bossSearchKeyword,
       bossSearchConditionSetRef,
+      bossSavedSearchReference: bossSavedSearchReference
+        ? {
+          name: bossSavedSearchReference.name,
+          ...(bossSavedSearchReference.nativeId ? { nativeId: bossSavedSearchReference.nativeId } : {}),
+          expectedKeyword: bossSavedSearchReference.expectedKeyword,
+          conditionFingerprint: bossSavedSearchReference.conditionFingerprint,
+        }
+        : undefined,
       hasJd: Boolean(jd),
       jdPreview: summarizeText(jd),
       jdFile,
@@ -1028,13 +1188,15 @@ export function normalizeTalentMappingClassificationTask(
 
 export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTask<SearchSubscriptionTaskInput> {
   const item = normalizeJsonObject(payload, 'request body');
-  assertAbsent(item, ['jd', 'jdFile', 'email', 'cc', 'includeViewed', 'includeBoss', 'bossJobId', 'bossSearchKeyword', 'liepinForwardContact', 'bossForwardMode', 'bossForwardRecipient', 'searchSource'], 'search-subscription task');
+  assertAbsent(item, ['jd', 'jdFile', 'email', 'cc', 'includeViewed', 'bossJobId', 'bossSearchKeyword', 'liepinForwardContact', 'bossForwardMode', 'bossForwardRecipient', 'searchSource'], 'search-subscription task');
 
   const platform = normalizePlatformSelection(item.platform);
+  const includeBoss = getOptionalBoolean(item, 'includeBoss') ?? false;
+  if (includeBoss && platform !== 'all') throw new Error('includeBoss can only be used with platform all');
   const searchSubscriptionFile = getRequiredString(item, 'searchSubscriptionFile');
   const keyword = getOptionalString(item, 'keyword');
   const applicationFilterInputFile = getOptionalString(item, 'applicationFilterInputFile');
-  const searchConditionSetRefs = normalizeSearchConditionSetRefs(item, platform);
+  const searchConditionSetRefs = normalizeSearchConditionSetRefs(item, platform, includeBoss, 'search-subscription');
   const saveSearchSubscription = getOptionalBoolean(item, 'saveSearchSubscription');
   const searchSubscriptionName = getOptionalString(item, 'searchSubscriptionName');
 
@@ -1044,6 +1206,7 @@ export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTas
 
   const input: SearchSubscriptionTaskInput = {
     platform,
+    includeBoss,
     searchSubscriptionFile,
     keyword,
     applicationFilterInputFile,
@@ -1052,6 +1215,7 @@ export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTas
     searchSubscriptionName,
   };
   const argv = ['--platform', platform, '--search-subscription-file', searchSubscriptionFile];
+  if (item.includeBoss !== undefined) pushOptionalBoolean(argv, '--include-boss', includeBoss);
   pushOptional(argv, '--keyword', keyword);
   pushOptional(argv, '--search-condition-set', serializeSearchConditionSetRefs(platform, searchConditionSetRefs));
   pushOptionalBoolean(argv, '--save-search-subscription', saveSearchSubscription);
@@ -1062,6 +1226,7 @@ export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTas
     argv,
     inputSummary: {
       platform,
+      includeBoss,
       searchSubscriptionFile,
       keyword,
       applicationFilterInputFile,

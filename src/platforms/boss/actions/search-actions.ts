@@ -21,6 +21,7 @@ import type {
   CandidateListItem,
   SearchCondition,
   SearchConditionApplyResult,
+  SearchSortPolicy,
 } from '../../../types/job.js';
 import type { CandidatePostOpenActions, CandidateProfileDetailOptions, SearchWaitOptions } from '../../types.js';
 import { parseBossResumeData } from './resume-actions.js';
@@ -39,6 +40,7 @@ import {
   closeBossResumeDetailStrict,
   closeExistingBossResumeDialog,
   forwardBossResume,
+  isBossResumeDetailVisible,
   parseBossResumeDetail,
   verifyBossResumeDetailIdentity,
   waitForBossResumeDetailOrPurchase,
@@ -297,7 +299,7 @@ async function openBossSearchMenu(page: Page, deadline: number): Promise<void> {
   await page.waitForURL((url) => isBossChatSearchUrl(url.toString()), { timeout: remainingTime(deadline) });
 }
 
-async function waitForBossSearchFrame(page: Page, deadline: number) {
+export async function waitForBossSearchFrame(page: Page, deadline: number) {
   await page.waitForFunction(
     () => Array.from(window.frames).some((frame) => {
       try {
@@ -696,7 +698,7 @@ async function waitForBossSearchSubmission(
   }
 }
 
-async function submitBossPreparedSearch(
+export async function submitBossPreparedSearch(
   page: Page,
   deadline: number,
   signal?: AbortSignal,
@@ -946,6 +948,12 @@ export async function applyBossDirectSearch(
     changedFields.push('keyword');
   }
 
+  if (options?.sortPolicy) {
+    const sortResult = await applyBossSearchSortPolicy(searchPage, options.sortPolicy, deadline);
+    if (sortResult.changed) changedFields.push('sort_policy');
+    else alreadySatisfiedFields.push('sort_policy');
+  }
+
   throwIfBossSearchAborted(options?.signal);
   await waitBossActionPaceWithinDeadline(searchPage, deadline);
   const preSubmissionVerification = await readBossDirectSearchVerificationSummary(
@@ -961,6 +969,15 @@ export async function applyBossDirectSearch(
     throw new Error(preSubmissionFailure.message ?? `Boss direct-search condition was not ready before submit for ${preSubmissionFailure.fieldId}.`);
   }
   const submission = await submitBossPreparedSearch(searchPage, deadline, options?.signal);
+  if (options?.sortPolicy === 'match-priority') {
+    const finalSortFrame = await waitForBossSearchFrame(searchPage, deadline);
+    const activeSortLabels = await finalSortFrame.locator('.search-label').evaluateAll((elements) => elements
+      .filter((element) => /\bactive\b|\bselected\b/.test(element.className))
+      .map((element) => normalizeText(element.textContent ?? '')));
+    if (activeSortLabels.length !== 1 || activeSortLabels[0] !== '匹配度优先') {
+      throw new Error('Boss sort-postcondition-failed: match-priority was not retained after the final search cycle.');
+    }
+  }
   const verification = await assertBossDirectSearchPostcondition(
     searchPage,
     keyword,
@@ -3134,6 +3151,63 @@ export async function applyBossViewedCandidatePolicy(
   return { desiredChecked, changed: true };
 }
 
+export async function applyBossSearchSortPolicy(
+  page: Page,
+  policy: SearchSortPolicy,
+  deadline = createSearchDeadline(),
+): Promise<{ policy: SearchSortPolicy; changed: boolean }> {
+  if (policy === 'platform-default') return { policy, changed: false };
+
+  const frame = await waitForBossSearchFrame(page, deadline);
+  const labels = frame.locator('.search-label');
+  const matches: Locator[] = [];
+  const count = await labels.count();
+  for (let index = 0; index < count; index += 1) {
+    const label = labels.nth(index);
+    if (!await label.isVisible().catch(() => false)) continue;
+    if (normalizeText(await label.innerText().catch(() => '')) === '匹配度优先') matches.push(label);
+  }
+  if (matches.length !== 1) {
+    throw new Error(`Boss sort-postcondition-failed: expected one visible "匹配度优先" control, found ${matches.length}.`);
+  }
+
+  const target = matches[0]!;
+  const activeBefore = /\bactive\b|\bselected\b/.test(await target.getAttribute('class').catch(() => '') ?? '');
+  if (activeBefore) return { policy, changed: false };
+
+  await clickBossControlNatively(page, target, remainingTime(deadline), {
+    deadline,
+    beforeClick: async () => {
+      const freshFrame = await waitForBossSearchFrame(page, deadline);
+      const freshLabels = freshFrame.locator('.search-label');
+      const freshMatches: Locator[] = [];
+      const freshCount = await freshLabels.count();
+      for (let index = 0; index < freshCount; index += 1) {
+        const label = freshLabels.nth(index);
+        if (await label.isVisible().catch(() => false)
+          && normalizeText(await label.innerText().catch(() => '')) === '匹配度优先') {
+          freshMatches.push(label);
+        }
+      }
+      if (freshMatches.length !== 1) throw new Error('Boss sort target changed before click.');
+    },
+  });
+
+  await frame.waitForFunction(() => Array.from(document.querySelectorAll<HTMLElement>('.search-label'))
+    .filter((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim() === '匹配度优先')
+    .some((element) => /\bactive\b|\bselected\b/.test(element.className)), undefined, {
+      timeout: remainingTime(deadline),
+      polling: 100,
+    });
+  const activeLabels = await frame.locator('.search-label').evaluateAll((elements) => elements
+    .filter((element) => /\bactive\b|\bselected\b/.test(element.className))
+    .map((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim()));
+  if (activeLabels.length !== 1 || activeLabels[0] !== '匹配度优先') {
+    throw new Error('Boss sort-postcondition-failed: 匹配度优先 did not become active.');
+  }
+  return { policy, changed: true };
+}
+
 async function clickBossMoreApplicationFilter(
   page: Page,
   frame: Frame,
@@ -4501,11 +4575,7 @@ async function openBossResumeDetail(
 ): Promise<Page> {
   const deadline = options?.deadline ?? createResumeDetailDeadline();
   if (options) {
-    const staleDetailCount = await searchPage
-      .locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])')
-      .count()
-      .catch(() => 0);
-    if (staleDetailCount > 0) {
+    if (await isBossResumeDetailVisible(searchPage)) {
       await closeBossResumeDetailStrict(searchPage, deadline, { pace: false });
     }
   } else {
@@ -4666,11 +4736,8 @@ async function visitBossSeenCandidateDetail(
     await waitBossActionPaceWithinDeadline(searchPage, deadline, options.cleanupReserveMs ?? 0);
   } catch (error) {
     let closeError: unknown;
-    const visibleDetailCount = await searchPage
-      .locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])')
-      .count()
-      .catch(() => 0);
-    if ((detailOpened || visibleDetailCount > 0) && !closeAttempted) {
+    const detailVisible = await isBossResumeDetailVisible(searchPage).catch(() => false);
+    if ((detailOpened || detailVisible) && !closeAttempted) {
       closeAttempted = true;
       try {
         await closeBossResumeDetailStrict(searchPage, deadline, { pace: false });

@@ -20,11 +20,20 @@ import {
   visitBossSeenCandidateDetail,
 } from '../platforms/boss/actions/search-actions.js';
 import {
+  buildBossSavedSearchReference,
+  openBossSavedSubscriptionSearch,
+  readBossSavedSubscriptions,
+  saveBossSearchCondition,
+} from '../platforms/boss/actions/subscription-actions.js';
+import { fingerprintSavedSearchConditionIdentity } from '../platforms/boss/saved-search-identity.js';
+import {
   assertBossResumeTarget,
   BossForwardPreConfirmationError,
   BossForwardUncertainError,
+  closeExistingBossResumeDialog,
   closeBossResumeDetailStrict,
   forwardBossResumeAction,
+  parseBossResumeDetail,
 } from '../platforms/boss/actions/resume-detail-actions.js';
 
 type SearchFixtureOptions = {
@@ -153,7 +162,102 @@ async function installForwardReceiptFixture(page: Page, mode: 'success' | 'uncer
   }, mode);
 }
 
+async function installNativeBossResumeFactory(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const host = window as unknown as {
+      __nativeResumeShareClicks: number;
+      __nativeResumeReportClicks: number;
+      __nativeResumeConfirmClicks: number;
+      __openNativeResume: (candidateId: string) => void;
+    };
+    host.__nativeResumeShareClicks = 0;
+    host.__nativeResumeReportClicks = 0;
+    host.__nativeResumeConfirmClicks = 0;
+    host.__openNativeResume = (candidateId: string) => {
+      const detail = document.createElement('div');
+      detail.className = 'dialog-wrap active';
+      detail.style.cssText = 'display:block;width:900px;height:638px';
+      detail.innerHTML = `
+        <div class="boss-dialog__wrapper dialog-lib-resume anonymous" style="display:block;width:900px;height:638px">
+          <button type="button" class="boss-popup__close" style="display:block;width:20px;height:20px">关闭</button>
+          <div class="lib-resume-anonymous lib-standard-resume with-footer">
+            <div class="resume-layout-wrap">
+              <div class="resume-detail-wrap" style="display:block;width:816px;height:500px">
+                <div class="resume-section geek-base-info-wrap" style="display:block;width:816px;height:158px">
+                  <div class="toolbar" style="display:flex;width:160px;height:24px">
+                    <div class="interested" aria-label="收藏牛人" style="display:block;width:24px;height:20px"></div>
+                    <div class="unsuitable" aria-label="不合适" style="display:block;width:24px;height:20px"></div>
+                    <div class="report" aria-label="举报" style="display:block;width:24px;height:20px"></div>
+                    <div class="share" aria-label="转发牛人" style="display:block;width:24px;height:20px"><i class="iboss-zhuanfa"></i></div>
+                  </div>
+                </div>
+              </div>
+              <div class="resume-footer-wrap" style="display:block;width:900px;height:59px">
+                <button type="button" class="prop-card-chat">搜索畅聊卡(1/15)</button>
+              </div>
+            </div>
+          </div>
+        </div>`;
+      const resumeRoot = detail.querySelector<HTMLElement>('.resume-detail-wrap')! as HTMLElement & {
+        __vue__?: unknown;
+      };
+      resumeRoot.__vue__ = {
+        $options: { name: 'LibStandardResume' },
+        $props: { resumeInfo: { expectId: candidateId, geekBaseInfo: {} } },
+        $parent: {
+          $options: { name: 'ResumeRoot' },
+          $data: { loading: false, resumeInfo: { expectId: candidateId, geekBaseInfo: {} } },
+        },
+      };
+      detail.querySelector('.boss-popup__close')?.addEventListener('click', () => detail.remove());
+      detail.querySelector('.report')?.addEventListener('click', () => { host.__nativeResumeReportClicks += 1; });
+      detail.querySelector('.share')?.addEventListener('click', () => {
+        host.__nativeResumeShareClicks += 1;
+        if (detail.querySelector('.c-share-box')) return;
+        const forward = document.createElement('div');
+        forward.className = 'c-share-box';
+        forward.style.cssText = 'display:block;width:480px;height:240px';
+        forward.innerHTML = `
+          <div class="nav-list"><span class="item cur">邮件转发</span><span class="item">站内同事</span></div>
+          <input placeholder="请输入收件人邮箱">
+          <textarea placeholder="请输入留言"></textarea>
+          <a ka="geek_coop_forward" style="display:block;width:80px;height:24px">转发</a>`;
+        forward.querySelector('[ka="geek_coop_forward"]')?.addEventListener('click', () => { host.__nativeResumeConfirmClicks += 1; });
+        detail.appendChild(forward);
+      });
+      document.body.appendChild(detail);
+      // A parent-page resource can belong to a previous native detail. The
+      // current Vue state, not this stale timing entry, is authoritative.
+      void fetch('/wapi/zpitem/web/boss/search/geek/info?expectId=stale-native-resource');
+    };
+  });
+}
+
 describe('Boss normal-search actions', () => {
+  it('canonicalizes saved condition identity independently of field order and keeps viewed in the fingerprint', () => {
+    const identity = {
+      jobScope: '全铝箱包设计',
+      city: '广东',
+      cityOptions: ['深圳', '广州'],
+      inline: { education: ['本科及以上', '大专'] },
+      more: { salary: '10-20K' },
+      toggles: { filter_recent_viewed: false },
+    };
+    const reordered = {
+      jobScope: '全铝箱包设计',
+      city: '广东',
+      cityOptions: ['广州', '深圳'],
+      inline: { education: ['大专', '本科及以上'] },
+      more: { salary: '10-20K' },
+      toggles: { filter_recent_viewed: false },
+    };
+    assert.equal(fingerprintSavedSearchConditionIdentity(identity), fingerprintSavedSearchConditionIdentity(reordered));
+    assert.notEqual(
+      fingerprintSavedSearchConditionIdentity(identity),
+      fingerprintSavedSearchConditionIdentity({ ...identity, toggles: { filter_recent_viewed: true } }),
+    );
+  });
+
   it('rejects CC for colleague forwarding before touching the page', async () => {
     await assert.rejects(() => forwardBossResumeAction({} as Page, {
       candidateId: 'candidate-colleague-cc',
@@ -163,6 +267,127 @@ describe('Boss normal-search actions', () => {
       actionMode: 'prepare-only',
       deadline: Date.now() + 1_000,
     }), /CC is only supported for email forwarding/);
+  });
+
+  it('reads and strictly closes a hydrated parent-DOM Boss resume without treating its chat-card footer as a purchase dialog', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card"><a ka="search_click_open_resume" data-expect="boss-candidate-1" href="#resume" onclick="parent.__openNativeResume(\'boss-candidate-1\'); return false"><div class="geek-info-detail" style="display:block;width:120px;height:80px">候选人甲</div></a></div>'),
+    });
+    try {
+      await installNativeBossResumeFactory(page);
+      const { candidates } = await extractBossCandidateList(page, { deadline: Date.now() + 3_000 });
+      assert.equal(candidates.length, 1);
+      const deadline = Date.now() + 10_000;
+      await openBossResumeDetail(page.context(), page, candidates[0]!, { deadline });
+      const resume = await parseBossResumeDetail(page, candidates[0]!, { deadline });
+      assert.equal(resume.candidateId, 'boss-candidate-1');
+      assert.equal(await page.locator('.dialog-wrap.active:visible:has(.dialog-lib-resume .resume-detail-wrap)').count(), 1);
+      await closeBossResumeDetailStrict(page, deadline, { pace: false });
+      assert.equal(await page.locator('.dialog-wrap.active:visible:has(.resume-detail-wrap)').count(), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('opens forwarding through the unique rightmost native share action without clicking its neighboring controls', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-1'));
+      await forwardBossResumeAction(page, {
+        candidateId: 'boss-candidate-1',
+        mode: 'email',
+        recipient: 'recipient@example.com',
+        actionMode: 'prepare-only',
+        deadline: Date.now() + 10_000,
+      });
+      const evidence = await page.evaluate(() => ({
+        shareClicks: (window as unknown as { __nativeResumeShareClicks: number }).__nativeResumeShareClicks,
+        reportClicks: (window as unknown as { __nativeResumeReportClicks: number }).__nativeResumeReportClicks,
+        confirmClicks: (window as unknown as { __nativeResumeConfirmClicks: number }).__nativeResumeConfirmClicks,
+      }));
+      assert.deepEqual(evidence, { shareClicks: 1, reportClicks: 0, confirmClicks: 0 });
+      assert.equal(await page.locator('.c-share-box input[placeholder="请输入收件人邮箱"]').inputValue(), 'recipient@example.com');
+      assert.equal(await page.locator('.c-share-box textarea[placeholder="请输入留言"]').inputValue(), 'boss-candidate-1');
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails before dispatch when the native share action is no longer the rightmost toolbar control', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => {
+        (window as unknown as { __openNativeResume: (candidateId: string) => void })
+          .__openNativeResume('boss-candidate-1');
+        const toolbar = document.querySelector('.geek-base-info-wrap .toolbar');
+        const share = toolbar?.querySelector('.share');
+        const report = toolbar?.querySelector('.report');
+        if (toolbar && share && report) toolbar.insertBefore(share, report);
+      });
+      await assert.rejects(() => forwardBossResumeAction(page, {
+        candidateId: 'boss-candidate-1',
+        mode: 'email',
+        recipient: 'recipient@example.com',
+        actionMode: 'prepare-only',
+        deadline: Date.now() + 10_000,
+      }), /not the rightmost item/);
+      assert.equal(await page.evaluate(() =>
+        (window as unknown as { __nativeResumeShareClicks: number }).__nativeResumeShareClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails before dispatch when the native toolbar exposes duplicate share actions', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => {
+        (window as unknown as { __openNativeResume: (candidateId: string) => void })
+          .__openNativeResume('boss-candidate-1');
+        const toolbar = document.querySelector('.geek-base-info-wrap .toolbar');
+        const share = toolbar?.querySelector('.share');
+        if (toolbar && share) toolbar.appendChild(share.cloneNode(true));
+      });
+      await assert.rejects(() => forwardBossResumeAction(page, {
+        candidateId: 'boss-candidate-1',
+        mode: 'email',
+        recipient: 'recipient@example.com',
+        actionMode: 'prepare-only',
+        deadline: Date.now() + 10_000,
+      }), /Expected one visible Boss resume forward action, found 2/);
+      assert.equal(await page.evaluate(() =>
+        (window as unknown as { __nativeResumeShareClicks: number }).__nativeResumeShareClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
   });
 
   it('reopens the recipient-only dialog for each deduplicated copy and writes the candidate ID to every message', async () => {
@@ -633,6 +858,519 @@ describe('Boss normal-search actions', () => {
       const frame = page.frame({ name: 'searchFrame' });
       assert.ok(frame);
       assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('waits for the live Boss subscription region to hydrate and reads native Vue card identity', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <div id="subscription-region-mount"></div>
+      <script>
+        setTimeout(() => {
+          const mount = document.querySelector('#subscription-region-mount');
+          if (!mount) return;
+          mount.innerHTML = '<div class="subscribe-card-right"><div ka="search_change_subscribe_card" class="subscribe-card" style="display:block;width:320px;height:100px"><span class="title-text">铝镁合金</span><span class="keywords-text">铝镁合金 拉杆箱</span><span class="info-labels-item">广东</span><span class="info-labels-item">大专-博士</span><span class="info-labels-item">35岁-46岁</span><span class="info-labels-item">牛人期望此职位</span><span class="info-labels-item">近14天没有看过</span></div></div>';
+          const card = mount.querySelector('[ka="search_change_subscribe_card"]');
+          card.__vue__ = { $props: { info: {
+            encryptId: 'native-subscription-1',
+            encryptJobId: 'native-job-1',
+            jobName: '全铝箱包设计',
+            subName: '铝镁合金',
+            conditions: { keywords: '铝镁合金 拉杆箱' },
+            searchLabelEntries: [
+              { key: 'keywords', label: '铝镁合金 拉杆箱' },
+              { key: 'city', label: '广东' },
+              { key: 'degree', label: '大专-博士' },
+              { key: 'age', label: '35岁-46岁' },
+              { key: 'geekJobRequirements', label: '牛人期望此职位' },
+              { key: 'viewResume', label: '近14天没有看过' },
+            ],
+          } } };
+        }, 800);
+      </script>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const cards = await readBossSavedSubscriptions(page, { deadline: Date.now() + 5_000 });
+      assert.deepEqual(cards.map((card) => ({
+        name: card.name,
+        keyword: card.expectedKeyword,
+        nativeId: card.nativeId,
+        nativeJobId: card.nativeJobId,
+        jobScope: card.expectedJobScope,
+      })), [{
+        name: '铝镁合金',
+        keyword: '铝镁合金 拉杆箱',
+        nativeId: 'native-subscription-1',
+        nativeJobId: 'native-job-1',
+        jobScope: '全铝箱包设计',
+      }]);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('matches the live Boss card evidence and waits for complete range hydration before one final submit', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <div class="city-wrap"><div class="city">广东</div><div class="city-box" style="display:none;width:200px;height:40px"></div><ul class="dropdown-province"></ul></div>
+      <div class="degree-ui">
+        <span class="degree-item">不限</span><span class="degree-select-custom-label">自定义</span>
+        <div class="degree-select-custom-slider"><div class="ui-slider ui-slider-range"><input type="hidden" value="4,7"></div></div>
+        <div class="degree-select-custom-content">大专-博士</div>
+      </div>
+      <div class="school-ui"><span class="degree-item active">不限</span></div>
+      <div class="experience-select"><span class="exp-item active">不限</span></div>
+      <div class="age-select">
+        <span class="age-item">不限</span><span class="custom">自定义</span>
+        <div class="age-custom" style="display:block;width:220px;height:32px">
+          <div class="dropdown-wrap"><input type="text" class="ipt" value="35岁"><input type="hidden" value="35"></div>
+          <div class="dropdown-wrap"><input type="text" class="ipt" value="46岁"><input type="hidden" value="46"></div>
+        </div>
+      </div>
+      <div class="more-filter-container">
+        <div class="filter-2-item"></div><div class="filter-2-item"></div><div class="filter-2-item"></div>
+        <div class="filter-2-item"></div><div class="filter-2-item"></div>
+        <div class="filter-2-item"><span class="defalut-select">牛人期望此职位</span></div>
+      </div>
+      <label class="high_search_checkbox" ka="search_change_view_resume"><input type="checkbox" checked>过滤近14天查看</label>
+      <label class="high_search_checkbox" ka="search_change_exchange_resume"><input type="checkbox">近30天未和同事交换简历</label>
+      <div class="subscribe-card-right">
+        <div ka="search_change_subscribe_card" class="subscribe-card" style="display:block;width:320px;height:120px">
+          <span class="title-text">铝镁合金</span><span class="keywords-text">铝镁合金 拉杆箱</span>
+          <span class="info-labels-item">广东</span><span class="info-labels-item">大专-博士</span>
+          <span class="info-labels-item">35岁-46岁</span><span class="info-labels-item">牛人期望此职位</span>
+          <span class="info-labels-item">近14天没有看过</span>
+        </div>
+      </div>
+      <div class="sort-controls"><span class="search-label active">综合排序</span><span class="search-label">匹配度优先</span></div>
+      <script>
+        const card = document.querySelector('[ka="search_change_subscribe_card"]');
+        card.__vue__ = { $props: { info: {
+          encryptId: 'native-live-subscription', encryptJobId: 'native-live-job', jobName: '全铝箱包设计', subName: '铝镁合金',
+          conditions: { keywords: '铝镁合金 拉杆箱' },
+          searchLabelEntries: [
+            { key: 'keywords', label: '铝镁合金 拉杆箱' }, { key: 'city', label: '广东' },
+            { key: 'degree', label: '大专-博士' }, { key: 'age', label: '35岁-46岁' },
+            { key: 'geekJobRequirements', label: '牛人期望此职位' }, { key: 'viewResume', label: '近14天没有看过' },
+          ],
+        } } };
+        window.__subscriptionClicks = 0;
+        card.addEventListener('click', () => {
+          window.__subscriptionClicks += 1;
+          setTimeout(() => {
+            document.querySelector('.search-current-job').textContent = '全铝箱包设计';
+            document.querySelector('.search-input').value = '铝镁合金 拉杆箱';
+            document.querySelector('.city-wrap .city').textContent = '广东';
+            document.querySelector('[ka="search_change_view_resume"] input').checked = true;
+          }, 20);
+          setTimeout(() => {
+            const degreeSlider = document.querySelector('.degree-ui .ui-slider');
+            degreeSlider.classList.remove('custom-slider-disabled');
+            degreeSlider.querySelector('input[type="hidden"]').value = '4,7';
+            document.querySelector('.degree-select-custom-content').textContent = '大专-博士';
+            const ageCustom = document.querySelector('.age-custom');
+            ageCustom.style.display = 'block';
+            ageCustom.querySelectorAll('input[type="hidden"]')[0].value = '35';
+            ageCustom.querySelectorAll('input[type="hidden"]')[1].value = '46';
+            document.querySelectorAll('.age-custom input.ipt')[0].value = '35岁';
+            document.querySelectorAll('.age-custom input.ipt')[1].value = '46岁';
+            document.querySelector('.more-filter-container .filter-2-item:nth-child(6) .defalut-select').textContent = '牛人期望此职位';
+          }, 100);
+        });
+        document.querySelectorAll('.search-label').forEach((label) => label.addEventListener('click', () => {
+          document.querySelectorAll('.search-label').forEach((item) => item.classList.remove('active'));
+          label.classList.add('active');
+        }));
+      </script><div class="geek-info-card">candidate card</div>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
+      await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
+      const hydratedState = await snapshotBossSearchFilterState(page, Date.now() + 5_000);
+      assert.deepEqual(hydratedState.inline.education, ['custom:大专-博士']);
+      assert.deepEqual(hydratedState.inline.age, ['custom:35-46']);
+      const cards = await readBossSavedSubscriptions(page, { deadline: Date.now() + 5_000 });
+      const target = buildBossSavedSearchReference('铝镁合金', hydratedState, cards[0]?.nativeId);
+
+      await frame.evaluate(() => {
+        document.querySelector<HTMLElement>('.search-current-job')!.textContent = '不限职位';
+        (document.querySelector<HTMLInputElement>('.search-input')!).value = '';
+        document.querySelector<HTMLElement>('.city-wrap .city')!.textContent = '全国';
+        const degreeSlider = document.querySelector<HTMLElement>('.degree-ui .ui-slider')!;
+        degreeSlider.classList.add('custom-slider-disabled');
+        degreeSlider.querySelector<HTMLInputElement>('input[type="hidden"]')!.value = '1,1';
+        document.querySelector<HTMLElement>('.degree-select-custom-content')!.textContent = '';
+        const ageCustom = document.querySelector<HTMLElement>('.age-custom')!;
+        ageCustom.style.display = 'none';
+        ageCustom.querySelectorAll<HTMLInputElement>('input[type="hidden"]').forEach((input) => { input.value = ''; });
+        document.querySelector<HTMLInputElement>('[ka="search_change_view_resume"] input')!.checked = false;
+        document.querySelector<HTMLElement>('.more-filter-container .filter-2-item:nth-child(6) .defalut-select')!.textContent = '';
+      });
+
+      await openBossSavedSubscriptionSearch(page, target, { deadline: Date.now() + 5_000, sortPolicy: 'match-priority' });
+      const finalState = await snapshotBossSearchFilterState(page, Date.now() + 5_000);
+      assert.deepEqual(finalState.inline.education, ['custom:大专-博士']);
+      assert.deepEqual(finalState.inline.age, ['custom:35-46']);
+      assert.equal(finalState.more.牛人职位要求, '牛人期望此职位');
+      assert.equal(await frame.locator('.search-label.active').innerText(), '匹配度优先');
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__subscriptionClicks), 1);
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('selects a unique native subscription by complete identity, hydrates it, sorts, and submits once', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <div class="city-wrap"><div class="city">广东</div><div class="city-box" style="display:none;width:200px;height:40px"></div><ul class="dropdown-province"><li><span class="city-checkbox status1">广东</span></li></ul></div>
+      <div class="degree-ui"><label class="degree-item"><input type="checkbox" checked><span>本科及以上</span></label></div>
+      <div class="subscribe-card-right">
+        <div ka="search_change_subscribe_card" data-subscribe-id="subscription-1" style="display:block;width:320px;height:100px">
+          <span class="title-text">铝镁合金</span>
+          <span class="keywords-text">铝镁合金 拉杆箱</span>
+          <span class="info-labels-item">全铝箱包设计 广东 本科及以上</span>
+        </div>
+      </div>
+      <div class="sort-controls"><span class="search-label active">综合排序</span><span class="search-label">匹配度优先</span></div>
+      <script>
+        const subscriptionCard = document.querySelector('[ka="search_change_subscribe_card"]');
+        subscriptionCard?.addEventListener('click', () => {
+          document.querySelector('.search-current-job').textContent = '全铝箱包设计';
+          document.querySelector('.search-input').value = '铝镁合金 拉杆箱';
+        });
+        document.querySelectorAll('.search-label').forEach((label) => label.addEventListener('click', () => {
+          document.querySelectorAll('.search-label').forEach((item) => item.classList.remove('active'));
+          label.classList.add('active');
+        }));
+      </script><div class="geek-info-card">candidate card</div>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
+      await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
+      const state = await snapshotBossSearchFilterState(page, Date.now() + 5_000);
+      const target = buildBossSavedSearchReference('铝镁合金', state, 'subscription-1');
+      const cards = await readBossSavedSubscriptions(page, { deadline: Date.now() + 5_000 });
+      assert.deepEqual(cards.map((card) => ({ name: card.name, keyword: card.expectedKeyword, nativeId: card.nativeId })), [
+        { name: '铝镁合金', keyword: '铝镁合金 拉杆箱', nativeId: 'subscription-1' },
+      ]);
+      await openBossSavedSubscriptionSearch(page, target, { deadline: Date.now() + 5_000, sortPolicy: 'match-priority' });
+      assert.equal(await frame.locator('.search-current-job').innerText(), '全铝箱包设计');
+      assert.equal(await frame.locator('.search-label.active').innerText(), '匹配度优先');
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('rechecks match-priority after the viewed override and fails before final submit when it was reset', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <label class="high_search_checkbox" ka="search_change_view_resume" style="display:block;width:200px;height:24px"><input type="checkbox">过滤近14天查看</label>
+      <div class="subscribe-card-right">
+        <div ka="search_change_subscribe_card" data-subscribe-id="subscription-sort-reset" style="display:block;width:320px;height:100px">
+          <span class="title-text">铝镁合金</span><span class="keywords-text">铝镁合金 拉杆箱</span><span class="info-labels-item">全铝箱包设计</span>
+        </div>
+      </div>
+      <div class="sort-controls"><span class="search-label active">综合排序</span><span class="search-label">匹配度优先</span></div>
+      <script>
+        const viewed = document.querySelector('[ka="search_change_view_resume"] input');
+        document.querySelector('[ka="search_change_subscribe_card"]')?.addEventListener('click', () => {
+          document.querySelector('.search-current-job').textContent = '全铝箱包设计';
+          document.querySelector('.search-input').value = '铝镁合金 拉杆箱';
+        });
+        document.querySelectorAll('.search-label').forEach((label) => label.addEventListener('click', () => {
+          document.querySelectorAll('.search-label').forEach((item) => item.classList.remove('active'));
+          label.classList.add('active');
+        }));
+        viewed?.addEventListener('change', () => {
+          const epoch = document.querySelector('#boss-search-submit-epoch');
+          epoch?.setAttribute('data-boss-search-result-version', String(Number(epoch.getAttribute('data-boss-search-result-version') || '0') + 1));
+          document.querySelectorAll('.search-label').forEach((item) => item.classList.toggle('active', item.textContent.trim() === '综合排序'));
+        });
+      </script><div class="geek-info-card">candidate card</div>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
+      await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
+      const state = await snapshotBossSearchFilterState(page, Date.now() + 5_000);
+      const target = buildBossSavedSearchReference('铝镁合金', state, 'subscription-sort-reset');
+      await assert.rejects(
+        () => openBossSavedSubscriptionSearch(page, target, {
+          deadline: Date.now() + 5_000,
+          includeViewedCandidates: false,
+          sortPolicy: 'match-priority',
+        }),
+        /sort-postcondition-failed/i,
+      );
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('rejects a saved search when final submit resets the requested viewed policy', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <label class="high_search_checkbox" ka="search_change_view_resume" style="display:block;width:200px;height:24px"><input type="checkbox">过滤近14天查看</label>
+      <div class="subscribe-card-right">
+        <div ka="search_change_subscribe_card" data-subscribe-id="subscription-viewed-reset" style="display:block;width:320px;height:100px">
+          <span class="title-text">铝镁合金</span><span class="keywords-text">铝镁合金 拉杆箱</span><span class="info-labels-item">全铝箱包设计</span>
+        </div>
+      </div>
+      <div class="sort-controls"><span class="search-label active">综合排序</span><span class="search-label">匹配度优先</span></div>
+      <script>
+        const viewed = document.querySelector('[ka="search_change_view_resume"] input');
+        document.querySelector('[ka="search_change_subscribe_card"]')?.addEventListener('click', () => {
+          document.querySelector('.search-current-job').textContent = '全铝箱包设计';
+          document.querySelector('.search-input').value = '铝镁合金 拉杆箱';
+        });
+        document.querySelectorAll('.search-label').forEach((label) => label.addEventListener('click', () => {
+          document.querySelectorAll('.search-label').forEach((item) => item.classList.remove('active'));
+          label.classList.add('active');
+        }));
+        viewed?.addEventListener('change', () => {
+          const epoch = document.querySelector('#boss-search-submit-epoch');
+          epoch?.setAttribute('data-boss-search-result-version', String(Number(epoch.getAttribute('data-boss-search-result-version') || '0') + 1));
+        });
+        document.querySelector('.search-btn')?.addEventListener('click', () => { viewed.checked = false; });
+      </script><div class="geek-info-card">candidate card</div>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
+      await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
+      const state = await snapshotBossSearchFilterState(page, Date.now() + 5_000);
+      const target = buildBossSavedSearchReference('铝镁合金', state, 'subscription-viewed-reset');
+      await assert.rejects(
+        () => openBossSavedSubscriptionSearch(page, target, {
+          deadline: Date.now() + 5_000,
+          includeViewedCandidates: false,
+          sortPolicy: 'match-priority',
+        }),
+        /viewed-policy-failed/i,
+      );
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('never renames a pre-existing same-keyword card when a new save card is unproven', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <div class="city-wrap"><div class="city">广东</div><div class="city-box" style="display:none;width:200px;height:40px"></div><ul class="dropdown-province"><li><span class="city-checkbox status1">广东</span></li></ul></div>
+      <div class="degree-ui"><label class="degree-item"><input type="checkbox" checked><span>本科及以上</span></label></div>
+      <div class="subscribe-card-right">
+        <div ka="search_change_subscribe_card" data-subscribe-id="old-card" style="display:block;width:320px;height:100px">
+          <span class="title-text">旧订阅</span><span class="keywords-text">铝镁合金 拉杆箱</span><span class="info-labels-item">全铝箱包设计 浙江</span>
+          <button class="edit-btn" type="button">编辑</button>
+        </div>
+        <button ka="search_subscribe_card" type="button" style="display:block;width:100px;height:30px">订阅</button>
+      </div>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
+      await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
+      await assert.rejects(
+        () => saveBossSearchCondition(page, '铝镁合金', { deadline: Date.now() + 3_000 }),
+        /save-new-card-unproven/i,
+      );
+      assert.equal(await frame.locator('.title-text').innerText(), '旧订阅');
+      assert.equal(await frame.locator('.edit-btn').count(), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('never treats another keyword with the same visible filters as the current saved condition', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <div class="city-wrap"><div class="city">广东</div><div class="city-box" style="display:none;width:200px;height:40px"></div><ul class="dropdown-province"><li><span class="city-checkbox status1">广东</span></li></ul></div>
+      <div class="degree-ui"><label class="degree-item"><input type="checkbox" checked><span>本科及以上</span></label></div>
+      <div class="subscribe-card-right">
+        <div ka="search_change_subscribe_card" data-subscribe-id="other-keyword" style="display:block;width:320px;height:100px">
+          <span class="title-text">其他订阅</span><span class="keywords-text">铝门窗</span><span class="info-labels-item">全铝箱包设计 广东 本科及以上</span>
+          <button class="edit-btn" type="button" onclick="window.__editClicks += 1">编辑</button>
+        </div>
+        <button ka="search_subscribe_card" type="button" style="display:block;width:100px;height:30px">订阅</button>
+      </div><script>window.__editClicks = 0;</script>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
+      await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
+      await assert.rejects(() => saveBossSearchCondition(page, '铝镁合金', { deadline: Date.now() + 1_500 }));
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__editClicks), 0);
+      assert.equal(await frame.locator('.title-text').innerText(), '其他订阅');
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('does not classify a rehydrated pre-existing no-ID card as the card created by this save click', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <div class="city-wrap"><div class="city">广东</div><div class="city-box" style="display:none;width:200px;height:40px"></div><ul class="dropdown-province"><li><span class="city-checkbox status1">广东</span></li></ul></div>
+      <div class="degree-ui"><label class="degree-item"><input type="checkbox" checked><span>本科及以上</span></label></div>
+      <div class="subscribe-card-right">
+        <div ka="search_change_subscribe_card" style="display:block;width:320px;height:100px">
+          <span class="title-text">旧订阅</span><span class="keywords-text">铝镁合金 拉杆箱</span><span class="info-labels-item">全铝箱包设计 浙江</span>
+          <button class="edit-btn" type="button">编辑</button>
+        </div>
+        <button ka="search_subscribe_card" type="button" style="display:block;width:100px;height:30px">订阅</button>
+      </div>
+      <script>
+        window.__editClicks = 0;
+        document.querySelector('[ka="search_subscribe_card"]')?.addEventListener('click', () => {
+          document.querySelector('.info-labels-item').textContent = '全铝箱包设计 广东 本科及以上';
+        });
+        document.querySelector('.edit-btn')?.addEventListener('click', () => { window.__editClicks += 1; });
+      </script>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
+      await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
+      await assert.rejects(
+        () => saveBossSearchCondition(page, '铝镁合金', { deadline: Date.now() + 1_500 }),
+        /save-new-card-unproven/i,
+      );
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__editClicks), 0);
+      assert.equal(await frame.locator('.title-text').innerText(), '旧订阅');
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('revalidates the complete current condition after pointer movement and before save dispatch', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <div class="subscribe-card-right"><button ka="search_subscribe_card" type="button" style="display:block;width:100px;height:30px">订阅</button></div>
+      <script>
+        window.__createClicks = 0;
+        document.addEventListener('mousemove', () => { document.querySelector('.search-input').value = '漂移后的关键词'; }, { once: true });
+        document.querySelector('[ka="search_subscribe_card"]')?.addEventListener('click', () => { window.__createClicks += 1; });
+      </script>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
+      await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
+      await assert.rejects(
+        () => saveBossSearchCondition(page, '铝镁合金', { deadline: Date.now() + 1_500 }),
+        /condition changed before dispatch/i,
+      );
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__createClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('proves a newly created native card before renaming it and returns renamed evidence', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`
+      <div class="city-wrap"><div class="city">广东</div><div class="city-box" style="display:none;width:200px;height:40px"></div><ul class="dropdown-province"><li><span class="city-checkbox status1">广东</span></li></ul></div>
+      <div class="degree-ui"><label class="degree-item"><input type="checkbox" checked><span>本科及以上</span></label></div>
+      <div class="subscribe-card-right">
+        <button ka="search_subscribe_card" type="button" style="display:block;width:100px;height:30px">订阅</button>
+      </div>
+      <script>
+        document.addEventListener('click', (event) => {
+          const target = event.target;
+          if (!(target instanceof HTMLElement)) return;
+          if (target.matches('[ka="search_subscribe_card"]')) {
+            document.querySelector('.subscribe-card-right')?.insertAdjacentHTML('afterbegin', '<div ka="search_change_subscribe_card" data-subscribe-id="new-card" style="display:block;width:320px;height:100px"><span class="title-text">系统订阅</span><span class="keywords-text">铝镁合金 拉杆箱</span><span class="info-labels-item">全铝箱包设计 广东 本科及以上</span><button class="edit-btn" type="button">编辑</button></div>');
+          }
+          if (target.matches('.edit-btn')) {
+            parent.document.body.insertAdjacentHTML('beforeend', '<div class="dialog-wrap active"><input value="系统订阅"><button type="button">确定</button></div>');
+            const dialog = parent.document.querySelector('.dialog-wrap.active');
+            const input = dialog?.querySelector('input');
+            dialog?.querySelector('button')?.addEventListener('click', () => {
+              const card = document.querySelector('[data-subscribe-id="new-card"] .title-text');
+              if (card && input) card.textContent = input.value;
+              dialog?.remove();
+            });
+          }
+        });
+      </script>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
+      await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
+      const result = await saveBossSearchCondition(page, '铝镁合金', { deadline: Date.now() + 5_000 });
+      assert.equal(result.outcome, 'renamed');
+      assert.equal(result.savedSearch.name, '铝镁合金');
+      assert.equal(result.savedSearch.nativeId, 'new-card');
+      assert.equal(result.savedSearch.expectedKeyword, '铝镁合金 拉杆箱');
+      assert.match(result.savedSearch.conditionFingerprint, /^[a-f0-9]{64}$/u);
+      assert.equal(await frame.locator('[data-subscribe-id="new-card"] .title-text').innerText(), '铝镁合金');
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
@@ -1520,7 +2258,59 @@ describe('Boss normal-search actions', () => {
     }
   });
 
-  it('fails closed when the detail API identity is missing or belongs to another candidate', () => {
+  it('dismisses the native no-close forwarding dialog through its proven layer without using Escape', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => {
+        const host = window as unknown as {
+          __openNativeResume: (candidateId: string) => void;
+          __nativeForwardLayerClicks: number;
+          __nativeForwardEscapePresses: number;
+        };
+        host.__openNativeResume('boss-candidate-1');
+        host.__nativeForwardLayerClicks = 0;
+        host.__nativeForwardEscapePresses = 0;
+        document.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape') host.__nativeForwardEscapePresses += 1;
+        });
+        const forward = document.createElement('div');
+        forward.className = 'dialog-wrap active';
+        forward.dataset.type = 'boss-dialog';
+        forward.style.cssText = 'display:block;position:fixed;inset:0;width:100vw;height:100vh';
+        forward.innerHTML = `
+          <div class="boss-popup__wrapper boss-dialog boss-dialog__wrapper dialog-default-v2 c-share-box"
+            style="display:block;position:fixed;left:300px;top:100px;width:500px;height:300px;z-index:2"></div>
+          <div class="boss-layer__wrapper"
+            style="display:block;position:fixed;inset:0;width:100vw;height:100vh;z-index:1"></div>`;
+        forward.querySelector('.boss-layer__wrapper')?.addEventListener('click', () => {
+          host.__nativeForwardLayerClicks += 1;
+          forward.remove();
+        });
+        document.body.appendChild(forward);
+      });
+      await closeExistingBossResumeDialog(page, Date.now() + 10_000, {
+        pace: false,
+        allowEscapeFallback: true,
+      });
+      const evidence = await page.evaluate(() => ({
+        layerClicks: (window as unknown as { __nativeForwardLayerClicks: number }).__nativeForwardLayerClicks,
+        escapePresses: (window as unknown as { __nativeForwardEscapePresses: number }).__nativeForwardEscapePresses,
+      }));
+      assert.deepEqual(evidence, { layerClicks: 1, escapePresses: 0 });
+      assert.equal(await page.locator('.dialog-wrap.active:visible').count(), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails closed when the detail payload identity is missing or belongs to another candidate', () => {
     const candidate = {
       candidateId: 'boss-candidate-1',
       sourceText: 'data-expect=boss-candidate-1 data-jid=boss-candidate-1',
@@ -1528,7 +2318,7 @@ describe('Boss normal-search actions', () => {
     assert.equal(assertBossResumeTarget({ code: 0, zpData: { expectId: 'boss-candidate-1' } }, candidate), 'boss-candidate-1');
     assert.throws(
       () => assertBossResumeTarget({ code: 0, zpData: {} }, candidate),
-      /detail API omitted expectId/,
+      /detail payload omitted expectId/,
     );
     assert.throws(
       () => assertBossResumeTarget({ code: 0, zpData: { expectId: 'other-candidate' } }, candidate),

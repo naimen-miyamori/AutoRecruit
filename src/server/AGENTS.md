@@ -35,10 +35,12 @@ when they are affected.
 - Preserve CLI isolation and platform constraints for capture, batch, search subscription, login,
   Boss, RAG, and Mapping modes. HTTP and assistant-confirmed Boss work normalizes then queues before
   browser activity.
-- `includeBoss` belongs only to normal capture/batch with `platform=all`. It defaults false for
-  hand-created and persisted schedule inputs; normalizers may add Boss as the fourth capture stage
-  only when it is explicitly true. Preview warnings must disclose possible reuse of saved Boss
-  forwarding, but preview remains non-authoritative.
+- `includeBoss` belongs to normal capture/batch and search subscription with `platform=all`. It
+  defaults false for hand-created and persisted schedule inputs; normalizers may add Boss as the
+  fourth stage only when it is explicitly true. Search-subscription Boss work remains limited to
+  native subscription search/save and never authorizes capture, forwarding, chat, or job sync.
+  Preview warnings must disclose possible reuse of saved Boss forwarding for capture, but preview
+  remains non-authoritative.
 - Assistant rag-answer is standalone: no task, browser, capture, scoring, export, or email.
   Stored-job and temporary-JD answers preserve the RAG fact, isolation, and no-answer contracts.
 - Internal HTTP endpoints are not a full auth gateway. Host binding, body limits, static paths, and
@@ -52,6 +54,9 @@ when they are affected.
   queueing.
 - Preserve intent IDs in task input/summaries for audit. Platform receipts enforce mutation retry
   idempotency; queue delivery is not assumed exactly once.
+- A failed all-platform search-subscription task retains structured summaries for completed stages
+  and the exact stopped platform while remaining failed. Earlier external saves are never rolled
+  back or hidden by a later-stage error.
 
 ## Verification
 

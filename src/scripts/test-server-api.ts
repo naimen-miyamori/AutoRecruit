@@ -7,6 +7,7 @@ import { describe, it } from 'node:test';
 import { handleApiRequest } from '../server/routes.js';
 import { TaskQueue } from '../server/task-queue.js';
 import { TaskScheduler } from '../server/task-scheduler.js';
+import { fingerprintSavedSearchConditionIdentity } from '../platforms/boss/saved-search-identity.js';
 import type { SearchConditionSetService } from '../search/search-condition-sets.js';
 import type { BossCapturePlanResolver } from '../server/boss-capture-snapshot.js';
 import { JobReadModel } from '../server/job-read-model.js';
@@ -15,6 +16,7 @@ import type { ResumeCaptureTaskInput, TaskDetail } from '../server/types.js';
 import type { MainRunSummary } from '../index.js';
 import type { ApplicationFilterOptions } from '../search/filter-application-options.js';
 import type { BossCaptureSettingsSnapshot, CandidateResume, CandidateScoreArtifact, JobRecord, RunResult } from '../types/job.js';
+import { SearchSubscriptionRunError } from '../search/search-subscription.js';
 
 async function makeTempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-server-api-'));
@@ -132,19 +134,40 @@ function passthroughBossCapturePlanResolver(overrides: {
   pageKeyword?: string;
   conditionSetRef?: { conditionSetId: string; platform: 'boss'; revision: number };
 } = {}): BossCapturePlanResolver {
-  return async (input) => ({
-    platform: 'boss',
-    jobKey: `stable-${input.bossJobId ?? 'legacy'}`,
-    ...(input.bossJobId ? { bossJobId: input.bossJobId } : {}),
-    expectedJobName: input.jobName,
-    search: {
-      source: overrides.conditionSetRef ? 'direct' : input.searchSource ?? 'saved',
-      pageKeyword: overrides.pageKeyword ?? input.bossSearchKeyword ?? input.jobName,
-      keywordSource: overrides.pageKeyword || input.bossSearchKeyword ? 'run-override' : 'legacy-job-keyword',
-      conditions: [],
-      ...(overrides.conditionSetRef ? { conditionSetRef: overrides.conditionSetRef } : {}),
-    },
-  });
+  return async (input) => {
+    const source = overrides.conditionSetRef ? 'direct' : input.searchSource ?? 'saved';
+    const pageKeyword = overrides.pageKeyword ?? input.bossSearchKeyword ?? input.jobName;
+    const conditionIdentity = {
+      jobScope: input.jobName,
+      inline: {},
+      more: {},
+      toggles: {},
+    };
+    return {
+      platform: 'boss',
+      jobKey: `stable-${input.bossJobId ?? 'legacy'}`,
+      ...(input.bossJobId ? { bossJobId: input.bossJobId } : {}),
+      expectedJobName: input.jobName,
+      search: {
+        source,
+        pageKeyword,
+        keywordSource: overrides.pageKeyword || input.bossSearchKeyword ? 'run-override' : 'legacy-job-keyword',
+        conditions: [],
+        ...(overrides.conditionSetRef ? { conditionSetRef: overrides.conditionSetRef } : {}),
+        ...(source === 'saved' ? {
+          savedSearch: {
+            version: 1 as const,
+            platform: 'boss' as const,
+            name: `${input.jobName}订阅`,
+            nativeId: 'test-subscription',
+            expectedKeyword: pageKeyword,
+            conditionIdentity,
+            conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+          },
+        } : {}),
+      },
+    };
+  };
 }
 
 describe('console API routes', () => {
@@ -564,6 +587,20 @@ describe('console API routes', () => {
         bossCaptureSettingsSnapshot: { version: 1, settingsHash: 'forged' },
       },
     });
+    const nameOnlySavedReference = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      body: {
+        platform: 'boss',
+        keyword: '全铝箱包设计',
+        bossSavedSearchReference: {
+          version: 1,
+          platform: 'boss',
+          name: '铝镁合金',
+          expectedKeyword: '铝镁合金 拉杆箱',
+        },
+      },
+    });
 
     assert.equal(outsideBoss.statusCode, 400);
     assert.match(JSON.stringify(outsideBoss.body), /only be used with platform boss/);
@@ -573,6 +610,76 @@ describe('console API routes', () => {
     assert.match(JSON.stringify(forgedResolution.body), /cannot include bossCapturePlan/);
     assert.equal(forgedSettingsSnapshot.statusCode, 400);
     assert.match(JSON.stringify(forgedSettingsSnapshot.body), /cannot include bossCaptureSettingsSnapshot/);
+    assert.equal(nameOnlySavedReference.statusCode, 400);
+    assert.match(JSON.stringify(nameOnlySavedReference.body), /conditionIdentity/);
+  });
+
+  it('accepts only a complete explicit Boss saved-search reference and pins it into the queue snapshot', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const conditionIdentity = {
+      jobScope: '全铝箱包设计',
+      city: '广东',
+      inline: { education: ['本科及以上'] },
+      more: {},
+      toggles: { filter_recent_viewed: false },
+    };
+    const savedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '铝镁合金',
+      nativeId: 'subscription-1',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/resume-capture',
+      taskQueue: queue,
+      bossCapturePlanResolver: async (input) => {
+        assert.deepEqual(input.savedSearchReference, savedSearch);
+        return {
+          platform: 'boss',
+          jobKey: 'stable-boss-position-1',
+          bossJobId: 'boss-position-1',
+          expectedJobName: input.jobName,
+          search: {
+            source: 'saved',
+            pageKeyword: savedSearch.expectedKeyword,
+            keywordSource: 'stored-setting',
+            conditions: [],
+            savedSearch,
+            sortPolicy: 'match-priority',
+          },
+        };
+      },
+      body: {
+        platform: 'boss',
+        keyword: '全铝箱包设计',
+        bossJobId: 'boss-position-1',
+        bossSavedSearchReference: savedSearch,
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    assert.deepEqual((queued.input as ResumeCaptureTaskInput).bossSavedSearchReference, savedSearch);
+    const referenceSummary = queued.inputSummary.bossSavedSearchReference as { conditionFingerprint?: string };
+    assert.equal(referenceSummary.conditionFingerprint, savedSearch.conditionFingerprint);
+    await waitForTask(queue, queued.taskId);
+    const snapshotIndex = (calls[0] ?? []).indexOf('--boss-capture-task-snapshot-json');
+    assert.ok(snapshotIndex >= 0);
+    const taskSnapshot = JSON.parse(calls[0]![snapshotIndex + 1]!) as { searchPlan?: { savedSearch?: unknown; sortPolicy?: string } };
+    assert.deepEqual(taskSnapshot.searchPlan?.savedSearch, savedSearch);
+    assert.equal(taskSnapshot.searchPlan?.sortPolicy, 'match-priority');
   });
 
   it('pins reusable search-condition-set revisions in capture task input without retaining filter paths', async () => {
@@ -1446,7 +1553,7 @@ describe('console API routes', () => {
       body: {
         messages: [{
           role: 'user',
-          content: '跑一下 51job 的搜索订阅',
+          content: '跑一下 51job 的订阅管理',
         }],
       },
       assistantCompleteJsonText: async () => JSON.stringify({
@@ -1816,6 +1923,144 @@ describe('console API routes', () => {
     assert.match((bossForwardWithoutRecipient.body as { error?: { message?: string } }).error?.message ?? '', /must be provided together/);
     assert.equal(bossForwardOnOtherPlatform.statusCode, 400);
     assert.match((bossForwardOnOtherPlatform.body as { error?: { message?: string } }).error?.message ?? '', /only be used with platform boss/);
+  });
+
+  it('adds Boss to search-subscription only when all-platform opt-in is explicit', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const conditionIdentity = { jobScope: '全铝箱包设计', inline: {}, more: {}, toggles: {} };
+    const savedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '铝镁合金',
+      nativeId: 'subscription-1',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return {
+          platform: 'boss',
+          keyword: '铝镁合金 拉杆箱',
+          resultTotal: 4,
+          resultTotalSource: 'page',
+          saveRequested: true,
+          saved: true,
+          allConditionsApplied: true,
+          conditionStatusCounts: { applied: 2, skipped: 0, failed: 0 },
+          conditionResults: [],
+          savedSearch,
+          saveOutcome: 'renamed',
+          sortPolicy: 'match-priority',
+        };
+      },
+    });
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/search-subscription',
+      taskQueue: queue,
+      body: {
+        platform: 'all',
+        includeBoss: true,
+        searchSubscriptionFile: './subscription.json',
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    assert.equal((queued.input as { includeBoss?: boolean }).includeBoss, true);
+    assert.equal(queued.inputSummary.includeBoss, true);
+    await waitForTask(queue, queued.taskId);
+    assert.deepEqual(calls[0], [
+      '--platform', 'all',
+      '--search-subscription-file', './subscription.json',
+      '--include-boss', 'true',
+    ]);
+    const completed = await queue.getTask(queued.taskId);
+    assert.deepEqual(completed?.outputSummary?.savedSearch, savedSearch);
+    assert.equal(completed?.outputSummary?.saveOutcome, 'renamed');
+    assert.equal(completed?.outputSummary?.sortPolicy, 'match-priority');
+  });
+
+  it('retains completed subscription stages and the stop platform on a failed queued run', async () => {
+    const taskDir = await makeTempDir();
+    const completedResult = {
+      platform: '51job' as const,
+      keyword: '铝镁合金 拉杆箱',
+      resultTotal: 8,
+      resultTotalSource: 'page' as const,
+      saveRequested: true,
+      saved: true,
+      allConditionsApplied: true,
+      conditionStatusCounts: { applied: 0, skipped: 0, failed: 0 },
+      conditionResults: [],
+      saveOutcome: 'saved' as const,
+    };
+    const failureSummary = {
+      mode: 'search-subscription' as const,
+      status: 'failed' as const,
+      completedPlatforms: ['51job' as const],
+      stoppedPlatform: 'boss' as const,
+      results: [completedResult],
+      error: 'Boss subscription failed',
+    };
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async () => { throw new SearchSubscriptionRunError(failureSummary); },
+    });
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/search-subscription',
+      taskQueue: queue,
+      body: {
+        platform: 'all',
+        includeBoss: true,
+        searchSubscriptionFile: './subscription.json',
+      },
+    });
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const failed = await waitForTask(queue, queued.taskId);
+    assert.equal(failed.status, 'failed');
+    assert.deepEqual(failed.output, failureSummary);
+    assert.deepEqual(failed.outputSummary?.completedPlatforms, ['51job']);
+    assert.equal(failed.outputSummary?.stoppedPlatform, 'boss');
+  });
+
+  it('lets the assistant preview and confirm the explicit Boss search-subscription stage', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/chat',
+      body: {
+        messages: [{ role: 'user', content: '按全部平台执行订阅管理，并包含 Boss' }],
+      },
+      assistantCompleteJsonText: async () => JSON.stringify({
+        draft: {
+          kind: 'search-subscription',
+          input: {
+            platform: 'all',
+            includeBoss: true,
+            searchSubscriptionFile: './subscription.json',
+          },
+          missingFields: [],
+          warnings: [],
+        },
+        clarificationQuestions: [],
+      }),
+    });
+
+    assert.equal(response.statusCode, 200);
+    const draft = (response.body as { draft?: { input?: Record<string, unknown>; argvPreview?: string[]; warnings?: string[] } }).draft;
+    assert.equal(draft?.input?.includeBoss, true);
+    assert.deepEqual(draft?.argvPreview, [
+      '--platform', 'all',
+      '--search-subscription-file', './subscription.json',
+      '--include-boss', 'true',
+    ]);
+    assert.match(draft?.warnings?.join('\n') ?? '', /不会抓取候选/);
   });
 
   it('manages versioned search condition sets through safe CRUD, promotion, and queue preflight routes', async () => {

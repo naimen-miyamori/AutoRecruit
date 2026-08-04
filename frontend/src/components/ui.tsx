@@ -13,7 +13,7 @@ export const PLATFORM_LABELS = {
 export const TASK_LABELS = {
   'resume-capture': '简历抓取',
   batch: '批量任务',
-  'search-subscription': '搜索订阅',
+  'search-subscription': '订阅管理',
   'boss-auto-chat': 'Boss 自动沟通',
   'boss-talent-search': 'Boss 人才发现',
   'boss-greet': 'Boss 单人打招呼',

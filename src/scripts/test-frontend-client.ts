@@ -81,6 +81,62 @@ async function mockApi(page: Page): Promise<void> {
           }],
         },
       };
+    } else if (pathname === '/api/tasks/task-subscription-1') {
+      body = {
+        taskId: 'task-subscription-1',
+        kind: 'search-subscription',
+        status: 'succeeded',
+        createdAt: '2026-08-04T00:00:00.000Z',
+        updatedAt: '2026-08-04T00:01:00.000Z',
+        logs: [],
+        output: {
+          platform: 'boss',
+          keyword: '铝镁合金 拉杆箱',
+          resultTotal: 4,
+          resultTotalSource: 'page',
+          saveRequested: true,
+          saved: true,
+          allConditionsApplied: true,
+          conditionStatusCounts: { applied: 2, skipped: 0, failed: 0 },
+          saveOutcome: 'renamed',
+          sortPolicy: 'match-priority',
+          savedSearch: {
+            name: '铝镁合金',
+            nativeId: 'subscription-1',
+            expectedKeyword: '铝镁合金 拉杆箱',
+            conditionIdentity: { jobScope: '全铝箱包设计' },
+            conditionFingerprint: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          },
+        },
+      };
+    } else if (pathname === '/api/tasks/task-subscription-failed') {
+      body = {
+        taskId: 'task-subscription-failed',
+        kind: 'search-subscription',
+        status: 'failed',
+        createdAt: '2026-08-04T00:00:00.000Z',
+        updatedAt: '2026-08-04T00:01:00.000Z',
+        error: 'Search subscription stopped at boss: Boss subscription failed',
+        logs: [],
+        output: {
+          mode: 'search-subscription',
+          status: 'failed',
+          completedPlatforms: ['51job', 'liepin', 'zhilian'],
+          stoppedPlatform: 'boss',
+          error: 'Boss subscription failed',
+          results: [{
+            platform: '51job',
+            keyword: '铝镁合金 拉杆箱',
+            resultTotal: 8,
+            resultTotalSource: 'page',
+            saveRequested: true,
+            saved: true,
+            allConditionsApplied: true,
+            conditionStatusCounts: { applied: 0, skipped: 0, failed: 0 },
+            saveOutcome: 'saved',
+          }],
+        },
+      };
     } else if (pathname === '/api/tasks') {
       body = { tasks: [] };
     } else if (pathname === '/api/dashboard/health') {
@@ -273,6 +329,8 @@ describe('frontend client', () => {
     await page.locator('label').filter({ hasText: /^平台/ }).first().locator('select').selectOption('all');
     const includeBoss = page.getByLabel('包含 Boss 直聘·直猎邦 Pro', { exact: true });
     await includeBoss.waitFor({ state: 'visible' });
+    const searchSource = page.locator('label').filter({ hasText: /^搜索来源/ }).locator('select');
+    assert.equal(await searchSource.locator('option[value="saved"]').textContent(), '订阅搜索');
     await includeBoss.check();
     await page.getByLabel('岗位名称', { exact: true }).fill('物业电工');
     await page.getByLabel('JD 文本', { exact: true }).fill('负责物业电气维修');
@@ -283,6 +341,56 @@ describe('frontend client', () => {
     assert.equal(payload.platform, 'all');
     assert.equal(payload.includeBoss, true);
     assert.equal(payload.keyword, '物业电工');
+    await page.close();
+  });
+
+  it('submits Boss as an explicit fourth stage for search-subscription with separate side-effect copy', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/run`, { waitUntil: 'networkidle' });
+
+    await page.getByRole('button', { name: '订阅管理', exact: true }).click();
+    await page.locator('label').filter({ hasText: /^平台/ }).first().locator('select').selectOption('all');
+    const includeBoss = page.getByLabel('订阅管理包含 Boss 第 4 阶段', { exact: true });
+    await includeBoss.check();
+    await page.getByLabel('订阅文件', { exact: true }).fill('./subscription.json');
+    await page.getByLabel('订阅名称', { exact: true }).fill('铝镁合金');
+    await page.getByLabel('保存平台订阅', { exact: true }).check();
+    await page.getByText(/只选择或保存平台原生订阅/).waitFor({ state: 'visible' });
+
+    const submitted = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/tasks/search-subscription');
+    await page.getByRole('button', { name: '提交任务', exact: true }).click();
+    const payload = (await submitted).postDataJSON() as Record<string, unknown>;
+    assert.equal(payload.platform, 'all');
+    assert.equal(payload.includeBoss, true);
+    assert.equal(payload.searchSubscriptionFile, './subscription.json');
+    assert.equal(payload.saveSearchSubscription, true);
+    assert.equal(payload.searchSubscriptionName, '铝镁合金');
+    await page.close();
+  });
+
+  it('shows native subscription outcome, reference identity, and sort policy in task details', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/tasks/task-subscription-1`, { waitUntil: 'networkidle' });
+    await page.getByText(/名称：铝镁合金/).waitFor({ state: 'visible' });
+    const body = await page.locator('body').innerText();
+    assert.match(body, /renamed/);
+    assert.match(body, /match-priority/);
+    assert.match(body, /Boss 原生订阅引用/);
+    assert.match(body, /不会抓取候选/);
+    await page.close();
+  });
+
+  it('shows completed platforms and the stop platform for a failed all-platform subscription', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/tasks/task-subscription-failed`, { waitUntil: 'networkidle' });
+    const body = await page.locator('body').innerText();
+    assert.match(body, /订阅管理在 boss 停止/);
+    assert.match(body, /51job → liepin → zhilian/);
+    assert.match(body, /Boss subscription failed/);
+    assert.match(body, /已保存 · saved/);
     await page.close();
   });
 

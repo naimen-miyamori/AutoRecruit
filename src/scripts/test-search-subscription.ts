@@ -146,6 +146,40 @@ describe('search subscription workflow', () => {
     assert.equal(summary.savedSearchName, '优衣库订阅');
   });
 
+  it('retains the complete Boss saved-search reference returned by saveSearchCondition', async () => {
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const searchPage = { id: 'search-page' } as unknown as Page;
+    const savedSearch = {
+      version: 1,
+      platform: 'boss',
+      name: '铝镁合金',
+      nativeId: 'subscription-1',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity: {
+        jobScope: '全铝箱包设计',
+        city: '广东',
+        inline: { education: ['本科及以上'] },
+        more: {},
+        toggles: { filter_recent_viewed: false },
+      },
+      conditionFingerprint: 'fingerprint-1',
+    };
+    const adapter = buildAdapter({
+      platform: 'boss',
+      prepareSearchConditionPage: async () => searchPage,
+      readSearchConditionResultTotal: async () => ({ resultTotal: 12, resultTotalSource: 'page' }),
+      saveSearchCondition: (async () => ({ outcome: 'renamed', savedSearch })) as never,
+    });
+
+    const summary = await runSearchSubscriptionWorkflow(adapter, rootPage, {
+      keyword: savedSearch.expectedKeyword,
+      savedSearchName: savedSearch.name,
+      conditions: [],
+    }, { save: true });
+
+    assert.deepEqual((summary as unknown as { savedSearch?: unknown }).savedSearch, savedSearch);
+  });
+
   it('refuses to save when any search condition was not applied', async () => {
     const calls: string[] = [];
     const rootPage = { id: 'root-page' } as unknown as Page;
@@ -663,6 +697,114 @@ describe('search subscription workflow', () => {
       assert.equal(summary.resultTotal, 12);
       assert.equal(summary.saved, true);
       assert.equal(summary.savedSearchName, '保存的订阅名');
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps search-subscription all core-only by default and adds Boss only with explicit opt-in', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-search-subscription-all-'));
+    const planPath = path.join(tempDir, 'conditions.json');
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const calls: string[] = [];
+
+    try {
+      await fs.writeFile(planPath, JSON.stringify({ keyword: '全平台关键词', conditions: [] }), 'utf8');
+      const indexModule = await loadIndexModule();
+      indexModule.ensureAuthenticatedBrowserSessionRef.fn = async (platform) => {
+        calls.push(`session:${platform}`);
+        return { page: rootPage, context: {}, browser: {} } as never;
+      };
+      indexModule.closeBrowserSessionRef.fn = async () => { calls.push('close'); };
+      indexModule.runSearchSubscriptionWorkflowRef.fn = async (adapter) => {
+        calls.push(`workflow:${adapter.platform}`);
+        return {
+          platform: adapter.platform,
+          keyword: '全平台关键词',
+          resultTotal: 0,
+          resultTotalSource: 'page',
+          saveRequested: false,
+          saved: false,
+          allConditionsApplied: true,
+          conditionStatusCounts: { applied: 0, skipped: 0, failed: 0 },
+          conditionResults: [],
+        };
+      };
+
+      await captureConsole(async () => {
+        await indexModule.main([
+          '--platform', 'all',
+          '--search-subscription-file', planPath,
+        ]);
+      });
+      assert.deepEqual(calls, [
+        'session:51job', 'workflow:51job', 'close',
+        'session:liepin', 'workflow:liepin', 'close',
+        'session:zhilian', 'workflow:zhilian', 'close',
+      ]);
+
+      calls.length = 0;
+      await captureConsole(async () => {
+        await indexModule.main([
+          '--platform', 'all',
+          '--include-boss', 'true',
+          '--search-subscription-file', planPath,
+        ]);
+      });
+      assert.deepEqual(calls, [
+        'session:51job', 'workflow:51job', 'close',
+        'session:liepin', 'workflow:liepin', 'close',
+        'session:zhilian', 'workflow:zhilian', 'close',
+        'session:boss', 'workflow:boss', 'close',
+      ]);
+
+      calls.length = 0;
+      indexModule.runSearchSubscriptionWorkflowRef.fn = async (adapter) => {
+        calls.push(`workflow:${adapter.platform}`);
+        if (adapter.platform === 'boss') throw new Error('Boss subscription failed');
+        return {
+          platform: adapter.platform,
+          keyword: '全平台关键词',
+          resultTotal: 0,
+          resultTotalSource: 'page',
+          saveRequested: false,
+          saved: false,
+          allConditionsApplied: true,
+          conditionStatusCounts: { applied: 0, skipped: 0, failed: 0 },
+          conditionResults: [],
+        };
+      };
+      await assert.rejects(
+        () => captureConsole(async () => {
+          await indexModule.main([
+            '--platform', 'all',
+            '--include-boss', 'true',
+            '--search-subscription-file', planPath,
+          ]);
+        }),
+        (error: unknown) => {
+          if (!(error instanceof Error) || !/Boss subscription failed/.test(error.message)) return false;
+          const summary = (error as Error & {
+            summary?: {
+              status?: string;
+              completedPlatforms?: string[];
+              stoppedPlatform?: string;
+              results?: Array<{ platform?: string }>;
+            };
+          }).summary;
+          assert.equal(summary?.status, 'failed');
+          assert.deepEqual(summary?.completedPlatforms, ['51job', 'liepin', 'zhilian']);
+          assert.equal(summary?.stoppedPlatform, 'boss');
+          assert.deepEqual(summary?.results?.map((item) => item.platform), ['51job', 'liepin', 'zhilian']);
+          return true;
+        },
+      );
+      assert.deepEqual(calls, [
+        'session:51job', 'workflow:51job', 'close',
+        'session:liepin', 'workflow:liepin', 'close',
+        'session:zhilian', 'workflow:zhilian', 'close',
+        'session:boss', 'workflow:boss', 'close',
+      ]);
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }

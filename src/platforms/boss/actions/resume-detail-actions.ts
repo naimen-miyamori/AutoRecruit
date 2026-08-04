@@ -14,6 +14,28 @@ import {
 } from './context.js';
 
 const bossResumePayloadCache = new WeakMap<Page, Map<string, BossResumeApiPayload>>();
+const bossLegacyResumeFrameSelector = 'iframe[src*="/web/frame/c-resume/"]';
+const bossNativeResumeRootSelector = '.dialog-lib-resume .resume-detail-wrap';
+
+function bossResumeDetailDialogs(page: Page): Locator {
+  return page.locator([
+    `.dialog-wrap.active:visible:has(${bossLegacyResumeFrameSelector})`,
+    `.dialog-wrap.active:visible:has(${bossNativeResumeRootSelector})`,
+  ].join(', '));
+}
+
+function bossNativeResumeRoots(page: Page): Locator {
+  return page.locator(`.dialog-wrap.active:visible ${bossNativeResumeRootSelector}:visible`);
+}
+
+/** Returns whether exactly one legacy or native Boss resume detail is visible. */
+export async function isBossResumeDetailVisible(page: Page): Promise<boolean> {
+  const count = await bossResumeDetailDialogs(page).count().catch(() => 0);
+  if (count > 1) {
+    throw new Error(`Expected at most one visible Boss resume detail dialog, found ${count}.`);
+  }
+  return count === 1;
+}
 
 /**
  * The external click was accepted but the page did not expose a verifiable
@@ -106,7 +128,15 @@ export async function closeExistingBossResumeDialog(
   deadline: number,
   options: { pace?: boolean; allowEscapeFallback?: boolean; cleanupReserveMs?: number } & Partial<CandidateProfileDetailOptions> = {},
 ): Promise<void> {
-  const activeDialog = page.locator('.dialog-wrap.active:visible[data-type="boss-dialog"], .dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"]), .dialog-wrap.active:visible:has(.c-share-box)').first();
+  // Forwarding overlays have their own strict close semantics. In particular,
+  // the current no-close overlay must never fall through to Escape, which can
+  // close the resume underneath while leaving the overlay visible.
+  await closeVisibleBossForwardDialogIfPresent(page, deadline);
+  const activeDialog = page.locator([
+    '.dialog-wrap.active:visible[data-type="boss-dialog"]',
+    `.dialog-wrap.active:visible:has(${bossLegacyResumeFrameSelector})`,
+    `.dialog-wrap.active:visible:has(${bossNativeResumeRootSelector})`,
+  ].join(', ')).first();
   if (await activeDialog.count().catch(() => 0) === 0) return;
 
   const closeButton = activeDialog.locator('.boss-popup__close, .close-btn, [ka="dialog_close"], .boss-dialog__close').first();
@@ -132,25 +162,55 @@ export async function closeExistingBossResumeDialog(
 }
 
 export async function waitForBossResumeDetailReady(page: Page, deadline: number, cleanupReserveMs = 0): Promise<void> {
-  await page.locator('.dialog-wrap.active[data-type="boss-dialog"] iframe[src*="/web/frame/c-resume/"], .dialog-wrap.active iframe[src*="/web/frame/c-resume/"]').first().waitFor({
-    state: 'visible',
-    timeout: remainingTimeWithReserve(deadline, cleanupReserveMs),
-  });
-  await page.waitForFunction(
-    () => {
-      const dialog = document.querySelector('.dialog-wrap.active[data-type="boss-dialog"], .dialog-wrap.active');
-      const frame = document.querySelector<HTMLIFrameElement>('.dialog-wrap.active iframe[src*="/web/frame/c-resume/"]');
-      return Boolean(dialog && frame);
-    },
-    undefined,
-    { timeout: remainingTimeWithReserve(deadline, cleanupReserveMs), polling: 250 },
-  );
-  const detailFrame = page.frames().find((frame) => /\/web\/frame\/c-resume\//.test(frame.url()));
-  if (!detailFrame) throw new Error('Boss resume detail frame did not become available.');
-  await detailFrame.locator('canvas#resume, #resume canvas').first().waitFor({
-    state: 'visible',
-    timeout: remainingTimeWithReserve(deadline, cleanupReserveMs),
-  });
+  while (remainingTimeWithReserve(deadline, cleanupReserveMs) > 1) {
+    const nativeRoots = bossNativeResumeRoots(page);
+    const nativeCount = await nativeRoots.count().catch(() => 0);
+    if (nativeCount > 1) {
+      throw new Error(`Expected at most one hydrated Boss native resume root, found ${nativeCount}.`);
+    }
+    if (nativeCount === 1) {
+      const nativeReady = await nativeRoots.first().evaluate((root) => {
+        const isVisible = (element: Element | null): element is HTMLElement => {
+          if (!(element instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        if (!isVisible(root) || !isVisible(root.querySelector('.geek-base-info-wrap'))) return false;
+        type VueResumeComponent = {
+          $options?: { name?: string };
+          $props?: { resumeInfo?: Record<string, unknown> };
+          $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+          $parent?: VueResumeComponent;
+        };
+        let component = (root as HTMLElement & { __vue__?: VueResumeComponent }).__vue__;
+        for (let depth = 0; component && depth < 8; depth += 1, component = component.$parent) {
+          const resumeInfo = component.$data?.resumeInfo ?? component.$props?.resumeInfo;
+          const expectId = resumeInfo?.expectId;
+          if ((component.$options?.name === 'ResumeRoot' || resumeInfo)
+            && component.$data?.loading !== true
+            && expectId !== undefined
+            && expectId !== null
+            && String(expectId).trim()) {
+            return true;
+          }
+        }
+        return false;
+      }).catch(() => false);
+      if (nativeReady) return;
+    }
+
+    const detailFrames = page.frames().filter((frame) => /\/web\/frame\/c-resume\//.test(frame.url()));
+    if (detailFrames.length > 1) {
+      throw new Error(`Expected at most one Boss resume detail frame, found ${detailFrames.length}.`);
+    }
+    if (detailFrames.length === 1
+      && await detailFrames[0]!.locator('canvas#resume, #resume canvas').first().isVisible().catch(() => false)) {
+      return;
+    }
+    await page.waitForTimeout(Math.min(100, remainingTimeWithReserve(deadline, cleanupReserveMs))).catch(() => undefined);
+  }
+  throw new Error('Boss resume detail did not hydrate through either the native DOM or legacy canvas path before the deadline.');
 }
 
 async function raiseUnexpectedContactDialog(
@@ -202,10 +262,14 @@ export async function waitForBossResumeDetailOrPurchase(
           && Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length)
           && window.getComputedStyle(element).visibility !== 'hidden';
         const detailVisible = [...document.querySelectorAll('.dialog-wrap.active')].some((dialog) =>
-          isVisible(dialog) && Boolean(dialog.querySelector('iframe[src*="/web/frame/c-resume/"]')));
+          isVisible(dialog)
+          && Boolean(dialog.querySelector(
+            'iframe[src*="/web/frame/c-resume/"], .dialog-lib-resume .resume-detail-wrap',
+          )));
         const purchaseVisible = [...document.querySelectorAll('.dialog-wrap.active')].some((dialog) =>
           isVisible(dialog)
           && !dialog.querySelector('iframe[src*="/web/frame/c-resume/"]')
+          && !dialog.querySelector('.dialog-lib-resume .resume-detail-wrap')
           && /搜索畅聊卡|立即购买/.test(dialog.textContent ?? ''));
         return detailVisible || purchaseVisible;
       },
@@ -225,16 +289,75 @@ export async function waitForBossResumeDetailOrPurchase(
   await waitForBossResumeDetailReady(page, deadline, cleanupReserveMs);
 }
 
-async function readBossResumeApiPayload(
+async function readBossResumePayload(
   page: Page,
   deadline: number,
   cleanupReserveMs = 0,
 ): Promise<BossResumeApiPayload> {
   await waitForBossResumeDetailReady(page, deadline, cleanupReserveMs);
-  const detailFrame = page.frames().find((frame) => /\/web\/frame\/c-resume\//.test(frame.url()));
-  if (!detailFrame) {
-    throw new Error('Boss resume detail frame did not become available for parsing.');
+  const nativeRoots = bossNativeResumeRoots(page);
+  const nativeCount = await nativeRoots.count().catch(() => 0);
+  if (nativeCount > 1) {
+    throw new Error(`Expected at most one hydrated Boss native resume root, found ${nativeCount}.`);
   }
+  if (nativeCount === 1) {
+    return nativeRoots.first().evaluate((root) => {
+      type VueResumeComponent = {
+        $options?: { name?: string };
+        $props?: { resumeInfo?: Record<string, unknown> };
+        $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+        $parent?: VueResumeComponent;
+      };
+      let component = (root as HTMLElement & { __vue__?: VueResumeComponent }).__vue__;
+      let resumeInfo: Record<string, unknown> | undefined;
+      for (let depth = 0; component && depth < 8; depth += 1, component = component.$parent) {
+        const currentResumeInfo = component.$data?.resumeInfo ?? component.$props?.resumeInfo;
+        if (currentResumeInfo
+          && component.$data?.loading !== true
+          && currentResumeInfo.expectId !== undefined
+          && currentResumeInfo.expectId !== null
+          && String(currentResumeInfo.expectId).trim()) {
+          resumeInfo = currentResumeInfo;
+          if (component.$options?.name === 'ResumeRoot') break;
+        }
+      }
+      if (!resumeInfo) {
+        throw new Error('Boss native resume state was not hydrated for parsing.');
+      }
+      const detailKeys = [
+        'geekBaseInfo',
+        'geekExpectList',
+        'highestEduExp',
+        'geekCertificationList',
+        'certList',
+        'professionalSkill',
+        'resumeSummary',
+        'showExpectPosition',
+        'geekWorkExpList',
+        'geekProjExpList',
+        'geekEduExpList',
+      ];
+      const geekDetail = Object.fromEntries(detailKeys
+        .filter((key) => resumeInfo![key] !== undefined)
+        .map((key) => [key, resumeInfo![key]]));
+      return JSON.parse(JSON.stringify({
+        code: 0,
+        zpData: {
+          expectId: resumeInfo.expectId,
+          geekDetail,
+          ...(resumeInfo.showExpectPosition === undefined
+            ? {}
+            : { showExpectPosition: resumeInfo.showExpectPosition }),
+        },
+      })) as BossResumeApiPayload;
+    });
+  }
+
+  const detailFrames = page.frames().filter((frame) => /\/web\/frame\/c-resume\//.test(frame.url()));
+  if (detailFrames.length !== 1) {
+    throw new Error(`Expected one Boss legacy resume detail frame for parsing, found ${detailFrames.length}.`);
+  }
+  const detailFrame = detailFrames[0]!;
   await detailFrame.waitForFunction(
     () => performance.getEntriesByType('resource')
       .some((entry) => /\/wapi\/(?:zpitem\/web\/boss\/search\/geek\/info|zpjob\/view\/geek\/info\/v2)\?/.test(entry.name)),
@@ -247,7 +370,7 @@ async function readBossResumeApiPayload(
       .reverse()
       .find((url) => /\/wapi\/(?:zpitem\/web\/boss\/search\/geek\/info|zpjob\/view\/geek\/info\/v2)\?/.test(url));
     if (!apiUrl) {
-      throw new Error('Boss resume detail API resource was not found in the detail frame.');
+      throw new Error('Boss resume detail API resource was not found in the legacy detail frame.');
     }
     const response = await fetch(apiUrl, { credentials: 'include' });
     if (!response.ok) {
@@ -271,8 +394,8 @@ function takeCachedBossResumePayload(page: Page, candidateId: string): BossResum
 }
 
 /**
- * Reads the current detail API identity without populating the resume parse
- * cache. History-view synchronisation deliberately uses this action so an
+ * Reads the current detail identity without populating the resume parse cache.
+ * History-view synchronisation deliberately uses this action so an
  * already-seen card is opened/verified/closed without becoming a capture or
  * causing any resume payload to be reused by a later parse.
  */
@@ -293,7 +416,7 @@ export function assertBossResumeTarget(payload: BossResumeApiPayload, candidate:
     ? ''
     : String(payload.zpData.expectId).trim();
   if (!detailCandidateId) {
-    throw new BossResumeIdentityVerificationError(`Boss resume detail identity verification failed for candidate ${candidate.candidateId}: detail API omitted expectId.`);
+    throw new BossResumeIdentityVerificationError(`Boss resume detail identity verification failed for candidate ${candidate.candidateId}: detail payload omitted expectId.`);
   }
 
   const sourceMatches = candidate.sourceText
@@ -315,9 +438,9 @@ async function readVerifiedBossResumePayload(
   deadline: number,
   cleanupReserveMs = 0,
 ): Promise<{ payload: BossResumeApiPayload; detailCandidateId: string }> {
-  const payload = await readBossResumeApiPayload(page, deadline, cleanupReserveMs);
+  const payload = await readBossResumePayload(page, deadline, cleanupReserveMs);
   if (payload.code !== 0) {
-    throw new BossResumeIdentityVerificationError(`Boss resume detail API failed: ${payload.message ?? `code ${payload.code ?? 'omitted'}`}`);
+    throw new BossResumeIdentityVerificationError(`Boss resume detail payload failed: ${payload.message ?? `code ${payload.code ?? 'omitted'}`}`);
   }
   return {
     payload,
@@ -361,7 +484,11 @@ async function waitForBossForwardDialog(page: Page, deadline: number, cleanupRes
 
 function bossPurchaseChatDialogs(page: Page): Locator {
   return page
-    .locator('.dialog-wrap.active:visible:not(:has(iframe[src*="/web/frame/c-resume/"]))')
+    .locator([
+      '.dialog-wrap.active:visible',
+      `:not(:has(${bossLegacyResumeFrameSelector}))`,
+      `:not(:has(${bossNativeResumeRootSelector}))`,
+    ].join(''))
     .filter({ hasText: /搜索畅聊卡|立即购买/ });
 }
 
@@ -394,14 +521,88 @@ async function closeVisibleBossForwardDialogIfPresent(page: Page, deadline: numb
   const dialog = dialogs.first();
   const closeButtons = dialog.locator('.boss-popup__close:visible, .close-btn:visible, [ka="dialog_close"]:visible, .boss-dialog__close:visible');
   const closeCount = await closeButtons.count();
-  if (closeCount !== 1) {
-    throw new Error(`Expected one close control on the visible Boss forwarding dialog, found ${closeCount}.`);
+  if (closeCount > 1) {
+    throw new Error(`Expected at most one close control on the visible Boss forwarding dialog, found ${closeCount}.`);
   }
-  await clickBossControlNatively(page, closeButtons.first(), remainingTime(deadline), {
+  if (closeCount === 1) {
+    await clickBossControlNatively(page, closeButtons.first(), remainingTime(deadline), {
+      deadline,
+      pace: false,
+    });
+    await dialog.waitFor({ state: 'hidden', timeout: remainingTime(deadline) });
+    return true;
+  }
+
+  // The current native forwarding dialog deliberately exposes no close icon.
+  // Its unique full-screen layer is the only supported dismissal target;
+  // Escape is unsafe because Boss closes the underlying resume but leaves this
+  // forwarding dialog orphaned. Prove an uncovered layer corner, click it, and
+  // require both forward dismissal and preservation of the resume underneath.
+  const layers = dialog.locator(':scope > .boss-layer__wrapper:visible');
+  const layerCount = await layers.count();
+  if (layerCount !== 1) {
+    throw new Error(`Boss forwarding dialog exposed neither one close control nor one safe dismissal layer; found ${layerCount} layers.`);
+  }
+  const layer = layers.first();
+  const readSafeLayerPosition = async (): Promise<{ x: number; y: number } | undefined> => layer.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) return undefined;
+    const layerRect = element.getBoundingClientRect();
+    const forwardBox = element.parentElement?.querySelector('.c-share-box');
+    if (!(forwardBox instanceof HTMLElement)) return undefined;
+    const boxRect = forwardBox.getBoundingClientRect();
+    const inset = Math.max(2, Math.min(16, layerRect.width / 4, layerRect.height / 4));
+    const candidates = [
+      { x: inset, y: inset },
+      { x: layerRect.width - inset, y: inset },
+      { x: inset, y: layerRect.height - inset },
+      { x: layerRect.width - inset, y: layerRect.height - inset },
+    ];
+    return candidates.find((position) => {
+      const clientX = layerRect.left + position.x;
+      const clientY = layerRect.top + position.y;
+      const outsideForwardBox = clientX < boxRect.left
+        || clientX > boxRect.right
+        || clientY < boxRect.top
+        || clientY > boxRect.bottom;
+      return outsideForwardBox && document.elementFromPoint(clientX, clientY) === element;
+    });
+  });
+  const safePosition = await readSafeLayerPosition();
+  if (!safePosition) {
+    throw new Error('Boss forwarding dialog had no proven uncovered dismissal-layer point.');
+  }
+  const resumeVisibleBeforeLayerClick = await isBossResumeDetailVisible(page);
+  await clickBossControlNatively(page, layer, remainingTime(deadline), {
     deadline,
     pace: false,
+    position: safePosition,
+    beforeClick: async () => {
+      if (await dialogs.count() !== 1 || await layers.count() !== 1) {
+        throw new Error('Boss forwarding dismissal layer changed before click.');
+      }
+      const positionStillSafe = await layer.evaluate((element, position) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const layerRect = element.getBoundingClientRect();
+        const forwardBox = element.parentElement?.querySelector('.c-share-box');
+        if (!(forwardBox instanceof HTMLElement)) return false;
+        const boxRect = forwardBox.getBoundingClientRect();
+        const clientX = layerRect.left + position.x;
+        const clientY = layerRect.top + position.y;
+        return (clientX < boxRect.left
+          || clientX > boxRect.right
+          || clientY < boxRect.top
+          || clientY > boxRect.bottom)
+          && document.elementFromPoint(clientX, clientY) === element;
+      }, safePosition);
+      if (!positionStillSafe) {
+        throw new Error('Boss forwarding dismissal-layer point changed before click.');
+      }
+    },
   });
   await dialog.waitFor({ state: 'hidden', timeout: remainingTime(deadline) });
+  if (resumeVisibleBeforeLayerClick && !await isBossResumeDetailVisible(page)) {
+    throw new Error('Boss forwarding dismissal layer also closed the underlying resume detail.');
+  }
   return true;
 }
 
@@ -425,7 +626,7 @@ export async function closeBossResumeDetailStrict(
   deadline: number,
   options: { pace?: boolean; cleanupReserveMs?: number } = {},
 ): Promise<void> {
-  const visibleResumeDialogs = page.locator('.dialog-wrap.active:visible:has(iframe[src*="/web/frame/c-resume/"])');
+  const visibleResumeDialogs = bossResumeDetailDialogs(page);
   const dialogCount = await visibleResumeDialogs.count();
   if (dialogCount !== 1) {
     throw new Error(`Expected one visible Boss resume detail dialog before close, found ${dialogCount}.`);
@@ -451,6 +652,49 @@ export async function closeBossResumeDetailStrict(
   }
 }
 
+async function assertNativeBossForwardAction(action: Locator): Promise<void> {
+  const evidence = await action.evaluate((element) => {
+    const isVisible = (target: Element | null): target is HTMLElement => {
+      if (!(target instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(target);
+      const rect = target.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && rect.width > 0
+        && rect.height > 0;
+    };
+    if (!isVisible(element) || element.getAttribute('aria-label') !== '转发牛人') {
+      return { ok: false, reason: 'share control was absent, hidden, or lost its aria-label' };
+    }
+    const group = element.parentElement;
+    if (!group) return { ok: false, reason: 'share control had no operation group' };
+    const classNames = ['interested', 'unsuitable', 'report', 'share'];
+    const controls = classNames.map((className) => {
+      const matches = [...group.querySelectorAll(`.${className}`)].filter(isVisible);
+      return matches.length === 1 ? matches[0] : undefined;
+    });
+    if (controls.some((control) => !control) || controls[3] !== element) {
+      return { ok: false, reason: 'expected one visible 收藏/不合适/举报/转发 control in the same group' };
+    }
+    const shareRect = element.getBoundingClientRect();
+    const shareCenterY = (shareRect.top + shareRect.bottom) / 2;
+    const leftControls = controls.slice(0, -1) as Element[];
+    const rightmost = leftControls.every((control) => {
+      const rect = control.getBoundingClientRect();
+      const centerY = (rect.top + rect.bottom) / 2;
+      return rect.left < shareRect.left && Math.abs(centerY - shareCenterY) <= Math.max(rect.height, shareRect.height);
+    });
+    const expectedOrder = controls.every((control, index) => index === 0
+      || control!.getBoundingClientRect().left > controls[index - 1]!.getBoundingClientRect().left);
+    return rightmost && expectedOrder
+      ? { ok: true, reason: '' }
+      : { ok: false, reason: 'share control was not the rightmost item in the expected top operation row' };
+  });
+  if (!evidence.ok) {
+    throw new Error(`Boss native resume forward action failed structural verification: ${evidence.reason}.`);
+  }
+}
+
 async function openBossForwardDialog(page: Page, deadline: number, cleanupReserveMs = 0): Promise<Locator> {
   await waitForBossResumeDetailReady(page, deadline, cleanupReserveMs);
   if (await bossPurchaseChatDialogs(page).count().catch(() => 0) > 0) {
@@ -460,11 +704,17 @@ async function openBossForwardDialog(page: Page, deadline: number, cleanupReserv
       'Boss resume forwarding started while a search-chat-card purchase dialog was already visible',
     );
   }
-  const action = page.locator('.dialog-wrap.active:has(iframe[src*="/web/frame/c-resume/"]) .btn-coop-forward:visible');
-  const actionCount = await action.count();
-  if (actionCount !== 1) {
-    throw new Error(`Expected one visible Boss resume forward action, found ${actionCount}.`);
+  const legacyActions = page.locator(`.dialog-wrap.active:has(${bossLegacyResumeFrameSelector}) .btn-coop-forward:visible`);
+  const nativeActions = bossNativeResumeRoots(page)
+    .locator('.geek-base-info-wrap .share[aria-label="转发牛人"]:visible');
+  const legacyActionCount = await legacyActions.count();
+  const nativeActionCount = await nativeActions.count();
+  if (legacyActionCount + nativeActionCount !== 1) {
+    throw new Error(`Expected one visible Boss resume forward action, found ${legacyActionCount + nativeActionCount}.`);
   }
+  const nativeAction = nativeActionCount === 1;
+  const action = nativeAction ? nativeActions : legacyActions;
+  if (nativeAction) await assertNativeBossForwardAction(action);
   // The generic coordinate click intentionally follows a continuous pointer
   // path, but the detail footer can reflow while that path is in motion. Use
   // a native locator click after pointer movement so Playwright resolves the
@@ -473,6 +723,23 @@ async function openBossForwardDialog(page: Page, deadline: number, cleanupReserv
   await clickBossControlNatively(page, action, remainingTime(deadline), {
     deadline,
     cleanupReserveMs,
+    beforeClick: async () => {
+      if (nativeAction) {
+        const currentActions = bossNativeResumeRoots(page)
+          .locator('.geek-base-info-wrap .share[aria-label="转发牛人"]:visible');
+        if (await currentActions.count() !== 1) {
+          throw new Error('Boss native resume forward action changed before click.');
+        }
+        await assertNativeBossForwardAction(currentActions);
+        return;
+      }
+      const currentActions = page.locator(
+        `.dialog-wrap.active:has(${bossLegacyResumeFrameSelector}) .btn-coop-forward:visible`,
+      );
+      if (await currentActions.count() !== 1) {
+        throw new Error('Boss legacy resume forward action changed before click.');
+      }
+    },
   });
   await page.waitForFunction(() => {
     const isVisible = (element: Element) => element instanceof HTMLElement
@@ -481,6 +748,7 @@ async function openBossForwardDialog(page: Page, deadline: number, cleanupReserv
     const purchaseVisible = [...document.querySelectorAll('.dialog-wrap.active')].some((dialog) =>
       isVisible(dialog)
       && !dialog.querySelector('iframe[src*="/web/frame/c-resume/"]')
+      && !dialog.querySelector('.dialog-lib-resume .resume-detail-wrap')
       && /搜索畅聊卡|立即购买/.test(dialog.textContent ?? ''));
     return forwardingVisible || purchaseVisible;
   }, undefined, { timeout: remainingTimeWithReserve(deadline, cleanupReserveMs), polling: 100 });

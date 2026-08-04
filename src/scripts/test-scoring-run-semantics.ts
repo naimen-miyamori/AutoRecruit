@@ -22,6 +22,7 @@ import {
   bossAdapter,
 } from '../platforms/boss-adapter.js';
 import { buildBossSyncedJobKey } from '../platforms/boss-jobs.js';
+import { fingerprintSavedSearchConditionIdentity } from '../platforms/boss/saved-search-identity.js';
 import { zhilianAdapter } from '../platforms/zhilian-adapter.js';
 import { SearchConditionSetService } from '../search/search-condition-sets.js';
 import { hashBossScreeningPolicy } from '../scoring/boss-screening.js';
@@ -1335,6 +1336,103 @@ describe('candidate list readiness', () => {
       { phase: 'extract', deadline: 100_000 },
     ]);
   });
+
+  it('fails before browser search when Boss saved capture has no complete native reference', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    let legacyFallbackCalls = 0;
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openSubscribeSearch: async () => {
+        legacyFallbackCalls += 1;
+        return { id: 'legacy-search-page' } as never;
+      },
+      extractCandidateList: async () => ({ candidates: [] }),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+
+    await assert.rejects(
+      () => indexModule.runResumeCaptureFlow(
+        'boss',
+        'boss-legacy-saved-reference-required',
+        {
+          title: '全铝箱包设计',
+          majors: [],
+          languageRequirements: [],
+          responsibilities: [],
+          hardRequirements: [],
+          preferredRequirements: [],
+          regionPreferences: [],
+          industryTags: [],
+        },
+        '铝镁合金 拉杆箱',
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-04T00:00:00.000Z',
+        adapter,
+        { searchSource: 'saved' },
+      ),
+      /saved-reference-required/i,
+    );
+    assert.equal(legacyFallbackCalls, 0);
+  });
+
+  it('fails closed instead of using the legacy saved-search entry when the native Boss hook is unavailable', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    let legacyFallbackCalls = 0;
+    const { openSavedSearch: _openSavedSearch, ...registeredBossAdapter } = indexModule.resolvePlatformAdapter('boss');
+    const adapter = {
+      ...registeredBossAdapter,
+      openSubscribeSearch: async (page: Page) => {
+        legacyFallbackCalls += 1;
+        return page;
+      },
+      extractCandidateList: async () => ({ candidates: [] }),
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    const conditionIdentity = {
+      jobScope: '全铝箱包设计',
+      city: '广东',
+      inline: { education: ['本科及以上'] },
+      more: {},
+      toggles: { filter_recent_viewed: false },
+    };
+    const savedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '铝镁合金',
+      nativeId: 'subscription-native-required',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+
+    await assert.rejects(
+      () => indexModule.runResumeCaptureFlow(
+        'boss',
+        'boss-native-saved-action-required',
+        {
+          title: '全铝箱包设计',
+          majors: [],
+          languageRequirements: [],
+          responsibilities: [],
+          hardRequirements: [],
+          preferredRequirements: [],
+          regionPreferences: [],
+          industryTags: [],
+        },
+        savedSearch.expectedKeyword,
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-04T00:00:00.000Z',
+        adapter,
+        { searchSource: 'saved', savedSearch },
+      ),
+      /native saved-search action is not registered/i,
+    );
+    assert.equal(legacyFallbackCalls, 0);
+  });
 });
 
 describe('scoring run semantics', () => {
@@ -1404,6 +1502,134 @@ describe('scoring run semantics', () => {
     assert.equal(saved.recipientEmail, 'ops@example.com');
     assert.deepStrictEqual(saved.ccEmails, ['audit@example.com']);
     assert.equal(secondStat.mtimeMs, firstStat.mtimeMs);
+  });
+
+  it('persists a complete Boss saved-search reference through the revision-checked job patch', async () => {
+    const JobStore = await makeIsolatedStore();
+    const store = new JobStore();
+    const jobKey = 'boss-saved-reference-cas';
+    const conditionIdentity = {
+      jobScope: '全铝箱包设计',
+      city: '广东',
+      inline: { education: ['本科及以上'] },
+      more: {},
+      toggles: { filter_recent_viewed: false },
+    };
+    const savedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '铝镁合金',
+      nativeId: 'subscription-1',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: '全铝箱包设计',
+      rawText: '岗位 JD',
+      normalizedJob: {
+        title: '全铝箱包设计',
+        majors: [],
+        languageRequirements: [],
+        responsibilities: [],
+        hardRequirements: [],
+        preferredRequirements: [],
+        regionPreferences: [],
+        industryTags: [],
+      },
+      createdAt: '2026-08-04T00:00:00.000Z',
+      searchSettings: { source: 'saved', conditions: [] },
+    });
+    const before = await store.readJobRecord('boss', jobKey);
+    const updated = await store.applyJobConfigPatch('boss', jobKey, before.revision ?? 1, {
+      searchSource: 'saved',
+      savedSearch,
+    });
+    assert.deepEqual(updated.searchSettings?.savedSearch, savedSearch);
+    assert.deepEqual((await store.readJobRecord('boss', jobKey)).searchSettings?.savedSearch, savedSearch);
+  });
+
+  it('binds a verified Boss saved reference without entering candidate capture', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = buildJobKey('全铝箱包设计', '');
+    const conditionIdentity = {
+      jobScope: '全铝箱包设计',
+      city: '广东',
+      inline: { education: ['本科及以上'] },
+      more: {},
+      toggles: { filter_recent_viewed: false },
+    };
+    const savedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '铝镁合金',
+      nativeId: 'subscription-binding-1',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: '全铝箱包设计',
+      rawText: '职位名称：全铝箱包设计',
+      normalizedJob: { ...buildNormalizedJob(), title: '全铝箱包设计' },
+      createdAt: '2026-08-04T00:00:00.000Z',
+      searchSettings: { source: 'saved', conditions: [] },
+    });
+
+    const originalOpenSavedSearch = bossAdapter.openSavedSearch;
+    const originalEnsureSession = indexModule.ensureAuthenticatedBrowserSessionRef.fn;
+    const originalCloseSession = indexModule.closeBrowserSessionRef.fn;
+    const opened: Array<{ target: unknown; options?: unknown }> = [];
+    const session = {
+      page: { id: 'boss-binding-page' },
+      context: { id: 'boss-binding-context' },
+      browser: { id: 'boss-binding-browser' },
+    } as unknown as BrowserSession;
+    bossAdapter.openSavedSearch = async (page, target, options) => {
+      opened.push({ target, options });
+      assert.equal(page, session.page);
+      return page;
+    };
+    indexModule.ensureAuthenticatedBrowserSessionRef.fn = async () => session;
+    indexModule.closeBrowserSessionRef.fn = async (closed) => {
+      assert.equal(closed, session);
+    };
+
+    try {
+      const result = await indexModule.main([
+        '--platform', 'boss',
+        '--keyword', '全铝箱包设计',
+        '--boss-bind-saved-search', 'true',
+        '--boss-confirmed', 'true',
+        '--boss-saved-search-reference-json', JSON.stringify(savedSearch),
+      ]) as { mode: string; candidateSideEffects: boolean; revision: number };
+      assert.equal(result.mode, 'boss-saved-search-binding');
+      assert.equal(result.candidateSideEffects, false);
+      assert.equal(result.revision, 2);
+    } finally {
+      bossAdapter.openSavedSearch = originalOpenSavedSearch;
+      indexModule.ensureAuthenticatedBrowserSessionRef.fn = originalEnsureSession;
+      indexModule.closeBrowserSessionRef.fn = originalCloseSession;
+    }
+
+    assert.equal(opened.length, 1);
+    assert.deepEqual(opened[0]?.target, savedSearch);
+    assert.deepEqual(opened[0]?.options, {
+      deadline: (opened[0]?.options as { deadline: number }).deadline,
+      includeViewedCandidates: false,
+      sortPolicy: 'match-priority',
+    });
+    const persisted = await store.readJobRecord('boss', jobKey);
+    assert.equal(persisted.searchSettings?.source, 'saved');
+    assert.deepEqual(persisted.searchSettings?.savedSearch, savedSearch);
+    assert.equal(persisted.searchSettings?.pageKeyword, savedSearch.expectedKeyword);
+    assert.deepEqual(persisted.searchSettings?.conditions, []);
   });
 
   it('persists run results with separate success and failure buckets', async () => {
@@ -5101,6 +5327,7 @@ describe('scoring run semantics', () => {
 
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({
         candidates: [
@@ -5136,6 +5363,7 @@ describe('scoring run semantics', () => {
       fetchedAt,
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary@example.com',
         bossForwardCc: ['primary-audit@example.com'],
@@ -5169,6 +5397,7 @@ describe('scoring run semantics', () => {
     await store.saveSeenIds('boss', jobKey, [candidates[0]!.candidateId]);
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates }),
       openResumeDetail: async (_context, _searchPage, candidate) => {
@@ -5211,6 +5440,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T12:34:56.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary@example.com',
       },
@@ -5261,6 +5491,7 @@ describe('scoring run semantics', () => {
     const beforeSeen = await store.readSeenIds('boss', jobKey);
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates }),
       openResumeDetail: async () => {
@@ -5295,6 +5526,7 @@ describe('scoring run semantics', () => {
       { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
       '2026-08-01T12:34:56.000Z',
       adapter,
+      { searchSource: 'direct' },
     );
 
     assert.deepStrictEqual(viewedIds, candidates.map((candidate) => candidate.candidateId));
@@ -5322,6 +5554,7 @@ describe('scoring run semantics', () => {
     const jobKey = 'job-orchestration-boss-duplicate-bounded-id';
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [{ candidateId: 'duplicate-id' }, { candidateId: 'duplicate-id' }] }),
       openResumeDetail: async () => {
@@ -5338,6 +5571,7 @@ describe('scoring run semantics', () => {
         { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
         '2026-08-01T12:34:56.000Z',
         adapter,
+        { searchSource: 'direct' },
       ),
       /duplicate stable IDs inside the first twenty: duplicate-id/,
     );
@@ -5375,6 +5609,7 @@ describe('scoring run semantics', () => {
 
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates }),
       openResumeDetail: async () => {
@@ -5392,6 +5627,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T12:00:02.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary@example.com',
         bossScreening: screening,
@@ -5415,6 +5651,7 @@ describe('scoring run semantics', () => {
     const candidate = { candidateId: 'boss-card-candidate' };
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [candidate] }),
       openResumeDetail: async () => createDetailPage(),
@@ -5434,6 +5671,7 @@ describe('scoring run semantics', () => {
       { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
       '2026-08-01T12:34:56.000Z',
       adapter,
+      { searchSource: 'direct' },
     );
 
     assert.deepEqual(result.capturedCandidateIds, []);
@@ -5464,6 +5702,7 @@ describe('scoring run semantics', () => {
     };
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({
         candidates: [
@@ -5520,6 +5759,7 @@ describe('scoring run semantics', () => {
       fetchedAt,
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary-forward@example.com',
         bossForwardCc: ['primary-forward-audit@example.com'],
@@ -5710,6 +5950,7 @@ describe('scoring run semantics', () => {
     let parseCalls = 0;
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [candidate] }),
       openResumeDetail: async () => detailPage,
@@ -5737,6 +5978,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T13:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary@example.com',
         bossForwardCc: ['copy@example.com'],
@@ -5763,6 +6005,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T14:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'changed-primary@example.com',
         bossForwardCc: ['changed-copy@example.com'],
@@ -5791,6 +6034,7 @@ describe('scoring run semantics', () => {
     const opened: string[] = [];
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [
         { candidateId: 'boss-close-first' },
@@ -5816,6 +6060,7 @@ describe('scoring run semantics', () => {
         { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
         '2026-08-01T15:00:00.000Z',
         adapter,
+        { searchSource: 'direct' },
       ),
       /detail modal remained visible/,
     );
@@ -5830,6 +6075,7 @@ describe('scoring run semantics', () => {
     const opened: string[] = [];
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [
         { candidateId: 'boss-contact-first' },
@@ -5859,6 +6105,7 @@ describe('scoring run semantics', () => {
         { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
         '2026-08-01T15:30:00.000Z',
         adapter,
+        { searchSource: 'direct' },
       ),
       /purchase dialog.*no forwarding confirmation was attempted/i,
     );
@@ -5886,6 +6133,7 @@ describe('scoring run semantics', () => {
     };
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [candidate] }),
       openResumeDetail: async () => detailPage,
@@ -5914,6 +6162,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T16:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary@example.com',
         bossScreening: screeningSettings,
@@ -5938,6 +6187,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T16:01:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'changed-primary@example.com',
         bossScreening: screeningSettings,
@@ -5960,6 +6210,7 @@ describe('scoring run semantics', () => {
     const forwardRecipients: string[] = [];
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [candidate] }),
       openResumeDetail: async () => detailPage,
@@ -5992,6 +6243,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T01:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary@example.com',
         bossForwardCc: ['primary-copy@example.com'],
@@ -6017,6 +6269,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T02:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'changed-primary@example.com',
         bossForwardCc: ['changed-copy@example.com'],
@@ -6056,6 +6309,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T03:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'another-target@example.com',
         bossForwardCc: ['another-copy@example.com'],
@@ -6078,6 +6332,7 @@ describe('scoring run semantics', () => {
     let scoreCalls = 0;
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [candidate] }),
       openResumeDetail: async () => detailPage,
@@ -6109,6 +6364,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T04:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary@example.com',
         bossForwardCc: ['uncertain-copy@example.com', 'pending-copy@example.com'],
@@ -6134,6 +6390,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T05:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'changed@example.com',
         bossForwardCc: ['changed-copy@example.com'],
@@ -6215,6 +6472,7 @@ describe('scoring run semantics', () => {
     const forwardRecipients: string[] = [];
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [candidate] }),
       openResumeDetail: async () => createDetailPage(),
@@ -6237,6 +6495,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T07:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'current-primary@example.com',
         bossScreening: screeningSettings,
@@ -6277,6 +6536,7 @@ describe('scoring run semantics', () => {
     });
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [candidate] }),
       openResumeDetail: async () => {
@@ -6298,6 +6558,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T09:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'current-primary@example.com',
         bossScreening: buildModelScreeningSettings(),
@@ -6333,6 +6594,7 @@ describe('scoring run semantics', () => {
     };
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
       openSubscribeSearch: async () => createSearchPage(),
       extractCandidateList: async () => ({ candidates: [candidate] }),
       openResumeDetail: async () => detailPage,
@@ -6364,6 +6626,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T01:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary@example.com',
         bossScreening: screeningSettings,
@@ -6388,6 +6651,7 @@ describe('scoring run semantics', () => {
       '2026-08-01T02:00:00.000Z',
       adapter,
       {
+        searchSource: 'direct',
         bossForwardMode: 'email',
         bossForwardRecipient: 'primary@example.com',
         bossScreening: screeningSettings,
@@ -6440,6 +6704,8 @@ describe('scoring run semantics', () => {
           keyword,
           '--jd',
           '职位名称：工业设计师',
+          '--search-source',
+          'direct',
           '--boss-forward-mode',
           'email',
           '--boss-forward-recipient',
@@ -7393,6 +7659,72 @@ describe('scoring run semantics', () => {
     assert.equal(batchSummaries[0]?.summary.searchExecution?.pageKeyword, '铝合金');
     assert.deepStrictEqual(directKeywords, ['铝', '铝合金']);
     assert.equal(await pathExists(path.join(tempDir, 'boss', 'jobs', jobName)), false);
+  });
+
+  it('uses a complete Boss saved-search reference supplied by one jobs-file item', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const bossJobId = 'boss-position-batch-saved-reference';
+    const jobName = '全铝箱包设计';
+    const jobKey = buildBossSyncedJobKey(jobName, bossJobId);
+    const conditionIdentity = {
+      jobScope: jobName,
+      city: '广东',
+      inline: { education: ['本科及以上'] },
+      more: {},
+      toggles: { filter_recent_viewed: false },
+    };
+    const savedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '铝镁合金',
+      nativeId: 'batch-native-subscription',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: jobName,
+      rawText: '职位名称：全铝箱包设计',
+      normalizedJob: { ...buildNormalizedJob(), title: jobName },
+      searchSettings: {
+        source: 'saved',
+        pageKeyword: savedSearch.expectedKeyword,
+        conditions: [],
+      },
+      bossPosition: {
+        bossJobId,
+        status: 'open',
+        syncedAt: '2026-08-04T00:00:00.000Z',
+        sourceHash: 'source-hash',
+      },
+      createdAt: '2026-08-04T00:00:00.000Z',
+    });
+    const jobsFilePath = path.join(tempDir, 'boss-saved-jobs.json');
+    await fs.writeFile(jobsFilePath, JSON.stringify([{
+      keyword: jobName,
+      bossJobId,
+      bossSearchKeyword: savedSearch.expectedKeyword,
+      searchSource: 'saved',
+      bossSavedSearchReference: savedSearch,
+    }], null, 2), 'utf8');
+    stubSuccessfulRun(indexModule);
+    const opened: unknown[] = [];
+    bossAdapter.openSavedSearch = async (_page, target) => {
+      opened.push(target);
+      return createSearchPage();
+    };
+
+    const result = await indexModule.main([
+      '--platform', 'boss', '--jobs-file', jobsFilePath,
+    ]);
+    const summaries = assertBatchSummary(result);
+    assert.equal(summaries.length, 1);
+    assert.deepEqual(opened, [savedSearch]);
+    assert.deepEqual(summaries[0]?.summary.searchExecution?.savedSearch, savedSearch);
   });
 
   it('rejects an unresolved Boss position ID before browser or capture side effects', async () => {
@@ -8502,6 +8834,8 @@ describe('scoring run semantics', () => {
         keyword,
         '--jd',
         '职位名称：含直猎邦全平台测试',
+        '--search-source',
+        'direct',
       ]));
 
       assert.deepStrictEqual(result.map((entry) => entry.platform), ['51job', 'liepin', 'zhilian', 'boss']);
@@ -8569,6 +8903,8 @@ describe('scoring run semantics', () => {
         'true',
         '--keyword',
         keyword,
+        '--search-source',
+        'direct',
       ]),
       new RegExp(`Capture preflight failed before opening a browser:[\\s\\S]*${keyword} / boss: Missing required argument --jd or --jd-file`),
     );
@@ -8723,6 +9059,8 @@ describe('scoring run semantics', () => {
         'boss',
         '--jobs-file',
         jobsFilePath,
+        '--search-source',
+        'direct',
         '--boss-forward-mode',
         'email',
         '--boss-forward-recipient',
@@ -8841,6 +9179,8 @@ describe('scoring run semantics', () => {
         'true',
         '--jobs-file',
         jobsFilePath,
+        '--search-source',
+        'direct',
       ]));
 
       assert.deepStrictEqual(result.map((entry) => `${entry.summary.jobKey}:${entry.platform}`), [

@@ -130,9 +130,9 @@ into Boss/直猎邦 as a fourth stage only with `--platform all --include-boss t
 4. Boss
 
 `listSupportedPlatforms()` remains the core three-platform list for modes whose `all` contract has
-not expanded. Use the capture-specific platform selection only in normal capture and batch; do not
-implicitly add Boss to search subscription, JD/RAG questions, filter discovery, Talent Mapping, or
-Boss independent modes.
+not expanded. Use purpose-specific platform selection for normal capture/batch and search
+subscription; both require explicit `includeBoss=true` to add Boss. Do not implicitly add Boss to
+JD/RAG questions, filter discovery, Talent Mapping, or Boss independent modes.
 
 For an all-platform jobs-file run, jobs-file order is the outer loop and the selected platform order
 above is the inner loop. Existing schedules and tasks without `includeBoss` remain core-only.
@@ -151,12 +151,18 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
 
 ### Standalone Modes
 
+- User-facing terminology is stable: ordinary capture with `search-source saved` is “订阅搜索”,
+  ordinary capture with `search-source direct` is “直接搜索”, and the standalone
+  `search-subscription` mode is “订阅管理”. Keep internal enum values, CLI flags, schemas, and
+  persisted `saved|direct` values unchanged.
 - jd-question and rag-question are aliases and standalone. They do not open a browser, capture or
   score resumes, export reports, or send email.
 - A stored-job question uses persisted RAG without JD reparsing. A temporary JD question uses only
   that JD and creates no job record, persistent RAG index, or production answer log.
 - Search subscription is standalone. It does not parse JD, create jobs, capture/score resumes,
-  export, send email, or alter seen state.
+  export, send email, or alter seen state. Plain `platform all` remains core-only; explicit
+  `platform all + includeBoss=true` adds Boss native subscription selection/save as the fourth
+  stage without authorizing any other Boss mode.
 - Boss auto-chat, talent discovery, greet, atomic chat operations, and position/JD sync are
   standalone Boss-only modes. Reads default to read-only; match, greet, chat, and contact mutations
   require explicit confirmation. Only position/JD sync is schedulable.
@@ -173,9 +179,11 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
   filter paths resolve from the jobs-file directory.
 - search-source saved|direct is only for normal capture. New jobs default to saved; omitted rerun
   values reuse persisted settings.
-- include-boss is valid only for normal capture or batch with platform all. It defaults false; when
-  true, Boss uses the ordinary capture chain and may reuse the Boss job's saved forwarding setting.
-  It never authorizes Boss talent matching, greetings, chat operations, or position sync.
+- include-boss is valid for normal capture, batch, or search subscription with platform all. It
+  defaults false; when true for capture, Boss uses the ordinary capture chain and may reuse the
+  Boss job's saved forwarding setting. When true for search subscription, Boss is limited to
+  native subscription search/save. It never authorizes Boss talent matching, greetings, chat
+  operations, forwarding, candidate capture, or position sync.
 - application-filter-input-file requires explicit direct search in normal capture. Build conditions
   from the saved application-filter catalog, persist normalized conditions and original input, and
   fail the run if any requested condition is skipped or fails.

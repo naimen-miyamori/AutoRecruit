@@ -14,6 +14,8 @@ import type {
   SearchCondition,
   SearchConditionApplyResult,
   SearchConditionPlan,
+  SearchConditionSaveResult,
+  SearchSubscriptionFailureSummary,
   SearchSubscriptionSummary,
 } from '../types/job.js';
 
@@ -27,6 +29,19 @@ interface LoadSearchConditionPlanFileOptions {
 interface RunSearchSubscriptionWorkflowOptions extends SearchWaitOptions {
   save: boolean;
   savedSearchName?: string;
+}
+
+export class SearchSubscriptionRunError extends Error {
+  readonly summary: SearchSubscriptionFailureSummary;
+
+  constructor(summary: SearchSubscriptionFailureSummary, cause?: unknown) {
+    super(
+      `Search subscription stopped at ${summary.stoppedPlatform}: ${summary.error}`,
+      cause === undefined ? undefined : { cause },
+    );
+    this.name = 'SearchSubscriptionRunError';
+    this.summary = summary;
+  }
 }
 
 function assertPlainObject(value: unknown, label: string): asserts value is Record<string, unknown> {
@@ -395,23 +410,48 @@ export async function runSearchSubscriptionWorkflow(
   plan: SearchConditionPlan,
   options: RunSearchSubscriptionWorkflowOptions,
 ): Promise<SearchSubscriptionSummary> {
-  if (!adapter.prepareSearchConditionPage) {
+  if (!adapter.executeSearchConditionPlan && !adapter.prepareSearchConditionPage) {
     throw new Error(`Platform ${adapter.platform} does not support opening a search-condition input page.`);
   }
-  if (!adapter.readSearchConditionResultTotal) {
+  if (!adapter.executeSearchConditionPlan && !adapter.readSearchConditionResultTotal) {
     throw new Error(`Platform ${adapter.platform} does not support reading search-condition result totals.`);
   }
   if (options.save && !adapter.saveSearchCondition) {
     throw new Error(`Platform ${adapter.platform} does not support saving search conditions.`);
   }
 
-  const searchPage = await adapter.prepareSearchConditionPage(page, plan.keyword, options);
-  const conditionResults = await applySearchConditions(adapter, searchPage, plan.conditions);
+  const effectiveOptions = adapter.platform === 'boss' && options.sortPolicy === undefined
+    ? { ...options, sortPolicy: 'match-priority' as const }
+    : options;
+  let searchPage: Page;
+  let conditionResults: SearchConditionApplyResult[];
+  let resultTotal: number;
+  let resultTotalSource: 'page' | 'api';
+  if (adapter.executeSearchConditionPlan) {
+    const execution = await adapter.executeSearchConditionPlan(page, plan, effectiveOptions);
+    searchPage = execution.page;
+    conditionResults = execution.conditionResults;
+    resultTotal = execution.resultTotal;
+    resultTotalSource = execution.resultTotalSource;
+  } else {
+    if (!adapter.prepareSearchConditionPage) {
+      throw new Error(`Platform ${adapter.platform} does not support opening a search-condition input page.`);
+    }
+    searchPage = await adapter.prepareSearchConditionPage(page, plan.keyword, effectiveOptions);
+    conditionResults = await applySearchConditions(adapter, searchPage, plan.conditions);
+    if (!adapter.readSearchConditionResultTotal) {
+      throw new Error(`Platform ${adapter.platform} does not support reading search-condition result totals.`);
+    }
+    const result = await adapter.readSearchConditionResultTotal(searchPage, effectiveOptions);
+    resultTotal = result.resultTotal;
+    resultTotalSource = result.resultTotalSource;
+  }
   const conditionStatusCounts = countConditionStatuses(conditionResults);
   const allConditionsApplied = conditionStatusCounts.skipped === 0 && conditionStatusCounts.failed === 0;
-  const { resultTotal, resultTotalSource } = await adapter.readSearchConditionResultTotal(searchPage, options);
   const savedSearchName = options.savedSearchName ?? plan.savedSearchName;
   let saved = false;
+  let saveOutcome: SearchSubscriptionSummary['saveOutcome'];
+  let savedSearch: SearchSubscriptionSummary['savedSearch'];
 
   if (options.save) {
     if (!savedSearchName) {
@@ -421,7 +461,23 @@ export async function runSearchSubscriptionWorkflow(
       throw new Error('Refusing to save search subscription because not all search conditions were applied.');
     }
 
-    await adapter.saveSearchCondition!(searchPage, savedSearchName, options);
+    const saveResult = await adapter.saveSearchCondition!(searchPage, savedSearchName, effectiveOptions);
+    if (adapter.platform === 'boss') {
+      if (!saveResult || typeof saveResult !== 'object' || !('outcome' in saveResult) || !('savedSearch' in saveResult)) {
+        throw new Error('Boss saveSearchCondition must return a complete saved-search reference and typed outcome.');
+      }
+      const typedResult = saveResult as SearchConditionSaveResult;
+      if (!typedResult.savedSearch) {
+        throw new Error('Boss saveSearchCondition returned no saved-search reference.');
+      }
+      saveOutcome = typedResult.outcome;
+      savedSearch = typedResult.savedSearch;
+    } else if (saveResult && typeof saveResult === 'object' && 'outcome' in saveResult) {
+      saveOutcome = saveResult.outcome;
+      savedSearch = saveResult.savedSearch;
+    } else {
+      saveOutcome = 'saved';
+    }
     saved = true;
   }
 
@@ -436,5 +492,8 @@ export async function runSearchSubscriptionWorkflow(
     allConditionsApplied,
     conditionStatusCounts,
     conditionResults,
+    ...(savedSearch ? { savedSearch } : {}),
+    ...(saveOutcome ? { saveOutcome } : {}),
+    ...(effectiveOptions.sortPolicy ? { sortPolicy: effectiveOptions.sortPolicy } : {}),
   };
 }

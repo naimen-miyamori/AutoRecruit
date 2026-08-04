@@ -8,7 +8,7 @@ import { BrowserSession, closeBrowserSession, ensureAuthenticatedBrowserSession 
 import { waitPlatformActionPace, waitPlatformCandidatePace } from './browser/pacing.js';
 import { createProductionExtractionBoundary } from './extraction/production-extractor.js';
 import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
-import { getPlatformAdapter, listCapturePlatforms, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
+import { getPlatformAdapter, listCapturePlatforms, listSearchSubscriptionPlatforms, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { fiftyOneJobAdapter } from './platforms/51job-adapter.js';
 import {
   BossForwardUncertainError,
@@ -28,7 +28,7 @@ import {
   waitBossActionPaceWithinDeadline,
 } from './platforms/boss/actions/context.js';
 import { executeBossChatOperation } from './platforms/boss-operations.js';
-import { syncBossPositions } from './platforms/boss-jobs.js';
+import { buildBossSyncedJobKey, syncBossPositions } from './platforms/boss-jobs.js';
 import { greetBossTalentCandidate, runBossTalentSearch } from './platforms/boss-talent.js';
 import {
   closeBossChatResume,
@@ -40,11 +40,17 @@ import {
   openBossChatPage,
   openBossUnreadConversation,
 } from './platforms/boss-chat.js';
-import { normalizeBossCaptureTaskSnapshot } from './server/task-normalizers.js';
+import { normalizeBossCaptureTaskSnapshot, normalizeBossSavedSearchReference } from './server/task-normalizers.js';
 import type { BossForwardMode, CandidatePostOpenActions, CandidateProfileDetailOptions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
 import { answerCandidateQuestionFromJd, toJdRagSources, type JdRagSource } from './rag/jd-question-answering.js';
 import { answerQuestionWithRag } from './rag/service.js';
-import { buildApplicationFilterConditions, loadApplicationFilterInputFile, loadSearchConditionPlanFile, runSearchSubscriptionWorkflow } from './search/search-subscription.js';
+import {
+  buildApplicationFilterConditions,
+  loadApplicationFilterInputFile,
+  loadSearchConditionPlanFile,
+  runSearchSubscriptionWorkflow,
+  SearchSubscriptionRunError,
+} from './search/search-subscription.js';
 import {
   SearchConditionSetService,
   type SearchConditionSetReference,
@@ -107,7 +113,9 @@ import {
   ReportDeliveryOptions,
   resolveReportDelivery,
   RunResult,
+  SavedSearchReference,
   SearchCondition,
+  SearchSortPolicy,
   SearchSubscriptionSummary,
   RunCaptureFailure,
   RunProcessingFailure,
@@ -196,6 +204,8 @@ interface RunnableJobInput extends ReportDeliveryOptions {
   bossJobId?: string;
   /** Explicit Boss page-query override; never affects core-platform searches. */
   bossSearchKeyword?: string;
+  /** Complete verified native reference; a name alone is never sufficient. */
+  bossSavedSearchReference?: SavedSearchReference;
   /** Fixed Boss-only condition-set override; it never changes core stages. */
   bossSearchConditionSetRef?: SearchConditionSetReference;
   jobDescriptionText?: string;
@@ -267,9 +277,18 @@ interface SearchSubscriptionCliInput {
   platform: CliPlatformSelection;
   keyword?: string;
   filePath: string;
+  includeBoss: boolean;
   save: boolean;
   savedSearchName?: string;
   searchConditionSetRefs?: Partial<Record<SupportedPlatform, SearchConditionSetReference>>;
+}
+
+interface BossSavedSearchBindingCliInput {
+  mode: 'boss-saved-search-binding';
+  platform: 'boss';
+  searchKeyword: string;
+  bossJobId?: string;
+  savedSearch: SavedSearchReference;
 }
 
 interface TalentMappingCliInput {
@@ -327,6 +346,7 @@ interface BatchRunnableJobInput extends RunnableJobInput {
 type CliInput = SingleJobCliInput
   | BatchCliInput
   | SearchSubscriptionCliInput
+  | BossSavedSearchBindingCliInput
   | TalentMappingCliInput
   | JdQuestionCliInput
   | BossAutoChatCliInput
@@ -340,6 +360,7 @@ interface SinglePlatformCliInput extends ReportDeliveryOptions {
   searchKeyword: string;
   bossJobId?: string;
   bossSearchKeyword?: string;
+  bossSavedSearchReference?: SavedSearchReference;
   bossSearchConditionSetRef?: SearchConditionSetReference;
   jobDescriptionText?: string;
   jobDescriptionFilePath?: string;
@@ -455,11 +476,23 @@ export interface BossAutoChatRunSummary extends BossChatReviewRun {
   summaryEmailSubject?: string;
 }
 
+export interface BossSavedSearchBindingSummary {
+  mode: 'boss-saved-search-binding';
+  platform: 'boss';
+  jobKey: string;
+  savedSearch: SavedSearchReference;
+  previousRevision: number;
+  revision: number;
+  verifiedAt: string;
+  candidateSideEffects: false;
+}
+
 export type MainResult = MainRunSummary
   | AllPlatformsRunSummary[]
   | BatchJobRunSummary[]
   | SearchSubscriptionSummary
   | SearchSubscriptionSummary[]
+  | BossSavedSearchBindingSummary
   | JdQuestionRunSummary
   | JdQuestionRunSummary[]
   | BossAutoChatRunSummary
@@ -579,6 +612,7 @@ function parseSearchConditionSetReferences(
     platform: CliPlatformSelection;
     includeBoss: boolean;
     argumentName: string;
+    purpose?: 'capture' | 'search-subscription';
   },
 ): Partial<Record<SupportedPlatform, SearchConditionSetReference>> | undefined {
   if (value === undefined) {
@@ -592,7 +626,9 @@ function parseSearchConditionSetReferences(
 
   const allowedPlatforms = new Set(
     options.platform === 'all'
-      ? listCapturePlatforms(options.includeBoss)
+      ? options.purpose === 'search-subscription'
+        ? listSearchSubscriptionPlatforms(options.includeBoss)
+        : listCapturePlatforms(options.includeBoss)
       : [options.platform],
   );
   const references: Partial<Record<SupportedPlatform, SearchConditionSetReference>> = {};
@@ -826,6 +862,18 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   const email = parseOptionalString(item.email, 'email', itemIndex);
   const bossJobId = parseOptionalString(item.bossJobId, 'bossJobId', itemIndex)?.trim();
   const bossSearchKeyword = parseOptionalString(item.bossSearchKeyword, 'bossSearchKeyword', itemIndex)?.trim();
+  const bossSavedSearchReference = item.bossSavedSearchReference === undefined
+    ? undefined
+    : (() => {
+      try {
+        return normalizeBossSavedSearchReference(
+          item.bossSavedSearchReference,
+          `jobs-file item ${itemIndex}.bossSavedSearchReference`,
+        );
+      } catch (error) {
+        throw new Error(`Invalid jobs-file item at index ${itemIndex}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })();
   const itemSearchSourceValue = parseOptionalString(item.searchSource, 'searchSource', itemIndex);
   const itemApplicationFilterInputFile = parseOptionalString(item.applicationFilterInputFile, 'applicationFilterInputFile', itemIndex);
   const itemSearchConditionSetRefs = parseBatchSearchConditionSetReferences(item.searchConditionSets, itemIndex, input);
@@ -912,8 +960,19 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
   if (bossSearchKeyword !== undefined && !bossSearchKeyword) {
     throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossSearchKeyword must be a non-empty string`);
   }
-  if ((bossJobId || bossSearchKeyword) && !listSelectedCapturePlatforms(input.platform, input.includeBoss).includes('boss')) {
-    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossJobId and bossSearchKeyword require a selected Boss capture stage`);
+  if ((bossJobId || bossSearchKeyword || bossSavedSearchReference)
+    && !listSelectedCapturePlatforms(input.platform, input.includeBoss).includes('boss')) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossJobId, bossSearchKeyword, and bossSavedSearchReference require a selected Boss capture stage`);
+  }
+  if (bossSavedSearchReference && effectiveSearchSource === 'direct') {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossSavedSearchReference requires searchSource saved or an omitted searchSource`);
+  }
+  if (bossSavedSearchReference && bossSavedSearchReference.conditionIdentity.jobScope !== keyword) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossSavedSearchReference.conditionIdentity.jobScope must match keyword`);
+  }
+  if (bossSavedSearchReference && bossSearchKeyword
+    && bossSavedSearchReference.expectedKeyword !== bossSearchKeyword) {
+    throw new Error(`Invalid jobs-file item at index ${itemIndex}: bossSavedSearchReference.expectedKeyword must match bossSearchKeyword`);
   }
 
   const hasItemBossScreeningInput = item.bossScreeningEnabled !== undefined
@@ -977,6 +1036,7 @@ function parseBatchJobItem(value: unknown, itemIndex: number, input: BatchCliInp
     searchKeyword: keyword,
     bossJobId,
     bossSearchKeyword,
+    bossSavedSearchReference,
     recipientEmail: email ?? input.recipientEmail,
     ccEmails: item.cc === undefined ? input.ccEmails : itemCcEmails,
     jobDescriptionText: jd,
@@ -1037,16 +1097,21 @@ function listSelectedCapturePlatforms(platform: CliPlatformSelection, includeBos
   return platform === 'all' ? listCapturePlatforms(includeBoss) : [platform];
 }
 
+function listSelectedSearchSubscriptionPlatforms(platform: CliPlatformSelection, includeBoss: boolean): SupportedPlatform[] {
+  return platform === 'all' ? listSearchSubscriptionPlatforms(includeBoss) : [platform];
+}
+
 function assertBossCaptureArgumentsAllowed(input: {
   platform: CliPlatformSelection;
   includeBoss: boolean;
   bossJobId?: string;
   bossSearchKeyword?: string;
   bossSearchConditionSetRef?: SearchConditionSetReference;
+  bossSavedSearchReference?: SavedSearchReference;
 }): void {
-  if (!input.bossJobId && !input.bossSearchKeyword && !input.bossSearchConditionSetRef) return;
+  if (!input.bossJobId && !input.bossSearchKeyword && !input.bossSearchConditionSetRef && !input.bossSavedSearchReference) return;
   if (input.platform === 'boss' || (input.platform === 'all' && input.includeBoss)) return;
-  throw new Error('--boss-job-id, --boss-search-keyword, and --boss-search-condition-set require --platform boss or --platform all --include-boss true');
+  throw new Error('--boss-job-id, --boss-search-keyword, --boss-search-condition-set, and --boss-saved-search-reference-json require --platform boss or --platform all --include-boss true');
 }
 
 function assertBossScreeningArgumentsAllowed(input: {
@@ -1152,6 +1217,18 @@ function parseArgs(argv: readonly string[]): CliInput {
       }
     })()
     : undefined;
+  const bossSavedSearchReference = flagPresence.has('boss-saved-search-reference-json')
+    ? (() => {
+      try {
+        return normalizeBossSavedSearchReference(
+          JSON.parse(values.get('boss-saved-search-reference-json')!),
+          '--boss-saved-search-reference-json',
+        );
+      } catch (error) {
+        throw new Error(`Invalid --boss-saved-search-reference-json: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })()
+    : undefined;
   const hasBossScreeningInput = flagPresence.has('boss-screening-enabled')
     || flagPresence.has('boss-screening-policy-file')
     || flagPresence.has('boss-secondary-forward-mode')
@@ -1198,6 +1275,9 @@ function parseArgs(argv: readonly string[]): CliInput {
   const bossChatOperationValue = values.get('boss-chat-operation')?.trim();
   const bossJobSync = flagPresence.has('boss-job-sync')
     ? parseOptionalBoolean(values.get('boss-job-sync'), '--boss-job-sync')
+    : false;
+  const bossBindSavedSearch = flagPresence.has('boss-bind-saved-search')
+    ? parseOptionalBoolean(values.get('boss-bind-saved-search'), '--boss-bind-saved-search')
     : false;
   const bossIncludeClosedJobs = flagPresence.has('boss-include-closed-jobs')
     ? parseOptionalBoolean(values.get('boss-include-closed-jobs'), '--boss-include-closed-jobs')
@@ -1354,6 +1434,33 @@ function parseArgs(argv: readonly string[]): CliInput {
     }
   };
 
+  if (bossBindSavedSearch) {
+    assertBossStandalone('--boss-bind-saved-search', [
+      'boss-bind-saved-search',
+      'keyword',
+      'boss-job-id',
+      'boss-saved-search-reference-json',
+      'boss-confirmed',
+    ]);
+    if (!searchKeyword) {
+      throw new Error('--boss-bind-saved-search requires --keyword with the persisted Boss job name');
+    }
+    if (!bossSavedSearchReference) {
+      throw new Error('--boss-bind-saved-search requires --boss-saved-search-reference-json');
+    }
+    if (!flagPresence.has('boss-confirmed')
+      || parseOptionalBoolean(values.get('boss-confirmed'), '--boss-confirmed') !== true) {
+      throw new Error('--boss-bind-saved-search requires --boss-confirmed true');
+    }
+    return {
+      mode: 'boss-saved-search-binding',
+      platform: 'boss',
+      searchKeyword,
+      ...(bossJobId ? { bossJobId } : {}),
+      savedSearch: bossSavedSearchReference,
+    };
+  }
+
   if (bossTalentSource) {
     assertBossStandalone('--boss-talent-source', [
       'boss-talent-source',
@@ -1494,6 +1601,7 @@ function parseArgs(argv: readonly string[]): CliInput {
       'boss-job-id',
       'boss-search-keyword',
       'boss-search-condition-set',
+      'boss-saved-search-reference-json',
       'boss-screening-enabled',
       'boss-screening-policy-file',
       'boss-secondary-forward-mode',
@@ -1542,8 +1650,8 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error('--jd-question must be a non-empty string');
     }
 
-    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || hasBossForwardingInput || hasBossScreeningInput || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || flagPresence.has('search-condition-set') || saveSearchSubscription || searchSubscriptionName) {
-      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-forward-cc, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --search-source, --application-filter-input-file, --search-condition-set, --save-search-subscription, or --search-subscription-name');
+    if (jobsFilePath || searchSubscriptionFilePath || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || hasBossForwardingInput || hasBossScreeningInput || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('boss-saved-search-reference-json') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file') || flagPresence.has('search-condition-set') || saveSearchSubscription || searchSubscriptionName) {
+      throw new Error('--jd-question cannot be combined with --jobs-file, --search-subscription-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-forward-cc, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --boss-saved-search-reference-json, --search-source, --application-filter-input-file, --search-condition-set, --save-search-subscription, or --search-subscription-name');
     }
 
     if (jobDescriptionText && jobDescriptionFilePath) {
@@ -1565,19 +1673,21 @@ function parseArgs(argv: readonly string[]): CliInput {
   }
 
   if (searchSubscriptionFilePath) {
-    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('include-boss') || flagPresence.has('liepin-forward-contact') || hasBossForwardingInput || hasBossScreeningInput || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
-      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --include-boss, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-forward-cc, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --search-source, or --application-filter-input-file');
+    if (jobsFilePath || flagPresence.has('jd') || flagPresence.has('jd-file') || flagPresence.has('email') || flagPresence.has('cc') || flagPresence.has('include-viewed') || flagPresence.has('liepin-forward-contact') || hasBossForwardingInput || hasBossScreeningInput || flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('boss-saved-search-reference-json') || flagPresence.has('search-source') || flagPresence.has('application-filter-input-file')) {
+      throw new Error('--search-subscription-file cannot be combined with --jobs-file, --jd, --jd-file, --email, --cc, --include-viewed, --liepin-forward-contact, --boss-forward-mode, --boss-forward-recipient, --boss-forward-cc, --boss-job-id, --boss-search-keyword, --boss-search-condition-set, --boss-saved-search-reference-json, --search-source, or --application-filter-input-file');
     }
 
     const searchConditionSetRefs = parseSearchConditionSetReferences(values.get('search-condition-set'), {
       platform,
-      includeBoss: false,
+      includeBoss,
       argumentName: '--search-condition-set',
+      purpose: 'search-subscription',
     });
 
     return {
       mode: 'search-subscription',
       platform,
+      includeBoss,
       keyword: searchKeyword,
       filePath: searchSubscriptionFilePath,
       save: saveSearchSubscription,
@@ -1597,8 +1707,8 @@ function parseArgs(argv: readonly string[]): CliInput {
     if (flagPresence.has('keyword') || flagPresence.has('jd') || flagPresence.has('jd-file')) {
       throw new Error('--jobs-file cannot be combined with --keyword, --jd, or --jd-file');
     }
-    if (flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set')) {
-      throw new Error('--boss-job-id, --boss-search-keyword, and --boss-search-condition-set must be specified per jobs-file item as bossJobId, bossSearchKeyword, and searchConditionSets.boss');
+    if (flagPresence.has('boss-job-id') || flagPresence.has('boss-search-keyword') || flagPresence.has('boss-search-condition-set') || flagPresence.has('boss-saved-search-reference-json')) {
+      throw new Error('--boss-job-id, --boss-search-keyword, --boss-search-condition-set, and --boss-saved-search-reference-json must be specified per jobs-file item');
     }
 
     const searchConditionSetRefs = parseSearchConditionSetReferences(values.get('search-condition-set'), {
@@ -1680,6 +1790,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     bossJobId,
     bossSearchKeyword,
     bossSearchConditionSetRef,
+    bossSavedSearchReference,
   });
 
   return {
@@ -1688,6 +1799,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     searchKeyword,
     bossJobId,
     bossSearchKeyword,
+    bossSavedSearchReference,
     bossSearchConditionSetRef,
     recipientEmail,
     ccEmails,
@@ -1725,6 +1837,7 @@ function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPl
     searchKeyword: input.searchKeyword,
     ...(platform === 'boss' && input.bossJobId ? { bossJobId: input.bossJobId } : {}),
     ...(platform === 'boss' && input.bossSearchKeyword ? { bossSearchKeyword: input.bossSearchKeyword } : {}),
+    ...(platform === 'boss' && input.bossSavedSearchReference ? { bossSavedSearchReference: input.bossSavedSearchReference } : {}),
     ...(platform === 'boss' && input.bossSearchConditionSetRef
       ? { bossSearchConditionSetRef: input.bossSearchConditionSetRef }
       : {}),
@@ -2399,7 +2512,7 @@ async function retryBossScreeningForwarding(input: {
       store,
       detailOptions,
     });
-    // `forwardBossResume` performs the live detail API identity check before
+    // `forwardBossResume` performs the live detail identity check before
     // each recipient dialog. Treat the forwarding action's successful return
     // as the workflow receipt for this retry lifecycle.
     if (platformAdapter.platform === 'boss') {
@@ -3175,6 +3288,8 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   postScoreRouting?: PostScoreRoutingSettings;
   searchSource?: SearchSource;
   searchConditions?: SearchCondition[];
+  savedSearch?: SavedSearchReference;
+  sortPolicy?: SearchSortPolicy;
   /** Immutable report targets captured before the run; used by routed replay. */
   reportDelivery?: ReportDeliveryOptions;
   secondaryReportDelivery?: ReportDeliveryOptions;
@@ -3267,6 +3382,9 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   }
   const searchSource = options.searchSource ?? 'saved';
   const searchConditions = options.searchConditions ?? [];
+  if (platform === 'boss' && searchSource === 'saved' && !options.savedSearch) {
+    throw new Error('Boss saved-reference-required: ordinary saved capture requires a complete verified native subscription reference.');
+  }
   const platformEstimatedTimeoutMs = platformAdapter.estimateSearchTimeoutMs?.({
     source: searchSource,
     conditions: searchConditions,
@@ -3284,6 +3402,7 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   const searchOptions = {
     deadline: searchDeadline,
     includeViewedCandidates: options.includeViewedCandidates,
+    sortPolicy: options.sortPolicy,
   };
   const searchPage = searchSource === 'direct'
     ? await (async () => {
@@ -3293,7 +3412,14 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
 
       return platformAdapter.openDirectSearch(session.page, pageKeyword, searchConditions, searchOptions);
     })()
-    : await platformAdapter.openSubscribeSearch(session.page, pageKeyword, searchOptions);
+    : platform === 'boss'
+      ? await (async () => {
+        if (!options.savedSearch || !platformAdapter.openSavedSearch) {
+          throw new Error('Boss saved-reference-required: native saved-search action is not registered; refusing the legacy saved-search fallback.');
+        }
+        return platformAdapter.openSavedSearch(session.page, options.savedSearch, searchOptions);
+      })()
+      : await platformAdapter.openSubscribeSearch(session.page, pageKeyword, searchOptions);
   session.page = searchPage;
   const { candidates: extractedCandidates } = platformAdapter.platform === '51job'
     ? await extractCandidateListRef.fn(searchPage, { deadline: searchDeadline })
@@ -4029,6 +4155,8 @@ async function resolveResumeCaptureContext(
         ...(snapshot.searchPlan.selectedFieldsFingerprint
           ? { resolution: { selectedFieldsFingerprint: snapshot.searchPlan.selectedFieldsFingerprint } }
           : {}),
+        ...(snapshot.searchPlan.savedSearch ? { savedSearch: snapshot.searchPlan.savedSearch } : {}),
+        ...(snapshot.searchPlan.sortPolicy ? { sortPolicy: snapshot.searchPlan.sortPolicy } : {}),
       },
       pageKeyword: snapshot.searchPlan.pageKeyword,
       ...(snapshot.jobIdentity.bossJobId ? { bossJobId: snapshot.jobIdentity.bossJobId } : {}),
@@ -4040,6 +4168,8 @@ async function resolveResumeCaptureContext(
         ...(snapshot.searchPlan.selectedFieldsFingerprint
           ? { selectedFieldsFingerprint: snapshot.searchPlan.selectedFieldsFingerprint }
           : {}),
+        ...(snapshot.searchPlan.savedSearch ? { savedSearch: snapshot.searchPlan.savedSearch } : {}),
+        ...(snapshot.searchPlan.sortPolicy ? { sortPolicy: snapshot.searchPlan.sortPolicy } : {}),
       },
     };
   }
@@ -4051,6 +4181,7 @@ async function resolveResumeCaptureContext(
     jobName: input.searchKeyword,
     ...(input.bossJobId ? { bossJobId: input.bossJobId } : {}),
     ...(input.bossSearchKeyword ? { bossSearchKeyword: input.bossSearchKeyword } : {}),
+    ...(input.bossSavedSearchReference ? { savedSearchReference: input.bossSavedSearchReference } : {}),
     searchSource: input.searchSource,
     searchSourceExplicit: input.searchSourceExplicit,
     ...(input.searchConditionSetRef ? { searchConditionSetRef: input.searchConditionSetRef } : {}),
@@ -4065,6 +4196,8 @@ async function resolveResumeCaptureContext(
     ...(plan.search.selectedFieldsFingerprint ? {
       resolution: { selectedFieldsFingerprint: plan.search.selectedFieldsFingerprint },
     } : {}),
+    ...(plan.search.savedSearch ? { savedSearch: plan.search.savedSearch } : {}),
+    ...(plan.search.sortPolicy ? { sortPolicy: plan.search.sortPolicy } : {}),
   };
 
   return {
@@ -4083,6 +4216,8 @@ async function resolveResumeCaptureContext(
       ...(plan.search.selectedFieldsFingerprint ? {
         selectedFieldsFingerprint: plan.search.selectedFieldsFingerprint,
       } : {}),
+      ...(plan.search.savedSearch ? { savedSearch: plan.search.savedSearch } : {}),
+      ...(plan.search.sortPolicy ? { sortPolicy: plan.search.sortPolicy } : {}),
     },
   };
 }
@@ -4370,6 +4505,8 @@ async function runSinglePlatform(input: SinglePlatformCliInput, options: { print
         postScoreRouting,
         searchSource: searchSettings.source,
         searchConditions: searchSettings.conditions,
+        ...(searchSettings.savedSearch ? { savedSearch: searchSettings.savedSearch } : {}),
+        ...(searchSettings.sortPolicy ? { sortPolicy: searchSettings.sortPolicy } : {}),
         reportDelivery: delivery,
         secondaryReportDelivery: bossScreening?.secondaryDelivery ?? postScoreRouting?.secondaryDelivery,
         searchExecution: captureContext.searchExecution,
@@ -4497,40 +4634,149 @@ async function runSearchSubscription(input: SearchSubscriptionCliInput): Promise
   const summaries: SearchSubscriptionSummary[] = [];
   const conditionSetService = input.searchConditionSetRefs ? new SearchConditionSetService() : undefined;
 
-  for (const platform of listSelectedCorePlatforms(input.platform)) {
-    const adapter = resolvePlatformAdapter(platform);
-    const conditionSet = input.searchConditionSetRefs?.[platform]
-      ? await conditionSetService!.resolve(input.searchConditionSetRefs[platform]!)
-      : undefined;
-    const plan = await loadSearchConditionPlanFile(input.filePath, {
-      platform,
-      keywordOverride: input.keyword ?? conditionSet?.revision.defaultKeyword,
-      savedSearchNameOverride: input.savedSearchName,
-    });
-    if (conditionSet && plan.conditions.some((condition) => condition.kind === 'applicationFilter')) {
-      throw new Error(`--search-subscription-file cannot include applicationFilter conditions when --search-condition-set is selected for ${platform}`);
-    }
-    const resolvedPlan = conditionSet
-      ? {
-        ...plan,
-        conditions: [...plan.conditions, ...conditionSet.conditions],
-      }
-      : plan;
-    const session = await ensureAuthenticatedBrowserSessionRef.fn(adapter.platform);
-
+  for (const platform of listSelectedSearchSubscriptionPlatforms(input.platform, input.includeBoss)) {
+    let session: BrowserSession | undefined;
+    let stageSummary: SearchSubscriptionSummary | undefined;
+    let failure: unknown;
     try {
-      summaries.push(await runSearchSubscriptionWorkflowRef.fn(adapter, session.page, resolvedPlan, {
+      const adapter = resolvePlatformAdapter(platform);
+      const conditionSet = input.searchConditionSetRefs?.[platform]
+        ? await conditionSetService!.resolve(input.searchConditionSetRefs[platform]!)
+        : undefined;
+      const plan = await loadSearchConditionPlanFile(input.filePath, {
+        platform,
+        keywordOverride: input.keyword ?? conditionSet?.revision.defaultKeyword,
+        savedSearchNameOverride: input.savedSearchName,
+      });
+      if (conditionSet && plan.conditions.some((condition) => condition.kind === 'applicationFilter')) {
+        throw new Error(`--search-subscription-file cannot include applicationFilter conditions when --search-condition-set is selected for ${platform}`);
+      }
+      const resolvedPlan = conditionSet
+        ? {
+          ...plan,
+          conditions: [...plan.conditions, ...conditionSet.conditions],
+        }
+        : plan;
+      session = await ensureAuthenticatedBrowserSessionRef.fn(adapter.platform);
+      stageSummary = await runSearchSubscriptionWorkflowRef.fn(adapter, session.page, resolvedPlan, {
         save: input.save,
         savedSearchName: input.savedSearchName,
-      }));
+        ...(platform === 'boss' ? { sortPolicy: 'match-priority' as const } : {}),
+      });
+    } catch (error) {
+      failure = error;
     } finally {
-      await closeBrowserSessionRef.fn(session);
+      if (session) {
+        try {
+          await closeBrowserSessionRef.fn(session);
+        } catch (error) {
+          failure ??= error;
+        }
+      }
+    }
+    if (stageSummary) summaries.push(stageSummary);
+    if (failure !== undefined) {
+      const message = failure instanceof Error ? failure.message : String(failure);
+      const summary = {
+        mode: 'search-subscription' as const,
+        status: 'failed' as const,
+        completedPlatforms: summaries.map((item) => item.platform),
+        stoppedPlatform: platform,
+        results: [...summaries],
+        error: message,
+      };
+      console.error(JSON.stringify(summary, null, 2));
+      throw new SearchSubscriptionRunError(summary, failure);
     }
   }
 
   const result = input.platform === 'all' ? summaries : summaries[0];
   console.log(JSON.stringify(result, null, 2));
   return result;
+}
+
+/**
+ * Verify and bind a complete native Boss subscription without entering the
+ * ordinary candidate-capture chain.  The native action performs the bounded
+ * card selection/hydration/search verification; only after that succeeds do
+ * we persist the reference with a revision-checked JobStore patch.
+ */
+async function runBossSavedSearchBinding(
+  input: BossSavedSearchBindingCliInput,
+): Promise<BossSavedSearchBindingSummary> {
+  const jobKey = input.bossJobId
+    ? buildBossSyncedJobKey(input.searchKeyword, input.bossJobId)
+    : buildJobKey(input.searchKeyword, '');
+  const store = new JobStore();
+  const existing = await store.readJobRecordIfExists('boss', jobKey);
+  if (!existing) {
+    throw new Error(`Boss saved-search binding requires an existing job record for ${jobKey}`);
+  }
+  if (existing.platform !== 'boss') {
+    throw new Error(`Boss saved-search binding found ${existing.platform}/${jobKey}, not a Boss job record`);
+  }
+  if (existing.searchKeyword !== input.searchKeyword) {
+    throw new Error(`Boss saved-search binding job name ${input.searchKeyword} does not match persisted job ${existing.searchKeyword}`);
+  }
+  if (input.savedSearch.conditionIdentity.jobScope !== existing.searchKeyword) {
+    throw new Error(`Boss saved-search binding reference job scope ${input.savedSearch.conditionIdentity.jobScope} does not match ${existing.searchKeyword}`);
+  }
+
+  const adapter = resolvePlatformAdapter('boss');
+  if (!adapter.openSavedSearch) {
+    throw new Error('Boss saved-search binding is unavailable because the native saved-search action is not registered');
+  }
+  const estimatedTimeoutMs = adapter.estimateSearchTimeoutMs?.({
+    source: 'saved',
+    conditions: [],
+    includeViewedCandidates: false,
+  });
+  const deadline = Date.now() + Math.max(
+    config.playwright.searchPageTimeoutMs,
+    typeof estimatedTimeoutMs === 'number' && Number.isFinite(estimatedTimeoutMs)
+      ? Math.max(1, estimatedTimeoutMs)
+      : 0,
+  );
+  const lease = await acquireBossSearchLease();
+  let session: BrowserSession | undefined;
+  try {
+    session = await ensureAuthenticatedBrowserSessionRef.fn('boss');
+    await adapter.openSavedSearch(session.page, input.savedSearch, {
+      deadline,
+      includeViewedCandidates: false,
+      sortPolicy: 'match-priority',
+    });
+    const previousRevision = existing.revision ?? 1;
+    const updated = await store.applyJobConfigPatch('boss', jobKey, previousRevision, {
+      searchSource: 'saved',
+      pageKeyword: input.savedSearch.expectedKeyword,
+      conditions: [],
+      applicationFilterInput: null,
+      conditionSetRef: null,
+      selectedFieldsFingerprint: null,
+      savedSearch: input.savedSearch,
+    });
+    const summary: BossSavedSearchBindingSummary = {
+      mode: 'boss-saved-search-binding',
+      platform: 'boss',
+      jobKey,
+      savedSearch: input.savedSearch,
+      previousRevision,
+      revision: updated.revision ?? previousRevision + 1,
+      verifiedAt: new Date().toISOString(),
+      candidateSideEffects: false,
+    };
+    console.log(JSON.stringify(summary, null, 2));
+    return summary;
+  } finally {
+    try {
+      if (session) {
+        await closeBrowserSessionRef.fn(session);
+      }
+    } finally {
+      await lease.release();
+    }
+  }
 }
 
 async function runTalentMapping(input: TalentMappingCliInput): Promise<TalentMappingRunSummary> {
@@ -4654,6 +4900,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 
   if (input.mode === 'search-subscription') {
     return runSearchSubscription(input);
+  }
+
+  if (input.mode === 'boss-saved-search-binding') {
+    return runBossSavedSearchBinding(input);
   }
 
   if (input.mode === 'batch') {

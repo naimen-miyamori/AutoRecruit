@@ -16,6 +16,7 @@ import {
 import type { SearchConditionSetService } from '../search/search-condition-sets.js';
 import type { JobRecord } from '../types/job.js';
 import { JobConfigConflictError, JobStore } from '../storage/job-store.js';
+import { fingerprintSavedSearchConditionIdentity } from '../platforms/boss/saved-search-identity.js';
 
 async function makeTempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-boss-snapshot-'));
@@ -89,6 +90,22 @@ describe('Boss capture task snapshots', () => {
     assert.equal(snapshot.inputSummary.bossCaptureTaskSnapshotHash, snapshotHash);
   });
 
+  it('clears an incompatible stored saved-search reference when the queued task explicitly switches to direct', async () => {
+    const normalized = normalizeResumeCaptureTask({
+      platform: 'boss',
+      keyword: '全铝箱包设计',
+      bossJobId: 'boss-position-1',
+      bossSearchKeyword: '铝箱包',
+      searchSource: 'direct',
+    });
+    const snapshot = await snapshotBossCaptureSettings(normalized, {
+      resolveBossCapturePlan: resolverFor(),
+      searchConditionSets: noConditionSetService(),
+    });
+    assert.equal(snapshot.input.bossCaptureTaskSnapshot?.canonicalPatch?.searchSource, 'direct');
+    assert.equal(snapshot.input.bossCaptureTaskSnapshot?.canonicalPatch?.savedSearch, null);
+  });
+
   it('materializes batch-relative paths and records source item identity', async () => {
     const dataDir = await makeTempDir();
     const jobsDir = path.join(dataDir, 'jobs');
@@ -121,6 +138,56 @@ describe('Boss capture task snapshots', () => {
     const taskSnapshot = materialized[0]?.bossCaptureTaskSnapshot as { sourceJobsFile?: string; sourceItemIndex?: number };
     assert.equal(taskSnapshot.sourceJobsFile, path.resolve(jobsFile));
     assert.equal(taskSnapshot.sourceItemIndex, 0);
+  });
+
+  it('passes a complete per-item Boss saved-search reference into batch plan resolution', async () => {
+    const dataDir = await makeTempDir();
+    const jobsFile = path.join(dataDir, 'jobs.json');
+    const conditionIdentity = {
+      jobScope: '全铝箱包设计',
+      city: '广东',
+      inline: { education: ['本科及以上'] },
+      more: {},
+      toggles: { filter_recent_viewed: false },
+    };
+    const savedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '铝镁合金',
+      nativeId: 'batch-subscription-1',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+    await fs.writeFile(jobsFile, JSON.stringify([{
+      keyword: '全铝箱包设计',
+      bossJobId: 'boss-position-1',
+      searchSource: 'saved',
+      bossSavedSearchReference: savedSearch,
+    }]), 'utf8');
+    const normalized = normalizeBatchTask({ platform: 'boss', jobsFile });
+    let observedReference: unknown;
+    const baseResolver = resolverFor({
+      source: 'saved',
+      pageKeyword: savedSearch.expectedKeyword,
+      keywordSource: 'run-override',
+      conditions: [],
+      savedSearch,
+      sortPolicy: 'match-priority',
+    });
+    const snapshot = await snapshotBossBatchCaptureSettings(normalized, {
+      dataDir,
+      resolveBossCapturePlan: async (input) => {
+        observedReference = input.savedSearchReference;
+        return baseResolver(input);
+      },
+      searchConditionSets: noConditionSetService(),
+    });
+    assert.deepEqual(observedReference, savedSearch);
+    const materialized = JSON.parse(await fs.readFile(snapshot.input.jobsFile, 'utf8')) as Array<{
+      bossCaptureTaskSnapshot?: { searchPlan?: { savedSearch?: unknown } };
+    }>;
+    assert.deepEqual(materialized[0]?.bossCaptureTaskSnapshot?.searchPlan?.savedSearch, savedSearch);
   });
 });
 

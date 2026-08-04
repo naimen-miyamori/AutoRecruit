@@ -1,6 +1,16 @@
 import type { BrowserContext, Page } from 'playwright';
 import type { SearchFilterCatalog, SearchFilterDiscoveryRunOptions } from '../search/filter-catalog.js';
-import type { CandidateListItem, CandidateResume, SearchCondition, SearchConditionApplyResult } from '../types/job.js';
+import type {
+  CandidateListItem,
+  CandidateResume,
+  SavedSearchReference,
+  SearchCondition,
+  SearchConditionApplyResult,
+  SearchConditionPlan,
+  SearchConditionPlanExecutionResult,
+  SearchConditionSaveResult,
+  SearchSortPolicy,
+} from '../types/job.js';
 import type {
   AdvanceCandidateBatchInput,
   AdvanceCandidateBatchResult,
@@ -20,6 +30,7 @@ export type BossForwardMode = 'colleague' | 'email';
 export interface SearchWaitOptions {
   deadline?: number;
   includeViewedCandidates?: boolean;
+  sortPolicy?: SearchSortPolicy;
   /**
    * A caller-owned cancellation signal. Platform actions must stop before the
    * next page mutation when it is aborted; they never create their own signal.
@@ -57,6 +68,8 @@ export interface PlatformAdapter {
   openAuthenticatedHome(page: Page): Promise<Page>;
   assertAuthenticated(page: Page): Promise<void>;
   openSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
+  /** Platform-native saved-search selection. Callers pass complete business identity. */
+  openSavedSearch?(page: Page, target: SavedSearchReference, options?: SearchWaitOptions): Promise<Page>;
   /**
    * Optional platform-owned estimate for one whole search budget. The caller
    * creates the one absolute deadline shared by search entry and extraction.
@@ -68,13 +81,19 @@ export interface PlatformAdapter {
   }): number;
   openDirectSearch?(page: Page, keyword: string, conditions: SearchCondition[], options?: SearchWaitOptions): Promise<Page>;
   prepareSearchConditionPage?(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
+  /** High-level condition replay for platforms whose controls require one final submit. */
+  executeSearchConditionPlan?(
+    page: Page,
+    plan: SearchConditionPlan,
+    options?: SearchWaitOptions,
+  ): Promise<SearchConditionPlanExecutionResult>;
   discoverSearchFilters?(page: Page, options: SearchFilterDiscoveryRunOptions): Promise<SearchFilterCatalog>;
   applySearchCondition?(page: Page, condition: SearchCondition): Promise<SearchConditionApplyResult>;
   readSearchConditionResultTotal?(page: Page, options?: SearchWaitOptions): Promise<{
     resultTotal: number;
     resultTotalSource: 'page' | 'api';
   }>;
-  saveSearchCondition?(page: Page, savedSearchName: string, options?: SearchWaitOptions): Promise<void>;
+  saveSearchCondition?(page: Page, savedSearchName: string, options?: SearchWaitOptions): Promise<void | SearchConditionSaveResult>;
   extractCandidateList(page: Page, options?: SearchWaitOptions): Promise<{ candidates: CandidateListItem[] }>;
   openResumeDetail(context: BrowserContext, searchPage: Page, candidate: CandidateListItem, options?: CandidateProfileDetailOptions): Promise<Page>;
   afterResumeDetailOpened?(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions, options?: CandidateProfileDetailOptions): Promise<void | CandidatePostOpenResult>;

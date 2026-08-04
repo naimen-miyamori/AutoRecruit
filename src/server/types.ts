@@ -9,6 +9,8 @@ import type {
   JobRecord,
   NormalizedJob,
   RunResult,
+  SavedSearchReference,
+  SearchSubscriptionFailureSummary,
 } from '../types/job.js';
 import type {
   BossChatOperationInput,
@@ -86,6 +88,8 @@ export interface ResumeCaptureTaskInput {
    * queue/scheduler snapshot, never an accepted client request field.
    */
   bossSearchConditionSetRef?: SearchConditionSetReference;
+  /** Complete server-resolved Boss native saved-search identity. */
+  bossSavedSearchReference?: SavedSearchReference;
   jd?: string;
   jdFile?: string;
   includeViewed?: boolean;
@@ -160,6 +164,7 @@ export interface TalentMappingClassificationTaskInput {
 
 export interface SearchSubscriptionTaskInput {
   platform: ConsolePlatformSelection;
+  includeBoss?: boolean;
   searchSubscriptionFile: string;
   keyword?: string;
   applicationFilterInputFile?: string;
@@ -248,6 +253,7 @@ export type TaskInput = ResumeCaptureTaskInput
   | LoginRefreshTaskInput
   | RagOpsTaskInput;
 export type TaskOutput = MainResult
+  | SearchSubscriptionFailureSummary
   | TalentMappingRunSummary
   | TalentMappingClassificationRunSummary
   | LoginRefreshTaskOutput

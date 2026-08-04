@@ -17,6 +17,11 @@ import {
   readBossSearchConditionResultTotal,
   runBossPostOpenActions,
 } from './boss/actions/search-actions.js';
+import {
+  executeBossSearchConditionPlan,
+  openBossSavedSubscriptionSearch,
+  saveBossSearchCondition,
+} from './boss/actions/subscription-actions.js';
 import { parseBossResumeDetail } from './boss/actions/resume-detail-actions.js';
 import { parseBossResumeData } from './boss/actions/resume-actions.js';
 
@@ -46,12 +51,15 @@ export const bossAdapter: PlatformAdapter = {
   openAuthenticatedHome: openBossAuthenticatedHome,
   assertAuthenticated: assertBossAuthenticated,
   openSubscribeSearch: openBossSubscribeSearch,
+  openSavedSearch: openBossSavedSubscriptionSearch,
   prepareSearchConditionPage: prepareBossSearchConditionPage,
+  executeSearchConditionPlan: executeBossSearchConditionPlan,
   discoverSearchFilters: discoverBossSearchFilters,
   estimateSearchTimeoutMs: estimateBossSearchTimeoutMs,
   openDirectSearch: openBossDirectSearch,
   applySearchCondition: applyBossSearchCondition,
   readSearchConditionResultTotal: readBossSearchConditionResultTotal,
+  saveSearchCondition: saveBossSearchCondition,
   extractCandidateList: extractBossCandidateList,
   openResumeDetail: openBossResumeDetail,
   afterResumeDetailOpened: runBossPostOpenActions,
