@@ -34,6 +34,7 @@ import {
   closeBossResumeDetailStrict,
   forwardBossResumeAction,
   parseBossResumeDetail,
+  readBossColleagueCommunicationFlag,
 } from '../platforms/boss/actions/resume-detail-actions.js';
 
 type SearchFixtureOptions = {
@@ -162,21 +163,43 @@ async function installForwardReceiptFixture(page: Page, mode: 'success' | 'uncer
   }, mode);
 }
 
-async function installNativeBossResumeFactory(page: Page): Promise<void> {
-  await page.evaluate(() => {
+async function installNativeBossResumeFactory(page: Page, options: {
+  communicationState?: 'present' | 'delayed-present' | 'stale-then-empty' | 'empty';
+  communicationInitiallySelected?: boolean;
+} = {}): Promise<void> {
+  await page.evaluate((factoryOptions) => {
     const host = window as unknown as {
       __nativeResumeShareClicks: number;
       __nativeResumeReportClicks: number;
       __nativeResumeConfirmClicks: number;
+      __nativeCommunicationTabClicks: number;
       __openNativeResume: (candidateId: string) => void;
     };
     host.__nativeResumeShareClicks = 0;
     host.__nativeResumeReportClicks = 0;
     host.__nativeResumeConfirmClicks = 0;
+    host.__nativeCommunicationTabClicks = 0;
     host.__openNativeResume = (candidateId: string) => {
       const detail = document.createElement('div');
       detail.className = 'dialog-wrap active';
       detail.style.cssText = 'display:block;width:900px;height:638px';
+      const communicationPanel = factoryOptions.communicationState
+        ? `<div class="resume-right-side" style="display:block;width:260px;height:240px">
+            <div class="chat-history-process" style="display:block;width:260px;height:220px">
+              <div class="tab-hd" style="display:flex;width:240px;height:28px">
+                <span class="item${factoryOptions.communicationInitiallySelected ? ' selected' : ''}"
+                  style="display:block;width:80px;height:24px">同事沟通</span>
+                <span class="item${factoryOptions.communicationInitiallySelected ? '' : ' selected'}"
+                  style="display:block;width:80px;height:24px">我的沟通</span>
+              </div>
+              <ul class="record" style="display:block;width:240px;height:100px">
+                ${factoryOptions.communicationState === 'present' || factoryOptions.communicationState === 'stale-then-empty'
+                  ? '<li style="display:block;width:220px;height:40px"><p class="action" style="display:block;width:200px;height:20px">已有沟通记录</p></li>'
+                  : ''}
+              </ul>
+            </div>
+          </div>`
+        : '';
       detail.innerHTML = `
         <div class="boss-dialog__wrapper dialog-lib-resume anonymous" style="display:block;width:900px;height:638px">
           <button type="button" class="boss-popup__close" style="display:block;width:20px;height:20px">关闭</button>
@@ -195,6 +218,7 @@ async function installNativeBossResumeFactory(page: Page): Promise<void> {
               <div class="resume-footer-wrap" style="display:block;width:900px;height:59px">
                 <button type="button" class="prop-card-chat">搜索畅聊卡(1/15)</button>
               </div>
+              ${communicationPanel}
             </div>
           </div>
         </div>`;
@@ -211,6 +235,29 @@ async function installNativeBossResumeFactory(page: Page): Promise<void> {
       };
       detail.querySelector('.boss-popup__close')?.addEventListener('click', () => detail.remove());
       detail.querySelector('.report')?.addEventListener('click', () => { host.__nativeResumeReportClicks += 1; });
+      detail.querySelectorAll('.chat-history-process .tab-hd .item').forEach((tab) => {
+        tab.addEventListener('click', () => {
+          if ((tab.textContent ?? '').trim() === '同事沟通') host.__nativeCommunicationTabClicks += 1;
+          detail.querySelectorAll('.chat-history-process .tab-hd .item')
+            .forEach((item) => item.classList.toggle('selected', item === tab));
+          if ((tab.textContent ?? '').trim() === '同事沟通'
+            && factoryOptions.communicationState === 'delayed-present') {
+            window.setTimeout(() => {
+              const records = detail.querySelector('.chat-history-process ul.record');
+              if (records) {
+                records.innerHTML = '<li style="display:block;width:220px;height:40px"><p class="action" style="display:block;width:200px;height:20px">延迟沟通记录</p></li>';
+              }
+            }, 1_200);
+          }
+          if ((tab.textContent ?? '').trim() === '同事沟通'
+            && factoryOptions.communicationState === 'stale-then-empty') {
+            window.setTimeout(() => {
+              const records = detail.querySelector('.chat-history-process ul.record');
+              if (records) records.innerHTML = '';
+            }, 600);
+          }
+        });
+      });
       detail.querySelector('.share')?.addEventListener('click', () => {
         host.__nativeResumeShareClicks += 1;
         if (detail.querySelector('.c-share-box')) return;
@@ -230,7 +277,7 @@ async function installNativeBossResumeFactory(page: Page): Promise<void> {
       // current Vue state, not this stale timing entry, is authoritative.
       void fetch('/wapi/zpitem/web/boss/search/geek/info?expectId=stale-native-resource');
     };
-  });
+  }, options);
 }
 
 describe('Boss normal-search actions', () => {
@@ -295,7 +342,171 @@ describe('Boss normal-search actions', () => {
     }
   });
 
-  it('opens forwarding through the unique rightmost native share action without clicking its neighboring controls', async () => {
+  it('detects a colleague communication record on the verified open Boss detail', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page, {
+        communicationState: 'delayed-present',
+        communicationInitiallySelected: false,
+      });
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-1'));
+
+      const result = await readBossColleagueCommunicationFlag(
+        page,
+        { candidateId: 'boss-candidate-1' },
+        { deadline: Date.now() + 10_000 },
+      );
+
+      assert.deepEqual(result, { hasColleagueCommunication: true });
+      assert.equal(await page.evaluate(() =>
+        (window as unknown as { __nativeCommunicationTabClicks: number }).__nativeCommunicationTabClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('returns false only after the selected colleague communication list is stably empty', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page, {
+        communicationState: 'empty',
+        communicationInitiallySelected: true,
+      });
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-1'));
+
+      const result = await readBossColleagueCommunicationFlag(
+        page,
+        { candidateId: 'boss-candidate-1' },
+        { deadline: Date.now() + 10_000 },
+      );
+
+      assert.deepEqual(result, { hasColleagueCommunication: false });
+      assert.equal(await page.evaluate(() =>
+        (window as unknown as { __nativeCommunicationTabClicks: number }).__nativeCommunicationTabClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('does not treat stale rows retained during colleague-tab hydration as a communication record', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page, {
+        communicationState: 'stale-then-empty',
+        communicationInitiallySelected: false,
+      });
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-1'));
+
+      const result = await readBossColleagueCommunicationFlag(
+        page,
+        { candidateId: 'boss-candidate-1' },
+        { deadline: Date.now() + 10_000 },
+      );
+
+      assert.deepEqual(result, { hasColleagueCommunication: false });
+      assert.equal(await page.evaluate(() =>
+        (window as unknown as { __nativeCommunicationTabClicks: number }).__nativeCommunicationTabClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails closed when the open detail exposes more than one colleague communication panel', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page, {
+        communicationState: 'present',
+        communicationInitiallySelected: true,
+      });
+      await page.evaluate(() => {
+        (window as unknown as { __openNativeResume: (candidateId: string) => void })
+          .__openNativeResume('boss-candidate-1');
+        const panel = document.querySelector('.resume-right-side');
+        panel?.parentElement?.appendChild(panel.cloneNode(true));
+      });
+
+      await assert.rejects(() => readBossColleagueCommunicationFlag(
+        page,
+        { candidateId: 'boss-candidate-1' },
+        { deadline: Date.now() + 10_000 },
+      ), /Expected one Boss colleague communication panel, found 2/);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails closed when the detail identity changes while communication records hydrate', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page, {
+        communicationState: 'delayed-present',
+        communicationInitiallySelected: false,
+      });
+      await page.evaluate(() => {
+        (window as unknown as { __openNativeResume: (candidateId: string) => void })
+          .__openNativeResume('boss-candidate-1');
+        const tab = [...document.querySelectorAll('.chat-history-process .tab-hd .item')]
+          .find((element) => (element.textContent ?? '').trim() === '同事沟通');
+        tab?.addEventListener('click', () => {
+          const resumeRoot = document.querySelector<HTMLElement>('.resume-detail-wrap') as HTMLElement & {
+            __vue__?: {
+              $props?: { resumeInfo?: { expectId?: string } };
+              $parent?: { $data?: { resumeInfo?: { expectId?: string } } };
+            };
+          };
+          if (resumeRoot.__vue__?.$props?.resumeInfo) {
+            resumeRoot.__vue__.$props.resumeInfo.expectId = 'different-candidate';
+          }
+          if (resumeRoot.__vue__?.$parent?.$data?.resumeInfo) {
+            resumeRoot.__vue__.$parent.$data.resumeInfo.expectId = 'different-candidate';
+          }
+        });
+      });
+
+      await assert.rejects(() => readBossColleagueCommunicationFlag(
+        page,
+        { candidateId: 'boss-candidate-1' },
+        { deadline: Date.now() + 10_000 },
+      ), /does not match requested candidate boss-candidate-1/);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('opens the unique rightmost native share action and adds the simple colleague-communication email note', async () => {
     const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
     const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
     config.playwright.actionDelayMinMsByPlatform.boss = 0;
@@ -310,6 +521,7 @@ describe('Boss normal-search actions', () => {
         mode: 'email',
         recipient: 'recipient@example.com',
         actionMode: 'prepare-only',
+        hasColleagueCommunication: true,
         deadline: Date.now() + 10_000,
       });
       const evidence = await page.evaluate(() => ({
@@ -319,7 +531,10 @@ describe('Boss normal-search actions', () => {
       }));
       assert.deepEqual(evidence, { shareClicks: 1, reportClicks: 0, confirmClicks: 0 });
       assert.equal(await page.locator('.c-share-box input[placeholder="请输入收件人邮箱"]').inputValue(), 'recipient@example.com');
-      assert.equal(await page.locator('.c-share-box textarea[placeholder="请输入留言"]').inputValue(), 'boss-candidate-1');
+      assert.equal(
+        await page.locator('.c-share-box textarea[placeholder="请输入留言"]').inputValue(),
+        'boss-candidate-1\n同事已沟通',
+      );
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
@@ -1214,7 +1429,7 @@ describe('Boss normal-search actions', () => {
       await frame.locator('.search-current-job').evaluate((element) => { element.textContent = '全铝箱包设计'; });
       await frame.locator('.search-input').fill('铝镁合金 拉杆箱');
       await assert.rejects(
-        () => saveBossSearchCondition(page, '铝镁合金', { deadline: Date.now() + 3_000 }),
+        () => saveBossSearchCondition(page, '铝镁合金', { deadline: Date.now() + 5_000 }),
         /save-new-card-unproven/i,
       );
       assert.equal(await frame.locator('.title-text').innerText(), '旧订阅');

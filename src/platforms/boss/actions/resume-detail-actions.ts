@@ -411,6 +411,148 @@ export async function verifyBossResumeDetailIdentity(
   return { candidateId: verified.detailCandidateId };
 }
 
+export interface BossColleagueCommunicationFlag {
+  hasColleagueCommunication: boolean;
+}
+
+/**
+ * Reads only whether the exact, currently open Boss candidate has at least
+ * one colleague communication record. No colleague name, time, or detail is
+ * returned to orchestration or persistence.
+ */
+export async function readBossColleagueCommunicationFlag(
+  page: Page,
+  candidate: CandidateListItem,
+  options: CandidateProfileDetailOptions,
+): Promise<BossColleagueCommunicationFlag> {
+  const cleanupReserveMs = options.cleanupReserveMs ?? 0;
+  await verifyBossResumeDetailIdentity(page, candidate, options.deadline, cleanupReserveMs);
+
+  const dialogs = page.locator(`.dialog-wrap.active:visible:has(${bossNativeResumeRootSelector})`);
+  await dialogs.first().waitFor({
+    state: 'visible',
+    timeout: remainingTimeWithReserve(options.deadline, cleanupReserveMs),
+  });
+  const dialogCount = await dialogs.count();
+  if (dialogCount !== 1) {
+    throw new Error(`Expected one active Boss native resume detail while reading colleague communication, found ${dialogCount}.`);
+  }
+
+  const panels = dialogs.first().locator('.resume-right-side .chat-history-process:visible');
+  await panels.first().waitFor({
+    state: 'visible',
+    timeout: remainingTimeWithReserve(options.deadline, cleanupReserveMs),
+  });
+  const panelCount = await panels.count();
+  if (panelCount !== 1) {
+    throw new Error(`Expected one Boss colleague communication panel, found ${panelCount}.`);
+  }
+  const panel = panels.first();
+  const colleagueTabs = panel.locator('.tab-hd span:visible').filter({ hasText: /^同事沟通$/ });
+  const tabCount = await colleagueTabs.count();
+  if (tabCount !== 1) {
+    throw new Error(`Expected one Boss colleague communication tab, found ${tabCount}.`);
+  }
+  const colleagueTab = colleagueTabs.first();
+  if (!(await colleagueTab.evaluate((element) => element.classList.contains('selected')))) {
+    await clickBossControlNatively(
+      page,
+      colleagueTab,
+      remainingTimeWithReserve(options.deadline, cleanupReserveMs),
+      {
+        deadline: options.deadline,
+        cleanupReserveMs,
+        beforeClick: async () => {
+          const currentTabs = panel.locator('.tab-hd span:visible').filter({ hasText: /^同事沟通$/ });
+          if (await currentTabs.count() !== 1) {
+            throw new Error('Boss colleague communication tab changed before selection.');
+          }
+          await verifyBossResumeDetailIdentity(page, candidate, options.deadline, cleanupReserveMs);
+        },
+      },
+    );
+  }
+
+  // A newly selected tab can retain the prior tab's rows while its request is
+  // in flight. Do not interpret either non-empty or empty rows until this
+  // bounded hydration window has elapsed.
+  const earliestResultAt = Date.now() + 1_500;
+  // The current panel can briefly expose an empty list while the selected
+  // tab hydrates without a visible loading indicator. Require a full stable
+  // window so that transient emptiness cannot silently suppress the note.
+  const stableEmptyWindowMs = 1_000;
+  let stableEmptySince: number | undefined;
+  while (remainingTimeWithReserve(options.deadline, cleanupReserveMs) > 1) {
+    const snapshot = await panel.evaluate((root) => {
+      const isVisible = (element: Element | null): element is HTMLElement => {
+        if (!(element instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      const selectedTabs = [...root.querySelectorAll('.tab-hd span')]
+        .filter((element) => isVisible(element)
+          && (element.textContent ?? '').replace(/\s+/g, ' ').trim() === '同事沟通'
+          && element.classList.contains('selected'));
+      const recordLists = [...root.querySelectorAll('ul.record')].filter(isVisible);
+      const rows = recordLists.length === 1
+        ? [...recordLists[0]!.querySelectorAll(':scope > li')].filter(isVisible)
+        : [];
+      const actions = rows
+        .map((row) => row.querySelector('p.action'))
+        .filter(isVisible)
+        .map((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      const explicitEmpty = rows.some((row) => /暂无|没有|无.*沟通记录/.test((row.textContent ?? '').replace(/\s+/g, ' ').trim()));
+      const loading = [...root.querySelectorAll('.loading, .boss-loading, [class*="loading"]')].some(isVisible);
+      return {
+        selectedTabCount: selectedTabs.length,
+        recordListCount: recordLists.length,
+        rowCount: rows.length,
+        actionCount: actions.length,
+        explicitEmpty,
+        loading,
+      };
+    });
+
+    if (snapshot.selectedTabCount > 1 || snapshot.recordListCount > 1) {
+      throw new Error('Boss colleague communication panel became ambiguous while reading it.');
+    }
+    if (snapshot.selectedTabCount !== 1) {
+      stableEmptySince = undefined;
+      await page.waitForTimeout(Math.min(100, remainingTimeWithReserve(options.deadline, cleanupReserveMs)));
+      continue;
+    }
+    if (Date.now() < earliestResultAt) {
+      stableEmptySince = undefined;
+      await page.waitForTimeout(Math.min(100, remainingTimeWithReserve(options.deadline, cleanupReserveMs)));
+      continue;
+    }
+    if (snapshot.recordListCount === 1 && snapshot.actionCount > 0) {
+      await verifyBossResumeDetailIdentity(page, candidate, options.deadline, cleanupReserveMs);
+      return { hasColleagueCommunication: true };
+    }
+    const empty = snapshot.recordListCount === 1
+      && !snapshot.loading
+      && (snapshot.rowCount === 0 || snapshot.explicitEmpty);
+    if (empty) {
+      stableEmptySince ??= Date.now();
+      if (Date.now() - stableEmptySince >= stableEmptyWindowMs) {
+        await verifyBossResumeDetailIdentity(page, candidate, options.deadline, cleanupReserveMs);
+        return { hasColleagueCommunication: false };
+      }
+    } else {
+      stableEmptySince = undefined;
+    }
+    await page.waitForTimeout(Math.min(100, remainingTimeWithReserve(options.deadline, cleanupReserveMs)));
+  }
+
+  throw new Error('Boss colleague communication panel did not reach a verified record or stable empty state before the deadline.');
+}
+
 export function assertBossResumeTarget(payload: BossResumeApiPayload, candidate: CandidateListItem): string {
   const detailCandidateId = payload.zpData?.expectId === undefined || payload.zpData.expectId === null
     ? ''
@@ -830,9 +972,10 @@ async function fillBossForwardForm(
   mode: BossForwardMode,
   recipient: string,
   candidateId: string,
+  hasColleagueCommunication: boolean,
   deadline: number,
   cleanupReserveMs = 0,
-): Promise<void> {
+): Promise<string> {
   const input = await selectBossForwardMode(dialog, mode, deadline, cleanupReserveMs);
   if (mode === 'colleague') {
     await selectBossForwardColleague(dialog, input, recipient, deadline, cleanupReserveMs);
@@ -847,16 +990,20 @@ async function fillBossForwardForm(
       throw new Error('Boss email forward recipient input did not retain the configured address.');
     }
   }
+  const messageText = mode === 'email' && hasColleagueCommunication
+    ? `${candidateId}\n同事已沟通`
+    : candidateId;
   const message = dialog.locator('textarea[placeholder="请输入留言"]');
   await runBossActionWithinDeadline(
     dialog.page(),
     deadline,
-    () => message.fill(candidateId, { timeout: remainingTime(deadline) }),
+    () => message.fill(messageText, { timeout: remainingTime(deadline) }),
     cleanupReserveMs,
   );
-  if (await message.inputValue() !== candidateId) {
-    throw new Error(`Boss forward message did not retain candidate ID ${candidateId}.`);
+  if (await message.inputValue() !== messageText) {
+    throw new Error(`Boss forward message did not retain the expected text for candidate ${candidateId}.`);
   }
+  return messageText;
 }
 
 function bossForwardSuccessIndicators(page: Page): Locator {
@@ -946,6 +1093,7 @@ async function clearBossForwardClickObserver(page: Page, token: string): Promise
 async function confirmBossForward(
   dialog: Locator,
   candidateId: string,
+  expectedMessage: string,
   deadline: number,
   cleanupReserveMs = 0,
 ): Promise<void> {
@@ -967,8 +1115,8 @@ async function confirmBossForward(
           throw new Error(`Boss forward confirmation control changed before candidate ${candidateId} click.`);
         }
         const message = dialog.locator('textarea[placeholder="请输入留言"]');
-        if (await message.count() !== 1 || await message.inputValue().catch(() => '') !== candidateId) {
-          throw new Error(`Boss forward candidate ID message changed before candidate ${candidateId} click.`);
+        if (await message.count() !== 1 || await message.inputValue().catch(() => '') !== expectedMessage) {
+          throw new Error(`Boss forward message changed before candidate ${candidateId} click.`);
         }
       },
     });
@@ -1016,6 +1164,8 @@ export async function forwardBossResumeAction(
     recipient: string;
     actionMode: NonNullable<CandidatePostOpenActions['bossForwardActionMode']>;
     ccEmails?: readonly string[];
+    /** Adds one simple line to Boss email-forward messages only. */
+    hasColleagueCommunication?: boolean;
     deadline: number;
     cleanupReserveMs?: number;
   },
@@ -1034,16 +1184,23 @@ export async function forwardBossResumeAction(
   }
   for (const targetRecipient of recipients) {
     const dialog = await openBossForwardDialog(page, input.deadline, input.cleanupReserveMs ?? 0);
-    await fillBossForwardForm(
+    const expectedMessage = await fillBossForwardForm(
       dialog,
       input.mode,
       targetRecipient,
       input.candidateId,
+      input.hasColleagueCommunication === true,
       input.deadline,
       input.cleanupReserveMs ?? 0,
     );
     if (input.actionMode !== 'prepare-only') {
-      await confirmBossForward(dialog, input.candidateId, input.deadline, input.cleanupReserveMs ?? 0);
+      await confirmBossForward(
+        dialog,
+        input.candidateId,
+        expectedMessage,
+        input.deadline,
+        input.cleanupReserveMs ?? 0,
+      );
     }
   }
 }
@@ -1057,6 +1214,7 @@ export async function forwardBossResume(
   ccEmails?: readonly string[],
   cachePayloadForParse = true,
   options?: CandidateProfileDetailOptions,
+  hasColleagueCommunication = false,
 ): Promise<void> {
   const normalizedRecipient = normalizeText(recipient);
   if (!normalizedRecipient) {
@@ -1083,6 +1241,7 @@ export async function forwardBossResume(
     recipient: normalizedRecipient,
     actionMode,
     ccEmails,
+    hasColleagueCommunication,
     deadline,
     cleanupReserveMs: options?.cleanupReserveMs,
   });

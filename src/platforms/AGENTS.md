@@ -75,6 +75,10 @@ Every public page action must:
   compatibility paths in one owning domain implementation.
 - Workflows may combine actions, request confirmation, persist results, and enter TaskQueue; page
   actions may operate and validate the page but do not take those responsibilities.
+- A workflow may start a new bounded page-action segment after an explicitly non-browser wait only
+  where the root contract authorizes it. Boss enabled screening uses this to retain the same verified
+  detail during model work, then revalidates it inside one bounded continuation; an action itself
+  never extends or resets its caller-provided deadline.
 - A migration completes only when facade/private-runtime imports and selector leakage fail the
   boundary tests; direct actions cover success, missing/ambiguous/stale identity, idempotency,
   deadline exhaustion, postcondition failure, and compatibility pointer behavior where relevant;

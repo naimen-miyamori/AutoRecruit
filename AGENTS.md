@@ -212,9 +212,12 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
   manual login; headless runs fail with actionable instructions.
 - Reuse the platform-scoped headed browser and authenticated tab where supported; avoid repeated
   login tabs and replacing a usable current page.
-- A search has one deadline from entry through extraction. Detail opens have one bounded deadline
-  and race valid platform readiness paths inside it. Pacing is intentional user-like delay, not an
-  unbudgeted wait that consumes readiness time.
+- A search has one deadline from entry through extraction. Detail browser work uses explicit bounded
+  action segments and races valid platform readiness paths inside them. Boss enabled screening may
+  keep one verified detail open during a non-browser model wait; it performs no page action during
+  that wait, then starts one fresh bounded continuation and revalidates the same candidate before
+  detection, forwarding, or strict close. This exception never authorizes a normal-path second open.
+  Pacing is intentional user-like delay, not an unbudgeted wait that consumes readiness time.
 - Action and candidate pacing defaults to 2000–4000ms with a weighted 2000–3000ms majority.
   Navigation, clicks, input, keys, forwarding, and candidate transitions use shared pacing;
   detailed platform typing and post-detail dwell rules live in scoped platform documents.

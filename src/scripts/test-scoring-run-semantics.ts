@@ -87,6 +87,9 @@ async function loadIndexModule(tempDir: string): Promise<typeof import('../index
     detailIdentityVerified: true,
     detailClosed: true,
   });
+  module.readBossColleagueCommunicationFlagRef.fn = async () => ({
+    hasColleagueCommunication: false,
+  });
   return module;
 }
 
@@ -5686,7 +5689,7 @@ describe('scoring run semantics', () => {
     assert.deepEqual(result.runResult.scoredCandidates, []);
   });
 
-  it('closes Boss capture detail before scoring, reopens only decided primary routes, and keeps score failures pending', async () => {
+  it('scores, checks communication, and forwards in one Boss detail while keeping rejected and failed scores isolated', async () => {
     const tempDir = await makeIsolatedTempDir();
     const indexModule = await loadIndexModule(tempDir);
     const store = new indexModule.JobStore();
@@ -5694,6 +5697,7 @@ describe('scoring run semantics', () => {
     const fetchedAt = '2026-07-31T12:34:56.000Z';
     const callOrder: string[] = [];
     const detailPage = createDetailPage();
+    let activeDetailOptions: { deadline: number } | undefined;
     const originalMarkCapturedCandidatesSeen = store.markCapturedCandidatesSeen.bind(store);
 
     store.markCapturedCandidatesSeen = async (platform, key, candidateIds) => {
@@ -5712,8 +5716,10 @@ describe('scoring run semantics', () => {
           { candidateId: 'boss-score-failed' },
         ],
       }),
-      openResumeDetail: async (_context, _searchPage, candidate) => {
+      openResumeDetail: async (_context, _searchPage, candidate, detailOptions) => {
         callOrder.push(`open:${candidate.candidateId}`);
+        assert.ok(detailOptions);
+        activeDetailOptions = detailOptions;
         return detailPage;
       },
       afterResumeDetailOpened: async () => {
@@ -5726,7 +5732,8 @@ describe('scoring run semantics', () => {
           pr: [candidate.candidateId],
         };
       },
-      closeResumeDetail: async (_searchPage, _detailPage, candidate) => {
+      closeResumeDetail: async (_searchPage, _detailPage, candidate, detailOptions) => {
+        assert.ok(detailOptions && detailOptions.deadline > Date.now(), 'strict close must use the fresh post-model continuation');
         callOrder.push(`close:${candidate.candidateId}`);
       },
     } satisfies import('../platforms/types.js').PlatformAdapter;
@@ -5742,6 +5749,8 @@ describe('scoring run semantics', () => {
     };
     indexModule.scoreAndEvaluateBossScreeningRef.fn = async ({ resume }) => {
       callOrder.push(`score:${resume.candidateId}`);
+      assert.ok(activeDetailOptions);
+      activeDetailOptions.deadline = Date.now() - 1;
       if (resume.candidateId === 'boss-score-failed') {
         throw new CodexSessionProviderError(
           'boss-screening',
@@ -5759,8 +5768,24 @@ describe('scoring run semantics', () => {
         evaluations: [buildModelRequirementEvaluation(outcome, resume.candidateId)],
       };
     };
-    indexModule.forwardBossResumeRef.fn = async (_page, candidate, mode, recipient, _actionMode, ccEmails) => {
-      callOrder.push(`forward:${candidate.candidateId}:${mode}:${recipient}:${ccEmails?.join(',') ?? ''}`);
+    indexModule.readBossColleagueCommunicationFlagRef.fn = async (_page, candidate, detailOptions) => {
+      assert.ok(detailOptions.deadline > Date.now(), 'communication read must use the fresh post-model continuation');
+      callOrder.push(`communication:${candidate.candidateId}`);
+      return { hasColleagueCommunication: candidate.candidateId === 'boss-qualified' };
+    };
+    indexModule.forwardBossResumeRef.fn = async (
+      _page,
+      candidate,
+      mode,
+      recipient,
+      _actionMode,
+      _ccEmails,
+      _cacheShareUrl,
+      detailOptions,
+      hasColleagueCommunication,
+    ) => {
+      assert.ok(detailOptions && detailOptions.deadline > Date.now(), 'forwarding must use the fresh post-model continuation');
+      callOrder.push(`forward:${candidate.candidateId}:${mode}:${recipient}:${hasColleagueCommunication ? 'communication' : 'none'}`);
     };
     const originalSendJobReportEmail = sendJobReportEmailRef.fn;
     const rejectionEmails: Array<{ recipient: string; subject: string; markdown: string; messageId?: string }> = [];
@@ -5827,36 +5852,34 @@ describe('scoring run semantics', () => {
       'open:boss-qualified',
       'parse:boss-qualified',
       'seen:boss-qualified',
-      'close:boss-qualified',
       'score:boss-qualified',
-      'open:boss-qualified',
-      'forward:boss-qualified:email:primary-forward@example.com:',
-      'forward:boss-qualified:email:primary-forward-audit@example.com:',
+      'communication:boss-qualified',
+      'forward:boss-qualified:email:primary-forward@example.com:communication',
+      'forward:boss-qualified:email:primary-forward-audit@example.com:communication',
       'close:boss-qualified',
       'open:boss-review',
       'parse:boss-review',
       'seen:boss-review',
-      'close:boss-review',
       'score:boss-review',
-      'open:boss-review',
-      'forward:boss-review:email:primary-forward@example.com:',
-      'forward:boss-review:email:primary-forward-audit@example.com:',
+      'communication:boss-review',
+      'forward:boss-review:email:primary-forward@example.com:none',
+      'forward:boss-review:email:primary-forward-audit@example.com:none',
       'close:boss-review',
       'open:boss-rejected',
       'parse:boss-rejected',
       'seen:boss-rejected',
-      'close:boss-rejected',
       'score:boss-rejected',
+      'close:boss-rejected',
       'open:boss-score-failed',
       'parse:boss-score-failed',
       'seen:boss-score-failed',
-      'close:boss-score-failed',
       'score:boss-score-failed',
+      'close:boss-score-failed',
       'open:boss-score-failed',
       'parse:boss-score-failed',
       'seen:boss-score-failed',
-      'close:boss-score-failed',
       'score:boss-score-failed',
+      'close:boss-score-failed',
     ]);
     assert.equal(callOrder.includes('legacy-forward'), false);
     assert.deepStrictEqual(result.runResult.bossRouting, {
@@ -5870,7 +5893,7 @@ describe('scoring run semantics', () => {
       forwardingStatusCounts: { sent: 2 },
       rejectionEmailStatusCounts: { sent: 1 },
     });
-    assert.equal(result.runResult.detailAttemptCount, 6);
+    assert.equal(result.runResult.detailAttemptCount, 4);
     assert.equal(rejectionEmails.length, 1);
     assert.equal(rejectionEmails[0]?.recipient, 'secondary-report@outlook.com');
     assert.match(rejectionEmails[0]?.subject ?? '', /明确否定/);
@@ -6796,6 +6819,8 @@ describe('scoring run semantics', () => {
     const detailPage = createDetailPage();
     let scoreCalls = 0;
     const forwardRecipients: string[] = [];
+    const forwardCommunicationFlags: Array<boolean | undefined> = [];
+    let communicationReads = 0;
     const adapter = {
       ...indexModule.resolvePlatformAdapter('boss'),
       openDirectSearch: async () => createSearchPage(),
@@ -6813,8 +6838,23 @@ describe('scoring run semantics', () => {
         evaluations: [buildModelRequirementEvaluation('satisfied', '明确证据')],
       };
     };
-    indexModule.forwardBossResumeRef.fn = async (_page, _candidate, _mode, recipient) => {
+    indexModule.readBossColleagueCommunicationFlagRef.fn = async () => {
+      communicationReads += 1;
+      return { hasColleagueCommunication: true };
+    };
+    indexModule.forwardBossResumeRef.fn = async (
+      _page,
+      _candidate,
+      _mode,
+      recipient,
+      _actionMode,
+      _ccEmails,
+      _cacheShareUrl,
+      _detailOptions,
+      hasColleagueCommunication,
+    ) => {
       forwardRecipients.push(recipient);
+      forwardCommunicationFlags.push(hasColleagueCommunication);
       if (recipient === 'primary-copy@example.com'
         && forwardRecipients.filter((value) => value === recipient).length === 1) {
         throw new BossForwardPreConfirmationError('copy forward dialog was unavailable before confirmation');
@@ -6838,6 +6878,8 @@ describe('scoring run semantics', () => {
         bossScreening: screeningSettings,
       },
     );
+    assert.equal(communicationReads, 1);
+    assert.deepStrictEqual(forwardCommunicationFlags, [true, true]);
     assert.equal(first.runResult.bossRouting?.forwardingStatusCounts['retryable-failed'], 1);
     assert.match(first.runResult.failedCandidates.at(-1)?.error ?? '', /Boss forwarding retryable-failed/);
     assert.deepStrictEqual(await store.readSeenIds('boss', jobKey), [candidate.candidateId]);
@@ -6866,11 +6908,13 @@ describe('scoring run semantics', () => {
     );
 
     assert.equal(scoreCalls, 1);
+    assert.equal(communicationReads, 2);
     assert.deepStrictEqual(forwardRecipients, [
       'primary@example.com',
       'primary-copy@example.com',
       'primary-copy@example.com',
     ]);
+    assert.deepStrictEqual(forwardCommunicationFlags, [true, true, true]);
     assert.deepStrictEqual(second.newCandidates, []);
     assert.deepStrictEqual(second.runResult.bossRouting?.qualifiedCandidateIds, []);
     assert.equal(second.runResult.bossRouting?.forwardingStatusCounts.sent, 1);
@@ -6906,6 +6950,7 @@ describe('scoring run semantics', () => {
     );
     assert.deepStrictEqual(third.newCandidates, []);
     assert.equal(scoreCalls, 1);
+    assert.equal(communicationReads, 2);
     assert.equal(forwardRecipients.length, 3);
   });
 

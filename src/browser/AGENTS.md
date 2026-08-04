@@ -32,7 +32,11 @@ to the matching src/platforms/<platform>/AGENTS.md.
 ## Deadlines and Readiness
 
 - Orchestration creates one search deadline and passes it through search entry and candidate
-  extraction. Detail operations use one bounded detail deadline.
+  extraction. Detail page actions use bounded action segments. Boss enabled screening may retain the
+  same verified detail through an unbounded non-browser model wait, with no page interaction during
+  the wait; afterward orchestration creates one fresh bounded continuation and revalidates that
+  candidate before any read, mutation, or strict close. It must not reopen the detail in the normal
+  path.
 - Use remaining-time calculations and race valid readiness paths within the existing budget. Do not
   stack sequential full-timeout waits, reset deadlines after navigation, or add unbudgeted waiting.
 - A stable empty list or explicit platform empty state is successful readiness. API fallback is

@@ -27,6 +27,7 @@ import {
   bossActionPaceUpperBoundMs,
   waitBossActionPaceWithinDeadline,
 } from './platforms/boss/actions/context.js';
+import { readBossColleagueCommunicationFlag } from './platforms/boss/actions/resume-detail-actions.js';
 import { executeBossChatOperation } from './platforms/boss-operations.js';
 import { buildBossSyncedJobKey, syncBossPositions } from './platforms/boss-jobs.js';
 import { greetBossTalentCandidate, runBossTalentSearch } from './platforms/boss-talent.js';
@@ -170,9 +171,9 @@ interface BossDetailLifecycleState {
 
 function createBossDetailLifecycleOptions(options: { forwarding?: boolean } = {}): CandidateProfileDetailOptions {
   const cleanupReserveMs = Math.max(1_000, bossActionPaceUpperBoundMs());
-  // Model evaluation is deliberately outside every page-detail lifecycle.
-  // A forwarding-only reopen may need several independent recipient dialogs,
-  // but it still receives one bounded deadline from open through strict close.
+  // Browser actions remain bounded even when a workflow keeps the same Boss
+  // detail visible during an unbounded model turn. After model completion the
+  // workflow explicitly starts one bounded same-detail continuation budget.
   const operationBudgetMs = options.forwarding
     ? Math.max(120_000, config.playwright.resumeDetailTimeoutMs * 4)
     : config.playwright.resumeDetailTimeoutMs;
@@ -184,6 +185,14 @@ function createBossDetailLifecycleOptions(options: { forwarding?: boolean } = {}
     deadline: Date.now() + timeoutMs,
     cleanupReserveMs,
   };
+}
+
+function continueBossDetailLifecycleAfterModel(
+  options: CandidateProfileDetailOptions | undefined,
+  forwarding: boolean,
+): void {
+  if (!options) return;
+  Object.assign(options, createBossDetailLifecycleOptions({ forwarding }));
 }
 
 interface BossScreeningCandidateResult {
@@ -532,6 +541,7 @@ export const openSubscribeSearchRef = { fn: fiftyOneJobAdapter.openSubscribeSear
 export const openDirectSearchRef = { fn: fiftyOneJobAdapter.openDirectSearch };
 export const openResumeDetailRef = { fn: fiftyOneJobAdapter.openResumeDetail };
 export const visitBossSeenCandidateDetailRef = { fn: visitBossSeenCandidateDetail };
+export const readBossColleagueCommunicationFlagRef = { fn: readBossColleagueCommunicationFlag };
 export const extractCandidateListRef = {
   fn: extractionBoundary.extractCandidateListFromPage,
 };
@@ -2389,6 +2399,7 @@ async function executeBossForwardingDeliveries(input: {
   detailPage: Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>;
   store: JobStore;
   detailOptions?: CandidateProfileDetailOptions;
+  hasColleagueCommunication?: boolean;
 }): Promise<BossForwardingOutboxEntry> {
   const { jobKey, candidate, detailPage, store, detailOptions } = input;
   let current: BossForwardingOutboxEntry = {
@@ -2413,7 +2424,8 @@ async function executeBossForwardingDeliveries(input: {
     try {
       // Each Boss dialog has only one recipient field. A configured CC is an
       // independent delivery: the page action reopens a fresh dialog and the
-      // candidate ID is written to that delivery's message field as well.
+      // candidate ID and optional colleague-communication note are written to
+      // that delivery's message field as well.
       await forwardBossResumeRef.fn(
         detailPage as never,
         candidate,
@@ -2423,6 +2435,7 @@ async function executeBossForwardingDeliveries(input: {
         undefined,
         false,
         detailOptions,
+        input.hasColleagueCommunication === true,
       );
       const completedAt = new Date().toISOString();
       current = replaceBossForwardingDelivery(current, index, {
@@ -2453,10 +2466,7 @@ async function executeBossForwardingDeliveries(input: {
   return current;
 }
 
-/**
- * Scores only after the capture detail has been strictly closed. A failed
- * score remains pending and cannot produce any routing or delivery fact.
- */
+/** Scores the persisted resume while its verified Boss detail remains open. */
 async function scoreAndPrepareBossCapturedCandidate(input: {
   jobKey: string;
   job: NormalizedJob;
@@ -2466,7 +2476,6 @@ async function scoreAndPrepareBossCapturedCandidate(input: {
   fetchedAt: string;
   screening: BossScreeningSettings;
   primaryForwarding: BossForwardingSettings;
-  detailClosedAt: string;
 }): Promise<BossScreeningPreparationResult> {
   const {
     jobKey,
@@ -2477,7 +2486,6 @@ async function scoreAndPrepareBossCapturedCandidate(input: {
     fetchedAt,
     screening,
     primaryForwarding,
-    detailClosedAt,
   } = input;
   const scoredAt = new Date().toISOString();
   const scoreArtifactBase = {
@@ -2556,31 +2564,15 @@ async function scoreAndPrepareBossCapturedCandidate(input: {
       routingDecisionId,
       deliveryKind: 'rejection-email',
     };
-    const createdRejectionEmailOutbox = createBossRejectionEmailOutboxEntry({
-      jobKey,
-      jobTitle: job.title,
-      resume,
-      artifact: routingArtifact,
-      secondaryDelivery: screening.secondaryDelivery,
-      requirements: screening.requirements,
-      now,
-    });
-    const rejectionEmailOutbox: BossRejectionEmailOutboxEntry = {
-      ...createdRejectionEmailOutbox,
-      detailClosedAt,
-    };
-    // The email outbox carries the immutable routing artifact so an
-    // interruption between the two writes can be repaired without scoring
-    // or opening the Boss detail again.
-    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, rejectionEmailOutbox);
-    await store.saveBossCandidateRoutingArtifact('boss', jobKey, routingArtifact);
+    // Rejected delivery cannot be materialized until the same detail has
+    // strictly closed. The caller keeps the pending-score handoff until its
+    // close callback atomically anchors the rejection outbox and artifact.
     return {
       status: 'decided',
       result: {
         candidateId: candidate.candidateId,
         scoreArtifact,
         routingArtifact,
-        rejectionEmailOutbox,
       },
     };
   }
@@ -2612,6 +2604,46 @@ async function scoreAndPrepareBossCapturedCandidate(input: {
       routingArtifact,
       forwardingOutbox: pendingOutbox,
     },
+  };
+}
+
+async function finalizeBossRejectedCandidateAfterDetailClose(input: {
+  jobKey: string;
+  job: NormalizedJob;
+  resume: CandidateResume;
+  store: JobStore;
+  screening: BossScreeningSettings;
+  result: BossScreeningCandidateResult;
+  detailClosedAt: string;
+}): Promise<BossScreeningCandidateResult> {
+  if (input.result.routingArtifact.classification !== 'rejected'
+    || input.result.routingArtifact.audience !== 'secondary') {
+    throw new Error(`Boss rejected close finalization received a non-rejected decision for ${input.resume.candidateId}.`);
+  }
+  if (!input.screening.secondaryDelivery?.recipientEmail) {
+    throw new Error(`Boss rejection email for ${input.resume.candidateId} has no secondary recipient.`);
+  }
+  const createdAt = new Date().toISOString();
+  const rejectionEmailOutbox: BossRejectionEmailOutboxEntry = {
+    ...createBossRejectionEmailOutboxEntry({
+      jobKey: input.jobKey,
+      jobTitle: input.job.title,
+      resume: input.resume,
+      artifact: input.result.routingArtifact,
+      secondaryDelivery: input.screening.secondaryDelivery,
+      requirements: input.screening.requirements,
+      now: createdAt,
+    }),
+    detailClosedAt: input.detailClosedAt,
+  };
+  // The outbox embeds the immutable routing fact. Persist it first so an
+  // interruption between writes can rebuild the standalone artifact without
+  // rescoring or reopening this rejected candidate.
+  await input.store.saveBossRejectionEmailOutboxEntry('boss', input.jobKey, rejectionEmailOutbox);
+  await input.store.saveBossCandidateRoutingArtifact('boss', input.jobKey, input.result.routingArtifact);
+  return {
+    ...input.result,
+    rejectionEmailOutbox,
   };
 }
 
@@ -2747,6 +2779,11 @@ async function retryBossScreeningForwarding(input: {
       await store.saveBossForwardingOutboxEntry('boss', jobKey, failed);
       return failed;
     }
+    const hasColleagueCommunication = entry.workflow !== 'pre-capture'
+      && entry.forwarding.mode === 'email'
+      ? (await readBossColleagueCommunicationFlagRef.fn(detailPage, candidate, detailOptions!))
+        .hasColleagueCommunication
+      : false;
     entry = await executeBossForwardingDeliveries({
       jobKey,
       candidate,
@@ -2754,6 +2791,7 @@ async function retryBossScreeningForwarding(input: {
       detailPage,
       store,
       detailOptions,
+      hasColleagueCommunication,
     });
     // `forwardBossResume` performs the live detail identity check before
     // each recipient dialog. Treat the forwarding action's successful return
@@ -3830,7 +3868,6 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
   };
   const seenCandidateIdsDuringRun = new Set(seenCandidateIdsBeforeRun);
   let processedCandidateCount = 0;
-  let bossDecisionForwardDetailAttemptCount = 0;
 
   for (const candidate of retryCandidates) {
     if (processedCandidateCount > 0) {
@@ -3954,7 +3991,7 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
         ...(options.bossForwardCc === undefined ? {} : { ccEmails: options.bossForwardCc }),
       };
       let resumeForScreening: CandidateResume | undefined;
-      let captureDetailClosedAt: string | undefined;
+      let rejectedAwaitingClose: BossScreeningCandidateResult | undefined;
       const candidateResult = await captureCandidateResume(
         platform,
         jobKey,
@@ -3964,7 +4001,7 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
         searchPage,
         platformAdapter,
         null,
-        async ({ resume }) => {
+        async ({ detailPage, resume, detailOptions }) => {
           if (!screeningWorkByCandidateId.has(candidate.candidateId)) {
             const now = new Date().toISOString();
             const workItem: BossScreeningWorkItem = {
@@ -3983,114 +4020,127 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
           // resume this exact candidate despite that seen marker.
           seenCandidateIdsDuringRun.add(candidate.candidateId);
           await store.markCapturedCandidatesSeen(platform, jobKey, [candidate.candidateId]);
-        },
-        undefined,
-        async () => {
-          captureDetailClosedAt = new Date().toISOString();
-        },
-      );
-      candidateResults.push(candidateResult);
 
-      if (candidateResult.captured) {
-        if (!resumeForScreening || !candidateResult.detailLifecycle.detailClosed || !captureDetailClosedAt) {
-          throw new Error(`Boss captured candidate ${candidate.candidateId} returned without a closed-detail scoring handoff.`);
-        }
-        try {
-          const prepared = await scoreAndPrepareBossCapturedCandidate({
-            jobKey,
-            job,
-            candidate,
-            resume: resumeForScreening,
-            store,
-            fetchedAt,
-            screening,
-            primaryForwarding,
-            detailClosedAt: captureDetailClosedAt,
-          });
-          if (prepared.status === 'pending-score') {
-            const existingWorkItem = screeningWorkByCandidateId.get(candidate.candidateId)!;
-            const failedAt = new Date().toISOString();
-            const updatedWorkItem: BossScreeningWorkItem = {
-              ...existingWorkItem,
-              updatedAt: failedAt,
-              scoreAttemptCount: (existingWorkItem.scoreAttemptCount ?? 0) + 1,
-              lastScoreFailure: {
-                failedAt,
-                error: prepared.failure.error,
-                ...(prepared.failure.diagnostic ? { diagnostic: prepared.failure.diagnostic } : {}),
-              },
-            };
-            await store.saveBossScreeningWorkItem('boss', jobKey, updatedWorkItem);
-            screeningWorkByCandidateId.set(candidate.candidateId, updatedWorkItem);
-            bossScreeningScoreFailures.push(prepared.failure);
-          } else {
+          try {
+            const prepared = await scoreAndPrepareBossCapturedCandidate({
+              jobKey,
+              job,
+              candidate,
+              resume,
+              store,
+              fetchedAt,
+              screening,
+              primaryForwarding,
+            });
+            continueBossDetailLifecycleAfterModel(detailOptions, true);
+
+            if (prepared.status === 'pending-score') {
+              const existingWorkItem = screeningWorkByCandidateId.get(candidate.candidateId)!;
+              const failedAt = new Date().toISOString();
+              const updatedWorkItem: BossScreeningWorkItem = {
+                ...existingWorkItem,
+                updatedAt: failedAt,
+                scoreAttemptCount: (existingWorkItem.scoreAttemptCount ?? 0) + 1,
+                lastScoreFailure: {
+                  failedAt,
+                  error: prepared.failure.error,
+                  ...(prepared.failure.diagnostic ? { diagnostic: prepared.failure.diagnostic } : {}),
+                },
+              };
+              await store.saveBossScreeningWorkItem('boss', jobKey, updatedWorkItem);
+              screeningWorkByCandidateId.set(candidate.candidateId, updatedWorkItem);
+              bossScreeningScoreFailures.push(prepared.failure);
+              return;
+            }
+
             const screeningResult = prepared.result;
+            if (screeningResult.routingArtifact.classification === 'rejected') {
+              rejectedAwaitingClose = screeningResult;
+              return;
+            }
+
             bossScreeningResults.push(screeningResult);
-            // The immutable decision and its delivery outbox now own recovery;
+            // The immutable decision and forwarding outbox now own recovery;
             // the pre-decision work item must not survive external execution.
             await store.deleteBossScreeningWorkItem('boss', jobKey, candidate.candidateId);
             screeningWorkByCandidateId.delete(candidate.candidateId);
-
-            if (screeningResult.rejectionEmailOutbox) {
-              screeningResult.rejectionEmailOutbox = await executeBossRejectionEmailDelivery(
-                store,
-                jobKey,
-                screeningResult.rejectionEmailOutbox,
-              );
-            } else if (screeningResult.forwardingOutbox) {
-              const forwardingLifecycle: BossDetailLifecycleState = {
-                detailOpened: false,
-                detailIdentityVerified: false,
-                detailClosed: false,
-              };
-              bossDecisionForwardDetailAttemptCount += 1;
-              try {
-                screeningResult.forwardingOutbox = await retryBossScreeningForwarding({
-                  jobKey,
-                  candidate,
-                  entry: screeningResult.forwardingOutbox,
-                  store,
-                  session,
-                  searchPage,
-                  platformAdapter,
-                  lifecycle: forwardingLifecycle,
-                });
-              } catch (error) {
-                screeningResult.forwardingOutbox = await store.readBossForwardingOutboxEntry(
-                  'boss',
-                  jobKey,
-                  candidate.candidateId,
-                ) ?? screeningResult.forwardingOutbox;
-                if (error instanceof BossUnexpectedContactDialogError
-                  || error instanceof BossResumeDetailCloseError) {
-                  throw error;
-                }
-                if (forwardingLifecycle.detailOpened && !forwardingLifecycle.detailClosed) {
-                  throw new BossResumeDetailCloseError(
-                    `Boss post-score forwarding detail did not close for candidate ${candidate.candidateId}: ${error instanceof Error ? error.message : String(error)}`,
-                  );
-                }
-                bossScreeningFailures.push({
-                  candidateId: candidate.candidateId,
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              }
+            if (!screeningResult.forwardingOutbox) {
+              throw new Error(`Boss non-rejected decision for ${candidate.candidateId} has no forwarding outbox.`);
             }
+
+            try {
+              const hasColleagueCommunication = primaryForwarding.mode === 'email'
+                ? (await readBossColleagueCommunicationFlagRef.fn(detailPage, candidate, detailOptions!))
+                  .hasColleagueCommunication
+                : false;
+              screeningResult.forwardingOutbox = await executeBossForwardingDeliveries({
+                jobKey,
+                candidate,
+                entry: screeningResult.forwardingOutbox,
+                detailPage,
+                store,
+                detailOptions,
+                hasColleagueCommunication,
+              });
+            } catch (error) {
+              screeningResult.forwardingOutbox = await store.readBossForwardingOutboxEntry(
+                'boss',
+                jobKey,
+                candidate.candidateId,
+              ) ?? screeningResult.forwardingOutbox;
+              if (error instanceof BossUnexpectedContactDialogError) {
+                throw error;
+              }
+              bossScreeningFailures.push({
+                candidateId: candidate.candidateId,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          } catch (error) {
+            // Capture and seen state are already durable. Browser work after
+            // the model gets a fresh bounded continuation, while any
+            // non-fatal routing/persistence failure remains recoverable and
+            // must not relabel the successful resume capture as failed.
+            continueBossDetailLifecycleAfterModel(detailOptions, true);
+            if (error instanceof BossUnexpectedContactDialogError) {
+              throw error;
+            }
+            bossScreeningFailures.push({
+              candidateId: candidate.candidateId,
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
-        } catch (error) {
-          if (error instanceof BossUnexpectedContactDialogError || error instanceof BossResumeDetailCloseError) {
-            throw error;
+        },
+        undefined,
+        async () => {
+          if (!rejectedAwaitingClose || !resumeForScreening) return;
+          try {
+            let finalized = await finalizeBossRejectedCandidateAfterDetailClose({
+              jobKey,
+              job,
+              resume: resumeForScreening,
+              store,
+              screening,
+              result: rejectedAwaitingClose,
+              detailClosedAt: new Date().toISOString(),
+            });
+            await store.deleteBossScreeningWorkItem('boss', jobKey, candidate.candidateId);
+            screeningWorkByCandidateId.delete(candidate.candidateId);
+            finalized.rejectionEmailOutbox = await executeBossRejectionEmailDelivery(
+              store,
+              jobKey,
+              finalized.rejectionEmailOutbox!,
+            );
+            bossScreeningResults.push(finalized);
+          } catch (error) {
+            bossScreeningFailures.push({
+              candidateId: candidate.candidateId,
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
-          // A persistence or routing orchestration failure must not turn a
-          // saved resume back into an unseen candidate or create fallback
-          // delivery. The pending item remains authoritative until a decision
-          // outbox exists.
-          bossScreeningFailures.push({
-            candidateId: candidate.candidateId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
+        },
+      );
+      candidateResults.push(candidateResult);
       recordBossSeenProcessingLifecycle(candidate.candidateId, candidateResult.detailLifecycle, candidateResult.failureReason);
     } else {
       const preCaptureForwarding = platform === 'boss' && options.bossForwardMode && options.bossForwardRecipient
@@ -4411,7 +4461,6 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
     captureAttemptCount: captureCandidates.length,
     detailAttemptCount: retryCandidates.length
       + captureCandidates.length
-      + bossDecisionForwardDetailAttemptCount
       + bossSeenViewAttemptedCandidateIds.size,
     captureFailures,
     processingFailures,

@@ -62,18 +62,25 @@ scheduled work.
   post-score screening disabled, retain the legacy order: forward
   before parsing or seen marking, so a pre-capture failure remains retryable. With enabled
   post-score screening, skip that legacy forwarding hook: parse and persist the exact resume, write
-  pending-score/seen, and strictly close the bounded capture detail before model work. Score only
-  from that persisted resume. A model/provider/schema failure remains pending, records de-identified
-  phase diagnostics, and must not create a routing artifact, forwarding outbox, rejection email, or
-  report audience. After a successful decision, persist the routing decision/outbox; only
-  `qualified` and `review` reopen the exact candidate in a second bounded detail lifecycle and
-  forward to the primary target. A proven `rejected` candidate must never call the Boss forwarding
-  action; a separate candidate-level rejection-email outbox carrying the verified first-detail close sends one SMTP
+  pending-score/seen, and score from that persisted resume while the same verified detail remains
+  open. Model waiting performs no page action. After the model returns, orchestration starts one
+  fresh bounded continuation and revalidates the same candidate; the normal path never opens the
+  detail a second time. A model/provider/schema failure remains pending, records de-identified phase
+  diagnostics, and must not create a routing artifact, forwarding outbox, rejection email, report
+  audience, or colleague-communication read. After a successful decision, persist the routing
+  decision/outbox. Only `qualified` and `review` may continue in the same detail and forward to the
+  primary target. For email forwarding only, first read a boolean indicating whether the verified
+  current detail has a colleague communication record; if true, append the simple line
+  `同事已沟通` after the candidate ID in every recipient message. Do not read, return, persist, or
+  report colleague names, times, or details. A proven `rejected` candidate must never perform that
+  read or call the Boss forwarding action; strictly close its one detail first, then create a
+  separate candidate-level rejection-email outbox carrying the verified close and send one SMTP
   message containing all missing reasons and the complete structured resume to the configured
   secondary email/CC. Page actions never decide this route or write its facts. Persist a
   pending-score work item before seen so an interruption or scoring failure before the first decision can recover
   only that exact candidate under the same policy. A pending or known pre-confirmation failed forwarding outbox may
-  retry only while the exact candidate is visible and must use its stored target deliveries.
+  retry in a later run by opening the exact candidate once and must use its stored target deliveries; this recovery
+  lifecycle is not a normal-path second open.
   Rejection email recovery uses only its persisted resume/routing facts and never reopens detail.
   Persist the verified `detailClosedAt` before the detail lifecycle returns and start SMTP only
   afterward. A missing close proof never authorizes SMTP but remains visible in the current run;
