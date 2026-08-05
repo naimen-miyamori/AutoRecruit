@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { config } from '../config.js';
@@ -30,6 +31,108 @@ interface JobRecordNormalizationOptions {
   allowLegacyBossScreening?: boolean;
 }
 
+const MAX_BOSS_REJECTION_EMAIL_ATTEMPTS = 2;
+
+function bossRejectionEmailAttemptCount(entry: BossRejectionEmailOutboxEntry): number {
+  const count = entry.attemptCount ?? 0;
+  if (!Number.isInteger(count) || count < 0 || count > MAX_BOSS_REJECTION_EMAIL_ATTEMPTS) {
+    throw new Error(`Invalid Boss rejection email attempt count for ${entry.deliveryId}.`);
+  }
+  return count;
+}
+
+function isKnownNotSentSmtpEvidence(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const evidence = value as Record<string, unknown>;
+  if (evidence.retrySafety !== 'known-not-sent') return false;
+  if (evidence.phase === 'connect') {
+    return evidence.code === 'EDNS'
+      && evidence.command === 'CONN'
+      && evidence.retryDisposition === 'immediate-once';
+  }
+  if (evidence.phase === 'auth') {
+    return evidence.command === 'AUTH' && evidence.retryDisposition === 'deferred-once';
+  }
+  if (evidence.phase === 'envelope') {
+    return evidence.command === 'MAIL' && evidence.retryDisposition === 'deferred-once';
+  }
+  return false;
+}
+
+function validateBossRejectionEmailAttemptState(
+  existing: BossRejectionEmailOutboxEntry | undefined,
+  incoming: BossRejectionEmailOutboxEntry,
+): void {
+  const incomingCount = bossRejectionEmailAttemptCount(incoming);
+  if (incoming.retryAuthorization) {
+    if (incomingCount < 1
+      || incoming.retryAuthorization.failedAttempt !== 1
+      || !isKnownNotSentSmtpEvidence(incoming.retryAuthorization)) {
+      throw new Error(`Boss rejection email ${incoming.deliveryId} has invalid retry authorization.`);
+    }
+  }
+  if (incomingCount > 1 && !incoming.retryAuthorization) {
+    throw new Error(`Boss rejection email ${incoming.deliveryId} is missing authorization for its second SMTP attempt.`);
+  }
+  if (incoming.status === 'pending' && incomingCount !== 0) {
+    throw new Error(`Pending Boss rejection email ${incoming.deliveryId} cannot have SMTP attempts.`);
+  }
+  if (incoming.status === 'sending' && incoming.attemptCount !== undefined
+    && (incomingCount < 1 || incomingCount > MAX_BOSS_REJECTION_EMAIL_ATTEMPTS)) {
+    throw new Error(`Sending Boss rejection email ${incoming.deliveryId} must have one or two SMTP attempts.`);
+  }
+  if (incoming.retryExhausted === true
+    && (incoming.status !== 'retryable-failed' || incomingCount !== MAX_BOSS_REJECTION_EMAIL_ATTEMPTS)) {
+    throw new Error(`Exhausted Boss rejection email ${incoming.deliveryId} must be retryable-failed after two attempts.`);
+  }
+  if (incoming.status === 'retryable-failed' && incomingCount === MAX_BOSS_REJECTION_EMAIL_ATTEMPTS
+    && incoming.retryExhausted !== true) {
+    throw new Error(`Boss rejection email ${incoming.deliveryId} must mark retry exhaustion after two failed attempts.`);
+  }
+  if (incoming.status === 'retryable-failed' && incomingCount > 0
+    && (!incoming.retryAuthorization || !isKnownNotSentSmtpEvidence(incoming.lastSmtpFailure))) {
+    throw new Error(`Boss rejection email ${incoming.deliveryId} retryable failure lacks valid pre-submit evidence.`);
+  }
+  if (incoming.status !== 'retryable-failed' && incoming.retryExhausted === true) {
+    throw new Error(`Boss rejection email ${incoming.deliveryId} cannot clear retry exhaustion through a non-retryable state.`);
+  }
+  if (existing) {
+    const existingCount = bossRejectionEmailAttemptCount(existing);
+    if (incomingCount < existingCount) {
+      throw new Error(`Boss rejection email ${incoming.deliveryId} attempt count cannot decrease.`);
+    }
+    if (existing.retryExhausted === true && incoming.retryExhausted !== true) {
+      throw new Error(`Boss rejection email ${incoming.deliveryId} cannot clear retry exhaustion.`);
+    }
+    if (existing.retryAuthorization
+      && !isDeepStrictEqual(existing.retryAuthorization, incoming.retryAuthorization)) {
+      throw new Error(`Boss rejection email ${incoming.deliveryId} retry authorization is immutable.`);
+    }
+    if (existing.status === 'retryable-failed' && incoming.status === 'sending') {
+      if (existing.retryExhausted === true || existingCount >= MAX_BOSS_REJECTION_EMAIL_ATTEMPTS) {
+        throw new Error(`Boss rejection email ${incoming.deliveryId} cannot start a third SMTP attempt.`);
+      }
+      if (incomingCount !== existingCount + 1) {
+        throw new Error(`Boss rejection email ${incoming.deliveryId} must increment attempts exactly once before sending.`);
+      }
+      if (existingCount > 0 && !existing.retryAuthorization) {
+        throw new Error(`Boss rejection email ${incoming.deliveryId} is missing retry authorization for its remaining attempt.`);
+      }
+    }
+    if (existing.status === 'pending' && incoming.status === 'sending' && incomingCount !== 1) {
+      throw new Error(`Boss rejection email ${incoming.deliveryId} must start its first SMTP attempt at count one.`);
+    }
+    if (existing.status === 'sending' && incoming.status === 'retryable-failed') {
+      if (incomingCount !== existingCount || !isKnownNotSentSmtpEvidence(incoming.lastSmtpFailure)) {
+        throw new Error(`Boss rejection email ${incoming.deliveryId} retryable failure lacks valid pre-submit evidence.`);
+      }
+      if (incomingCount === 1 && !incoming.retryAuthorization) {
+        throw new Error(`Boss rejection email ${incoming.deliveryId} first retryable failure lacks retry authorization.`);
+      }
+    }
+  }
+}
+
 interface JobPaths {
   jobDir: string;
   resumesDir: string;
@@ -40,6 +143,7 @@ interface JobPaths {
   screeningWorkDir: string;
   forwardingOutboxDir: string;
   rejectionEmailOutboxDir: string;
+  rejectionEmailLocksDir: string;
   snapshotsDir: string;
   domSnapshotsDir: string;
   jdPath: string;
@@ -106,6 +210,47 @@ export class JobConfigConflictError extends Error {
   }
 }
 
+interface BossRejectionEmailDeliveryLockRecord {
+  version: 1;
+  pid: number;
+  token: string;
+  acquiredAt: string;
+}
+
+export interface BossRejectionEmailDeliveryLease {
+  readonly token: string;
+}
+
+export class BossRejectionEmailDeliveryBusyError extends Error {
+  readonly code = 'BOSS_REJECTION_EMAIL_DELIVERY_BUSY' as const;
+
+  constructor(readonly deliveryId: string) {
+    super(`Boss rejection email ${deliveryId} is already being delivered by another live process.`);
+    this.name = 'BossRejectionEmailDeliveryBusyError';
+  }
+}
+
+function isBossRejectionEmailDeliveryLockRecord(value: unknown): value is BossRejectionEmailDeliveryLockRecord {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return record.version === 1
+    && Number.isInteger(record.pid)
+    && (record.pid as number) > 0
+    && typeof record.token === 'string'
+    && record.token.length > 0
+    && typeof record.acquiredAt === 'string'
+    && record.acquiredAt.length > 0;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
 async function ensureDir(dirPath: string): Promise<void> {
   await fs.mkdir(dirPath, { recursive: true });
 }
@@ -125,6 +270,32 @@ async function writeFileAtomically(filePath: string, content: string): Promise<v
 
 async function writeJson(filePath: string, data: unknown): Promise<void> {
   await writeFileAtomically(filePath, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+async function tryCreateExclusiveJsonFile(filePath: string, data: unknown): Promise<boolean> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  let created = false;
+  try {
+    handle = await fs.open(filePath, 'wx', 0o600);
+    created = true;
+    await handle.writeFile(`${JSON.stringify(data, null, 2)}\n`, 'utf8');
+    await handle.sync();
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    if (handle) {
+      await handle.close().catch(() => undefined);
+      handle = undefined;
+    }
+    if (created) await fs.rm(filePath, { force: true }).catch(() => undefined);
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function readJsonObject(filePath: string): Promise<unknown> {
+  return JSON.parse(await fs.readFile(filePath, 'utf8')) as unknown;
 }
 
 async function writeJsonIfChanged(filePath: string, data: unknown): Promise<boolean> {
@@ -306,6 +477,7 @@ export class JobStore {
       screeningWorkDir: path.join(jobDir, 'routing', 'pending-score'),
       forwardingOutboxDir: path.join(jobDir, 'routing', 'outbox'),
       rejectionEmailOutboxDir: path.join(jobDir, 'routing', 'rejection-email-outbox'),
+      rejectionEmailLocksDir: path.join(jobDir, 'routing', 'rejection-email-locks'),
       snapshotsDir: path.join(jobDir, 'snapshots'),
       domSnapshotsDir: path.join(jobDir, 'snapshots-dom'),
       jdPath: path.join(jobDir, 'jd.json'),
@@ -324,6 +496,7 @@ export class JobStore {
       ensureDir(paths.screeningWorkDir),
       ensureDir(paths.forwardingOutboxDir),
       ensureDir(paths.rejectionEmailOutboxDir),
+      ensureDir(paths.rejectionEmailLocksDir),
       ensureDir(paths.snapshotsDir),
       ensureDir(paths.domSnapshotsDir),
     ]);
@@ -932,12 +1105,90 @@ export class JobStore {
     ));
   }
 
-  async saveBossRejectionEmailOutboxEntry(
+  private async acquireBossRejectionEmailDeliveryLease(
+    paths: JobPaths,
+    deliveryId: string,
+  ): Promise<BossRejectionEmailDeliveryLockRecord> {
+    const lockPath = path.join(paths.rejectionEmailLocksDir, `${routingCandidateFileName(deliveryId)}.lock`);
+    const lease: BossRejectionEmailDeliveryLockRecord = {
+      version: 1,
+      pid: process.pid,
+      token: randomUUID(),
+      acquiredAt: new Date().toISOString(),
+    };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (await tryCreateExclusiveJsonFile(lockPath, lease)) return lease;
+      let existing: unknown;
+      try {
+        existing = await readJsonObject(lockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw new BossRejectionEmailDeliveryBusyError(deliveryId);
+      }
+      if (!isBossRejectionEmailDeliveryLockRecord(existing) || processIsAlive(existing.pid)) {
+        throw new BossRejectionEmailDeliveryBusyError(deliveryId);
+      }
+      const stalePath = `${lockPath}.stale-${lease.token}`;
+      try {
+        await fs.rename(lockPath, stalePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      await fs.rm(stalePath, { force: true });
+    }
+    throw new BossRejectionEmailDeliveryBusyError(deliveryId);
+  }
+
+  private async assertBossRejectionEmailDeliveryLease(
+    paths: JobPaths,
+    deliveryId: string,
+    token: string,
+  ): Promise<void> {
+    const lockPath = path.join(paths.rejectionEmailLocksDir, `${routingCandidateFileName(deliveryId)}.lock`);
+    let current: unknown;
+    try {
+      current = await readJsonObject(lockPath);
+    } catch {
+      throw new Error(`Boss rejection email ${deliveryId} delivery lease is missing or unreadable.`);
+    }
+    if (!isBossRejectionEmailDeliveryLockRecord(current)
+      || current.pid !== process.pid
+      || current.token !== token) {
+      throw new Error(`Boss rejection email ${deliveryId} delivery lease ownership changed.`);
+    }
+  }
+
+  private async releaseBossRejectionEmailDeliveryLease(
+    paths: JobPaths,
+    deliveryId: string,
+    lease: BossRejectionEmailDeliveryLockRecord,
+  ): Promise<void> {
+    await this.assertBossRejectionEmailDeliveryLease(paths, deliveryId, lease.token);
+    await fs.rm(
+      path.join(paths.rejectionEmailLocksDir, `${routingCandidateFileName(deliveryId)}.lock`),
+    );
+  }
+
+  async withBossRejectionEmailDeliveryLock<T>(
     platform: 'boss',
     jobKey: string,
+    deliveryId: string,
+    operation: (lease: BossRejectionEmailDeliveryLease) => Promise<T>,
+  ): Promise<T> {
+    const paths = await this.initializeJob(platform, jobKey);
+    const lease = await this.acquireBossRejectionEmailDeliveryLease(paths, deliveryId);
+    try {
+      return await operation({ token: lease.token });
+    } finally {
+      await this.releaseBossRejectionEmailDeliveryLease(paths, deliveryId, lease);
+    }
+  }
+
+  private async saveBossRejectionEmailOutboxEntryUnlocked(
+    paths: JobPaths,
     entry: BossRejectionEmailOutboxEntry,
   ): Promise<string> {
-    const paths = await this.initializeJob(platform, jobKey);
     const filePath = path.join(paths.rejectionEmailOutboxDir, `${routingCandidateFileName(entry.deliveryId)}.json`);
     const existing = await readJsonFile<BossRejectionEmailOutboxEntry | undefined>(filePath, undefined);
     if (existing) {
@@ -974,7 +1225,7 @@ export class JobStore {
       }
       const allowedTransitions: Record<BossRejectionEmailOutboxEntry['status'], ReadonlySet<BossRejectionEmailOutboxEntry['status']>> = {
         pending: new Set(['pending', 'sending', 'retryable-failed', 'superseded']),
-        sending: new Set(['sending', 'sent', 'uncertain']),
+        sending: new Set(['sent', 'retryable-failed', 'uncertain']),
         sent: new Set(['sent']),
         'retryable-failed': new Set(['retryable-failed', 'sending', 'superseded']),
         uncertain: new Set(['uncertain']),
@@ -984,8 +1235,24 @@ export class JobStore {
         throw new Error(`Invalid rejection email delivery transition ${existing.status} -> ${entry.status} for ${entry.deliveryId}.`);
       }
     }
+    validateBossRejectionEmailAttemptState(existing, entry);
     await writeJsonIfChanged(filePath, entry);
     return filePath;
+  }
+
+  async saveBossRejectionEmailOutboxEntry(
+    platform: 'boss',
+    jobKey: string,
+    entry: BossRejectionEmailOutboxEntry,
+    options: { leaseToken?: string } = {},
+  ): Promise<string> {
+    const paths = await this.initializeJob(platform, jobKey);
+    if (options.leaseToken) {
+      await this.assertBossRejectionEmailDeliveryLease(paths, entry.deliveryId, options.leaseToken);
+      return this.saveBossRejectionEmailOutboxEntryUnlocked(paths, entry);
+    }
+    return this.withBossRejectionEmailDeliveryLock(platform, jobKey, entry.deliveryId, ({ token }) =>
+      this.saveBossRejectionEmailOutboxEntry(platform, jobKey, entry, { leaseToken: token }));
   }
 
   async readBossRejectionEmailOutboxEntry(

@@ -2641,7 +2641,7 @@ describe('console API routes', () => {
       filters: Array<{ fieldCount: number; failedControls: number; unknownControls: number }>;
       sessions: Array<{ recentLoginRefreshStatus?: string; recentLoginRefreshError?: string }>;
       tasks: { failed: number; latestFailureMessage?: string };
-      bossRejectionEmails: { outboxCount: number; pending: number; sending: number; sent: number; retryableFailed: number; uncertain: number; superseded: number };
+      bossRejectionEmails: { outboxCount: number; pending: number; sending: number; sent: number; retryableFailed: number; retryExhausted: number; uncertain: number; superseded: number };
     };
     assert.equal(health.dataAnomalies[0]?.missingJd, 1);
     assert.equal(health.dataAnomalies[0]?.exportOnlyDirectories, 1);
@@ -2670,6 +2670,7 @@ describe('console API routes', () => {
       sending: 0,
       sent: 0,
       retryableFailed: 0,
+      retryExhausted: 0,
       uncertain: 0,
       superseded: 0,
     });
@@ -2686,6 +2687,10 @@ describe('console API routes', () => {
       path.join(dataDir, 'boss', 'jobs', 'boss-email-health', 'routing', 'rejection-email-outbox', 'sent.json'),
       { status: 'sent' },
     );
+    await writeJson(
+      path.join(dataDir, 'boss', 'jobs', 'boss-email-health', 'routing', 'rejection-email-outbox', 'exhausted.json'),
+      { status: 'retryable-failed', retryExhausted: true },
+    );
     const queue = new TaskQueue({ taskDir, runner: async () => buildRunSummary() });
     const response = await handleApiRequest({
       method: 'GET',
@@ -2698,11 +2703,12 @@ describe('console API routes', () => {
 
     assert.equal(response.statusCode, 200);
     assert.deepStrictEqual((response.body as { bossRejectionEmails: unknown }).bossRejectionEmails, {
-      outboxCount: 2,
+      outboxCount: 3,
       pending: 0,
       sending: 1,
       sent: 1,
       retryableFailed: 0,
+      retryExhausted: 1,
       uncertain: 0,
       superseded: 0,
     });

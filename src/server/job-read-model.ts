@@ -384,26 +384,30 @@ export class JobReadModel {
     sending: number;
     sent: number;
     retryableFailed: number;
+    retryExhausted: number;
     uncertain: number;
     superseded: number;
   }> {
     if (platform && platform !== 'boss') {
-      return { outboxCount: 0, pending: 0, sending: 0, sent: 0, retryableFailed: 0, uncertain: 0, superseded: 0 };
+      return { outboxCount: 0, pending: 0, sending: 0, sent: 0, retryableFailed: 0, retryExhausted: 0, uncertain: 0, superseded: 0 };
     }
 
     const jobsDir = path.join(this.dataDir, 'boss', 'jobs');
     const jobKeys = await listDirectories(jobsDir);
-    const counts = { outboxCount: 0, pending: 0, sending: 0, sent: 0, retryableFailed: 0, uncertain: 0, superseded: 0 };
+    const counts = { outboxCount: 0, pending: 0, sending: 0, sent: 0, retryableFailed: 0, retryExhausted: 0, uncertain: 0, superseded: 0 };
     for (const jobKey of jobKeys) {
       const outboxDir = path.join(jobsDir, jobKey, 'routing', 'rejection-email-outbox');
       for (const file of await listJsonFiles(outboxDir)) {
-        const entry = await readJsonFileIfExists<{ status?: string }>(path.join(outboxDir, file));
+        const entry = await readJsonFileIfExists<{ status?: string; retryExhausted?: boolean }>(path.join(outboxDir, file));
         if (!entry) continue;
         counts.outboxCount += 1;
         if (entry.status === 'pending') counts.pending += 1;
         else if (entry.status === 'sending') counts.sending += 1;
         else if (entry.status === 'sent') counts.sent += 1;
-        else if (entry.status === 'retryable-failed') counts.retryableFailed += 1;
+        else if (entry.status === 'retryable-failed') {
+          if (entry.retryExhausted === true) counts.retryExhausted += 1;
+          else counts.retryableFailed += 1;
+        }
         else if (entry.status === 'uncertain') counts.uncertain += 1;
         else if (entry.status === 'superseded') counts.superseded += 1;
       }

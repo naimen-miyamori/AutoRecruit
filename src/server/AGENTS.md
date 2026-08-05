@@ -61,9 +61,10 @@ when they are affected.
 - A failed all-platform search-subscription task retains structured summaries for completed stages
   and the exact stopped platform while remaining failed. Earlier external saves are never rolled
   back or hidden by a later-stage error.
-- Dashboard health includes aggregate Boss rejection-email outbox counts, including `sending`, only;
-  task detail owns immutable recipients, candidate-level delivery states, and the
-  `sending`/`uncertain` manual-verification warnings. Neither read
+- Dashboard health includes aggregate Boss rejection-email outbox counts, including `sending` and
+  `retryExhausted`; exhausted entries are not counted as automatically recoverable. Task detail owns
+  immutable recipients, candidate-level delivery states, and the `sending`/`uncertain`/
+  `retryExhausted` manual-verification warnings. Neither read
   model exposes rejection-email body content or SMTP credentials.
 
 ## Verification

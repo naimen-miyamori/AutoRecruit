@@ -956,6 +956,7 @@ describe('sendJobReport', () => {
       sending: 1,
       sent: 1,
       retryableFailed: 0,
+      retryExhausted: 0,
       uncertain: 0,
       superseded: 0,
       failedCandidateIds: ['rejected-email-sending'],
@@ -1023,6 +1024,51 @@ describe('sendJobReport', () => {
     });
     assert.equal(immutableFailure.emailDelivered, false);
     assert.match(immutableFailure.emailError ?? '', /not confirmed sent/);
+  });
+
+  it('derives rejection emailAttempted from actual SMTP calls instead of retryable status alone', () => {
+    const skippedDeliveries = {
+      primary: {
+        jobKey: 'boss-rejection-attempt-count',
+        audience: 'primary' as const,
+        attempted: false,
+        delivered: false,
+        skipReason: 'no-primary-audience-candidates',
+        summary: { candidateCount: 0, successCount: 0, failureCount: 0 },
+      },
+      secondary: {
+        jobKey: 'boss-rejection-attempt-count',
+        audience: 'secondary' as const,
+        attempted: false,
+        delivered: false,
+        skipReason: 'rejected-candidates-delivered-individually',
+        summary: { candidateCount: 1, successCount: 1, failureCount: 0 },
+      },
+    };
+    const routing = {
+      enabled: true as const,
+      policyHash: 'policy-hash',
+      qualifiedCandidateIds: [],
+      reviewCandidateIds: [],
+      rejectedCandidateIds: ['rejected-candidate'],
+      forwardingStatusCounts: {},
+      rejectionEmailStatusCounts: { 'retryable-failed': 1 },
+      rejectionEmailRetryExhaustedCount: 1,
+    };
+    const exhausted = buildBossRoutedMainRunEmailSummary(skippedDeliveries, {
+      ...routing,
+      rejectionEmailSmtpAttemptCount: 2,
+    });
+    assert.equal(exhausted.emailAttempted, true);
+    assert.equal(exhausted.emailDelivered, false);
+
+    const preflightOnly = buildBossRoutedMainRunEmailSummary(skippedDeliveries, {
+      ...routing,
+      rejectionEmailSmtpAttemptCount: 0,
+      rejectionEmailRetryExhaustedCount: 0,
+    });
+    assert.equal(preflightOnly.emailAttempted, false);
+    assert.equal(preflightOnly.emailDelivered, false);
   });
 
   it('reports routed Boss candidates when another attempted candidate failed before scoring and routing', async () => {

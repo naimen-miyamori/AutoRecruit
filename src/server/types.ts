@@ -624,6 +624,7 @@ export interface BossRejectionEmailHealth {
   sending: number;
   sent: number;
   retryableFailed: number;
+  retryExhausted: number;
   uncertain: number;
   superseded: number;
 }

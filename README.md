@@ -333,6 +333,16 @@ npm run email:report -- boss "工业设计师-boss-job-id-123" recruiter@example
 只读取最新 run、对应评分产物和分流事实并通过 SMTP 发送，不打开浏览器、不重新抓取、不转发候选人简历，也不修改
 seen。这里的收件人仅覆盖本次补发；如需后续普通抓取持续发送报告，应在普通抓取中配置 `--email`。
 
+若只需要检查 SMTP 的 DNS、TCP/TLS 和 `220` 欢迎语，不认证也不发信，可运行只读诊断：
+
+```bash
+npm run smtp:diagnose -- --attempts 3
+```
+
+默认只探测一次，最多允许显式指定 5 次；命中 `198.18.0.0/15` 等 synthetic/Fake-IP 地址时只告警，不自动修改
+代理、VPN、DNS 或系统路由。若使用透明 TUN，优先在代理客户端为 SMTP 域名配置 DIRECT 和真实 DNS，再由运维侧确认
+实际路由。
+
 所有评分报告（包括 Boss 主/副受众）在进入 SMTP 前都会校验收件人和抄送地址；格式错误或
 `example.com`、`.test`、`.invalid` 等文档/测试域名会直接 fail closed，不会尝试发送并产生退信。
 
@@ -392,19 +402,25 @@ pending-score 会保存 provider、kind、phase、首个输出状态和耗时等
 
 运行摘要中的 `reportDeliveries.primary/secondary` 是聚合报告事实；新合同的 secondary 会以
 `rejected-candidates-delivered-individually` 跳过。候选人级状态另写入 `bossRouting.rejectionEmailStatusCounts`，任务
-摘要的 `rejectionEmails` 返回 eligible、pending、sending、sent、retryableFailed、uncertain、superseded、失败候选 ID，
-以及本轮 outbox 固化的 `deliveryTargets`。顶层
-兼容字段会把主聚合报告和所有必要的否定邮件一起归约：任一实际发送即 `emailAttempted=true`，所有必要邮件确认成功才有
+摘要的 `rejectionEmails` 返回 eligible、pending、sending、sent、retryableFailed、retryExhausted、uncertain、superseded、失败候选 ID，
+以及本轮 outbox 固化的 `deliveryTargets`；`bossRouting.rejectionEmailSmtpAttemptCount` 只统计本轮实际进入
+`sendMail()` 的次数。顶层兼容字段会把主聚合报告和所有必要的否定邮件一起归约：任一本轮实际 SMTP 调用即
+`emailAttempted=true`，所有必要邮件确认成功才有
 `emailDelivered=true`。
-任务详情会显示副收件人/CC、每份否定邮件状态以及 `sending`/`uncertain` 人工核对提示；控制台首页健康摘要只汇总 Boss 否定邮件 outbox
-的状态数量，不展示正文或 SMTP 凭据。
+任务详情会显示副收件人/CC、每份否定邮件状态以及 `sending`/`uncertain`/`retryExhausted` 人工核对提示；自动重试已用尽的邮件
+不会再进入下一轮自动恢复。控制台首页健康摘要只汇总 Boss 否定邮件 outbox 的状态数量，不展示正文或 SMTP 凭据。
 Boss 否定邮件正文由独立完整渲染器生成，每位候选人只出现一次，包含全部明确缺失要求、理由、核验证据和完整结构化简历；
 不复用聚合报告的截断正文。完整评分仍写入本地导出；普通平台报告保持原有完整格式。
 
 启用分流后，简历保存与写入 seen 之间会先落一条“待评分分流”工作项；若评分失败或进程在分流决定落盘前中断，后续启用
 分流的运行只会按同一候选人 ID 恢复该工作，不会把 seen 误当作已经转发。只有成功评分并形成 outbox 后，`pending` 或明确的
-`retryable-failed` 会在候选人仍出现在当前结果时按原 outbox 的单个地址重试；主地址和每个副本地址分别保存
-状态，已 `sent` 或结果不确定的 `uncertain` 地址永不自动重发，因而副本失败不会重复发送已成功的主地址。
+`retryable-failed` 会按原 outbox 的不可变 TO/CC 恢复，即使候选人不再出现在当前卡片中也不依赖重新抓取。只有
+`EDNS + CONN` 能证明 DNS 连接前失败并在当前运行短暂退避后重试一次；AUTH 和 MAIL 失败只保留后续运行的一次机会。
+Nodemailer 可能在 DATA 后仍把 socket timeout/close 记为 `command=CONN`，因此 ETIMEDOUT、ESOCKET、ECONNECTION 及
+其他 CONN 一律进入 `uncertain`，不得自动重发。RCPT、DATA、阶段未知、部分收件人 accepted/rejected/pending、遗留
+`sending` 和任何结果不确定的调用同样保持 `uncertain`。同一候选人的 TO 与 CC 是一封 SMTP 消息并共享一个状态；每个
+delivery 在跨进程原子锁内重新读取 outbox、递增尝试次数并调用 SMTP，最多两次，第二次仍证明未提交时写入
+`retryExhausted`。
 
 抓取详情严格关闭后才允许形成否定邮件 outbox；不可变收件人、正文、分流事实和已验证的关闭时间一次落盘，随后 SMTP 才能开始。重跑只依据这个持久化凭证恢复，不通过候选人离开前 20、历史 run 已收录或浏览器重启推断关闭成功；没有关闭凭证
 的邮件不发送但会进入本轮失败摘要。已具备凭证的 `pending/retryable-failed` 即使候选人不再出现在当前卡片中也可恢复，恢复后的

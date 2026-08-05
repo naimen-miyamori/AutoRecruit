@@ -1,7 +1,13 @@
 import nodemailer from 'nodemailer';
 
 import { config } from '../config.js';
-import type { JobResultsMarkdownSummary } from '../types/job.js';
+import type {
+  JobResultsMarkdownSummary,
+  SmtpFailureEvidence,
+  SmtpFailurePhase,
+  SmtpRetryDisposition,
+  SmtpRetrySafety,
+} from '../types/job.js';
 import type { SupportedPlatform } from '../platforms/types.js';
 
 export interface SendJobReportEmailParams {
@@ -29,6 +35,122 @@ export interface MailTransportPayload {
 
 export interface MailTransport {
   sendMail(payload: MailTransportPayload): Promise<unknown>;
+}
+
+/** Error with provider-neutral, de-identified SMTP delivery evidence. */
+export class MailDeliveryError extends Error {
+  readonly evidence: SmtpFailureEvidence;
+
+  constructor(message: string, evidence: SmtpFailureEvidence) {
+    super(message);
+    this.name = 'MailDeliveryError';
+    this.evidence = evidence;
+  }
+}
+
+function asErrorRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function safeErrorField(value: unknown, maxLength = 32): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toUpperCase();
+  return normalized && /^[A-Z0-9_-]+(?:\s+[A-Z0-9_-]+)*$/u.test(normalized)
+    ? normalized.slice(0, maxLength)
+    : undefined;
+}
+
+function readResponseCode(record: Record<string, unknown> | undefined): number | undefined {
+  const value = record?.responseCode;
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599) return value;
+  return undefined;
+}
+
+function classifySmtpFailure(error: unknown): SmtpFailureEvidence {
+  const record = asErrorRecord(error);
+  const code = safeErrorField(record?.code);
+  const rawCommand = safeErrorField(record?.command, 40);
+  const command = rawCommand?.startsWith('AUTH')
+    ? 'AUTH'
+    : rawCommand?.startsWith('MAIL')
+      ? 'MAIL'
+      : rawCommand?.startsWith('RCPT')
+        ? 'RCPT'
+        : rawCommand?.startsWith('DATA')
+          ? 'DATA'
+          : rawCommand === 'CONN'
+            ? 'CONN'
+            : undefined;
+  const provenDnsFailure = command === 'CONN' && code === 'EDNS';
+  const phase: SmtpFailurePhase = provenDnsFailure
+    ? 'connect'
+    : command === 'AUTH'
+      ? 'auth'
+      : command === 'MAIL' || command === 'RCPT'
+        ? 'envelope'
+        : command === 'DATA'
+          ? 'data'
+          : 'unknown';
+  const retrySafety: SmtpRetrySafety = provenDnsFailure || command === 'AUTH' || command === 'MAIL'
+    ? 'known-not-sent'
+    : 'uncertain';
+  const retryDisposition: SmtpRetryDisposition = retrySafety === 'uncertain'
+    ? 'none'
+    : provenDnsFailure
+      ? 'immediate-once'
+      : 'deferred-once';
+  const responseCode = readResponseCode(record);
+  return {
+    phase,
+    retrySafety,
+    retryDisposition,
+    ...(code ? { code } : {}),
+    ...(command ? { command } : {}),
+    ...(responseCode === undefined ? {} : { responseCode }),
+  };
+}
+
+function formatMailDeliverySummary(evidence: SmtpFailureEvidence): string {
+  const details = [
+    `phase=${evidence.phase}`,
+    `retrySafety=${evidence.retrySafety}`,
+    `retryDisposition=${evidence.retryDisposition}`,
+    ...(evidence.code ? [`code=${evidence.code}`] : []),
+    ...(evidence.command ? [`command=${evidence.command}`] : []),
+    ...(evidence.responseCode === undefined ? [] : [`responseCode=${evidence.responseCode}`]),
+  ];
+  return `SMTP delivery failed (${details.join(', ')}).`;
+}
+
+/** Normalizes a transport exception without retaining SMTP-specific sensitive fields. */
+export function normalizeMailDeliveryError(error: unknown): MailDeliveryError {
+  if (error instanceof MailDeliveryError) return error;
+  const evidence = classifySmtpFailure(error);
+  return new MailDeliveryError(formatMailDeliverySummary(evidence), evidence);
+}
+
+export function getMailDeliveryErrorEvidence(error: unknown): SmtpFailureEvidence | undefined {
+  return error instanceof MailDeliveryError ? error.evidence : undefined;
+}
+
+function partialRecipientFailure(result: unknown): MailDeliveryError | undefined {
+  const record = asErrorRecord(result);
+  const rejectedCount = Array.isArray(record?.rejected) ? record.rejected.length : 0;
+  const pendingCount = Array.isArray(record?.pending) ? record.pending.length : 0;
+  if (rejectedCount === 0 && pendingCount === 0) return undefined;
+  const evidence: SmtpFailureEvidence = {
+    phase: 'data',
+    retrySafety: 'uncertain',
+    retryDisposition: 'none',
+    code: 'EPARTIAL',
+    command: 'DATA',
+  };
+  return new MailDeliveryError(
+    `SMTP delivery was partial (rejectedCount=${rejectedCount}, pendingCount=${pendingCount}).`,
+    evidence,
+  );
 }
 
 export interface SmtpConfig {
@@ -157,14 +279,20 @@ export async function sendJobReportEmail(
   const resolvedTransport = transport ?? createSmtpTransport();
   const resolvedSmtp = smtp ?? getSmtpConfig();
 
-  await resolvedTransport.sendMail({
-    from: resolvedSmtp.from,
-    to: params.recipient,
-    ...(params.ccEmails?.length ? { cc: params.ccEmails } : {}),
-    subject: params.subject,
-    text: params.markdown,
-    ...(params.messageId ? { messageId: params.messageId } : {}),
-  });
+  try {
+    const result = await resolvedTransport.sendMail({
+      from: resolvedSmtp.from,
+      to: params.recipient,
+      ...(params.ccEmails?.length ? { cc: params.ccEmails } : {}),
+      subject: params.subject,
+      text: params.markdown,
+      ...(params.messageId ? { messageId: params.messageId } : {}),
+    });
+    const partialFailure = partialRecipientFailure(result);
+    if (partialFailure) throw partialFailure;
+  } catch (error) {
+    throw normalizeMailDeliveryError(error);
+  }
 
   return {
     recipient: params.recipient,

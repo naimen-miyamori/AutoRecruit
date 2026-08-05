@@ -25,9 +25,11 @@ contracts.
 - Boss keeps one platform key and adapter. Normal capture/batch and search subscription may opt into
   it as the fourth stage only through their explicit `all + includeBoss` selection; plain `all`
   registries, questions, filter discovery, and Talent Mapping remain three-platform.
-- Search entry and extraction consume the caller's shared search deadline. Detail opening consumes
-  one total detail deadline: popup/current-page/content races are platform-owned, and modal
-  platforms use modal readiness without resetting the budget.
+- Search entry and extraction consume the caller's shared search deadline. Detail opening uses a
+  bounded action segment: popup/current-page/content races are platform-owned, and modal platforms
+  use modal readiness without resetting that segment. Boss enabled screening may keep the verified
+  detail open during a non-browser model wait, then use one fresh bounded continuation on that same
+  detail; the normal path must not open it a second time.
 - A stable or explicit empty result is a successful zero-candidate result. In direct capture, every
   requested condition must be applied and confirmed; skipped or failed conditions abort before
   candidate extraction.

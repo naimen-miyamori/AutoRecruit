@@ -252,6 +252,21 @@ export interface BossRoutingDecision {
 
 export type BossForwardingStatus = 'pending' | 'sending' | 'sent' | 'retryable-failed' | 'uncertain' | 'superseded';
 
+/** Normalized SMTP failure phase; provider-specific raw error fields never leave the mailer. */
+export type SmtpFailurePhase = 'connect' | 'auth' | 'envelope' | 'data' | 'unknown';
+export type SmtpRetrySafety = 'known-not-sent' | 'uncertain';
+export type SmtpRetryDisposition = 'immediate-once' | 'deferred-once' | 'none';
+
+/** De-identified SMTP evidence safe for outbox/audit persistence. */
+export interface SmtpFailureEvidence {
+  phase: SmtpFailurePhase;
+  retrySafety: SmtpRetrySafety;
+  retryDisposition: SmtpRetryDisposition;
+  code?: string;
+  command?: string;
+  responseCode?: number;
+}
+
 export interface BossForwardingDeliveryState {
   role: 'recipient' | 'cc';
   recipient: string;
@@ -321,6 +336,21 @@ export interface BossRejectionEmailOutboxEntry {
   attemptedAt?: string;
   completedAt?: string;
   error?: string;
+  /** Persisted SMTP attempt slots, reserved immediately before each call; preflight failures stay at zero. */
+  attemptCount?: number;
+  /** True after the second proven-not-sent attempt; ordinary recovery must stop. */
+  retryExhausted?: boolean;
+  /** First proven-not-sent failure that authorized the one bounded retry. */
+  retryAuthorization?: SmtpFailureEvidence & {
+    failedAttempt: 1;
+    occurredAt: string;
+    summary: string;
+  };
+  /** Most recent normalized failure, omitted from successful terminal presentation. */
+  lastSmtpFailure?: SmtpFailureEvidence & {
+    occurredAt: string;
+    summary: string;
+  };
 }
 
 /** Immutable, platform-neutral routing decision written after score/evaluation. */
@@ -747,6 +777,9 @@ export interface RunResult {
     scoreFailureStatusCounts?: Record<string, number>;
     forwardingStatusCounts: Record<string, number>;
     rejectionEmailStatusCounts?: Record<string, number>;
+    /** Actual rejection-email sendMail calls made during this run. */
+    rejectionEmailSmtpAttemptCount?: number;
+    rejectionEmailRetryExhaustedCount?: number;
   };
   /** Lightweight routing index for non-Boss post-score routing runs. */
   postScoreRouting?: {

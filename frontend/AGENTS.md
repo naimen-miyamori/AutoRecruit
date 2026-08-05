@@ -51,9 +51,10 @@ owning domain instructions for screens that expose platform, RAG, Boss, or Talen
   forwarding and receives one candidate-level email containing the reason and complete resume;
   legacy secondary-forward controls must not be rendered.
 - Task details and dashboard health render candidate-level rejection-email counts, recipients/CC
-  from the reviewed task input or immutable snapshot, and explicit `sending`/`uncertain`
-  manual-verification warnings without
-  rendering email body content or SMTP credentials.
+  from the reviewed task input or immutable snapshot, and explicit `sending`/`uncertain`/
+  `retryExhausted` manual-verification warnings. Exhausted retry entries must not be presented as
+  eligible for another automatic recovery, and the UI must not render email body content or SMTP
+  credentials.
 - Boss task details render pending-score count and de-identified provider `kind@phase` counts.
   Pending candidates are not review candidates and the UI must state that they received neither
   Boss forwarding nor rejection email; never render their IDs merely to explain a model failure.

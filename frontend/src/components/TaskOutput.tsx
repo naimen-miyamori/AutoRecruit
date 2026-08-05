@@ -169,7 +169,12 @@ export function TaskOutput({ kind, input, output }: { kind: string; input?: unkn
     const uncertain = count(rejection, 'uncertain');
     const sending = count(rejection, 'sending');
     const pending = count(rejection, 'pending');
-    const retryableFailed = count(rejection, 'retryableFailed') + count(rejection, 'retryable-failed');
+    const retryExhausted = count(rejectionSummary, 'retryExhausted')
+      || count(routing, 'rejectionEmailRetryExhaustedCount');
+    const rawRetryableFailed = count(rejection, 'retryableFailed') + count(rejection, 'retryable-failed');
+    const retryableFailed = rejectionSummary && ('retryableFailed' in rejectionSummary)
+      ? count(rejectionSummary, 'retryableFailed')
+      : Math.max(0, rawRetryableFailed - retryExhausted);
     const superseded = count(rejection, 'superseded');
     const failedCandidateIds = stringList(rejectionSummary?.failedCandidateIds);
     const eligible = count(rejectionSummary, 'eligible') || (Array.isArray(routing?.rejectedCandidateIds) ? routing.rejectedCandidateIds.length : 0);
@@ -201,12 +206,14 @@ export function TaskOutput({ kind, input, output }: { kind: string; input?: unkn
             <div className="detail-cell"><span>应发份数</span><strong>{eligible}</strong></div>
             <div className="detail-cell"><span>已发送</span><strong>{sent}</strong></div>
             <div className="detail-cell"><span>待处理 / 可重试</span><strong>{pending + retryableFailed}</strong></div>
+            <div className="detail-cell"><span>自动重试已用尽</span><strong>{retryExhausted}</strong></div>
             <div className="detail-cell"><span>发送中断待核对</span><strong>{sending}</strong></div>
             <div className="detail-cell"><span>结果不确定</span><strong>{uncertain}</strong></div>
             <div className="detail-cell"><span>已终止 / 废弃</span><strong>{superseded}</strong></div>
           </div>
           {sending > 0 && <div className="stale-banner"><strong>存在停留在 sending 的否定邮件</strong><span>请勿人工重发；下一次 Boss 运行会将其转为 uncertain 后要求人工核对。</span></div>}
           {uncertain > 0 && <div className="stale-banner"><strong>存在结果不确定的否定邮件</strong><span>系统不会自动重发；请先人工核对 SMTP 收件箱和投递日志。</span></div>}
+          {retryExhausted > 0 && <div className="stale-banner"><strong>存在自动重试已用尽的否定邮件</strong><span>系统不会继续发送；请检查 SMTP 配置后进行人工处理。</span></div>}
           {failedCandidateIds.length > 0 && <div className="receipt-box"><strong>需要人工处理的候选人</strong><div className="mono">{failedCandidateIds.join('、')}</div></div>}
         </Section>}
         {typeof output.resultPath === 'string' && <div className="receipt-box"><strong>运行结果</strong><div className="mono">{output.resultPath}</div></div>}

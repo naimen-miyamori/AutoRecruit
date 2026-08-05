@@ -5892,6 +5892,8 @@ describe('scoring run semantics', () => {
       scoreFailureStatusCounts: { 'turn-interrupted@turn-running': 1 },
       forwardingStatusCounts: { sent: 2 },
       rejectionEmailStatusCounts: { sent: 1 },
+      rejectionEmailSmtpAttemptCount: 1,
+      rejectionEmailRetryExhaustedCount: 0,
     });
     assert.equal(result.runResult.detailAttemptCount, 4);
     assert.equal(rejectionEmails.length, 1);
@@ -6021,6 +6023,306 @@ describe('scoring run semantics', () => {
       assert.equal(sendCalls, 0);
     } finally {
       sendJobReportEmailRef.fn = originalSendJobReportEmail;
+    }
+  });
+
+  it('retries one transient pre-submit SMTP failure and never makes a third call', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-rejection-email-bounded-retry';
+    const decidedAt = '2026-08-01T01:30:00.000Z';
+    const markdown = '完整简历';
+    const makeEntry = (deliveryId: string): BossRejectionEmailOutboxEntry => {
+      const routingArtifact: BossCandidateRoutingArtifact = {
+        routingDecisionId: `${deliveryId}-decision`,
+        candidateId: `${deliveryId}-candidate`,
+        fetchedAt: decidedAt,
+        decidedAt,
+        policyHash: 'bounded-retry-policy',
+        scoreStatus: 'success',
+        classification: 'rejected',
+        audience: 'secondary',
+        requirementEvaluations: [],
+        matchedRequirementIds: [],
+        unknownRequirementIds: [],
+        reason: '明确否定。',
+        deliveryKind: 'rejection-email',
+      };
+      return {
+        version: 1,
+        deliveryId,
+        candidateId: routingArtifact.candidateId,
+        routingDecisionId: routingArtifact.routingDecisionId!,
+        routingArtifact,
+        policyHash: routingArtifact.policyHash,
+        recipientEmail: 'secondary@outlook.com',
+        ccEmails: [],
+        messageId: `<${deliveryId}@autorecruit.local>`,
+        subject: '明确否定',
+        markdown,
+        contentHash: createHash('sha256').update(markdown).digest('hex'),
+        status: 'pending',
+        createdAt: decidedAt,
+        updatedAt: decidedAt,
+        detailClosedAt: decidedAt,
+        attemptCount: 0,
+      };
+    };
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    const originalWait = indexModule.waitBossRejectionEmailRetryRef.fn;
+    let sendCalls = 0;
+    let waitCalls = 0;
+    const attemptPayloads: Array<{ recipient: string; subject: string; messageId?: string }> = [];
+    sendJobReportEmailRef.fn = async ({ recipient, subject, messageId }) => {
+      sendCalls += 1;
+      attemptPayloads.push({ recipient, subject, messageId });
+      if (sendCalls === 1) {
+        throw Object.assign(new Error('DNS resolution failed'), {
+          code: 'EDNS',
+          command: 'CONN',
+        });
+      }
+      return { recipient, subject };
+    };
+    indexModule.waitBossRejectionEmailRetryRef.fn = async () => {
+      waitCalls += 1;
+    };
+    try {
+      const entry = makeEntry('bounded-retry-success');
+      await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, entry);
+      const delivered = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, entry);
+      assert.equal(sendCalls, 2);
+      assert.equal(waitCalls, 1);
+      assert.equal(delivered.status, 'sent');
+      assert.equal(delivered.attemptCount, 2);
+      assert.equal(delivered.retryExhausted, undefined);
+      assert.equal(delivered.lastSmtpFailure, undefined);
+      assert.equal(delivered.retryAuthorization?.failedAttempt, 1);
+      assert.equal(delivered.retryAuthorization?.phase, 'connect');
+      assert.deepEqual(attemptPayloads, [
+        { recipient: entry.recipientEmail, subject: entry.subject, messageId: entry.messageId },
+        { recipient: entry.recipientEmail, subject: entry.subject, messageId: entry.messageId },
+      ]);
+
+      sendCalls = 0;
+      waitCalls = 0;
+      sendJobReportEmailRef.fn = async () => {
+        sendCalls += 1;
+        throw Object.assign(new Error('DNS resolution failed'), {
+          code: 'EDNS',
+          command: 'CONN',
+        });
+      };
+      const exhaustedEntry = makeEntry('bounded-retry-exhausted');
+      await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, exhaustedEntry);
+      const exhausted = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, exhaustedEntry);
+      assert.equal(sendCalls, 2);
+      assert.equal(waitCalls, 1);
+      assert.equal(exhausted.status, 'retryable-failed');
+      assert.equal(exhausted.attemptCount, 2);
+      assert.equal(exhausted.retryExhausted, true);
+      const afterExhaustion = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, exhausted);
+      assert.equal(afterExhaustion.status, 'retryable-failed');
+      assert.equal(sendCalls, 2, 'an exhausted delivery must not make a third SMTP call');
+    } finally {
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+      indexModule.waitBossRejectionEmailRetryRef.fn = originalWait;
+    }
+  });
+
+  it('allows only one concurrent executor to call SMTP for the same rejection delivery', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const competingStore = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-rejection-email-concurrent-lock';
+    const decidedAt = '2026-08-01T01:40:00.000Z';
+    const routingArtifact: BossCandidateRoutingArtifact = {
+      routingDecisionId: 'concurrent-delivery-decision',
+      candidateId: 'concurrent-delivery-candidate',
+      fetchedAt: decidedAt,
+      decidedAt,
+      policyHash: 'concurrent-delivery-policy',
+      scoreStatus: 'success',
+      classification: 'rejected',
+      audience: 'secondary',
+      requirementEvaluations: [],
+      matchedRequirementIds: [],
+      unknownRequirementIds: [],
+      reason: '明确否定。',
+      deliveryKind: 'rejection-email',
+    };
+    const entry: BossRejectionEmailOutboxEntry = {
+      version: 1,
+      deliveryId: 'concurrent-delivery',
+      candidateId: routingArtifact.candidateId,
+      routingDecisionId: routingArtifact.routingDecisionId!,
+      routingArtifact,
+      policyHash: routingArtifact.policyHash,
+      recipientEmail: 'secondary@outlook.com',
+      ccEmails: [],
+      messageId: '<concurrent-delivery@autorecruit.local>',
+      subject: '明确否定',
+      markdown: '完整简历',
+      contentHash: createHash('sha256').update('完整简历').digest('hex'),
+      status: 'pending',
+      createdAt: decidedAt,
+      updatedAt: decidedAt,
+      detailClosedAt: decidedAt,
+      attemptCount: 0,
+    };
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, entry);
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    let sendCalls = 0;
+    let releaseSend!: () => void;
+    let markSendStarted!: () => void;
+    const sendStarted = new Promise<void>((resolve) => { markSendStarted = resolve; });
+    const sendGate = new Promise<void>((resolve) => { releaseSend = resolve; });
+    sendJobReportEmailRef.fn = async ({ recipient, subject }) => {
+      sendCalls += 1;
+      markSendStarted();
+      await sendGate;
+      return { recipient, subject };
+    };
+    try {
+      const firstExecution = indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, entry);
+      await sendStarted;
+      await assert.rejects(
+        indexModule.executeBossRejectionEmailDeliveryRef.fn(competingStore, jobKey, entry),
+        /already being delivered by another live process/,
+      );
+      assert.equal(sendCalls, 1);
+      releaseSend();
+      const delivered = await firstExecution;
+      assert.equal(delivered.status, 'sent');
+      assert.equal(sendCalls, 1);
+      const idempotent = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, delivered);
+      assert.equal(idempotent.status, 'sent');
+      assert.equal(sendCalls, 1);
+    } finally {
+      releaseSend();
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+    }
+  });
+
+  it('defers AUTH failures, while ambiguous CONN, unknown, and DATA failures remain uncertain', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-rejection-email-failure-phases';
+    const decidedAt = '2026-08-01T01:45:00.000Z';
+    const makeEntry = (deliveryId: string): BossRejectionEmailOutboxEntry => {
+      const routingArtifact: BossCandidateRoutingArtifact = {
+        routingDecisionId: `${deliveryId}-decision`,
+        candidateId: `${deliveryId}-candidate`,
+        fetchedAt: decidedAt,
+        decidedAt,
+        policyHash: 'failure-phase-policy',
+        scoreStatus: 'success',
+        classification: 'rejected',
+        audience: 'secondary',
+        requirementEvaluations: [],
+        matchedRequirementIds: [],
+        unknownRequirementIds: [],
+        reason: '明确否定。',
+        deliveryKind: 'rejection-email',
+      };
+      return {
+        version: 1,
+        deliveryId,
+        candidateId: routingArtifact.candidateId,
+        routingDecisionId: routingArtifact.routingDecisionId!,
+        routingArtifact,
+        policyHash: routingArtifact.policyHash,
+        recipientEmail: 'secondary@outlook.com',
+        ccEmails: [],
+        messageId: `<${deliveryId}@autorecruit.local>`,
+        subject: '明确否定',
+        markdown: '完整简历',
+        contentHash: createHash('sha256').update('完整简历').digest('hex'),
+        status: 'pending',
+        createdAt: decidedAt,
+        updatedAt: decidedAt,
+        detailClosedAt: decidedAt,
+        attemptCount: 0,
+      };
+    };
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    const originalWait = indexModule.waitBossRejectionEmailRetryRef.fn;
+    let sendCalls = 0;
+    let waitCalls = 0;
+    try {
+      sendJobReportEmailRef.fn = async ({ recipient, subject }) => {
+        sendCalls += 1;
+        if (sendCalls === 1) {
+          throw Object.assign(new Error('authentication failed'), { code: 'EAUTH', command: 'AUTH' });
+        }
+        return { recipient, subject };
+      };
+      indexModule.waitBossRejectionEmailRetryRef.fn = async () => {
+        waitCalls += 1;
+      };
+      const deferredEntry = makeEntry('deferred-auth');
+      await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, deferredEntry);
+      const deferred = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, deferredEntry);
+      assert.equal(sendCalls, 1);
+      assert.equal(waitCalls, 0);
+      assert.equal(deferred.status, 'retryable-failed');
+      assert.equal(deferred.attemptCount, 1);
+      assert.equal(deferred.retryAuthorization?.retryDisposition, 'deferred-once');
+      const authRecovered = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, deferred);
+      assert.equal(authRecovered.status, 'sent');
+      assert.equal(sendCalls, 2);
+      assert.equal(authRecovered.attemptCount, 2);
+
+      sendCalls = 0;
+      sendJobReportEmailRef.fn = async () => {
+        sendCalls += 1;
+        throw Object.assign(new Error('connection closed during DATA'), {
+          code: 'ECONNRESET',
+          command: 'DATA',
+        });
+      };
+      const dataEntry = makeEntry('data-uncertain');
+      await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, dataEntry);
+      const uncertain = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, dataEntry);
+      assert.equal(uncertain.status, 'uncertain');
+      assert.equal(uncertain.attemptCount, 1);
+      assert.equal(sendCalls, 1);
+      const uncertainAgain = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, uncertain);
+      assert.equal(uncertainAgain.status, 'uncertain');
+      assert.equal(sendCalls, 1);
+
+      sendCalls = 0;
+      sendJobReportEmailRef.fn = async () => {
+        sendCalls += 1;
+        throw Object.assign(new Error('Greeting never received'), {
+          code: 'ETIMEDOUT',
+          command: 'CONN',
+        });
+      };
+      const timeoutEntry = makeEntry('conn-timeout-uncertain');
+      await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, timeoutEntry);
+      const timeout = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, timeoutEntry);
+      assert.equal(timeout.status, 'uncertain');
+      assert.equal(timeout.lastSmtpFailure?.phase, 'unknown');
+      assert.equal(sendCalls, 1);
+
+      sendCalls = 0;
+      sendJobReportEmailRef.fn = async () => {
+        sendCalls += 1;
+        throw new Error('Greeting never received');
+      };
+      const unknownEntry = makeEntry('unknown-uncertain');
+      await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, unknownEntry);
+      const unknown = await indexModule.executeBossRejectionEmailDeliveryRef.fn(store, jobKey, unknownEntry);
+      assert.equal(unknown.status, 'uncertain');
+      assert.equal(unknown.lastSmtpFailure?.phase, 'unknown');
+      assert.equal(sendCalls, 1);
+    } finally {
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+      indexModule.waitBossRejectionEmailRetryRef.fn = originalWait;
     }
   });
 

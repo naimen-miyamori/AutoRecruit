@@ -86,10 +86,16 @@ scheduled work.
   afterward. A missing close proof never authorizes SMTP but remains visible in the current run;
   recovered outcomes remain reportable even when the candidate is absent or already indexed by a
   historical run.
-  The primary address and every copy address have separate durable states; sent and uncertain
-  external confirmations are never auto-retried, and a failed copy must not repeat a successful
-  primary delivery. A policy-version migration may mark unfinished old-policy deliveries as
-  `superseded`; that terminal state is never retried. Explicit
+  Boss page-forwarding primary and copy addresses have separate durable states; sent and uncertain
+  confirmations are never auto-retried, and a failed copy must not repeat a successful primary
+  delivery. A rejection email's TO and CC addresses instead form one SMTP delivery and share one
+  state. Execute each rejection delivery under an atomic cross-process lock, re-read its outbox
+  entry inside that lock, and cap it at two actual SMTP calls. Only `EDNS + CONN` proves a safe
+  immediate retry; AUTH and MAIL may retain one deferred attempt. Treat ETIMEDOUT, ESOCKET,
+  ECONNECTION, every other CONN, RCPT, DATA, resolved partial-recipient results, unknown phases,
+  and inherited `sending` as `uncertain`, because Nodemailer may label a post-DATA socket failure
+  as CONN. Never infer retry safety from error text. A policy-version migration may mark unfinished
+  old-policy deliveries as `superseded`; that terminal state is never retried. Explicit
   normal-capture forwarding and screening settings persist only on that Boss job record; they must
   not rewrite the auto-chat platform default. Only explicit auto-chat input may update the latter.
 - HTTP, assistant, batch, and scheduler capture tasks use the server-created Boss settings v3/task v4 snapshot:
@@ -102,10 +108,12 @@ scheduled work.
   that window do not backfill from position 21 onward. For each stable ID in that bounded window
   already present in the validated current-job `seen-ids.json`, ordinary capture performs exactly
   one read-only detail open/identity-check/close lifecycle unless an outbox-retry or pending-score lifecycle
-  already covers it. A successfully decided qualified/review candidate may then use a separate
-  forwarding-only detail lifecycle; that is not a history-view action. History view never parses, scores, forwards,
-  contacts, or writes history, and a failed close stops later card operations. Boss standalone modes
-  and other platforms do not inherit this cap or view-sync contract.
+  already covers it. A newly decided qualified/review candidate continues its original detail
+  lifecycle for forwarding; only a later retryable outbox recovery may open that exact candidate in
+  a separate forwarding lifecycle. That recovery is not a history-view action. History view never
+  parses, scores, forwards, contacts, or writes history, and a failed close stops later card
+  operations. Boss standalone modes and other platforms do not inherit this cap or view-sync
+  contract.
 - A candidate enters captured history only after the current detail identity is verified, the parsed
   resume ID matches the requested card, and the resume file is written and read back successfully.
   RunResult v2 records `capturedCandidateIds` and stage-specific retryable failures; legacy v1
@@ -128,14 +136,17 @@ scheduled work.
   structure again immediately before clicking. The current no-close forwarding dialog is dismissed
   only through a unique uncovered layer point with a verified postcondition. Never use Escape for
   that cleanup: it can close the underlying resume while leaving the forwarding dialog visible.
-- Each normal Boss detail lifecycle uses one absolute deadline created by the workflow and passed
-  through its own open, identity verification, parsing or recipient delivery, and strict close.
-  Model evaluation never runs inside a page-detail deadline. Post-score qualified/review forwarding
-  uses a second exact-candidate lifecycle and never reuses or resets the capture deadline. Actions
-  reserve cleanup time before spending user-like pace, recompute remaining timeout after pacing, and
-  revalidate the exact candidate/control again after pointer movement immediately before dispatch.
-  Actions must not create a fresh detail deadline for a later lifecycle phase; unfinished deliveries
-  remain pending/retryable while strict close owns the reserved budget.
+- Each normal Boss screening detail starts with one bounded page-action segment for open, identity,
+  parsing, and persistence. Model evaluation may then wait outside page actions while that same
+  verified detail remains open; after the model returns, the workflow creates one fresh bounded
+  continuation, revalidates the same candidate, and performs communication detection, qualified/
+  review forwarding, or strict close in that original detail. The normal path never opens a second
+  detail. A later retryable outbox recovery may open the exact candidate once in its own bounded
+  lifecycle; rejection-email recovery never opens detail. Actions reserve cleanup time before
+  spending user-like pace, recompute remaining timeout after pacing, and revalidate the exact
+  candidate/control again after pointer movement immediately before dispatch. Actions must not
+  extend their caller deadline; unfinished deliveries remain pending/retryable while strict close
+  owns the reserved budget.
 
 ## Talent Discovery and Atomic Conversations
 

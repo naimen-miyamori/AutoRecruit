@@ -34,11 +34,12 @@ function dashboardHealth(): Record<string, unknown> {
     filters: [],
     tasks: { queued: 0, running: 0, succeeded: 0, failed: 0, cancelled: 0 },
     bossRejectionEmails: {
-      outboxCount: 3,
+      outboxCount: 4,
       pending: 0,
       sending: 1,
       sent: 1,
       retryableFailed: 0,
+      retryExhausted: 1,
       uncertain: 1,
       superseded: 0,
     },
@@ -576,7 +577,9 @@ describe('frontend client', () => {
     const body = await page.locator('body').innerText();
     assert.match(body, /1 封停留在 sending/);
     assert.match(body, /1 封结果不确定/);
+    assert.match(body, /1 封自动重试已用尽/);
     assert.match(body, /发送中\s*1/);
+    assert.match(body, /自动重试已用尽\s*1/);
     await page.close();
   });
 

@@ -662,7 +662,7 @@ describe('JobStore Boss model screening facts', () => {
     };
     await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, pending);
     assert.deepEqual(await store.readBossRejectionEmailOutboxEntry('boss', jobKey, pending.deliveryId), pending);
-    const sending = { ...pending, status: 'sending' as const, updatedAt: '2026-08-01T01:02:00.000Z' };
+    const sending = { ...pending, status: 'sending' as const, attemptCount: 1, updatedAt: '2026-08-01T01:02:00.000Z' };
     await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, sending);
     const sent = { ...sending, status: 'sent' as const, completedAt: '2026-08-01T01:03:00.000Z', updatedAt: '2026-08-01T01:03:00.000Z' };
     await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, sent);
@@ -674,7 +674,164 @@ describe('JobStore Boss model screening facts', () => {
       () => store.saveBossRejectionEmailOutboxEntry('boss', jobKey, { ...sent, markdown: 'tampered' }),
       /different immutable content/,
     );
-    assert.deepEqual(await store.listBossRejectionEmailOutboxEntries('boss', jobKey), [sent]);
+
+    const retryPending = {
+      ...pending,
+      deliveryId: 'rejection-delivery-retry-store',
+      messageId: '<rejection-delivery-retry-store@autorecruit.local>',
+    };
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, retryPending);
+    await assert.rejects(
+      store.saveBossRejectionEmailOutboxEntry('boss', jobKey, {
+        ...retryPending,
+        retryAuthorization: {
+          phase: 'connect',
+          retrySafety: 'known-not-sent',
+          retryDisposition: 'immediate-once',
+          code: 'EDNS',
+          command: 'CONN',
+          failedAttempt: 1,
+          occurredAt: '2026-08-01T01:01:30.000Z',
+          summary: 'forged authorization before any attempt',
+        },
+      }),
+      /invalid retry authorization/,
+    );
+    const retrySending = { ...retryPending, status: 'sending' as const, attemptCount: 1 };
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, retrySending);
+    await assert.rejects(
+      store.saveBossRejectionEmailOutboxEntry('boss', jobKey, {
+        ...retrySending,
+        updatedAt: '2026-08-01T01:03:30.000Z',
+      }),
+      /Invalid rejection email delivery transition sending -> sending/,
+    );
+    await assert.rejects(
+      () => store.saveBossRejectionEmailOutboxEntry('boss', jobKey, {
+        ...retrySending,
+        status: 'retryable-failed',
+        error: 'forged retry state',
+      }),
+      /retryable failure lacks valid pre-submit evidence/,
+    );
+    const unsafeConnFailure = {
+      phase: 'connect' as const,
+      retrySafety: 'known-not-sent' as const,
+      retryDisposition: 'immediate-once' as const,
+      code: 'ETIMEDOUT',
+      command: 'CONN',
+      occurredAt: '2026-08-01T01:04:00.000Z',
+      summary: 'SMTP connect failure',
+    };
+    await assert.rejects(
+      store.saveBossRejectionEmailOutboxEntry('boss', jobKey, {
+        ...retrySending,
+        status: 'retryable-failed',
+        error: 'forged ambiguous CONN retry state',
+        lastSmtpFailure: unsafeConnFailure,
+        retryAuthorization: { ...unsafeConnFailure, failedAttempt: 1 as const },
+      }),
+      /invalid retry authorization/,
+    );
+    const unsafeAuthFailure = {
+      phase: 'auth' as const,
+      retrySafety: 'known-not-sent' as const,
+      retryDisposition: 'immediate-once' as const,
+      code: 'EAUTH',
+      command: 'AUTH',
+      occurredAt: '2026-08-01T01:04:00.000Z',
+      summary: 'SMTP auth failure',
+    };
+    await assert.rejects(
+      store.saveBossRejectionEmailOutboxEntry('boss', jobKey, {
+        ...retrySending,
+        status: 'retryable-failed',
+        error: 'forged immediate AUTH retry state',
+        lastSmtpFailure: unsafeAuthFailure,
+        retryAuthorization: { ...unsafeAuthFailure, failedAttempt: 1 as const },
+      }),
+      /invalid retry authorization/,
+    );
+    const firstFailure = {
+      phase: 'connect' as const,
+      retrySafety: 'known-not-sent' as const,
+      retryDisposition: 'immediate-once' as const,
+      code: 'EDNS',
+      command: 'CONN',
+      occurredAt: '2026-08-01T01:04:00.000Z',
+      summary: 'SMTP DNS failure',
+    };
+    const retryable = {
+      ...retrySending,
+      status: 'retryable-failed' as const,
+      error: 'SMTP connect failure',
+      lastSmtpFailure: firstFailure,
+      retryAuthorization: { ...firstFailure, failedAttempt: 1 as const },
+    };
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, retryable);
+    await assert.rejects(
+      () => store.saveBossRejectionEmailOutboxEntry('boss', jobKey, {
+        ...retryable,
+        attemptCount: 0,
+        retryAuthorization: undefined,
+      }),
+      /attempt count cannot decrease/,
+    );
+    const secondSending = { ...retryable, status: 'sending' as const, attemptCount: 2 };
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, secondSending);
+    const exhausted = {
+      ...secondSending,
+      status: 'retryable-failed' as const,
+      retryExhausted: true,
+      lastSmtpFailure: { ...firstFailure, occurredAt: '2026-08-01T01:05:00.000Z' },
+    };
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, exhausted);
+    await assert.rejects(
+      () => store.saveBossRejectionEmailOutboxEntry('boss', jobKey, {
+        ...exhausted,
+        status: 'sending',
+        retryExhausted: undefined,
+      }),
+      /cannot clear retry exhaustion/,
+    );
+
+    const locksDir = path.join(
+      tempDir,
+      'boss',
+      'jobs',
+      jobKey,
+      'routing',
+      'rejection-email-locks',
+    );
+    const stalePending = {
+      ...pending,
+      deliveryId: 'rejection-delivery-stale-lock',
+      messageId: '<rejection-delivery-stale-lock@autorecruit.local>',
+    };
+    const staleLockPath = path.join(locksDir, `${encodeURIComponent(stalePending.deliveryId)}.lock`);
+    await fs.writeFile(staleLockPath, JSON.stringify({
+      version: 1,
+      pid: 2_147_483_647,
+      token: 'stale-lock-token',
+      acquiredAt: '2026-08-01T01:00:00.000Z',
+    }), 'utf8');
+    await store.saveBossRejectionEmailOutboxEntry('boss', jobKey, stalePending);
+    await assert.rejects(fs.access(staleLockPath), /ENOENT/);
+
+    const malformedPending = {
+      ...pending,
+      deliveryId: 'rejection-delivery-malformed-lock',
+      messageId: '<rejection-delivery-malformed-lock@autorecruit.local>',
+    };
+    const malformedLockPath = path.join(locksDir, `${encodeURIComponent(malformedPending.deliveryId)}.lock`);
+    await fs.writeFile(malformedLockPath, '{}', 'utf8');
+    await assert.rejects(
+      store.saveBossRejectionEmailOutboxEntry('boss', jobKey, malformedPending),
+      /already being delivered by another live process/,
+    );
+    const rejectionEntries = await store.listBossRejectionEmailOutboxEntries('boss', jobKey);
+    assert.deepEqual(rejectionEntries.find((entry) => entry.deliveryId === sent.deliveryId), sent);
+    assert.equal(rejectionEntries.find((entry) => entry.deliveryId === exhausted.deliveryId)?.retryExhausted, true);
   });
 });
 

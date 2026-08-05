@@ -67,6 +67,7 @@ export interface SendBossRoutedReportsSummary {
     sending: number;
     sent: number;
     retryableFailed: number;
+    retryExhausted: number;
     uncertain: number;
     superseded: number;
     failedCandidateIds: string[];
@@ -502,6 +503,7 @@ function summarizeBossRejectionEmails(
     sending: 0,
     sent: 0,
     retryableFailed: 0,
+    retryExhausted: 0,
     uncertain: 0,
     superseded: 0,
     failedCandidateIds: [] as string[],
@@ -513,7 +515,10 @@ function summarizeBossRejectionEmails(
     if (status === 'pending') counts.pending += 1;
     else if (status === 'sending') counts.sending += 1;
     else if (status === 'sent') counts.sent += 1;
-    else if (status === 'retryable-failed') counts.retryableFailed += 1;
+    else if (status === 'retryable-failed') {
+      if (entry?.retryExhausted === true) counts.retryExhausted += 1;
+      else counts.retryableFailed += 1;
+    }
     else if (status === 'uncertain') counts.uncertain += 1;
     else if (status === 'superseded') counts.superseded += 1;
     else counts.failedCandidateIds.push(candidateId);
