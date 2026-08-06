@@ -46,7 +46,7 @@ function dashboardHealth(): Record<string, unknown> {
   };
 }
 
-async function mockApi(page: Page): Promise<void> {
+async function mockApi(page: Page, options: { assistantValidationGate?: Promise<void> } = {}): Promise<void> {
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const pathname = new URL(request.url()).pathname;
@@ -54,6 +54,54 @@ async function mockApi(page: Page): Promise<void> {
 
     if (request.method() === 'POST' && pathname === '/api/tasks/boss-talent-search') {
       body = { taskId: 'task-talent-1', kind: 'boss-talent-search', status: 'queued' };
+    } else if (request.method() === 'POST' && pathname === '/api/assistant/chat') {
+      const payload = request.postDataJSON() as { messages?: Array<{ role?: string; content?: string }> };
+      const latestUserMessage = [...(payload.messages ?? [])].reverse().find((message) => message.role === 'user')?.content ?? '';
+      body = latestUserMessage.includes('订阅搜索和订阅管理')
+        ? {
+          message: {
+            role: 'assistant',
+            content: 'assistant-mode-ambiguous: 请明确选择一个模式。',
+            createdAt: '2026-08-05T00:01:00.000Z',
+          },
+          clarificationQuestions: ['请明确选择“订阅搜索”“直接搜索”或“订阅管理”中的一个模式。'],
+        }
+        : {
+          message: {
+            role: 'assistant',
+            content: '已识别为订阅搜索，请核对模式和岗位身份。',
+            createdAt: '2026-08-05T00:00:00.000Z',
+          },
+          draft: {
+            modeId: 'capture.subscription-search',
+            modeLabel: '订阅搜索',
+            effectSummary: '使用平台已保存的订阅入口，可能打开候选详情并执行岗位已配置的评分、转发或邮件流程。',
+            kind: 'resume-capture',
+            input: {
+              platform: 'boss',
+              keyword: '全铝箱包设计',
+              searchSource: 'saved',
+            },
+            missingFields: [],
+            warnings: ['风险：Boss 普通抓取会打开候选详情，并可能复用岗位已保存的转发、报告邮件和模型分流配置。'],
+            argvPreview: ['--search-source', 'saved'],
+          },
+          clarificationQuestions: [],
+        };
+    } else if (request.method() === 'POST' && pathname === '/api/assistant/validate') {
+      await options.assistantValidationGate;
+      const payload = request.postDataJSON() as { draft?: unknown };
+      body = {
+        message: {
+          role: 'assistant',
+          content: '旧草稿已重新校验。',
+          createdAt: '2026-08-05T00:00:30.000Z',
+        },
+        draft: payload.draft,
+        clarificationQuestions: [],
+      };
+    } else if (request.method() === 'POST' && pathname === '/api/assistant/confirm') {
+      body = { task: { taskId: 'task-assistant-capture-1' }, kind: 'resume-capture' };
     } else if (request.method() === 'POST' && pathname === '/api/tasks/resume-capture') {
       body = { taskId: 'task-capture-1', kind: 'resume-capture', status: 'queued' };
     } else if (request.method() === 'POST' && pathname === '/api/tasks/boss-greet') {
@@ -434,6 +482,79 @@ describe('frontend client', () => {
       assert.deepStrictEqual(consoleErrors, []);
       await page.close();
     }
+  });
+
+  it('shows assistant mode facts and keeps derived search fields out of editing', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/assistant`, { waitUntil: 'networkidle' });
+
+    await page.getByPlaceholder('例如：只读列出 Boss 未读会话').fill('运行全铝箱包设计的订阅搜索');
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.getByText('订阅搜索 · 类型：resume-capture', { exact: true }).waitFor({ state: 'visible' });
+    await page.getByText(/使用平台已保存的订阅入口/).waitFor({ state: 'visible' });
+    assert.equal(await page.getByLabel('searchSource', { exact: true }).count(), 0);
+    assert.equal(await page.getByLabel('argvPreview', { exact: true }).count(), 0);
+
+    const confirmButton = page.getByRole('button', { name: '确认', exact: true });
+    assert.equal(await confirmButton.isDisabled(), true);
+    await page.getByLabel('我已核对目标身份和外部操作风险', { exact: true }).check();
+    const confirmRequest = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/assistant/confirm');
+    await confirmButton.click();
+    const payload = (await confirmRequest).postDataJSON() as { draft?: { modeId?: string; input?: Record<string, unknown> }; riskAccepted?: boolean };
+    assert.equal(payload.draft?.modeId, 'capture.subscription-search');
+    assert.equal(payload.draft?.input?.searchSource, 'saved');
+    assert.equal(payload.riskAccepted, true);
+    await page.getByText(/任务已创建：/).waitFor({ state: 'visible' });
+    await page.close();
+  });
+
+  it('invalidates the previous executable draft when the latest mode request needs clarification', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page);
+    await page.goto(`${baseUrl}/assistant`, { waitUntil: 'networkidle' });
+
+    const composer = page.getByPlaceholder('例如：只读列出 Boss 未读会话');
+    await composer.fill('运行全铝箱包设计的订阅搜索');
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.getByText('订阅搜索 · 类型：resume-capture', { exact: true }).waitFor({ state: 'visible' });
+
+    await composer.fill('改成订阅搜索和订阅管理');
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.getByText(/assistant-mode-ambiguous/).waitFor({ state: 'visible' });
+    assert.equal(await page.getByRole('button', { name: '确认', exact: true }).count(), 0);
+    await page.getByText('草稿将在这里显示并允许人工核对。', { exact: true }).waitFor({ state: 'visible' });
+    await page.close();
+  });
+
+  it('does not resurrect an invalidated draft when an older validation response arrives late', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    let releaseValidation!: () => void;
+    const validationGate = new Promise<void>((resolve) => { releaseValidation = resolve; });
+    await mockApi(page, { assistantValidationGate: validationGate });
+    await page.goto(`${baseUrl}/assistant`, { waitUntil: 'networkidle' });
+
+    const composer = page.getByPlaceholder('例如：只读列出 Boss 未读会话');
+    await composer.fill('运行全铝箱包设计的订阅搜索');
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.getByText('订阅搜索 · 类型：resume-capture', { exact: true }).waitFor({ state: 'visible' });
+
+    const validationRequest = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/assistant/validate');
+    await page.getByRole('button', { name: '重新校验', exact: true }).click();
+    await validationRequest;
+
+    await composer.fill('改成订阅搜索和订阅管理');
+    await page.getByRole('button', { name: '发送', exact: true }).click();
+    await page.getByText(/assistant-mode-ambiguous/).waitFor({ state: 'visible' });
+
+    const validationResponse = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/assistant/validate');
+    releaseValidation();
+    await validationResponse;
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+
+    assert.equal(await page.getByRole('button', { name: '确认', exact: true }).count(), 0);
+    await page.getByText('草稿将在这里显示并允许人工核对。', { exact: true }).waitFor({ state: 'visible' });
+    await page.close();
   });
 
   it('submits the exact reviewed intent ID for a confirmed Boss greet', async () => {

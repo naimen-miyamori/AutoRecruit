@@ -23,6 +23,7 @@ import type {
   BossTalentSearchResult,
 } from '../types/boss.js';
 import type { ArtifactDescriptor } from './api-contracts.js';
+import type { AssistantModeId } from './assistant-mode-registry.js';
 import type {
   TalentMappingClassificationRunSummary,
   TalentMappingCorePlatform,
@@ -326,7 +327,15 @@ export interface ModelConfig {
   apiKey?: string;
 }
 
-export type AssistantDraft =
+export interface AssistantDraftMetadata {
+  /** Stable user-facing intent selected by the assistant. */
+  modeId?: AssistantModeId;
+  /** Server-derived display metadata; never an execution input. */
+  modeLabel?: string;
+  effectSummary?: string;
+}
+
+export type AssistantDraft = AssistantDraftMetadata & (
   | {
     kind: 'resume-capture';
     input: Partial<ResumeCaptureTaskInput> & Record<string, unknown>;
@@ -409,7 +418,7 @@ export type AssistantDraft =
     input: Partial<RagAnswerInput> & Record<string, unknown>;
     missingFields: string[];
     warnings: string[];
-  };
+  });
 
 export interface AssistantChatRequest {
   messages: AssistantMessage[];

@@ -229,6 +229,15 @@ export async function resolveBossCapturePlan(
       source: input.searchConditionSetRef ? 'direct' : input.searchSource ?? 'saved',
       conditions: [],
     });
+  const storedSavedSearchReference = target.jobRecord?.searchSettings?.source === 'saved'
+    ? cloneSearchSettings(target.jobRecord.searchSettings).savedSearch
+    : undefined;
+  const canReuseExplicitSavedSearch = input.searchSourceExplicit
+    && input.searchSource === 'saved'
+    && !input.savedSearchReference
+    && !input.searchConditionSetRef
+    && !input.explicitSearchSettings
+    && storedSavedSearchReference !== undefined;
   const conditionSetRef = input.searchConditionSetRef ?? (
     reuseStoredSettings ? baseSettings.conditionSetRef : undefined
   );
@@ -241,6 +250,13 @@ export async function resolveBossCapturePlan(
       throw new Error('Boss saved-reference-required: a native saved-search reference requires search source saved.');
     }
     settings = { ...settings, savedSearch: input.savedSearchReference };
+  } else if (canReuseExplicitSavedSearch) {
+    // Selecting the saved source explicitly changes the source field, but it
+    // does not erase the dependent, authoritative saved-search identity from
+    // the same stored saved job. Direct jobs and stale residual references
+    // are intentionally excluded above.
+    assertSavedSearchReference(storedSavedSearchReference!, expectedJobName, explicitPageKeyword);
+    settings = { ...settings, savedSearch: storedSavedSearchReference };
   }
   if (input.bossSavedSearchName && settings.savedSearch?.name !== input.bossSavedSearchName) {
     throw new Error('Boss saved-reference-required: name-only Boss saved input cannot replace a complete stored reference.');

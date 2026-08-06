@@ -148,6 +148,10 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
   forwarding settings.
 - Explicit CLI values replace saved canonical values; omitted values reuse them. Do not append
   duplicate history or rewrite an unchanged job record.
+- Search-source selection is field-level: explicitly selecting `saved` may reuse the complete
+  `savedSearch` reference only when the same authoritative JobRecord is currently `source=saved`
+  and the reference passes identity/fingerprint validation; it must never carry a stale reference
+  from a direct job. Explicit `direct` continues to drop saved-only reference/sort state.
 
 ### Standalone Modes
 
@@ -155,6 +159,16 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
   ordinary capture with `search-source direct` is “直接搜索”, and the standalone
   `search-subscription` mode is “订阅管理”. Keep internal enum values, CLI flags, schemas, and
   persisted `saved|direct` values unchanged.
+- Conversation mode routing is explicit: “订阅搜索” means ordinary `resume-capture` with saved
+  search, “直接搜索” means ordinary `resume-capture` with direct search, and “订阅管理” means
+  standalone `search-subscription`. Assistant/model mode IDs, derived task kinds, and search
+  sources must agree; conflicting or ambiguous terms require clarification and cannot enter the
+  queue. An existing Boss saved job must carry a verified complete native reference before the
+  browser; the agent must never treat subscription management as candidate capture or synthesize
+  a reference from a name.
+- A legacy assistant capture draft that omits search source means no source override; repeated
+  validation/confirmation must remain idempotent. Sending a new assistant message invalidates the
+  prior executable draft until that exact request returns a new valid draft.
 - jd-question and rag-question are aliases and standalone. They do not open a browser, capture or
   score resumes, export reports, or send email.
 - A stored-job question uses persisted RAG without JD reparsing. A temporary JD question uses only
@@ -242,6 +256,8 @@ See src/browser/AGENTS.md and the matching platform document before changing the
 - assistant confirmation reuses normalizers and TaskQueue; preview argv is not execution authority.
   HTTP and assistant-confirmed Boss work enters TaskQueue; risk acceptance does not replace
   mode-specific confirmation and identity checks.
+- Assistant Boss normal-capture drafts disclose that stored forwarding, report delivery, or
+  screening settings may be reused and require explicit risk acceptance before confirmation.
 
 See src/rag/AGENTS.md and src/server/AGENTS.md before changing those flows.
 

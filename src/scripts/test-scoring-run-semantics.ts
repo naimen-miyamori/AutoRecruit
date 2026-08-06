@@ -33,7 +33,7 @@ import { openResumeByUrl } from './capture-resume-dom-snapshot.js';
 import { runManualLoginSessionSave } from './login-and-save-session.js';
 import { sendJobReportEmailRef } from './send-job-report-email.js';
 import type { AllPlatformsRunSummary, BatchJobRunSummary, MainResult } from '../index.js';
-import type { BossCandidateRoutingArtifact, BossRejectionEmailOutboxEntry } from '../types/job.js';
+import type { BossCandidateRoutingArtifact, BossRejectionEmailOutboxEntry, SavedSearchReference } from '../types/job.js';
 
 const tempDirs: string[] = [];
 const originalDataDir = config.dataDir;
@@ -8535,6 +8535,76 @@ describe('scoring run semantics', () => {
       platform: 'boss',
       revision: 1,
     });
+  });
+
+  it('lets explicit CLI saved source reuse the complete reference on the current saved Boss job', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const bossJobId = 'boss-position-explicit-saved';
+    const jobName = '全铝箱包设计';
+    const jobKey = buildBossSyncedJobKey(jobName, bossJobId);
+    const conditionIdentity = {
+      jobScope: jobName,
+      city: '广东',
+      inline: { education: ['本科及以上'] },
+      more: {},
+      toggles: { filter_recent_viewed: false },
+    };
+    const savedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '铝镁合金',
+      nativeId: 'explicit-saved-native',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+    await store.saveJobRecord('boss', {
+      jobKey,
+      platform: 'boss',
+      searchKeyword: jobName,
+      rawText: '职位名称：全铝箱包设计',
+      normalizedJob: { ...buildNormalizedJob(), title: jobName },
+      searchSettings: {
+        source: 'saved',
+        pageKeyword: savedSearch.expectedKeyword,
+        conditions: [],
+        savedSearch,
+        sortPolicy: 'match-priority',
+      },
+      bossPosition: {
+        bossJobId,
+        status: 'open',
+        syncedAt: '2026-07-30T00:00:00.000Z',
+        sourceHash: 'source-hash',
+      },
+      createdAt: '2026-07-30T00:00:00.000Z',
+    });
+
+    stubSuccessfulRun(indexModule);
+    const originalOpenSavedSearch = bossAdapter.openSavedSearch;
+    const opened: SavedSearchReference[] = [];
+    bossAdapter.openSavedSearch = async (_page, target) => {
+      opened.push(target);
+      return createSearchPage();
+    };
+    let result: import('../index.js').MainRunSummary;
+    try {
+      result = await indexModule.main([
+        '--platform', 'boss', '--keyword', jobName, '--boss-job-id', bossJobId,
+        '--search-source', 'saved',
+      ]) as import('../index.js').MainRunSummary;
+    } finally {
+      bossAdapter.openSavedSearch = originalOpenSavedSearch;
+    }
+
+    assert.equal(result.jobKey, jobKey);
+    assert.deepEqual(opened, [savedSearch]);
+    assert.equal(result.searchExecution?.source, 'saved');
+    assert.equal(result.searchExecution?.pageKeyword, savedSearch.expectedKeyword);
+    assert.deepEqual(result.searchExecution?.savedSearch, savedSearch);
+    assert.equal(result.searchExecution?.sortPolicy, 'match-priority');
   });
 
   it('keeps Boss identity and page-query fields scoped to the Boss stage for all-platform and batch capture', async () => {

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { handleApiRequest } from '../server/routes.js';
+import { finalizeAssistantDraft } from '../server/cli-assistant.js';
 import { TaskQueue } from '../server/task-queue.js';
 import { TaskScheduler } from '../server/task-scheduler.js';
 import { fingerprintSavedSearchConditionIdentity } from '../platforms/boss/saved-search-identity.js';
@@ -15,7 +16,7 @@ import { bossReceiptArtifact, bossReviewArtifact, bossSyncArtifact, jobExportArt
 import type { ResumeCaptureTaskInput, TaskDetail } from '../server/types.js';
 import type { MainRunSummary } from '../index.js';
 import type { ApplicationFilterOptions } from '../search/filter-application-options.js';
-import type { BossCaptureSettingsSnapshot, CandidateResume, CandidateScoreArtifact, JobRecord, RunResult } from '../types/job.js';
+import type { BossCaptureSettingsSnapshot, BossCaptureTaskSnapshot, CandidateResume, CandidateScoreArtifact, JobRecord, RunResult } from '../types/job.js';
 import { SearchSubscriptionRunError } from '../search/search-subscription.js';
 
 async function makeTempDir(): Promise<string> {
@@ -106,9 +107,11 @@ function modelPolicyForApi() {
 function takeBossCaptureSettingsSnapshot(argv: readonly string[]): {
   argv: string[];
   snapshot?: BossCaptureSettingsSnapshot;
+  taskSnapshot?: BossCaptureTaskSnapshot;
 } {
   let visible = [...argv];
   let snapshot: BossCaptureSettingsSnapshot | undefined;
+  let taskSnapshot: BossCaptureTaskSnapshot | undefined;
   const settingsIndex = visible.indexOf('--boss-capture-settings-json');
   if (settingsIndex >= 0) {
     const raw = visible[settingsIndex + 1];
@@ -118,10 +121,16 @@ function takeBossCaptureSettingsSnapshot(argv: readonly string[]): {
   }
   const taskIndex = visible.indexOf('--boss-capture-task-snapshot-json');
   if (taskIndex >= 0) {
-    assert.ok(visible[taskIndex + 1]);
+    const raw = visible[taskIndex + 1];
+    assert.ok(raw);
+    taskSnapshot = JSON.parse(raw) as BossCaptureTaskSnapshot;
     visible = [...visible.slice(0, taskIndex), ...visible.slice(taskIndex + 2)];
   }
-  return { argv: visible, ...(snapshot ? { snapshot } : {}) };
+  return {
+    argv: visible,
+    ...(snapshot ? { snapshot } : {}),
+    ...(taskSnapshot ? { taskSnapshot } : {}),
+  };
 }
 
 function acceptingSearchConditionSetService(): SearchConditionSetService {
@@ -1421,6 +1430,140 @@ describe('console API routes', () => {
     assert.match(body.draft?.warnings?.join('\n') ?? '', /Boss 会把简历转发/);
   });
 
+  it('maps the explicit 订阅搜索 term to a stable mode and derives saved source', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/chat',
+      body: {
+        messages: [{
+          role: 'user',
+          content: '运行全铝箱包设计 Boss 的订阅搜索',
+        }],
+      },
+      assistantCompleteJsonText: async () => JSON.stringify({
+        draft: {
+          modeId: 'capture.subscription-search',
+          input: {
+            platform: 'boss',
+            keyword: '全铝箱包设计',
+            bossJobId: 'boss-position-1',
+          },
+          missingFields: [],
+          warnings: [],
+        },
+        clarificationQuestions: [],
+      }),
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.body as { draft?: {
+      modeId?: string;
+      modeLabel?: string;
+      kind?: string;
+      input?: Record<string, unknown>;
+      argvPreview?: string[];
+    } };
+    assert.equal(body.draft?.modeId, 'capture.subscription-search');
+    assert.equal(body.draft?.modeLabel, '订阅搜索');
+    assert.equal(body.draft?.kind, 'resume-capture');
+    assert.equal(body.draft?.input?.searchSource, 'saved');
+    assert.ok(body.draft?.argvPreview?.includes('--search-source'));
+    assert.ok(body.draft?.argvPreview?.includes('saved'));
+    assert.match((body.draft as { warnings?: string[] } | undefined)?.warnings?.join('\n') ?? '', /可能复用.*转发.*邮件/);
+  });
+
+  it('keeps a legacy omitted capture source stable across repeated finalization', () => {
+    const first = finalizeAssistantDraft({
+      kind: 'resume-capture',
+      input: {
+        platform: '51job',
+        keyword: '门店店长',
+        jd: '负责门店经营管理。',
+      },
+    });
+    const second = finalizeAssistantDraft(first);
+
+    assert.equal(first.modeId, 'capture.reuse-job-settings');
+    assert.equal(first.input.searchSource, undefined);
+    assert.deepEqual(second, first);
+    assert.ok(!('argvPreview' in first) || !first.argvPreview.includes('--search-source'));
+  });
+
+  it('returns a non-executable clarification when the model emits an unknown mode', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/chat',
+      body: {
+        messages: [{ role: 'user', content: '运行全铝箱包设计 Boss 的订阅搜索' }],
+      },
+      assistantCompleteJsonText: async () => JSON.stringify({
+        draft: {
+          modeId: 'capture.unknown-search',
+          input: { platform: 'boss', keyword: '全铝箱包设计' },
+        },
+        clarificationQuestions: [],
+      }),
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.body as { draft?: unknown; message?: { content?: string }; clarificationQuestions?: string[] };
+    assert.equal(body.draft, undefined);
+    assert.match(body.message?.content ?? '', /assistant-mode-unknown/);
+    assert.ok((body.clarificationQuestions?.length ?? 0) > 0);
+  });
+
+  it('does not execute a mode that conflicts with the explicit subscription term', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/chat',
+      body: {
+        messages: [{ role: 'user', content: '执行全铝箱包设计的订阅搜索' }],
+      },
+      assistantCompleteJsonText: async () => JSON.stringify({
+        draft: {
+          modeId: 'subscription.manage',
+          input: {
+            platform: 'boss',
+            searchSubscriptionFile: './subscription.json',
+          },
+          missingFields: [],
+          warnings: [],
+        },
+        clarificationQuestions: [],
+      }),
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.body as { draft?: unknown; clarificationQuestions?: string[]; message?: { content?: string } };
+    assert.equal(body.draft, undefined);
+    assert.match(body.message?.content ?? '', /assistant-mode-conflict/);
+    assert.match(body.clarificationQuestions?.join('\n') ?? '', /订阅搜索/);
+  });
+
+  it('requires clarification when a request contains multiple explicit search modes', async () => {
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/chat',
+      body: {
+        messages: [{ role: 'user', content: '执行订阅搜索和订阅管理' }],
+      },
+      assistantCompleteJsonText: async () => JSON.stringify({
+        draft: {
+          modeId: 'capture.subscription-search',
+          input: { platform: 'boss', keyword: '全铝箱包设计', bossJobId: 'boss-position-1' },
+          missingFields: [],
+          warnings: [],
+        },
+        clarificationQuestions: [],
+      }),
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.body as { draft?: unknown; message?: { content?: string } };
+    assert.equal(body.draft, undefined);
+    assert.match(body.message?.content ?? '', /assistant-mode-ambiguous/);
+  });
+
   it('generates and validates a read-only Boss atomic-operation assistant draft', async () => {
     const response = await handleApiRequest({
       method: 'POST',
@@ -1654,7 +1797,6 @@ describe('console API routes', () => {
       pathname: '/api/assistant/confirm',
       taskQueue: queue,
       body: {
-        riskAccepted: true,
         draft: {
           kind: 'resume-capture',
           input: {
@@ -1667,6 +1809,7 @@ describe('console API routes', () => {
           warnings: [],
           argvPreview: [],
         },
+        riskAccepted: true,
       },
     });
 
@@ -1685,6 +1828,65 @@ describe('console API routes', () => {
       '--include-viewed',
       'true',
     ]);
+  });
+
+  it('confirms a mode-based Boss subscription-search draft with a complete saved reference snapshot', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary({ jobKey: 'stable-boss-position-1' });
+      },
+    });
+
+    const draft = {
+      modeId: 'capture.subscription-search' as const,
+      kind: 'resume-capture' as const,
+      input: {
+        platform: 'boss',
+        keyword: '全铝箱包设计',
+        bossJobId: 'boss-position-1',
+      },
+      missingFields: [],
+      warnings: [],
+      argvPreview: ['forged-preview'],
+    };
+    const denied = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/confirm',
+      taskQueue: queue,
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver({ pageKeyword: '铝镁合金 拉杆箱' }),
+      body: {
+        draft,
+      },
+    });
+    assert.equal(denied.statusCode, 400);
+    assert.match(JSON.stringify(denied.body), /riskAccepted/);
+    assert.equal(calls.length, 0);
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/confirm',
+      taskQueue: queue,
+      bossCapturePlanResolver: passthroughBossCapturePlanResolver({ pageKeyword: '铝镁合金 拉杆箱' }),
+      body: {
+        draft,
+        riskAccepted: true,
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const task = (response.body as { task: TaskDetail }).task;
+    assert.equal((task.input as ResumeCaptureTaskInput).searchSource, 'saved');
+    assert.ok((task.input as ResumeCaptureTaskInput).bossSavedSearchReference);
+    await waitForTask(queue, task.taskId);
+    assert.ok(calls[0]?.includes('--boss-capture-task-snapshot-json'));
+    const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
+    assert.equal(captured.snapshot?.sourceJobKey, 'stable-boss-position-1');
+    assert.equal(captured.taskSnapshot?.searchPlan.source, 'saved');
+    assert.equal(captured.taskSnapshot?.searchPlan.savedSearch?.expectedKeyword, '铝镁合金 拉杆箱');
   });
 
   it('confirms assistant drafts with jdFile after users leave JD text blank', async () => {
@@ -1716,6 +1918,7 @@ describe('console API routes', () => {
           warnings: [],
           argvPreview: [],
         },
+        riskAccepted: true,
       },
     });
 
@@ -1770,6 +1973,7 @@ describe('console API routes', () => {
     assert.deepStrictEqual(draft?.missingFields, []);
     assert.equal(draft?.input?.bossCapturePlan, undefined);
     assert.ok(draft?.warnings?.some((warning) => warning.includes('bossCapturePlan')));
+    assert.ok(draft?.warnings?.some((warning) => warning.startsWith('风险：Boss 普通抓取')));
     assert.deepStrictEqual(draft?.argvPreview, [
       '--platform', 'boss',
       '--keyword', '全铝箱包设计',
@@ -1782,7 +1986,7 @@ describe('console API routes', () => {
       pathname: '/api/assistant/confirm',
       taskQueue: queue,
       bossCapturePlanResolver: passthroughBossCapturePlanResolver({ pageKeyword: '铝' }),
-      body: { draft },
+      body: { draft, riskAccepted: true },
     });
     assert.equal(confirmed.statusCode, 200);
     const task = (confirmed.body as { task: TaskDetail }).task;

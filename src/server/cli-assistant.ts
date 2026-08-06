@@ -14,6 +14,17 @@ import {
   normalizeSearchSubscriptionTask,
   normalizeTalentMappingTask,
 } from './task-normalizers.js';
+import {
+  assistantModeIds,
+  assertAssistantModeMatchesKind,
+  compileAssistantModeInput,
+  getAssistantModeDefinition,
+  inferAssistantModeId,
+  isAssistantModeId,
+  listAssistantModeDefinitions,
+  type AssistantModeId,
+  type AssistantModeTaskKind,
+} from './assistant-mode-registry.js';
 import type {
   AssistantChatRequest,
   AssistantChatResponse,
@@ -51,12 +62,16 @@ const assistantKindSchema = z.enum([
   'rag-ops',
   'rag-answer',
 ]);
+const assistantModeIdSchema = z.enum(assistantModeIds);
 
 const modelDraftSchema = z.object({
-  kind: assistantKindSchema,
+  modeId: assistantModeIdSchema.optional(),
+  kind: assistantKindSchema.optional(),
   input: objectSchema.default({}),
   missingFields: z.array(z.string()).default([]),
   warnings: z.array(z.string()).default([]),
+}).refine((draft) => draft.modeId !== undefined || draft.kind !== undefined, {
+  message: 'assistant draft requires modeId or legacy kind',
 });
 
 const modelResponseSchema = z.object({
@@ -395,6 +410,11 @@ function computeWarnings(kind: AssistantDraft['kind'], input: Record<string, unk
     warnings.push('风险：已选择包含已查看候选人，候选人范围会扩大。');
   }
 
+  if ((kind === 'resume-capture' || kind === 'batch')
+    && (input.platform === 'boss' || (input.platform === 'all' && input.includeBoss === true))) {
+    warnings.push('风险：Boss 普通抓取会打开候选详情，并可能复用岗位已保存的转发、报告邮件和模型分流配置。');
+  }
+
   if ((kind === 'resume-capture' || kind === 'batch') && (isPresent(input.email) || (Array.isArray(input.cc) && input.cc.length > 0) || isPresent(input.bossSecondaryEmail) || (Array.isArray(input.bossSecondaryCc) && input.bossSecondaryCc.length > 0))) {
     warnings.push('风险：任务完成后会发送邮件。');
   }
@@ -681,20 +701,69 @@ function approximateArgv(kind: AssistantDraft['kind'], input: Record<string, unk
   return argv;
 }
 
-export function finalizeAssistantDraft(rawDraft: Pick<AssistantDraft, 'kind' | 'input'> & {
+interface RawAssistantDraft {
+  modeId?: AssistantModeId;
+  kind?: AssistantDraft['kind'];
+  input?: Record<string, unknown>;
   missingFields?: string[];
   warnings?: string[];
-}): AssistantDraft {
-  const { input, droppedFields } = cleanInput(rawDraft.kind, rawDraft.input ?? {});
-  const missingFields = computeMissingFields(rawDraft.kind, input);
+}
+
+function compileRawAssistantDraft(rawDraft: RawAssistantDraft): {
+  modeId: AssistantModeId;
+  kind: AssistantModeTaskKind;
+  input: Record<string, unknown>;
+  label: string;
+  effectSummary: string;
+} {
+  const rawInput = rawDraft.input ?? {};
+  const modeId = rawDraft.modeId ?? (
+    rawDraft.kind
+      ? inferAssistantModeId(rawDraft.kind as AssistantModeTaskKind, rawInput)
+      : undefined
+  );
+  if (!modeId || !isAssistantModeId(modeId)) {
+    throw new Error('assistant-mode-unknown: draft requires a registered modeId or legacy kind');
+  }
+
+  const definition = getAssistantModeDefinition(modeId);
+  if (rawDraft.kind) {
+    assertAssistantModeMatchesKind(modeId, rawDraft.kind as AssistantModeTaskKind);
+  }
+  if (rawInput.searchSource !== undefined) {
+    const expectedSource = definition.searchSource;
+    const batchSearchSourceIsAllowed = definition.modeId === 'batch.capture';
+    if (!batchSearchSourceIsAllowed
+      && (expectedSource === undefined || expectedSource === 'reuse-job-settings' || rawInput.searchSource !== expectedSource)) {
+      throw new Error(`assistant-mode-conflict: ${modeId} cannot carry searchSource=${String(rawInput.searchSource)}`);
+    }
+  }
+
+  const compiled = compileAssistantModeInput(modeId, rawInput);
+  return {
+    modeId,
+    kind: compiled.kind,
+    input: compiled.input,
+    label: compiled.definition.label,
+    effectSummary: compiled.definition.effectSummary,
+  };
+}
+
+export function finalizeAssistantDraft(rawDraft: RawAssistantDraft): AssistantDraft {
+  const compiled = compileRawAssistantDraft(rawDraft);
+  const { input, droppedFields } = cleanInput(compiled.kind, compiled.input);
+  const missingFields = computeMissingFields(compiled.kind, input);
   const warnings = unique([
     ...(rawDraft.warnings ?? []),
-    ...computeWarnings(rawDraft.kind, input, droppedFields),
+    ...computeWarnings(compiled.kind, input, droppedFields),
   ]);
 
-  if (rawDraft.kind === 'rag-answer') {
+  if (compiled.kind === 'rag-answer') {
     return {
-      kind: rawDraft.kind,
+      modeId: compiled.modeId,
+      modeLabel: compiled.label,
+      effectSummary: compiled.effectSummary,
+      kind: compiled.kind,
       input: input as Partial<RagAnswerInput> & Record<string, unknown>,
       missingFields,
       warnings,
@@ -702,11 +771,14 @@ export function finalizeAssistantDraft(rawDraft: Pick<AssistantDraft, 'kind' | '
   }
 
   return {
-    kind: rawDraft.kind,
+    modeId: compiled.modeId,
+    modeLabel: compiled.label,
+    effectSummary: compiled.effectSummary,
+    kind: compiled.kind,
     input: input as Partial<ResumeCaptureTaskInput | BatchTaskInput | TalentMappingTaskInput | SearchSubscriptionTaskInput | BossAutoChatTaskInput | BossTalentSearchTaskInput | BossGreetTaskInput | BossChatOperationTaskInput | BossJobSyncTaskInput | LoginRefreshTaskInput | RagOpsTaskInput> & Record<string, unknown>,
     missingFields,
     warnings,
-    argvPreview: previewArgv(rawDraft.kind, input),
+    argvPreview: previewArgv(compiled.kind, input),
   } as AssistantDraft;
 }
 
@@ -761,13 +833,17 @@ function isUnsafeShellRequest(text: string): boolean {
 }
 
 function buildSystemPrompt(): string {
+  const modeCatalog = listAssistantModeDefinitions()
+    .map((definition) => `${definition.modeId}=${definition.label}（${definition.effectSummary}；别名：${definition.aliases.join('、')}）`)
+    .join('\n');
   return [
     '你是招聘自动化 CLI 助手，只能把中文需求转换成受控任务草稿 JSON。',
     '绝对禁止输出 shell 命令、npm script、文件写入动作、破坏性命令或任何绕过后端 normalizer 的参数。',
-    '允许的 kind 只有：resume-capture、batch、talent-mapping、search-subscription、boss-auto-chat、boss-talent-search、boss-greet、boss-chat-operation、boss-job-sync、login-refresh、rag-ops、rag-answer。',
+    `只能选择以下一个 modeId，不能自行创造模式：\n${modeCatalog}`,
+    'kind 是服务端根据 modeId 派生的兼容字段；优先只输出 modeId，不要自行组合 kind 和 searchSource。',
     '输出必须是严格 JSON 对象，不要 markdown，不要代码块，不要解释。',
-    'JSON 结构：{"reply":"中文回复","draft":{"kind":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
-    'resume-capture 字段：platform, keyword, bossJobId, bossSearchKeyword, jd, jdFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient, bossForwardCc, bossScreeningEnabled, bossScreeningPolicyFile, bossSecondaryEmail, bossSecondaryCc。bossJobId 只用于 platform=boss 或 all 且 includeBoss=true 的普通抓取，必须是精确的已同步职位 ID；bossSearchKeyword 只覆盖 Boss 人才页查询词，不改变岗位身份或其他平台关键词。只要 platform=boss 且提供 bossJobId，就可复用岗位已保存 JD/搜索设置而省略 jd 和 jdFile。searchConditionSetRefs 是 {平台:{conditionSetId,platform,revision}}，revision 必须固定。',
+    'JSON 结构：{"reply":"中文回复","draft":{"modeId":"...","input":{...},"missingFields":[],"warnings":[]},"clarificationQuestions":[],"rejected":false}',
+    'resume-capture 模式字段：platform, keyword, bossJobId, bossSearchKeyword, jd, jdFile, includeViewed, includeBoss, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient, bossForwardCc, bossScreeningEnabled, bossScreeningPolicyFile, bossSecondaryEmail, bossSecondaryCc。不要自行输出 searchSource；订阅搜索、直接搜索和复用岗位设置由 modeId 决定。bossJobId 只用于 platform=boss 或 all 且 includeBoss=true 的普通抓取，必须是精确的已同步职位 ID；bossSearchKeyword 只覆盖 Boss 人才页查询词，不改变岗位身份或其他平台关键词。只要 platform=boss 且提供 bossJobId，就可复用岗位已保存 JD/搜索设置而省略 jd 和 jdFile。searchConditionSetRefs 是 {平台:{conditionSetId,platform,revision}}，revision 必须固定。',
     'batch 字段：platform, jobsFile, includeViewed, includeBoss, searchSource, applicationFilterInputFile, searchConditionSetRefs, email, cc, liepinForwardContact, bossForwardMode, bossForwardRecipient, bossForwardCc, bossScreeningEnabled, bossScreeningPolicyFile, bossSecondaryEmail, bossSecondaryCc；不要包含 keyword、jd、jdFile。',
     'talent-mapping 字段：platform, talentMappingFile, mappingStage, confirmedDetailOpen, mappingRunId；mappingStage 只能 scan、enrich、all，详情阶段必须 confirmedDetailOpen=true；只允许 51job、liepin、zhilian 或 all，不允许 Boss；不与普通抓取、JD、邮件、转发、订阅或 RAG 参数组合。',
     'Boss 转发和评分后模型要求分流仅允许 platform=boss，或 platform=all 且 includeBoss=true；bossForwardMode 只能是 colleague 或 email，出现时必须与 recipient 同时提供。bossScreeningPolicyFile 只引用版本 2 模型要求 JSON，不接受旧版本、脚本、表达式或收件人；bossScreeningEnabled=true 时，明确满足和需复核候选人转发给主受众，模型明确判断要求缺失的候选人不做 Boss 转发，而向 bossSecondaryEmail 逐份发送否定原因和完整简历。',
@@ -781,7 +857,8 @@ function buildSystemPrompt(): string {
     'rag-ops 字段：action, platform, jobKey, keyword, question, file, policyFile, reviewer, limit, includeReviewed, failOnIssue；action 只能是 doctor、review、metrics、ops、rebuild。',
     'rag-answer 字段：platform, jobKey, keyword, jd, jdFile, question, topK, autoIndex, logAnswer, metadata。',
     '平台只能是 51job、liepin、zhilian、boss、all；普通抓取或批量任务的 all 在 includeBoss=true 时按 51job、liepin、zhilian、boss 执行，否则仍是前三个平台。其他模式的 all 不包含 boss；rag-answer 和 login-refresh 不能使用 all。',
-    'applicationFilterInputFile 只能用于 direct 普通简历抓取或批量任务，订阅管理只作为订阅包装输入。searchConditionSetRefs 和 applicationFilterInputFile 不能同时使用；普通抓取/批量使用条件集时 searchSource 必须为 direct，平台映射不得超出任务实际选择的平台。用户可见名称必须把 searchSource=saved 称为“订阅搜索”、searchSource=direct 称为“直接搜索”。',
+    'applicationFilterInputFile 只能用于 direct 普通简历抓取或批量任务，订阅管理只作为订阅包装输入。searchConditionSetRefs 和 applicationFilterInputFile 不能同时使用；直接搜索使用筛选条件时由 modeId=capture.direct-search 表达。平台映射不得超出任务实际选择的平台。用户可见名称固定为：订阅搜索、直接搜索、订阅管理。',
+    '精确术语映射不可混用：用户说“订阅搜索”只能选 capture.subscription-search；说“直接搜索”只能选 capture.direct-search；说“订阅管理”只能选 subscription.manage。若同一请求同时出现多个模式术语，返回 clarificationQuestions，不生成可执行 draft。',
     '如果信息不足，把字段名放到 missingFields，并用 clarificationQuestions 给出中文追问。',
   ].join('\n');
 }
@@ -791,6 +868,40 @@ function buildModelInput(request: AssistantChatRequest): string {
     messages: request.messages,
     currentDraft: request.draft,
   }, null, 2);
+}
+
+const EXPLICIT_MODE_TERMS: readonly { term: string; modeId: AssistantModeId }[] = [
+  { term: '订阅搜索', modeId: 'capture.subscription-search' },
+  { term: '直接搜索', modeId: 'capture.direct-search' },
+  { term: '订阅管理', modeId: 'subscription.manage' },
+];
+
+function explicitModeConstraint(text: string):
+  | { modeId?: AssistantModeId; conflict?: string }
+  | undefined {
+  const normalized = text.normalize('NFKC').replace(/\s+/gu, '');
+  const matches = EXPLICIT_MODE_TERMS.filter((item) => normalized.includes(item.term));
+  const modeIds = [...new Set(matches.map((item) => item.modeId))];
+  if (modeIds.length === 0) return undefined;
+  if (modeIds.length > 1) {
+    return { conflict: `assistant-mode-ambiguous: ${modeIds.join(', ')}` };
+  }
+  return { modeId: modeIds[0] };
+}
+
+function assistantModeClarification(
+  message: string,
+  question = '请明确选择“订阅搜索”“直接搜索”或“订阅管理”中的一个模式。',
+): AssistantChatResponse {
+  return {
+    message: {
+      role: 'assistant',
+      content: message,
+      createdAt: new Date().toISOString(),
+    },
+    clarificationQuestions: [question],
+    rejected: false,
+  };
 }
 
 export function normalizeModelConfig(value: ModelConfig | undefined): OpenAISettingsOverride | undefined {
@@ -844,8 +955,37 @@ export async function chatWithCliAssistant(
     settings: normalizeModelConfig(request.modelConfig),
   });
 
-  const parsed = modelResponseSchema.parse(extractJsonObject(rawText));
-  const draft = parsed.draft ? finalizeAssistantDraft(parsed.draft) : undefined;
+  let parsed: z.infer<typeof modelResponseSchema>;
+  try {
+    parsed = modelResponseSchema.parse(extractJsonObject(rawText));
+  } catch (error) {
+    const unknownMode = error instanceof z.ZodError
+      && error.issues.some((issue) => issue.path[0] === 'draft' && issue.path[1] === 'modeId');
+    if (unknownMode) {
+      return assistantModeClarification(
+        'assistant-mode-unknown: 模型返回了未注册的业务模式，本次没有生成可执行草稿。',
+        '请重新确认要执行的业务模式。',
+      );
+    }
+    throw error;
+  }
+  let draft: AssistantDraft | undefined;
+  if (parsed.draft) {
+    try {
+      draft = finalizeAssistantDraft(parsed.draft);
+    } catch (error) {
+      return assistantModeClarification(error instanceof Error ? error.message : String(error));
+    }
+    const constraint = explicitModeConstraint(unsafeText);
+    if (constraint?.conflict) {
+      return assistantModeClarification(constraint.conflict);
+    }
+    if (constraint?.modeId && draft.modeId !== constraint.modeId) {
+      return assistantModeClarification(
+        `assistant-mode-conflict: 用户明确要求 ${constraint.modeId}，模型返回了 ${draft.modeId ?? 'unknown'}`,
+      );
+    }
+  }
   const clarificationQuestions = unique([
     ...parsed.clarificationQuestions,
     ...(draft?.missingFields ?? []).map((field) => `请补充 ${field}。`),

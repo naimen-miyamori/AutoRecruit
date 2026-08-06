@@ -16,6 +16,13 @@ owning domain instructions for screens that expose platform, RAG, Boss, or Talen
 - Keep frontend API contracts synchronized with the server read models and task input types. A route
   or response change updates frontend/src/api/contracts.ts, the typed API client, query keys, and
   affected screen tests in the same work item.
+- Assistant mode labels and effect summaries come from the server. Derived mode/task/source fields
+  are display-only and must not be editable generic input or execution authority; mode conflicts
+  render as clarification/error states and do not expose a confirmation action.
+- Submitting any new assistant message immediately invalidates the previous executable draft while
+  preserving it only as model context. Pending, rejected, failed, or no-draft responses never leave
+  the prior confirmation action available. A late response from an older chat or validation
+  generation must not restore a draft invalidated by a newer message or field edit.
 
 ## Task and Mutation Safety
 

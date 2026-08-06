@@ -103,6 +103,11 @@ scheduled work.
   configuration revision. Explicit patches use JobStore CAS before browser work; a revision
   conflict fails closed. RunResult routing facts own report recipients and CC, so manual replay
   cannot be retargeted by later job edits.
+- Explicit `searchSource=saved` is a source selection, not permission to discard its dependent
+  identity: when the same authoritative JobRecord is currently saved, the capture-plan resolver
+  may reuse and revalidate its complete native saved-search reference. A direct JobRecord's stale
+  residual reference is never reused; missing or mismatched identity remains `saved-reference-required`
+  or `saved-reference-invalid` before the browser.
 - Every ordinary Boss capture run truncates the extracted result order to the first 20 resumes
   before seen, recovery, detail, scoring, forwarding, or persistence work. Seen candidates inside
   that window do not backfill from position 21 onward. For each stable ID in that bounded window

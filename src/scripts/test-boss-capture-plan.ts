@@ -192,6 +192,50 @@ describe('Boss saved capture plan resolver', () => {
     assert.equal(newJob.search.keywordSource, 'legacy-job-keyword');
   });
 
+  it('reuses the complete stored saved reference when saved source is explicitly selected', async () => {
+    const conditionIdentity = {
+      jobScope: '全铝箱包设计',
+      city: '广东',
+      cityOptions: [],
+      inline: { education: ['custom:大专-博士'] },
+      more: { '牛人职位要求': '牛人期望此职位' },
+      toggles: { filter_recent_viewed: true },
+    };
+    const savedSearch = {
+      version: 1 as const,
+      platform: 'boss' as const,
+      name: '铝镁合金',
+      nativeId: 'native-saved-search',
+      expectedKeyword: '铝镁合金 拉杆箱',
+      conditionIdentity,
+      conditionFingerprint: fingerprintSavedSearchConditionIdentity(conditionIdentity),
+    };
+    const record = storedJob({
+      searchSettings: {
+        source: 'saved',
+        pageKeyword: savedSearch.expectedKeyword,
+        conditions: [],
+        savedSearch,
+        sortPolicy: 'match-priority',
+      },
+    });
+
+    const plan = await resolveBossCapturePlan({
+      jobName: '全铝箱包设计',
+      bossJobId: record.bossPosition!.bossJobId,
+      searchSource: 'saved',
+      searchSourceExplicit: true,
+    }, {
+      store: storeFor([record]),
+      searchConditionSets: conditionSetService(),
+    });
+
+    assert.equal(plan.search.source, 'saved');
+    assert.deepEqual(plan.search.savedSearch, savedSearch);
+    assert.equal(plan.search.pageKeyword, savedSearch.expectedKeyword);
+    assert.equal(plan.search.sortPolicy, 'match-priority');
+  });
+
   it('uses the documented page keyword precedence without using it as the job identity', async () => {
     const record = storedJob({
       searchSettings: {

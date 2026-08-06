@@ -25,6 +25,19 @@ when they are affected.
   commands.
 - Drop or warn about unsafe fields before confirmation, then normalize again at confirmation.
   assistant/confirm submits through TaskQueue and never trusts preview argv.
+- Assistant drafts use a registered business `modeId` as the intent authority. The server derives
+  the legacy task kind and any implied `searchSource`; clients and models must not freely combine
+  `kind`, `searchSource`, or mode labels. The exact terms “订阅搜索”, “直接搜索”, and “订阅管理”
+  map to one mode each; conflicts or multiple terms require clarification before queueing.
+- Legacy capture drafts with an omitted source compile to the no-override mode and remain identical
+  across repeated finalize/validate/confirm passes. An unknown model mode produces a no-draft
+  clarification response rather than an executable fallback or an unclassified HTTP error.
+- A single-platform Boss normal-capture or batch draft always carries a conservative risk warning:
+  queue preflight may reuse stored forwarding, report delivery, or screening settings even when the
+  draft contains no explicit delivery fields. Confirmation therefore requires risk acceptance.
+- A Boss `saved` capture may reuse a complete saved-search reference only from the same current
+  saved JobRecord after identity and fingerprint validation. Missing or stale references fail
+  before browser/session creation; never fall back to a name-only or legacy saved entry.
 - Boss immediate match, greet, and chat mutation need both mode-specific confirmed true and final
   assistant risk acceptance. Read-only drafts never acquire mutation authority by sharing a kind.
 - Web UI baseUrl, model, and apiKey overrides apply only to assistant draft generation and console
