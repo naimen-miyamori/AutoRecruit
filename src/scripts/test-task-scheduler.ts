@@ -276,8 +276,8 @@ describe('TaskScheduler', () => {
       const captured = calls.map(takeBossCaptureSettingsSnapshot);
       assert.equal(captured[1]?.snapshot?.sourceJobKey, '店长');
       assert.deepStrictEqual(captured.map((item) => item.argv), [
-        ['--platform', 'all', '--keyword', '店长'],
-        ['--platform', 'all', '--keyword', '店长', '--include-boss', 'true', '--search-source', 'direct'],
+        ['--mode-id', 'capture.reuse-job-settings', '--platform', 'all', '--keyword', '店长'],
+        ['--mode-id', 'capture.direct-search', '--platform', 'all', '--keyword', '店长', '--include-boss', 'true', '--search-source', 'direct'],
       ]);
     } finally {
       scheduler.close();
@@ -318,10 +318,62 @@ describe('TaskScheduler', () => {
         return runs.find((run) => run.status === 'succeeded');
       }, 'scheduled search-subscription Boss opt-in round');
       assert.deepEqual(calls, [[
+        '--mode-id', 'subscription.manage',
         '--platform', 'all',
         '--search-subscription-file', './subscription.json',
         '--include-boss', 'true',
       ]]);
+    } finally {
+      scheduler.close();
+    }
+  });
+
+  it('rejects subscription-saving schedule templates on create and update', async () => {
+    const dataDir = await makeTempDir();
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async () => output(),
+    });
+    const scheduler = new TaskScheduler({ taskQueue: queue, dataDir, now: () => new Date('2026-07-20T02:00:00.000Z') });
+    const savingTask = {
+      taskKey: 'saving-subscription',
+      name: '循环保存订阅',
+      kind: 'search-subscription',
+      input: {
+        platform: '51job',
+        searchSubscriptionFile: './subscription.json',
+        saveSearchSubscription: true,
+      },
+    };
+
+    try {
+      await assert.rejects(
+        () => scheduler.createSchedule({ ...baseSchedule([savingTask]), enabled: false }),
+        /Scheduled search-subscription tasks cannot save or rename platform subscriptions/,
+      );
+      await assert.rejects(
+        () => scheduler.createSchedule({
+          ...baseSchedule([{
+            ...savingTask,
+            input: {
+              ...savingTask.input,
+              saveSearchSubscription: false,
+              searchSubscriptionName: '循环改名',
+            },
+          }]),
+          enabled: false,
+        }),
+        /Scheduled search-subscription tasks cannot save or rename platform subscriptions/,
+      );
+
+      const safeSchedule = await scheduler.createSchedule({
+        ...baseSchedule([{ ...savingTask, input: { ...savingTask.input, saveSearchSubscription: false } }]),
+        enabled: false,
+      });
+      await assert.rejects(
+        () => scheduler.updateSchedule(safeSchedule.scheduleId, { tasks: [savingTask] }),
+        /Scheduled search-subscription tasks cannot save or rename platform subscriptions/,
+      );
     } finally {
       scheduler.close();
     }
@@ -390,6 +442,7 @@ describe('TaskScheduler', () => {
       const captured = calls.map(takeBossCaptureSettingsSnapshot);
       assert.equal(captured[0]?.snapshot?.sourceJobKey, '全铝箱包设计-boss-position-1');
       assert.deepStrictEqual(captured.map((item) => item.argv), [[
+        '--mode-id', 'capture.direct-search',
         '--platform', 'boss',
         '--keyword', '全铝箱包设计',
         '--boss-job-id', 'boss-position-1',
@@ -468,6 +521,7 @@ describe('TaskScheduler', () => {
       ]);
       assert.deepStrictEqual(captured.map((item) => item.argv), [
         [
+          '--mode-id', 'capture.reuse-job-settings',
           '--platform', 'boss',
           '--keyword', '全铝箱包设计',
           '--boss-job-id', 'boss-position-1',
@@ -475,6 +529,7 @@ describe('TaskScheduler', () => {
           '--boss-search-condition-set', 'scs-aluminum-luggage@1',
         ],
         [
+          '--mode-id', 'capture.reuse-job-settings',
           '--platform', 'boss',
           '--keyword', '全铝箱包设计',
           '--boss-job-id', 'boss-position-1',

@@ -53,6 +53,8 @@ export type ScheduleStatus = 'enabled' | 'paused' | 'stop_requested' | 'stopped'
 export type ScheduleRunStatus = 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'stopped' | 'interrupted' | 'skipped';
 export type WorkflowFailurePolicy = 'stop-round' | 'continue';
 
+export type { OperationModeCatalog, OperationModeCatalogItem } from './api-contracts.js';
+
 /**
  * A condition-set revision is resolved before it enters the queue or a
  * schedule.  The reference deliberately carries no filesystem path or

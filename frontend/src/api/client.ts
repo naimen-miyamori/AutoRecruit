@@ -1,3 +1,4 @@
+import { parseOperationModeCatalogResponse } from './contracts';
 import type {
   ApplicationFilterOptions,
   AssistantChatRequest,
@@ -138,6 +139,8 @@ export async function downloadArtifact(artifactId: string, fileName: string): Pr
 
 export const api = {
   health: (signal?: AbortSignal) => requestJson<{ status: string; service: string }>('/health', { signal }),
+  listOperationModes: (surface?: 'assistant' | 'manual' | 'schedule' | 'cli', signal?: AbortSignal) => requestJson<unknown>(`/operation-modes${surface ? `?surface=${encodeURIComponent(surface)}` : ''}`, { signal })
+    .then((value) => parseOperationModeCatalogResponse(value, { surface })),
   dashboardHealth: (signal?: AbortSignal) => requestJson<DashboardHealth>('/dashboard/health', { signal }),
   listTasks: (signal?: AbortSignal) => requestJson<{ tasks: TaskSummary[] }>('/tasks', { signal }),
   getTask: (taskId: string, signal?: AbortSignal) => requestJson<TaskDetail>(`/tasks/${encodeURIComponent(taskId)}`, { signal }),
@@ -211,6 +214,7 @@ export const api = {
 
 export const queryKeys = {
   health: ['health'] as const,
+  operationModes: (surface?: string) => ['operation-modes', surface ?? 'all'] as const,
   dashboard: ['dashboard'] as const,
   tasks: ['tasks'] as const,
   task: (taskId: string) => ['tasks', taskId] as const,

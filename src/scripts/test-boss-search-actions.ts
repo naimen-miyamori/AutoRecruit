@@ -126,6 +126,7 @@ function recentViewedSearchBody(options: { refreshOnChange?: boolean } = {}): st
 
 async function installForwardReceiptFixture(page: Page, mode: 'success' | 'uncertain' | 'pre-confirmation'): Promise<void> {
   await page.evaluate((fixtureMode) => {
+    (window as unknown as { __bossForwardConfirmClicks: number }).__bossForwardConfirmClicks = 0;
     const detail = document.createElement('div');
     detail.className = 'dialog-wrap active';
     detail.dataset.type = 'boss-dialog';
@@ -142,6 +143,7 @@ async function installForwardReceiptFixture(page: Page, mode: 'success' | 'uncer
       share.innerHTML = '<div class="nav-list"><span class="item cur">邮件转发</span></div><input placeholder="请输入收件人邮箱"><textarea placeholder="请输入留言"></textarea><a ka="geek_coop_forward" style="display:block;width:80px;height:24px">转发</a>';
       const confirm = share.querySelector<HTMLAnchorElement>('a[ka="geek_coop_forward"]')!;
       confirm.addEventListener('click', () => {
+        (window as unknown as { __bossForwardConfirmClicks: number }).__bossForwardConfirmClicks += 1;
         share.style.display = 'none';
         if (fixtureMode === 'success') {
           const success = document.createElement('div');
@@ -798,11 +800,14 @@ describe('Boss normal-search actions', () => {
           mode: 'email',
           recipient: 'primary@example.com',
           actionMode: 'confirm',
-          deadline: Date.now() + 1_000,
+          deadline: Date.now() + 3_000,
         }),
         (error: unknown) => error instanceof BossForwardUncertainError
           && /success evidence|completion is uncertain/.test(error.message),
       );
+      assert.equal(await page.evaluate(() => (
+        window as unknown as { __bossForwardConfirmClicks: number }
+      ).__bossForwardConfirmClicks), 1);
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;

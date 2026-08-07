@@ -159,6 +159,15 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
   ordinary capture with `search-source direct` is “直接搜索”, and the standalone
   `search-subscription` mode is “订阅管理”. Keep internal enum values, CLI flags, schemas, and
   persisted `saved|direct` values unchanged.
+- `src/operation-modes.ts` is the platform-neutral source of truth for public mode IDs, labels,
+  task-kind/source mapping, surfaces, and declared effects. Assistant aliases remain in the server
+  registry; frontend text comes from `GET /api/operation-modes` and must not create a competing
+  semantic catalog.
+- AI or human-run CLI search operations must use `npm run search:run` with exactly one supported
+  `--mode-id`: `capture.reuse-job-settings`, `capture.subscription-search`,
+  `capture.direct-search`, `batch.capture`, or `subscription.manage`. The historical `npm run dev`
+  entry remains compatible when the flag is omitted, but prints the implicitly derived mode and is
+  not the recommended safety entry.
 - Conversation mode routing is explicit: “订阅搜索” means ordinary `resume-capture` with saved
   search, “直接搜索” means ordinary `resume-capture` with direct search, and “订阅管理” means
   standalone `search-subscription`. Assistant/model mode IDs, derived task kinds, and search
@@ -177,6 +186,10 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
   export, send email, or alter seen state. Plain `platform all` remains core-only; explicit
   `platform all + includeBoss=true` adds Boss native subscription selection/save as the fourth
   stage without authorizing any other Boss mode.
+- Scheduled search-subscription templates are read-only: omit or set
+  `saveSearchSubscription=false`, do not provide a subscription name, and reject any schedule
+  create/update/recovery path that requests saving or renaming. Manual and assistant-confirmed
+  subscription management retain their existing explicit save capability.
 - Boss auto-chat, talent discovery, greet, atomic chat operations, and position/JD sync are
   standalone Boss-only modes. Reads default to read-only; match, greet, chat, and contact mutations
   require explicit confirmation. Only position/JD sync is schedulable.
@@ -193,6 +206,8 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
   filter paths resolve from the jobs-file directory.
 - search-source saved|direct is only for normal capture. New jobs default to saved; omitted rerun
   values reuse persisted settings.
+- `batch.capture` is the top-level batch mode; a jobs-file item's saved/direct source remains an
+  independent per-item override and must not relabel the batch task.
 - include-boss is valid for normal capture, batch, or search subscription with platform all. It
   defaults false; when true for capture, Boss uses the ordinary capture chain and may reuse the
   Boss job's saved forwarding setting. When true for search subscription, Boss is limited to

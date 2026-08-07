@@ -18,6 +18,7 @@ import type { MainRunSummary } from '../index.js';
 import type { ApplicationFilterOptions } from '../search/filter-application-options.js';
 import type { BossCaptureSettingsSnapshot, BossCaptureTaskSnapshot, CandidateResume, CandidateScoreArtifact, JobRecord, RunResult } from '../types/job.js';
 import { SearchSubscriptionRunError } from '../search/search-subscription.js';
+import { parseOperationModeCatalogResponse } from '../server/api-contracts.js';
 
 async function makeTempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-server-api-'));
@@ -180,7 +181,22 @@ function passthroughBossCapturePlanResolver(overrides: {
 }
 
 describe('console API routes', () => {
-  it('returns health status', async () => {
+it('serves operation-mode catalogs that pass the surface-aware public parser', async () => {
+  for (const surface of ['assistant', 'manual', 'schedule', 'cli'] as const) {
+    const response = await handleApiRequest({
+      method: 'GET',
+      pathname: '/api/operation-modes',
+      searchParams: new URLSearchParams(`surface=${surface}`),
+    });
+    assert.equal(response.statusCode, 200);
+    assert.doesNotThrow(() => parseOperationModeCatalogResponse(response.body, { surface }));
+  }
+  const unscoped = await handleApiRequest({ method: 'GET', pathname: '/api/operation-modes', searchParams: new URLSearchParams() });
+  assert.equal(unscoped.statusCode, 200);
+  assert.doesNotThrow(() => parseOperationModeCatalogResponse(unscoped.body));
+});
+
+it('returns health status', async () => {
     const response = await handleApiRequest({
       method: 'GET',
       pathname: '/api/health',
@@ -415,6 +431,7 @@ describe('console API routes', () => {
 
     assert.equal(completed.status, 'succeeded');
     assert.deepStrictEqual(calls[0], [
+      '--mode-id', 'capture.direct-search',
       '--platform',
       'all',
       '--keyword',
@@ -468,6 +485,7 @@ describe('console API routes', () => {
     const completed = await waitForTask(queue, queued.taskId);
     assert.equal(completed.status, 'succeeded');
     assert.deepStrictEqual(calls[0], [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform', 'liepin', '--keyword', '箱包设计', '--jd', '负责箱包设计',
       '--email', 'primary@example.com', '--cc', 'audit@example.com',
       '--result-routing-enabled', 'true', '--result-routing-policy-file', policyPath,
@@ -541,6 +559,7 @@ describe('console API routes', () => {
     const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
     assert.equal(captured.snapshot?.sourceJobKey, 'stable-boss-position-1');
     assert.deepStrictEqual(captured.argv, [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform', 'boss',
       '--keyword', '全铝箱包设计',
       '--boss-job-id', 'boss-position-1',
@@ -812,6 +831,7 @@ describe('console API routes', () => {
 
     assert.equal(completed.status, 'succeeded');
     assert.deepStrictEqual(calls[0], [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform',
       'liepin',
       '--keyword',
@@ -858,6 +878,7 @@ describe('console API routes', () => {
       ccEmails: ['forward-audit@example.com'],
     });
     assert.deepStrictEqual(captured.argv, [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform',
       'boss',
       '--keyword',
@@ -915,6 +936,7 @@ describe('console API routes', () => {
     const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
     assert.equal(captured.snapshot?.screening?.enabled, true);
     assert.deepStrictEqual(captured.argv, [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform', 'boss',
       '--keyword', '物业电工',
       '--jd', '负责物业电气维修',
@@ -971,10 +993,12 @@ describe('console API routes', () => {
     const queued = response.body as TaskDetail;
     const completed = await waitForTask(queue, queued.taskId);
     assert.equal(completed.status, 'succeeded');
-    assert.equal(calls[0]?.[0], '--platform');
-    assert.equal(calls[0]?.[1], 'boss');
-    assert.equal(calls[0]?.[2], '--jobs-file');
-    const snapshotPath = calls[0]?.[3];
+    assert.equal(calls[0]?.[0], '--mode-id');
+    assert.equal(calls[0]?.[1], 'batch.capture');
+    assert.equal(calls[0]?.[2], '--platform');
+    assert.equal(calls[0]?.[3], 'boss');
+    assert.equal(calls[0]?.[4], '--jobs-file');
+    const snapshotPath = calls[0]?.[5];
     assert.ok(snapshotPath);
     assert.notEqual(snapshotPath, jobsFile);
     const snapshottedJobs = JSON.parse(await fs.readFile(snapshotPath, 'utf8')) as Array<{
@@ -1027,6 +1051,7 @@ describe('console API routes', () => {
       ccEmails: [],
     });
     assert.deepStrictEqual(captured.argv, [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform',
       'all',
       '--keyword',
@@ -1263,6 +1288,30 @@ describe('console API routes', () => {
     assert.ok(persisted.logs.some((log) => log.message === 'Task succeeded'));
   });
 
+  it('records the default CLI mode announcement as task info instead of an error', async () => {
+    const taskDir = await makeTempDir();
+    const jobsFile = path.join(taskDir, 'empty-jobs.json');
+    await fs.writeFile(jobsFile, '[]\n', 'utf8');
+    const queue = new TaskQueue({ taskDir });
+
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/tasks/batch',
+      taskQueue: queue,
+      body: {
+        platform: '51job',
+        jobsFile,
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const queued = response.body as TaskDetail;
+    const completed = await waitForTask(queue, queued.taskId);
+    const modeLogs = completed.logs.filter((log) => log.message.includes('执行模式：批量抓取'));
+    assert.equal(completed.status, 'succeeded');
+    assert.deepStrictEqual(modeLogs.map((log) => log.level), ['info']);
+  });
+
   it('queues login-refresh tasks through the session refresh runner', async () => {
     const taskDir = await makeTempDir();
     const cliCalls: string[][] = [];
@@ -1411,6 +1460,7 @@ describe('console API routes', () => {
     assert.doesNotMatch(JSON.stringify(body), /sk-test-assistant/);
     assert.deepStrictEqual(body.draft?.missingFields, []);
     assert.deepStrictEqual(body.draft?.argvPreview, [
+      '--mode-id', 'capture.direct-search',
       '--platform',
       'boss',
       '--keyword',
@@ -1647,6 +1697,7 @@ describe('console API routes', () => {
     assert.equal(body.draft?.input?.jd, undefined);
     assert.equal(body.draft?.input?.jdFile, './fixtures/jd.txt');
     assert.deepStrictEqual(body.draft?.argvPreview, [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform',
       'boss',
       '--keyword',
@@ -1713,7 +1764,7 @@ describe('console API routes', () => {
     assert.equal('email' in (draft?.input ?? {}), false);
     assert.equal('includeViewed' in (draft?.input ?? {}), false);
     assert.match(draft?.warnings?.join('\n') ?? '', /已忽略不支持的字段/);
-    assert.deepStrictEqual(draft?.argvPreview, ['--platform', '51job', '--search-subscription-file', './subscription.json']);
+    assert.deepStrictEqual(draft?.argvPreview, ['--mode-id', 'subscription.manage', '--platform', '51job', '--search-subscription-file', './subscription.json']);
   });
 
   it('surfaces illegal assistant filter combinations before confirmation', async () => {
@@ -1819,6 +1870,7 @@ describe('console API routes', () => {
     const completed = await waitForTask(queue, task.taskId);
     assert.equal(completed.status, 'succeeded');
     assert.deepStrictEqual(calls[0], [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform',
       'all',
       '--keyword',
@@ -1929,6 +1981,7 @@ describe('console API routes', () => {
     const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
     assert.equal(captured.snapshot?.sourceJobKey, 'stable-legacy');
     assert.deepStrictEqual(captured.argv, [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform',
       'boss',
       '--keyword',
@@ -1975,6 +2028,7 @@ describe('console API routes', () => {
     assert.ok(draft?.warnings?.some((warning) => warning.includes('bossCapturePlan')));
     assert.ok(draft?.warnings?.some((warning) => warning.startsWith('风险：Boss 普通抓取')));
     assert.deepStrictEqual(draft?.argvPreview, [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform', 'boss',
       '--keyword', '全铝箱包设计',
       '--boss-job-id', 'boss-position-1',
@@ -1996,6 +2050,7 @@ describe('console API routes', () => {
     const captured = takeBossCaptureSettingsSnapshot(calls[0] ?? []);
     assert.equal(captured.snapshot?.sourceJobKey, 'stable-boss-position-1');
     assert.deepStrictEqual(captured.argv, [
+      '--mode-id', 'capture.reuse-job-settings',
       '--platform', 'boss',
       '--keyword', '全铝箱包设计',
       '--boss-job-id', 'boss-position-1',
@@ -2182,6 +2237,7 @@ describe('console API routes', () => {
     assert.equal(queued.inputSummary.includeBoss, true);
     await waitForTask(queue, queued.taskId);
     assert.deepEqual(calls[0], [
+      '--mode-id', 'subscription.manage',
       '--platform', 'all',
       '--search-subscription-file', './subscription.json',
       '--include-boss', 'true',
@@ -2263,6 +2319,7 @@ describe('console API routes', () => {
     const draft = (response.body as { draft?: { input?: Record<string, unknown>; argvPreview?: string[]; warnings?: string[] } }).draft;
     assert.equal(draft?.input?.includeBoss, true);
     assert.deepEqual(draft?.argvPreview, [
+      '--mode-id', 'subscription.manage',
       '--platform', 'all',
       '--search-subscription-file', './subscription.json',
       '--include-boss', 'true',

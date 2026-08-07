@@ -111,6 +111,7 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.5; }
 .segmented { align-items: stretch; padding: 3px; background: var(--surface-strong); border-radius: 7px; }
 .segmented button { min-height: 31px; padding: 5px 11px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 12px; font-weight: 800; }
 .segmented button.active { color: var(--text); background: white; box-shadow: 0 1px 2px rgba(22,38,44,.12); }
+.mode-picker-list { display: grid; gap: 15px; }.mode-picker-group { display: grid; gap: 7px; }.mode-picker-group h3 { margin: 0; color: var(--muted); font-size: 12px; }.mode-picker-group .segmented { width: 100%; }.mode-picker-group .segmented button { display: grid; flex: 1 1 170px; gap: 3px; min-height: 53px; text-align: left; }.mode-picker-group .segmented button small { color: inherit; font-size: 10px; font-weight: 500; line-height: 1.35; opacity: .85; }
 
 .task-list { display: grid; max-height: 690px; overflow-y: auto; }
 .task-item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 11px 4px; border: 0; border-bottom: 1px solid var(--line); color: var(--text); background: transparent; text-align: left; }

@@ -386,7 +386,9 @@ export class TaskQueue {
 
   constructor(options: TaskQueueOptions = {}) {
     this.taskDir = options.taskDir ?? path.join(config.dataDir, 'runtime', 'tasks');
-    this.runner = options.runner ?? ((argv) => runCliMain(argv));
+    this.runner = options.runner ?? ((argv) => runCliMain(argv, {
+      reportSearchMode: (message) => console.log(message),
+    }));
     this.ragOpsRunner = options.ragOpsRunner ?? runRagOpsTask;
     this.talentMappingClassificationRunner = options.talentMappingClassificationRunner
       ?? ((input) => runTalentMappingClassificationTask(input));

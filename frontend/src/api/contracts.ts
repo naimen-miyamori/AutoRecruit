@@ -1,4 +1,11 @@
 export type { ArtifactDescriptor } from '../../../src/server/api-contracts.js';
+export { parseOperationModeCatalogResponse } from '../../../src/server/api-contracts.js';
+export type {
+  OperationModeCatalog,
+  OperationModeCatalogItem,
+} from '../../../src/server/api-contracts.js';
+export { compileSearchOperationMode, isCliSearchModeId } from '../../../src/operation-modes.js';
+export type { CliSearchModeId } from '../../../src/operation-modes.js';
 export type {
   AssistantChatRequest,
   AssistantChatResponse,

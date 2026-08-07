@@ -16,6 +16,18 @@ owning domain instructions for screens that expose platform, RAG, Boss, or Talen
 - Keep frontend API contracts synchronized with the server read models and task input types. A route
   or response change updates frontend/src/api/contracts.ts, the typed API client, query keys, and
   affected screen tests in the same work item.
+- Search and capture mode labels/effects are loaded from `GET /api/operation-modes?surface=manual` or
+  `surface=schedule`; the typed client parses the unknown response with the requested surface before
+  pages consume it, and directory failure disables only dependent search/capture creation controls.
+  `NewTaskPage` and `AutomationPage` use one discriminated selection state and may compile a selected
+  business mode to the existing task kind/source input, but must not expose derived `kind`,
+  `searchSource`, or argv as authorization. Reusable filter state may survive mode switches, but
+  inactive modes must not receive those fields in request bodies.
+- Automation subscription management is always read-only and must explain that narrower schedule
+  contract even though the general catalog mode can save. Successful schedule creation resets the
+  business selection and dependent platform form state together; a Boss-only selection must never
+  remain active beside a reset non-Boss platform value. Historical templates that still request a
+  subscription save or rename remain inspectable but show an explicit rejection warning.
 - Assistant mode labels and effect summaries come from the server. Derived mode/task/source fields
   are display-only and must not be editable generic input or execution authority; mode conflicts
   render as clarification/error states and do not expose a confirmation action.

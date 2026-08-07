@@ -139,6 +139,34 @@ storage-state.boss.json
 
 这些是互相隔离的运行模式。独立模式不能随意与普通抓取、批量、订阅管理或问答参数混用。
 
+控制台“新建任务”和“自动运行”中的搜索选择器直接展示五种业务模式：按岗位设置抓取、订阅搜索、直接搜索、批量抓取和订阅管理；名称、分组、顺序和副作用说明来自 `GET /api/operation-modes?surface=manual|schedule`。客户端先按请求 surface 对未知响应做运行时合同解析，再消费目录；搜索与独立任务始终只有一个活动选择。Talent Mapping、Boss 独立任务和登录刷新仍在独立入口中选择。模式目录读取失败或合同不一致时，搜索/抓取创建会明确报错并提供重试，独立任务和历史查看不受影响。
+
+### 搜索模式断言
+
+搜索类 CLI 推荐使用安全入口 `npm run search:run`，并明确声明业务模式：
+
+| mode ID | 用户名称 | 关键参数 | 结果 |
+| --- | --- | --- | --- |
+| `capture.reuse-job-settings` | 按岗位设置抓取 | 省略 `--search-source` | 普通候选抓取，复用岗位设置 |
+| `capture.subscription-search` | 订阅搜索 | `--search-source saved` | 普通候选抓取，使用保存入口 |
+| `capture.direct-search` | 直接搜索 | `--search-source direct` | 普通候选抓取，使用本次条件 |
+| `batch.capture` | 批量抓取 | `--jobs-file ...` | 按 jobs 文件逐项执行 |
+| `subscription.manage` | 订阅管理 | `--search-subscription-file ...` | 只读取/可保存订阅，不抓候选 |
+
+例如执行 51job 的“订阅搜索”（不是订阅管理）：
+
+```bash
+npm run search:run -- \
+  --mode-id capture.subscription-search \
+  --platform 51job \
+  --keyword "铝镁合金" \
+  --search-source saved \
+  --jd-file ./jd.txt
+```
+
+旧的 `npm run dev` 命令仍兼容，但省略 `--mode-id` 时只会在 stderr 提示参数推导出的模式；AI 或人工代运行不要绕过
+`search:run`。模式不一致会在打开浏览器前失败，stdout JSON 保持机器可读。
+
 ---
 
 ## 快速上手
@@ -836,6 +864,8 @@ Talent Mapping 浏览器任务使用 `POST /api/tasks/talent-mapping`，分类�
 - Boss 自动聊天
 
 计划按每日时间窗口和轮次间隔运行，并与手工任务共享一个全局队列。普通抓取或批量计划选择 `all` 时可显式保存“包含 Boss 直聘·直猎邦 Pro”；历史计划缺少该字段时按 `false` 解释。Boss 立即匹配、单人打招呼和原子会话变更不能加入自动运行计划；新增 Boss 独立模式中只有职位/JD 同步可调度。
+
+自动化页面的搜索计划与独立计划分开选择：前者使用上述五种 API 目录模式，后者保留 Talent Mapping、Boss 自动沟通和 Boss 职位同步的类型化入口。计划任务名称从服务端模式目录生成，提交时仍通过共享编译器生成兼容的 task kind 与输入字段。自动化中的订阅管理固定为只读：服务端拒绝任何 `saveSearchSubscription=true` 或订阅名称，手工/助手显式确认的订阅管理仍可保存；历史保存型计划仍可查看，但详情会提示它将在恢复或运行前被拒绝。计划创建成功会同时重置业务选择与平台表单，避免残留 Boss-only 选择。新建任务页会保留用户在模式切换前填写的条件集或旧筛选文件，但只有直接搜索、订阅管理以及显式 direct 的 batch 默认来源会把筛选字段发送到请求中。
 
 控制计划：
 

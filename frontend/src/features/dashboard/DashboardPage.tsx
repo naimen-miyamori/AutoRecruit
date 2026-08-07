@@ -57,7 +57,7 @@ export function DashboardPage() {
         </Section>
         <Section title="运行轨道" description="运行中页面每 3 秒自动更新。" actions={<Link className="text-link" to="/tasks">全部任务</Link>}>
           <div className="compact-list">
-            {tasks.slice(0, 7).map((task) => <Link className="compact-item" to={`/tasks/${encodeURIComponent(task.taskId)}`} key={task.taskId}><StatusPill status={task.status} /><div><strong>{TASK_LABELS[task.kind]}</strong><small>{String(task.inputSummary.platform ?? '')} · {String(task.inputSummary.keyword ?? task.inputSummary.jobKey ?? task.inputSummary.action ?? '')}</small></div><time>{formatCompactDate(task.updatedAt)}</time></Link>)}
+            {tasks.slice(0, 7).map((task) => <Link className="compact-item" to={`/tasks/${encodeURIComponent(task.taskId)}`} key={task.taskId}><StatusPill status={task.status} /><div><strong>{String(task.inputSummary?.modeLabel ?? TASK_LABELS[task.kind])}</strong><small>{String(task.inputSummary?.platform ?? '')}{task.inputSummary?.modeId !== undefined ? ` · 模式 ${String(task.inputSummary.modeId)}` : ''} · {String(task.inputSummary?.keyword ?? task.inputSummary?.jobKey ?? task.inputSummary?.action ?? '')}</small></div><time>{formatCompactDate(task.updatedAt)}</time></Link>)}
             {tasks.length === 0 && <EmptyState title="还没有任务" description="从“新建任务”开始第一次运行。" />}
           </div>
         </Section>

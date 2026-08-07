@@ -49,6 +49,12 @@ import {
 import { preflightTaskSearchConditionSets } from './search-condition-set-preflight.js';
 import { TaskQueue } from './task-queue.js';
 import {
+  listOperationModeDefinitions,
+  listOperationModePickerGroups,
+  type OperationModePickerTarget,
+  type OperationModeSurface,
+} from '../operation-modes.js';
+import {
   normalizeApplicationFilterInputRequest,
   normalizeBatchTask,
   normalizeBossAutoChatTask,
@@ -549,6 +555,34 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
       return jsonResponse(200, {
         status: 'ok',
         service: 'autorecruit-console-api',
+      });
+    }
+
+    if (method === 'GET' && pathname === '/api/operation-modes') {
+      const surfaceValue = searchParams.get('surface');
+      if (surfaceValue && !['assistant', 'manual', 'schedule', 'cli'].includes(surfaceValue)) {
+        throw new Error('surface must be assistant, manual, schedule, or cli');
+      }
+      const surface = surfaceValue ? surfaceValue as OperationModeSurface : undefined;
+      const pickerTarget: OperationModePickerTarget | undefined = surface === 'manual'
+        ? 'manual-search-create'
+        : surface === 'schedule'
+          ? 'schedule-search-create'
+          : undefined;
+      return jsonResponse(200, {
+        groups: pickerTarget ? listOperationModePickerGroups(pickerTarget) : [],
+        modes: listOperationModeDefinitions(surface).map((definition) => ({
+          modeId: definition.modeId,
+          label: definition.label,
+          taskKind: definition.taskKind,
+          ...(definition.searchSource ? { searchSource: definition.searchSource } : {}),
+          effectSummary: definition.effectSummary,
+          declaredEffects: definition.effectSummary,
+          surfaces: definition.surfaces,
+          pickerTargets: definition.pickerTargets,
+          ...(definition.pickerGroupId ? { pickerGroupId: definition.pickerGroupId } : {}),
+          ...(definition.pickerOrder !== undefined ? { pickerOrder: definition.pickerOrder } : {}),
+        })),
       });
     }
 

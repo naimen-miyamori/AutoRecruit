@@ -2,14 +2,21 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { CheckCircle2, Play } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import type { Platform, PlatformSelection, SearchConditionSetRef, TaskKind } from '../../api/contracts';
+import { compileSearchOperationMode, isCliSearchModeId } from '../../api/contracts';
+import type { CliSearchModeId, Platform, PlatformSelection, SearchConditionSetRef, TaskKind } from '../../api/contracts';
 import { api, queryKeys } from '../../api/client';
-import { ErrorState, LoadingState, PageHeader, PLATFORM_LABELS, Section, SuccessNotice } from '../../components/ui';
+import { ErrorState, LoadingState, PageHeader, PLATFORM_LABELS, Section, SuccessNotice, TASK_LABELS } from '../../components/ui';
 import { FilterBuilder } from './FilterBuilder';
 
 type Mode = 'resume-capture' | 'batch' | 'talent-mapping' | 'search-subscription' | 'boss-auto-chat' | 'login-refresh';
 type BossScreeningChoice = 'inherit' | 'enabled' | 'disabled';
 type ResultRoutingChoice = 'inherit' | 'enabled' | 'disabled';
+type NewTaskSelection =
+  | { type: 'search'; modeId: CliSearchModeId }
+  | { type: 'independent'; mode: IndependentMode };
+
+const INDEPENDENT_MODES = ['talent-mapping', 'boss-auto-chat', 'login-refresh'] as const satisfies readonly Mode[];
+type IndependentMode = (typeof INDEPENDENT_MODES)[number];
 
 interface FormState {
   platform: PlatformSelection;
@@ -23,7 +30,7 @@ interface FormState {
   saveSearchSubscription: boolean;
   includeViewed: boolean;
   includeBoss: boolean;
-  searchSource: '' | 'saved' | 'direct';
+  batchSearchSource: '' | 'saved' | 'direct';
   applicationFilterInputFile: string;
   searchConditionSetRefs: Partial<Record<Platform, SearchConditionSetRef>>;
   email: string;
@@ -57,7 +64,7 @@ interface FormState {
 
 const initialForm: FormState = {
   platform: '51job', keyword: '', jd: '', jdFile: '', jobsFile: '', talentMappingFile: '', searchSubscriptionFile: '', searchSubscriptionName: '', saveSearchSubscription: false,
-  includeViewed: false, includeBoss: false, searchSource: '', applicationFilterInputFile: '', searchConditionSetRefs: {}, email: '', cc: '', clearCc: false, liepinForwardContact: '', bossJobId: '', bossSearchKeyword: '', bossForwardMode: '', bossForwardRecipient: '', bossForwardCc: '', clearBossForwardCc: false, bossScreeningEnabled: undefined, bossScreeningChoice: 'inherit', bossScreeningPolicyFile: '', bossSecondaryEmail: '', bossSecondaryCc: '', clearBossSecondaryCc: false, resultRoutingChoice: 'inherit', resultRoutingPolicyFile: '', secondaryEmail: '', secondaryCc: '',
+  includeViewed: false, includeBoss: false, batchSearchSource: '', applicationFilterInputFile: '', searchConditionSetRefs: {}, email: '', cc: '', clearCc: false, liepinForwardContact: '', bossJobId: '', bossSearchKeyword: '', bossForwardMode: '', bossForwardRecipient: '', bossForwardCc: '', clearBossForwardCc: false, bossScreeningEnabled: undefined, bossScreeningChoice: 'inherit', bossScreeningPolicyFile: '', bossSecondaryEmail: '', bossSecondaryCc: '', clearBossSecondaryCc: false, resultRoutingChoice: 'inherit', resultRoutingPolicyFile: '', secondaryEmail: '', secondaryCc: '',
   scoreThreshold: '70', requireAllHardRequirements: true, replyToUnqualifiedCandidates: false, summaryEmail: '', summaryCc: '', syncJobsBeforeReview: false,
 };
 
@@ -93,9 +100,15 @@ function ConditionSetSelector({ platform, value, onChange }: { platform: Platfor
 
 export function NewTaskPage() {
   const [searchParams] = useSearchParams();
-  const [mode, setMode] = useState<Mode>(searchParams.get('mode') === 'talent-mapping' ? 'talent-mapping' : 'resume-capture');
+  const [selection, setSelection] = useState<NewTaskSelection>(() => searchParams.get('mode') === 'talent-mapping'
+    ? { type: 'independent', mode: 'talent-mapping' }
+    : { type: 'search', modeId: 'capture.reuse-job-settings' });
   const [form, setForm] = useState(initialForm);
   const [validationError, setValidationError] = useState<string>();
+  const operationModesQuery = useQuery({
+    queryKey: queryKeys.operationModes('manual'),
+    queryFn: ({ signal }) => api.listOperationModes('manual', signal),
+  });
   const mutation = useMutation({ mutationFn: ({ kind, body }: { kind: TaskKind; body: Record<string, unknown> }) => api.submitTask(kind, body) });
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((current) => ({ ...current, [key]: value }));
   const setBossScreeningChoice = (choice: BossScreeningChoice) => setForm((current) => ({
@@ -109,14 +122,35 @@ export function NewTaskPage() {
     return { ...current, searchConditionSetRefs: refs, applicationFilterInputFile: value ? '' : current.applicationFilterInputFile };
   });
   const setLegacyFilterFile = (value: string) => setForm((current) => ({ ...current, applicationFilterInputFile: value, searchConditionSetRefs: value.trim() ? {} : current.searchConditionSetRefs }));
-  const setModeSafe = (next: Mode) => {
-    setMode(next);
+  const selectIndependentMode = (next: IndependentMode) => {
+    setSelection({ type: 'independent', mode: next });
     setValidationError(undefined);
     if (next === 'boss-auto-chat') set('platform', 'boss');
     if (next === 'login-refresh' && form.platform === 'all') set('platform', '51job');
     if (next === 'talent-mapping' && form.platform === 'boss') set('platform', '51job');
   };
-  const showFilter = mode === 'search-subscription' || ((mode === 'resume-capture' || mode === 'batch') && form.searchSource === 'direct');
+  const selectSearchMode = (modeId: CliSearchModeId) => {
+    setSelection({ type: 'search', modeId });
+    setValidationError(undefined);
+  };
+  const selectedSearchModeId = selection.type === 'search' ? selection.modeId : undefined;
+  const compiledSearchMode = selectedSearchModeId ? compileSearchOperationMode(selectedSearchModeId) : undefined;
+  const mode: Mode = selection.type === 'independent' ? selection.mode : compiledSearchMode?.taskKind ?? 'resume-capture';
+  const allowsDirectFilters = mode === 'search-subscription'
+    || (mode === 'resume-capture' && compiledSearchMode?.searchSource === 'direct')
+    || (mode === 'batch' && form.batchSearchSource === 'direct');
+  const showFilter = mode === 'search-subscription' || ((mode === 'resume-capture' || mode === 'batch') && allowsDirectFilters);
+  const catalogModes = operationModesQuery.data?.modes ?? [];
+  const catalogGroups = operationModesQuery.data?.groups ?? [];
+  const savedSourceLabel = catalogModes.find((item) => item.modeId === 'capture.subscription-search')?.label ?? '模式目录未就绪';
+  const directSourceLabel = catalogModes.find((item) => item.modeId === 'capture.direct-search')?.label ?? '模式目录未就绪';
+  const searchModeCatalogError = operationModesQuery.error;
+  const searchModeCatalogUnavailable = operationModesQuery.isLoading || Boolean(searchModeCatalogError);
+  const selectedSearchMode = selectedSearchModeId ? catalogModes.find((item) => item.modeId === selectedSearchModeId) : undefined;
+  const manualSearchGroups = catalogGroups
+    .filter((group) => group.orders['manual-search-create'] !== undefined)
+    .sort((left, right) => (left.orders['manual-search-create'] ?? 0) - (right.orders['manual-search-create'] ?? 0));
+  const manualSearchModes = catalogModes.filter((item) => item.pickerTargets.includes('manual-search-create') && isCliSearchModeId(item.modeId));
   const selectedPlatforms = targetPlatforms(form, mode);
   const showBossSavedJob = mode === 'resume-capture' && (form.platform === 'boss' || (form.platform === 'all' && form.includeBoss));
   const showBossCaptureSettings = (mode === 'resume-capture' || mode === 'batch')
@@ -151,8 +185,11 @@ export function NewTaskPage() {
 
   const submit = () => {
     setValidationError(undefined);
+    if ((mode === 'resume-capture' || mode === 'batch' || mode === 'search-subscription') && searchModeCatalogUnavailable) {
+      if (searchModeCatalogError) return setValidationError(`搜索模式目录读取失败：${searchModeCatalogError instanceof Error ? searchModeCatalogError.message : String(searchModeCatalogError)}`);
+      return setValidationError('正在读取搜索模式目录，请稍候。');
+    }
     if (hasReferences(form) && form.applicationFilterInputFile.trim()) return setValidationError('条件集与旧筛选文件互斥；请只保留一种筛选来源。');
-    if ((mode === 'resume-capture' || mode === 'batch') && hasReferences(form) && form.searchSource !== 'direct') return setValidationError('条件集只能用于直接搜索，请将搜索来源设为“直接搜索”。');
     let body: Record<string, unknown>;
     if (mode === 'resume-capture') {
       if (!form.keyword.trim()) return setValidationError('关键词必填');
@@ -161,7 +198,7 @@ export function NewTaskPage() {
       if ((form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && !form.clearBossForwardCc && form.bossForwardCc.trim() && form.bossForwardMode === 'colleague') return setValidationError('Boss 转发抄送仅适用于邮件转发');
       if (showBossCaptureSettings && form.bossSecondaryCc.trim() && !form.bossSecondaryEmail.trim()) return setValidationError('Boss 否定邮件抄送需要副收件人邮箱');
       if (showResultRoutingSettings && form.secondaryCc.trim() && !form.secondaryEmail.trim()) return setValidationError('副报告抄送需要副报告邮箱');
-      body = commonBody(form, mode);
+      body = commonBody(form, mode, compiledSearchMode?.searchSource);
       body.keyword = form.keyword.trim();
       body.jd = form.jd.trim() || undefined;
       body.jdFile = form.jdFile.trim() || undefined;
@@ -171,7 +208,7 @@ export function NewTaskPage() {
       if ((form.platform === 'boss' || (form.platform === 'all' && form.includeBoss)) && !form.clearBossForwardCc && form.bossForwardCc.trim() && form.bossForwardMode === 'colleague') return setValidationError('Boss 转发抄送仅适用于邮件转发');
       if (showBossCaptureSettings && form.bossSecondaryCc.trim() && !form.bossSecondaryEmail.trim()) return setValidationError('Boss 否定邮件抄送需要副收件人邮箱');
       if (showResultRoutingSettings && form.secondaryCc.trim() && !form.secondaryEmail.trim()) return setValidationError('副报告抄送需要副报告邮箱');
-      body = { ...commonBody(form, mode), jobsFile: form.jobsFile.trim() };
+      body = { ...commonBody(form, mode, compiledSearchMode?.searchSource), jobsFile: form.jobsFile.trim() };
     } else if (mode === 'talent-mapping') {
       if (!form.talentMappingFile.trim()) return setValidationError('Talent Mapping 计划文件必填');
       if (form.platform === 'boss') return setValidationError('Boss 不属于 Talent Mapping 产品范围');
@@ -201,9 +238,17 @@ export function NewTaskPage() {
   return (
     <div className="page-stack">
       <PageHeader eyebrow="NEW TASK" title="新建任务" description="所有任务在服务端重新规范化后进入共享串行队列；页面预览不是执行来源。" />
-      <Section>
-        <div className="segmented">{([['resume-capture', '简历抓取'], ['batch', '批量任务'], ['talent-mapping', '人才地图扫描'], ['search-subscription', '订阅管理'], ['boss-auto-chat', 'Boss 自动沟通'], ['login-refresh', '登录刷新']] as const).map(([value, label]) => <button type="button" className={mode === value ? 'active' : ''} key={value} onClick={() => setModeSafe(value)}>{label}</button>)}</div>
+      <Section title="搜索与抓取模式" description="以下五个模式来自服务端目录；选择后再填写对应任务参数。">
+        {operationModesQuery.isLoading && <LoadingState label="读取搜索模式目录" />}
+        {searchModeCatalogError && <ErrorState error={searchModeCatalogError} onRetry={() => void operationModesQuery.refetch()} />}
+        {!operationModesQuery.isLoading && !searchModeCatalogError && <div className="mode-picker-list">{manualSearchGroups.map((group) => <div className="mode-picker-group" key={group.groupId}><h3>{group.label}</h3><div className="segmented">{manualSearchModes.filter((item) => item.pickerGroupId === group.groupId).sort((left, right) => (left.pickerOrder ?? 0) - (right.pickerOrder ?? 0)).map((item) => <button type="button" className={selectedSearchModeId === item.modeId ? 'active' : ''} aria-label={item.label} aria-pressed={selectedSearchModeId === item.modeId} key={item.modeId} onClick={() => { if (isCliSearchModeId(item.modeId)) selectSearchMode(item.modeId); }}><span>{item.label}</span><small>{item.declaredEffects}</small></button>)}</div></div>)}</div>}
       </Section>
+      <Section title="独立任务" description="人才地图、Boss 自动沟通和登录刷新不依赖搜索模式目录，也不会被订阅管理替代。">
+        <div className="segmented">{INDEPENDENT_MODES.map((value) => <button type="button" className={selection.type === 'independent' && selection.mode === value ? 'active' : ''} aria-pressed={selection.type === 'independent' && selection.mode === value} key={value} onClick={() => selectIndependentMode(value)}>{TASK_LABELS[value]}</button>)}</div>
+      </Section>
+      {mode === 'search-subscription' && <Section title="订阅管理模式" description="这是独立的订阅条件读取/保存任务，不是候选抓取。">
+        <div className="security-note">模式：{selectedSearchMode?.label ?? '等待服务端模式目录'}<br />作用：{form.saveSearchSubscription ? '本次读取条件并请求保存或更新平台订阅。' : '本次只读取条件和结果，不保存平台订阅。'}<br />不会做：抓取候选、打开详情、写 seen、评分、报告或邮件。</div>
+      </Section>}
       <Section title="任务参数" description={mode === 'boss-auto-chat' ? 'Boss 是单平台独立模式。' : mode === 'talent-mapping' ? '此入口只执行卡片扫描；详情补全需在人才地图项目页核对精确人数并逐轮确认。' : mode === 'search-subscription' ? '订阅管理只选择或保存平台原生订阅，不抓取候选、不打开详情、不写 seen/评分/报告；全部平台默认不包含 Boss。' : '全部主平台默认运行 51job、猎聘和智联；普通抓取与批量可显式追加直猎邦。'}>
         <div className="form-grid">
           <label><span>平台</span><select value={form.platform} onChange={(event) => set('platform', event.target.value as PlatformSelection)} disabled={mode === 'boss-auto-chat'}>{(mode === 'boss-auto-chat' ? ['boss'] : mode === 'login-refresh' ? ['51job', 'liepin', 'zhilian', 'boss'] : mode === 'talent-mapping' ? ['51job', 'liepin', 'zhilian', 'all'] : ['51job', 'liepin', 'zhilian', 'boss', 'all']).map((item) => <option value={item} key={item}>{PLATFORM_LABELS[item as keyof typeof PLATFORM_LABELS]}</option>)}</select></label>
@@ -213,7 +258,8 @@ export function NewTaskPage() {
           {mode === 'search-subscription' && <><label><span>订阅文件</span><input value={form.searchSubscriptionFile} onChange={(event) => set('searchSubscriptionFile', event.target.value)} placeholder="./search-subscription.json" /></label><label><span>订阅名称</span><input value={form.searchSubscriptionName} onChange={(event) => set('searchSubscriptionName', event.target.value)} /></label><label className="checkbox-field"><input type="checkbox" checked={form.saveSearchSubscription} onChange={(event) => set('saveSearchSubscription', event.target.checked)} />保存平台订阅</label></>}
           {mode === 'resume-capture' && <><label className="wide"><span>JD 文本</span><textarea value={form.jd} onChange={(event) => set('jd', event.target.value)} rows={6} /></label><label><span>JD 文件</span><input value={form.jdFile} onChange={(event) => set('jdFile', event.target.value)} placeholder="./jd.txt" /></label></>}
           {showBossSavedJob && <><label className="wide"><span>Boss 已同步岗位</span>{bossPositionsQuery.isLoading ? <LoadingState label="读取 Boss 职位" /> : <select value={form.bossJobId} onChange={(event) => selectBossJob(event.target.value)}><option value="">不选择（按岗位名匹配或新建）</option>{bossPositionsQuery.data?.positions.filter((position) => Boolean(position.jobKey)).map((position) => <option key={position.bossJobId} value={position.bossJobId}>{position.name} · {position.status} · {position.bossJobId}</option>)}</select>}{bossPositionsQuery.error && <small className="inline-error">无法读取 Boss 已同步岗位：{bossPositionsQuery.error instanceof Error ? bossPositionsQuery.error.message : String(bossPositionsQuery.error)}</small>}</label><label><span>Boss 页面搜索词（可选覆盖）</span><input value={form.bossSearchKeyword} onChange={(event) => set('bossSearchKeyword', event.target.value)} placeholder="默认复用岗位设置或条件集默认关键词" /></label>{form.bossJobId && <div className="security-note wide">{selectedBossJobQuery.isLoading ? '正在读取岗位保存设置…' : selectedBossSearchSettings ? <>复用岗位设置：{selectedBossSearchSettings.source === 'direct' ? '直接搜索' : '订阅搜索'}{selectedBossSearchSettings.pageKeyword ? `；页面搜索词：${selectedBossSearchSettings.pageKeyword}` : savedBossDefaultKeyword ? `；条件集默认搜索词：${savedBossDefaultKeyword}` : '；页面搜索词将使用岗位名称'}{selectedBossSearchSettings.conditionSetRef ? `；已保存条件集：${selectedBossSearchSettings.conditionSetRef.conditionSetId}@${selectedBossSearchSettings.conditionSetRef.revision}` : '；未关联条件集'}。</> : '该职位尚无本地保存设置；请提供 JD 或显式配置搜索来源。'}</div>}</>}
-          {(mode === 'resume-capture' || mode === 'batch') && <><label><span>搜索来源</span><select value={form.searchSource} onChange={(event) => set('searchSource', event.target.value as FormState['searchSource'])}><option value="">复用岗位设置</option><option value="saved">订阅搜索</option><option value="direct">直接搜索</option></select></label><label className="checkbox-field"><input type="checkbox" checked={form.includeViewed} onChange={(event) => set('includeViewed', event.target.checked)} />包含已查看候选人</label></>}
+          {mode === 'batch' && <><label><span>批量条目默认搜索来源</span><select value={form.batchSearchSource} onChange={(event) => set('batchSearchSource', event.target.value as FormState['batchSearchSource'])}><option value="">按每个岗位设置</option><option value="saved">{savedSourceLabel}</option><option value="direct">{directSourceLabel}</option></select></label><label className="checkbox-field"><input type="checkbox" checked={form.includeViewed} onChange={(event) => set('includeViewed', event.target.checked)} />包含已查看候选人</label></>}
+          {mode === 'resume-capture' && <label className="checkbox-field"><input type="checkbox" checked={form.includeViewed} onChange={(event) => set('includeViewed', event.target.checked)} />包含已查看候选人</label>}
           {form.platform === 'all' && (mode === 'resume-capture' || mode === 'batch' || mode === 'search-subscription') && <label className="checkbox-field"><input type="checkbox" checked={form.includeBoss} onChange={(event) => set('includeBoss', event.target.checked)} />{mode === 'search-subscription' ? '订阅管理包含 Boss 第 4 阶段' : '包含 Boss 直聘·直猎邦 Pro'}</label>}
           {(mode === 'resume-capture' || mode === 'batch') && <><label><span>{showBossCaptureSettings && form.bossScreeningEnabled ? '主报告邮箱' : '报告邮箱'}</span><input type="email" value={form.email} onChange={(event) => set('email', event.target.value)} /></label><label><span>{showBossCaptureSettings && form.bossScreeningEnabled ? '主报告抄送' : '抄送'}</span><input value={form.cc} onChange={(event) => set('cc', event.target.value)} placeholder="逗号分隔" disabled={form.clearCc} /></label>{showBossCaptureSettings && <label className="checkbox-field"><input type="checkbox" checked={form.clearCc} onChange={(event) => set('clearCc', event.target.checked)} />清除主报告已保存抄送</label>}</>}
           {showResultRoutingSettings && <><label className="wide"><span>评分后模型要求分流</span><select value={form.resultRoutingChoice} onChange={(event) => set('resultRoutingChoice', event.target.value as ResultRoutingChoice)}><option value="inherit">复用岗位设置（不写回）</option><option value="enabled">本次启用并保存</option><option value="disabled">本次停用并保存</option></select></label><label className="checkbox-field wide"><input type="checkbox" checked={form.resultRoutingChoice === 'enabled'} onChange={(event) => set('resultRoutingChoice', event.target.checked ? 'enabled' : 'disabled')} />启用跨平台评分后结果分流</label><label className="wide"><span>模型要求策略文件（可选）</span><input value={form.resultRoutingPolicyFile} onChange={(event) => set('resultRoutingPolicyFile', event.target.value)} placeholder="./post-score-routing-policy.json" /></label><label><span>副报告邮箱</span><input type="email" value={form.secondaryEmail} onChange={(event) => set('secondaryEmail', event.target.value)} /></label><label><span>副报告抄送</span><input value={form.secondaryCc} onChange={(event) => set('secondaryCc', event.target.value)} placeholder="逗号分隔" /></label><small className="wide">明确符合和需复核进入主报告；模型明确否定进入副报告。此设置只做结果分流，不改变猎聘站内转发或 BOSS 原生转发。</small></>}
@@ -224,7 +270,7 @@ export function NewTaskPage() {
           {form.platform === 'all' && form.includeBoss && mode === 'search-subscription' && <div className="security-note wide">Boss 会作为第 4 个阶段选择或保存“我的订阅”。不会抓取候选、打开详情、写 seen/评分/报告或发送邮件；保存或改名会改变 Boss 平台订阅状态。</div>}
           {mode === 'boss-auto-chat' && <><label className="checkbox-field"><input type="checkbox" checked={form.requireAllHardRequirements} onChange={(event) => set('requireAllHardRequirements', event.target.checked)} />所有硬性要求必须满足</label>{!form.requireAllHardRequirements && <label><span>评分线</span><input type="number" min="0" max="100" value={form.scoreThreshold} onChange={(event) => set('scoreThreshold', event.target.value)} /></label>}<label className="checkbox-field"><input type="checkbox" checked={form.replyToUnqualifiedCandidates} onChange={(event) => set('replyToUnqualifiedCandidates', event.target.checked)} />回复不合适候选人</label><label className="checkbox-field"><input type="checkbox" checked={form.syncJobsBeforeReview} onChange={(event) => set('syncJobsBeforeReview', event.target.checked)} />审查前同步职位/JD</label><label><span>总结邮件</span><input type="email" value={form.summaryEmail} onChange={(event) => set('summaryEmail', event.target.value)} /></label><label><span>总结抄送</span><input value={form.summaryCc} onChange={(event) => set('summaryCc', event.target.value)} /></label></>}
         </div>
-        <div className="form-actions"><button className="primary-button" type="button" disabled={mutation.isPending} onClick={submit}><Play size={16} />{mutation.isPending ? '提交中' : mode === 'talent-mapping' ? '提交扫描任务' : '提交任务'}</button></div>
+        <div className="form-actions"><button className="primary-button" type="button" disabled={mutation.isPending || ((mode === 'resume-capture' || mode === 'batch' || mode === 'search-subscription') && searchModeCatalogUnavailable)} onClick={submit}><Play size={16} />{mutation.isPending ? '提交中' : mode === 'talent-mapping' ? '提交扫描任务' : '提交任务'}</button></div>
       </Section>
       {showFilter && <Section title="搜索条件集" description="新流程直接引用平台条件集并固定 revision；不会生成或传递新的运行时筛选文件。">
         <div className="condition-set-selector-grid">{selectedPlatforms.map((platform) => <ConditionSetSelector key={platform} platform={platform} value={form.searchConditionSetRefs[platform]} onChange={(value) => setConditionSetReference(platform, value)} />)}</div>
@@ -244,14 +290,15 @@ function splitList(value: string): string[] | undefined {
   return items.length ? items : undefined;
 }
 
-function commonBody(form: FormState, mode: 'resume-capture' | 'batch'): Record<string, unknown> {
-  const searchConditionSetRefs = form.searchSource === 'direct' ? refsForTargetPlatforms(form, mode) : undefined;
+function commonBody(form: FormState, mode: 'resume-capture' | 'batch', compiledSearchSource?: 'saved' | 'direct'): Record<string, unknown> {
+  const searchSource = mode === 'batch' ? form.batchSearchSource || undefined : compiledSearchSource;
+  const searchConditionSetRefs = searchSource === 'direct' ? refsForTargetPlatforms(form, mode) : undefined;
   return {
     platform: form.platform,
     includeBoss: form.platform === 'all' ? form.includeBoss : undefined,
     includeViewed: form.includeViewed,
-    searchSource: form.searchSource || undefined,
-    applicationFilterInputFile: form.searchSource === 'direct' && !searchConditionSetRefs ? form.applicationFilterInputFile.trim() || undefined : undefined,
+    searchSource,
+    applicationFilterInputFile: searchSource === 'direct' && !searchConditionSetRefs ? form.applicationFilterInputFile.trim() || undefined : undefined,
     searchConditionSetRefs,
     email: form.email.trim() || undefined,
     cc: form.clearCc ? [] : splitList(form.cc),

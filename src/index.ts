@@ -98,6 +98,12 @@ import {
 import { loadTalentMappingPlanFile } from './talent-mapping/plan.js';
 import { runTalentMappingWorkflow } from './talent-mapping/workflow.js';
 import {
+  deriveCliSearchModeId,
+  getOperationModeDefinition,
+  isCliSearchModeId,
+  type CliSearchModeId,
+} from './operation-modes.js';
+import {
   BossAutomationSettings,
   BossCaptureSettingsSnapshot,
   BossCaptureTaskSnapshot,
@@ -265,11 +271,13 @@ interface RunnableJobInput extends ReportDeliveryOptions {
 interface SingleJobCliInput extends RunnableJobInput {
   mode: 'single';
   platform: CliPlatformSelection;
+  modeId?: CliSearchModeId;
 }
 
 interface BatchCliInput extends ReportDeliveryOptions {
   mode: 'batch';
   platform: CliPlatformSelection;
+  modeId?: CliSearchModeId;
   jobsFilePath: string;
   includeViewedCandidates: boolean;
   includeBoss: boolean;
@@ -294,6 +302,7 @@ interface BatchCliInput extends ReportDeliveryOptions {
 interface SearchSubscriptionCliInput {
   mode: 'search-subscription';
   platform: CliPlatformSelection;
+  modeId?: CliSearchModeId;
   keyword?: string;
   filePath: string;
   includeBoss: boolean;
@@ -537,6 +546,10 @@ export type MainResult = MainRunSummary
   | BossChatOperationResult
   | BossJobSyncRun
   | TalentMappingRunSummary;
+
+export interface MainOptions {
+  reportSearchMode?: (message: string) => void;
+}
 
 export const parseJobDescriptionRef = { fn: parseJobDescription };
 export const extractionBoundary = createProductionExtractionBoundary();
@@ -1149,7 +1162,7 @@ function assertBossScreeningArgumentsAllowed(input: {
   throw new Error('--boss-screening-enabled, --boss-screening-policy-file, --boss-secondary-email, and --boss-secondary-cc require --platform boss or --platform all --include-boss true');
 }
 
-function parseArgs(argv: readonly string[]): CliInput {
+function parseArgsInternal(argv: readonly string[]): CliInput {
   const values = new Map<string, string>();
   const flagPresence = new Set<string>();
 
@@ -1181,6 +1194,11 @@ function parseArgs(argv: readonly string[]): CliInput {
 
   const searchKeyword = values.get('keyword');
   const platform = parsePlatformSelection(values.get('platform'));
+  const requestedModeId = values.get('mode-id')?.trim();
+  if (flagPresence.has('mode-id') && !isCliSearchModeId(requestedModeId)) {
+    throw new Error(`operation-mode-unknown: --mode-id must be one of: ${['capture.reuse-job-settings', 'capture.subscription-search', 'capture.direct-search', 'batch.capture', 'subscription.manage'].join(', ')}`);
+  }
+  const modeId = requestedModeId ? requestedModeId as CliSearchModeId : undefined;
   const jobsFilePath = values.get('jobs-file');
   const jobDescriptionText = values.get('jd');
   const jobDescriptionFilePath = values.get('jd-file');
@@ -1698,6 +1716,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     return {
       mode: 'search-subscription',
       platform,
+      modeId,
       includeBoss,
       keyword: searchKeyword,
       filePath: searchSubscriptionFilePath,
@@ -1740,6 +1759,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     return {
       mode: 'batch',
       platform,
+      modeId,
       jobsFilePath,
       recipientEmail,
       ccEmails,
@@ -1804,6 +1824,7 @@ function parseArgs(argv: readonly string[]): CliInput {
   return {
     mode: 'single',
     platform,
+    modeId,
     searchKeyword,
     bossJobId,
     bossSearchKeyword,
@@ -1834,6 +1855,46 @@ function parseArgs(argv: readonly string[]): CliInput {
     applicationFilterInputFilePath,
     searchConditionSetRefs,
   };
+}
+
+type CliSearchOperationInput = SingleJobCliInput | BatchCliInput | SearchSubscriptionCliInput;
+
+function isCliSearchOperationInput(input: CliInput): input is CliSearchOperationInput {
+  return input.mode === 'single' || input.mode === 'batch' || input.mode === 'search-subscription';
+}
+
+function parseArgs(argv: readonly string[]): CliInput {
+  const input = parseArgsInternal(argv);
+  if (argv.includes('--mode-id') && !isCliSearchOperationInput(input)) {
+    throw new Error('--mode-id is only valid for resume capture, batch capture, or subscription management');
+  }
+  return input;
+}
+
+function announceCliSearchMode(
+  input: CliSearchOperationInput,
+  report: (message: string) => void = (message) => process.stderr.write(`${message}\n`),
+): CliSearchModeId {
+  const resolvedModeId = deriveCliSearchModeId({
+    mode: input.mode,
+    searchSource: input.mode === 'search-subscription' ? undefined : input.searchSource,
+    searchSourceExplicit: input.mode === 'single' || input.mode === 'batch'
+      ? input.searchSourceExplicit
+      : undefined,
+  });
+  if (input.modeId && input.modeId !== resolvedModeId) {
+    const requestedDefinition = getOperationModeDefinition(input.modeId);
+    const resolvedDefinition = getOperationModeDefinition(resolvedModeId);
+    throw new Error(`operation-mode-conflict: 预期“${requestedDefinition.label}”（${input.modeId}），但参数解析为“${resolvedDefinition.label}”（${resolvedModeId}）。请修改 --mode-id 或匹配的搜索参数，使二者一致后再重试。`);
+  }
+
+  const definition = getOperationModeDefinition(resolvedModeId);
+  if (input.modeId) {
+    report(`执行模式：${definition.label}（${resolvedModeId}）\n作用：${definition.effectSummary}`);
+  } else {
+    report(`兼容入口：未提供 --mode-id，已解析为“${definition.label}”（${resolvedModeId}）。为避免“订阅搜索”和“订阅管理”混淆，建议使用 npm run search:run -- --mode-id ${resolvedModeId} ...\n作用：${definition.effectSummary}`);
+  }
+  return resolvedModeId;
 }
 
 function buildSinglePlatformInput(input: RunnableJobInput, platform: SupportedPlatform): SinglePlatformCliInput {
@@ -5455,8 +5516,12 @@ async function runJdQuestion(input: JdQuestionCliInput): Promise<JdQuestionRunSu
   return result;
 }
 
-export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<MainResult> {
+export async function main(argv: readonly string[] = process.argv.slice(2), options: MainOptions = {}): Promise<MainResult> {
   const input = parseArgs(argv);
+
+  if (isCliSearchOperationInput(input)) {
+    announceCliSearchMode(input, options.reportSearchMode);
+  }
 
   if (input.mode === 'talent-mapping') {
     return runTalentMapping(input);

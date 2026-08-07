@@ -35,15 +35,16 @@ export function TasksPage() {
       <div className="split-layout">
         <Section className="sticky-panel" title="任务列表" description={`${tasks.length} 条结果`} actions={<div className="filter-row"><select aria-label="任务状态" value={status} onChange={(event) => setStatus(event.target.value as typeof status)}><option value="all">全部状态</option><option value="queued">排队中</option><option value="running">运行中</option><option value="succeeded">成功</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><select aria-label="任务类型" value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}><option value="all">全部类型</option>{Object.entries(TASK_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>}>
           {tasksQuery.isLoading && <LoadingState />}
-          <div className="task-list">{tasks.map((task) => <button className={`task-item${task.taskId === taskId ? ' active' : ''}`} type="button" key={task.taskId} onClick={() => navigate(`/tasks/${encodeURIComponent(task.taskId)}`)}><StatusPill status={task.status} /><div className="task-item-content"><strong>{TASK_LABELS[task.kind]}</strong><span><b>{String(task.inputSummary.platform ?? '')}</b><time>{formatCompactDate(task.updatedAt)}</time></span>{task.error && <small className="inline-error">{task.error}</small>}</div></button>)}</div>
+          <div className="task-list">{tasks.map((task) => <button className={`task-item${task.taskId === taskId ? ' active' : ''}`} type="button" key={task.taskId} onClick={() => navigate(`/tasks/${encodeURIComponent(task.taskId)}`)}><StatusPill status={task.status} /><div className="task-item-content"><strong>{String(task.inputSummary?.modeLabel ?? TASK_LABELS[task.kind])}</strong><span><b>{String(task.inputSummary?.platform ?? '')}</b>{task.inputSummary?.modeId !== undefined && <> · 模式 {String(task.inputSummary.modeId)}</>}<time>{formatCompactDate(task.updatedAt)}</time></span>{task.error && <small className="inline-error">{task.error}</small>}</div></button>)}</div>
           {!tasksQuery.isLoading && tasks.length === 0 && <EmptyState title="没有符合条件的任务" />}
         </Section>
         <div className="page-stack">
           {!taskId && <Section><EmptyState title="选择一个任务" /></Section>}
           {detailQuery.isLoading && <Section><LoadingState label="读取任务详情" /></Section>}
           {detail && <>
-            <Section title={TASK_LABELS[detail.kind]} description={detail.taskId} actions={<StatusPill status={detail.status} />}>
+            <Section title={String(detail.inputSummary?.modeLabel ?? TASK_LABELS[detail.kind])} description={detail.taskId} actions={<StatusPill status={detail.status} />}>
               <div className="detail-grid"><div className="detail-cell"><span>创建</span><strong>{formatDate(detail.createdAt)}</strong></div><div className="detail-cell"><span>开始</span><strong>{formatDate(detail.startedAt)}</strong></div><div className="detail-cell"><span>结束</span><strong>{formatDate(detail.finishedAt)}</strong></div><div className="detail-cell"><span>来源</span><strong>{detail.schedule ? `计划 ${detail.schedule.scheduleId}` : '手工 / 助手'}</strong></div></div>
+              {detail.inputSummary?.modeId !== undefined && <div className="security-note">模式 ID：{String(detail.inputSummary.modeId)}<br />声明效果：{String(detail.inputSummary.declaredEffects ?? '未提供')}<br />解析效果：{String(detail.inputSummary.resolvedEffects ?? '未提供')}</div>}
               {detail.error && <div className="error-banner"><span>{detail.error}</span></div>}
             </Section>
             <Section title="任务结果" description="按任务类型展示完整输出，不仅显示摘要。"><TaskOutput kind={detail.kind} input={detail.input} output={detail.output} /></Section>

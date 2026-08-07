@@ -8,6 +8,7 @@ import { isTalentMappingCorePlatform } from '../types/talent-mapping.js';
 import { loadTalentMappingPlanFile } from '../talent-mapping/plan.js';
 import { assertSafeSearchConditionSetId } from '../search/search-condition-set-store.js';
 import { normalizeBossCaptureSettingsSnapshot } from '../scoring/boss-screening.js';
+import { deriveCliSearchModeId, getOperationModeDefinition, resolveOperationModeEffects } from '../operation-modes.js';
 import {
   fingerprintSavedSearchConditionIdentity,
   normalizeBossSavedSearchIdentity,
@@ -787,6 +788,16 @@ export function normalizeResumeCaptureTask(
   const jdFile = getOptionalString(item, 'jdFile');
   const includeViewed = getOptionalBoolean(item, 'includeViewed');
   const searchSource = normalizeSearchSource(item.searchSource);
+  const operationModeId = deriveCliSearchModeId({
+    mode: 'single',
+    searchSource,
+    searchSourceExplicit: item.searchSource !== undefined,
+  });
+  const operationModeDefinition = getOperationModeDefinition(operationModeId);
+  const resolvedOperationEffects = resolveOperationModeEffects(operationModeId, {
+    searchSource,
+    searchSourceExplicit: item.searchSource !== undefined,
+  });
   const applicationFilterInputFile = getOptionalString(item, 'applicationFilterInputFile');
   const searchConditionSetRefs = normalizeSearchConditionSetRefs(item, platform, includeBoss === true);
   const email = getOptionalString(item, 'email');
@@ -873,7 +884,7 @@ export function normalizeResumeCaptureTask(
     bossCaptureSettingsSnapshot,
     bossCaptureTaskSnapshot,
   };
-  const argv = ['--platform', platform, '--keyword', keyword];
+  const argv = ['--mode-id', operationModeId, '--platform', platform, '--keyword', keyword];
   pushOptionalBoolean(argv, '--include-boss', includeBoss);
   pushOptional(argv, '--boss-job-id', bossJobId);
   pushOptional(argv, '--boss-search-keyword', bossSearchKeyword);
@@ -935,6 +946,10 @@ export function normalizeResumeCaptureTask(
       jdPreview: summarizeText(jd),
       jdFile,
       includeViewed: includeViewed ?? false,
+      modeId: operationModeId,
+      modeLabel: operationModeDefinition.label,
+      declaredEffects: operationModeDefinition.effectSummary,
+      resolvedEffects: resolvedOperationEffects,
       searchSource: searchSource ?? 'stored-or-saved',
       applicationFilterInputFile,
       searchConditionSetRefs: summarizeSearchConditionSetRefs(searchConditionSetRefs),
@@ -995,6 +1010,16 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
   const jobsFile = getRequiredString(item, 'jobsFile');
   const includeViewed = getOptionalBoolean(item, 'includeViewed');
   const searchSource = normalizeSearchSource(item.searchSource);
+  const operationModeId = deriveCliSearchModeId({
+    mode: 'batch',
+    searchSource,
+    searchSourceExplicit: item.searchSource !== undefined,
+  });
+  const operationModeDefinition = getOperationModeDefinition(operationModeId);
+  const resolvedOperationEffects = resolveOperationModeEffects(operationModeId, {
+    searchSource,
+    searchSourceExplicit: item.searchSource !== undefined,
+  });
   const applicationFilterInputFile = getOptionalString(item, 'applicationFilterInputFile');
   const searchConditionSetRefs = normalizeSearchConditionSetRefs(item, platform, includeBoss === true);
   const email = getOptionalString(item, 'email');
@@ -1027,7 +1052,7 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
     ...bossScreening,
     ...postScoreRouting,
   };
-  const argv = ['--platform', platform, '--jobs-file', jobsFile];
+  const argv = ['--mode-id', operationModeId, '--platform', platform, '--jobs-file', jobsFile];
   pushOptionalBoolean(argv, '--include-boss', includeBoss);
   pushOptionalBoolean(argv, '--include-viewed', includeViewed);
   pushOptional(argv, '--search-source', searchSource);
@@ -1056,6 +1081,10 @@ export function normalizeBatchTask(payload: unknown): NormalizedTask<BatchTaskIn
       includeBoss: includeBoss ?? false,
       jobsFile,
       includeViewed: includeViewed ?? false,
+      modeId: operationModeId,
+      modeLabel: operationModeDefinition.label,
+      declaredEffects: operationModeDefinition.effectSummary,
+      resolvedEffects: resolvedOperationEffects,
       searchSource: searchSource ?? 'stored-or-saved',
       applicationFilterInputFile,
       searchConditionSetRefs: summarizeSearchConditionSetRefs(searchConditionSetRefs),
@@ -1176,6 +1205,11 @@ export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTas
   const searchConditionSetRefs = normalizeSearchConditionSetRefs(item, platform, includeBoss, 'search-subscription');
   const saveSearchSubscription = getOptionalBoolean(item, 'saveSearchSubscription');
   const searchSubscriptionName = getOptionalString(item, 'searchSubscriptionName');
+  const operationModeId = deriveCliSearchModeId({ mode: 'search-subscription' });
+  const operationModeDefinition = getOperationModeDefinition(operationModeId);
+  const resolvedOperationEffects = resolveOperationModeEffects(operationModeId, {
+    saveSearchSubscription,
+  });
 
   if (applicationFilterInputFile && searchConditionSetRefs) {
     throw new Error('applicationFilterInputFile and searchConditionSetRefs are mutually exclusive');
@@ -1191,7 +1225,7 @@ export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTas
     saveSearchSubscription,
     searchSubscriptionName,
   };
-  const argv = ['--platform', platform, '--search-subscription-file', searchSubscriptionFile];
+  const argv = ['--mode-id', operationModeId, '--platform', platform, '--search-subscription-file', searchSubscriptionFile];
   if (item.includeBoss !== undefined) pushOptionalBoolean(argv, '--include-boss', includeBoss);
   pushOptional(argv, '--keyword', keyword);
   pushOptional(argv, '--search-condition-set', serializeSearchConditionSetRefs(platform, searchConditionSetRefs));
@@ -1203,6 +1237,10 @@ export function normalizeSearchSubscriptionTask(payload: unknown): NormalizedTas
     argv,
     inputSummary: {
       platform,
+      modeId: operationModeId,
+      modeLabel: operationModeDefinition.label,
+      declaredEffects: operationModeDefinition.effectSummary,
+      resolvedEffects: resolvedOperationEffects,
       includeBoss,
       searchSubscriptionFile,
       keyword,
@@ -1515,6 +1553,9 @@ export async function normalizeSchedulableTask(
     }
     case 'search-subscription': {
       const normalized = await prepareSearchSubscriptionTask(input, dataDir);
+      if (normalized.input.saveSearchSubscription === true || normalized.input.searchSubscriptionName !== undefined) {
+        throw new Error('Scheduled search-subscription tasks cannot save or rename platform subscriptions');
+      }
       return { kind, ...normalized };
     }
     case 'boss-auto-chat': {

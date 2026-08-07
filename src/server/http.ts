@@ -251,6 +251,7 @@ async function main(): Promise<void> {
     frontend: config.frontendDistDir,
     endpoints: [
       'GET /api/health',
+      'GET /api/operation-modes',
       'GET /api/tasks',
       'GET /api/schedules',
       'POST /api/schedules',

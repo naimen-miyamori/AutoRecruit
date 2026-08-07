@@ -6,161 +6,45 @@
  * implied search-source value from this registry.
  */
 
-export type AssistantModeId =
-  | 'capture.reuse-job-settings'
-  | 'capture.subscription-search'
-  | 'capture.direct-search'
-  | 'batch.capture'
-  | 'subscription.manage'
-  | 'talent-mapping.run'
-  | 'boss.auto-chat'
-  | 'boss.talent-search'
-  | 'boss.greet'
-  | 'boss.chat-operation'
-  | 'boss.job-sync'
-  | 'session.login-refresh'
-  | 'rag.ops'
-  | 'rag.answer';
+import {
+  listOperationModeDefinitions,
+  type OperationModeDefinition,
+  type OperationModeId,
+  type OperationModeSearchSource,
+  type OperationModeTaskKind,
+} from '../operation-modes.js';
 
-export type AssistantModeTaskKind =
-  | 'resume-capture'
-  | 'batch'
-  | 'search-subscription'
-  | 'talent-mapping'
-  | 'boss-auto-chat'
-  | 'boss-talent-search'
-  | 'boss-greet'
-  | 'boss-chat-operation'
-  | 'boss-job-sync'
-  | 'login-refresh'
-  | 'rag-ops'
-  | 'rag-answer';
+export type AssistantModeId = OperationModeId;
+export type AssistantModeTaskKind = OperationModeTaskKind;
+export type AssistantModeSearchSource = OperationModeSearchSource;
 
-export type AssistantModeSearchSource = 'saved' | 'direct' | 'reuse-job-settings' | undefined;
-
-export interface AssistantModeDefinition {
-  modeId: AssistantModeId;
-  label: string;
-  taskKind: AssistantModeTaskKind;
-  searchSource: AssistantModeSearchSource;
-  effectSummary: string;
+export interface AssistantModeDefinition extends OperationModeDefinition {
   aliases: readonly string[];
 }
 
-const MODE_DEFINITIONS: readonly AssistantModeDefinition[] = [
-  {
-    modeId: 'capture.reuse-job-settings',
-    label: '普通抓取（不覆盖搜索来源）',
-    taskKind: 'resume-capture',
-    searchSource: 'reuse-job-settings',
-    effectSummary: '不显式覆盖搜索来源；已有岗位复用保存设置，新岗位沿用普通抓取默认来源。',
-    aliases: ['复用岗位设置', '按岗位设置抓取'],
-  },
-  {
-    modeId: 'capture.subscription-search',
-    label: '订阅搜索',
-    taskKind: 'resume-capture',
-    searchSource: 'saved',
-    effectSummary: '使用平台已保存的订阅入口，可能打开候选详情并执行岗位已配置的评分、转发或邮件流程。',
-    aliases: ['订阅搜索', '保存的订阅搜索'],
-  },
-  {
-    modeId: 'capture.direct-search',
-    label: '直接搜索',
-    taskKind: 'resume-capture',
-    searchSource: 'direct',
-    effectSummary: '按本次明确提供的关键词和筛选条件搜索并执行普通抓取流程。',
-    aliases: ['直接搜索', '筛选搜索'],
-  },
-  {
-    modeId: 'batch.capture',
-    label: '批量抓取',
-    taskKind: 'batch',
-    searchSource: undefined,
-    effectSummary: '按 jobs 文件逐项执行普通抓取。',
-    aliases: ['批量抓取', '批量任务'],
-  },
-  {
-    modeId: 'subscription.manage',
-    label: '订阅管理',
-    taskKind: 'search-subscription',
-    searchSource: undefined,
-    effectSummary: '只应用订阅条件、读取结果并可保存订阅，不抓取候选或评分。',
-    aliases: ['订阅管理', '订阅保存', '管理订阅'],
-  },
-  {
-    modeId: 'talent-mapping.run',
-    label: '人才地图',
-    taskKind: 'talent-mapping',
-    searchSource: undefined,
-    effectSummary: '执行独立的人才市场研究流程，不进入普通抓取状态。',
-    aliases: ['人才地图', '人才研究'],
-  },
-  {
-    modeId: 'boss.auto-chat',
-    label: 'Boss 自动沟通',
-    taskKind: 'boss-auto-chat',
-    searchSource: undefined,
-    effectSummary: '审查 Boss 未读会话并按确认的沟通策略执行。',
-    aliases: ['Boss 自动沟通', 'Boss 自动聊天'],
-  },
-  {
-    modeId: 'boss.talent-search',
-    label: 'Boss 人才发现',
-    taskKind: 'boss-talent-search',
-    searchSource: undefined,
-    effectSummary: '执行 Boss 独立人才发现；匹配动作仍需要单独确认。',
-    aliases: ['Boss 人才发现', 'Boss 人才搜索', 'Boss 深度搜索'],
-  },
-  {
-    modeId: 'boss.greet',
-    label: 'Boss 打招呼',
-    taskKind: 'boss-greet',
-    searchSource: undefined,
-    effectSummary: '向精确核验的 Boss 候选人发送一次打招呼。',
-    aliases: ['Boss 打招呼', 'Boss 招呼'],
-  },
-  {
-    modeId: 'boss.chat-operation',
-    label: 'Boss 会话操作',
-    taskKind: 'boss-chat-operation',
-    searchSource: undefined,
-    effectSummary: '读取或修改精确 Boss 会话；变更操作需要确认。',
-    aliases: ['Boss 会话操作', 'Boss 聊天操作'],
-  },
-  {
-    modeId: 'boss.job-sync',
-    label: 'Boss 职位同步',
-    taskKind: 'boss-job-sync',
-    searchSource: undefined,
-    effectSummary: '读取 Boss 职位并同步已验证的 JD 与职位身份。',
-    aliases: ['Boss 职位同步', '同步 Boss 职位'],
-  },
-  {
-    modeId: 'session.login-refresh',
-    label: '登录态刷新',
-    taskKind: 'login-refresh',
-    searchSource: undefined,
-    effectSummary: '通过平台登录流程刷新指定平台的会话状态。',
-    aliases: ['登录态刷新', '刷新登录'],
-  },
-  {
-    modeId: 'rag.ops',
-    label: 'RAG 运维',
-    taskKind: 'rag-ops',
-    searchSource: undefined,
-    effectSummary: '执行受控的 RAG 检查、审核、指标或索引操作。',
-    aliases: ['RAG 运维', 'RAG 检查'],
-  },
-  {
-    modeId: 'rag.answer',
-    label: 'JD/RAG 问答',
-    taskKind: 'rag-answer',
-    searchSource: undefined,
-    effectSummary: '只基于岗位事实回答问题，不打开浏览器或执行抓取。',
-    aliases: ['JD 问答', 'RAG 问答', '岗位问答'],
-  },
-];
+const MODE_ALIASES: Partial<Record<OperationModeId, readonly string[]>> = {
+  'capture.reuse-job-settings': ['复用岗位设置', '按岗位设置抓取'],
+  'capture.subscription-search': ['订阅搜索', '保存的订阅搜索'],
+  'capture.direct-search': ['直接搜索', '筛选搜索'],
+  'batch.capture': ['批量抓取', '批量任务'],
+  'subscription.manage': ['订阅管理', '订阅保存', '管理订阅'],
+  'talent-mapping.run': ['人才地图', '人才研究'],
+  'boss.auto-chat': ['Boss 自动沟通', 'Boss 自动聊天'],
+  'boss.talent-search': ['Boss 人才发现', 'Boss 人才搜索', 'Boss 深度搜索'],
+  'boss.greet': ['Boss 打招呼', 'Boss 招呼'],
+  'boss.chat-operation': ['Boss 会话操作', 'Boss 聊天操作'],
+  'boss.job-sync': ['Boss 职位同步', '同步 Boss 职位'],
+  'session.login-refresh': ['登录态刷新', '刷新登录'],
+  'rag.ops': ['RAG 运维', 'RAG 检查'],
+  'rag.answer': ['JD 问答', 'RAG 问答', '岗位问答'],
+};
+
+const MODE_DEFINITIONS: readonly AssistantModeDefinition[] = listOperationModeDefinitions().map(
+  (definition) => ({
+    ...definition,
+    aliases: MODE_ALIASES[definition.modeId] ?? [],
+  }),
+);
 
 const MODE_BY_ID = new Map(MODE_DEFINITIONS.map((definition) => [definition.modeId, definition]));
 
