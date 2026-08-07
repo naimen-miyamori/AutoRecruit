@@ -10,8 +10,7 @@ import type { Page } from 'playwright';
 import { config, resolveStorageStatePath } from '../config.js';
 import { buildJobKey } from '../parsers/jd-parser.js';
 import { getResumeDomSnapshot, collectResumePageEvidence, openResumeDetail } from '../browser/resume-detail.js';
-import { collectCandidateList, waitForCandidateResultsReady } from '../browser/candidate-list.js';
-import { clickSearchTriggerRef, findSubscriptionCardRef, openAuthenticatedSubscribePageRef, openSubscribeSearch, waitForAuthenticatedSubscribeReadyRef, waitForSearchTriggerReadyRef } from '../browser/subscribe-search.js';
+import { apply51jobViewedCandidatePolicyRef, clickSearchTriggerRef, findSubscriptionCardRef, openAuthenticatedSubscribePageRef, openSubscribeSearch, waitForAuthenticatedSubscribeReadyRef, waitForSearchTriggerReadyRef } from '../browser/subscribe-search.js';
 import { BrowserSession, closeBrowserSessionRef, createFreshBrowserSessionRef, createPersistentBrowserSessionRef, isLiepinReusableBrowserEnabled, isReusableBrowserEnabled, openLoginSessionRef, persistBrowserSessionRef, openAuthenticatedSubscribePageRef as openAuthenticatedSubscribePageSessionRef, resolveBrowserHeadless, verifyPersistedBrowserSessionRef } from '../browser/session.js';
 import { validateCandidateListExtraction } from '../extraction/extractor.js';
 import { resolveOpenAISettings } from '../llm/openai-client.js';
@@ -37,6 +36,27 @@ import type { BossCandidateRoutingArtifact, BossRejectionEmailOutboxEntry, Saved
 
 const tempDirs: string[] = [];
 const originalDataDir = config.dataDir;
+const originalApply51jobViewedCandidatePolicy = apply51jobViewedCandidatePolicyRef.fn;
+
+type SubscribeSearchViewedPolicyTestDouble = {
+  __apply51jobViewedCandidatePolicy?: (input: {
+    includeViewedCandidates?: boolean;
+    deadline: number;
+    signal?: AbortSignal;
+  }) => Promise<{
+    status: 'already-satisfied' | 'applied';
+    resultState: 'candidates' | 'explicit-empty';
+    candidateCount: number;
+  }>;
+};
+
+apply51jobViewedCandidatePolicyRef.fn = async (page, input) => {
+  const double = page as unknown as SubscribeSearchViewedPolicyTestDouble;
+  if (double.__apply51jobViewedCandidatePolicy) {
+    return double.__apply51jobViewedCandidatePolicy(input);
+  }
+  return originalApply51jobViewedCandidatePolicy(page, input);
+};
 
 async function makeIsolatedTempDir(): Promise<string> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-scoring-'));
@@ -240,111 +260,6 @@ function createDetailPage() {
   } as never;
 }
 
-function createCandidateListPage(options: {
-  bodyText?: string;
-  resultListVisible?: boolean;
-  candidateCardsVisible?: boolean;
-  candidateCardCountSequence?: number[];
-  cardPayloads?: Array<{ id: string; text: string; html?: string; resumeUrl?: string; name?: string }>;
-  url?: string;
-  loadingVisible?: boolean;
-  rootVisible?: boolean;
-  onWaitForTimeout?: (timeout: number) => void;
-}) {
-  const {
-    bodyText = '结果页已加载',
-    resultListVisible = true,
-    candidateCardsVisible = false,
-    candidateCardCountSequence,
-    cardPayloads = [],
-    url = 'https://example.com/search',
-    loadingVisible = false,
-    rootVisible = false,
-    onWaitForTimeout,
-  } = options;
-  const countSequence = [...(candidateCardCountSequence ?? [])];
-
-  const candidateCardsLocator = {
-    first: () => ({
-      waitFor: async (_options?: { state?: string; timeout?: number }) => {
-        if (!candidateCardsVisible) {
-          throw new Promise<void>(() => undefined);
-        }
-      },
-    }),
-    count: async () => countSequence.shift() ?? cardPayloads.length,
-    evaluateAll: async () => cardPayloads.map((card) => ({
-      elementId: card.id,
-      html: card.html ?? `<div id="${card.id}">${card.text}</div>`,
-      text: card.text,
-      resumeUrl: card.resumeUrl,
-      name: card.name,
-    })),
-  };
-
-  const resultListLocator = {
-    first: () => ({
-      waitFor: async (_options?: { state?: string; timeout?: number }) => {
-        if (!resultListVisible) {
-          throw new Error('result list not visible');
-        }
-      },
-      locator: (selector?: string) => {
-        if (selector === 'div[id^="no_interested_"]') {
-          return {
-            evaluateAll: async () => candidateCardsLocator.evaluateAll(),
-          };
-        }
-
-        throw new Error(`unexpected nested selector: ${selector ?? ''}`);
-      },
-    }),
-  };
-
-  return {
-    waitForLoadState: async (_state: string) => undefined,
-    waitForTimeout: async (timeout: number) => {
-      onWaitForTimeout?.(timeout);
-    },
-    url: () => url,
-    locator: (selector?: string) => {
-      if (selector === 'div[id^="no_interested_"]') {
-        return candidateCardsLocator;
-      }
-      if (selector === '.virtual_list') {
-        return {
-          ...resultListLocator,
-          count: async () => (resultListVisible ? 1 : 0),
-        };
-      }
-      if (selector === 'body') {
-        return {
-          innerText: async () => bodyText,
-        };
-      }
-      if (selector === '#app, #root, [data-testid="app-root"]') {
-        return {
-          count: async () => (rootVisible ? 1 : 0),
-        };
-      }
-      if (selector === '.base-page-loading') {
-        return {
-          count: async () => (loadingVisible ? 1 : 0),
-          first: () => ({
-            waitFor: async () => {
-              if (!loadingVisible) {
-                throw new Error('loading not visible');
-              }
-            },
-          }),
-        };
-      }
-
-      throw new Error(`unexpected selector: ${selector ?? ''}`);
-    },
-  } as never;
-}
-
 function createSubscribeSearchOpenStub() {
   const viewedFilterSelector = 'label.el-checkbox:has-text("我已看"), label:has-text("我已看")';
   const popupWaitForLoadStateCalls: string[] = [];
@@ -376,6 +291,23 @@ function createSubscribeSearchOpenStub() {
   let pageTextTriggerReady = false;
   let viewedFilterChecked = true;
   let viewedFilterClicks = 0;
+  const applyViewedCandidatePolicy = async (input: {
+    includeViewedCandidates?: boolean;
+    deadline: number;
+    signal?: AbortSignal;
+  }) => {
+    const desiredChecked = input.includeViewedCandidates !== true;
+    const changed = viewedFilterChecked !== desiredChecked;
+    if (changed) {
+      viewedFilterClicks += 1;
+      viewedFilterChecked = desiredChecked;
+    }
+    return {
+      status: changed ? 'applied' as const : 'already-satisfied' as const,
+      resultState: 'candidates' as const,
+      candidateCount: 1,
+    };
+  };
   const extraPages: Array<{
     label: string;
     url: () => string;
@@ -395,6 +327,7 @@ function createSubscribeSearchOpenStub() {
   };
 
   const targetPage = {
+    __apply51jobViewedCandidatePolicy: applyViewedCandidatePolicy,
     waitForLoadState: async (state: string) => {
       targetWaitForLoadStateCalls.push(state);
     },
@@ -502,6 +435,7 @@ function createSubscribeSearchOpenStub() {
   };
 
   const page = {
+    __apply51jobViewedCandidatePolicy: applyViewedCandidatePolicy,
     url: () => currentUrl,
     goto: async (url: string) => {
       currentUrl = url;
@@ -601,6 +535,7 @@ function createSubscribeSearchOpenStub() {
     },
     showPopup() {
       popupPage = {
+        __apply51jobViewedCandidatePolicy: applyViewedCandidatePolicy,
         url: () => 'https://ehire.51job.com/Revision/talent/search?rt=popup',
         isClosed: () => false,
         close: async () => {
@@ -1095,95 +1030,13 @@ function buildLiepinManualLoginWaitDiagnosticLog(options: {
 }
 
 after(async () => {
+  apply51jobViewedCandidatePolicyRef.fn = originalApply51jobViewedCandidatePolicy;
   delete process.env.DATA_DIR;
   (config as { dataDir: string }).dataDir = originalDataDir;
   await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
 describe('candidate list readiness', () => {
-  it('treats a stable empty visible result list as ready', async () => {
-    let now = 0;
-    const page = createCandidateListPage({
-      bodyText: '已筛选为零条结果',
-      resultListVisible: true,
-      candidateCardsVisible: false,
-      cardPayloads: [],
-      onWaitForTimeout: (timeout) => {
-        now += timeout;
-      },
-    });
-
-    await captureDateNow(async () => {
-      Date.now = () => now;
-      await assert.doesNotReject(() => waitForCandidateResultsReady(page, { deadline: config.playwright.emptyResultsStableMs + 500 }));
-      const candidates = await collectCandidateList(page, { deadline: now + config.playwright.emptyResultsStableMs + 500 });
-
-      assert.deepStrictEqual(candidates, []);
-    });
-  });
-
-  it('returns candidates when the result list appears before delayed candidate cards', async () => {
-    let now = 0;
-    const page = createCandidateListPage({
-      bodyText: '结果页已加载',
-      resultListVisible: true,
-      candidateCardsVisible: true,
-      candidateCardCountSequence: [0, 0, 1],
-      cardPayloads: [
-        {
-          id: 'no_interested_100228050',
-          text: '张三\n上海测试科技有限公司\n销售经理',
-          resumeUrl: 'https://example.com/resume/100228050',
-          name: '张三',
-        },
-      ],
-      onWaitForTimeout: (timeout) => {
-        now += timeout;
-      },
-    });
-
-    await captureDateNow(async () => {
-      Date.now = () => now;
-      const candidates = await collectCandidateList(page, { deadline: config.playwright.emptyResultsStableMs + 500 });
-
-      assert.deepStrictEqual(candidates.map((candidate) => candidate.candidateId), ['100228050']);
-    });
-  });
-
-  it('treats explicit empty-result text as ready without waiting for the stable empty-list window', async () => {
-    const waitCalls: number[] = [];
-    const page = createCandidateListPage({
-      bodyText: '暂无符合条件的人才',
-      resultListVisible: true,
-      candidateCardsVisible: false,
-      cardPayloads: [],
-      onWaitForTimeout: (timeout) => {
-        waitCalls.push(timeout);
-      },
-    });
-
-    await waitForCandidateResultsReady(page, { deadline: Date.now() + 1000 });
-
-    assert.deepStrictEqual(waitCalls, []);
-  });
-
-  it('treats 51job filtered empty-result text as ready without waiting for the stable empty-list window', async () => {
-    const waitCalls: number[] = [];
-    const page = createCandidateListPage({
-      bodyText: '过滤：\n我已看\n\n没有搜索到相关的人才\n\n更换搜索条件再试试',
-      resultListVisible: true,
-      candidateCardsVisible: false,
-      cardPayloads: [],
-      onWaitForTimeout: (timeout) => {
-        waitCalls.push(timeout);
-      },
-    });
-
-    await waitForCandidateResultsReady(page, { deadline: Date.now() + 1000 });
-
-    assert.deepStrictEqual(waitCalls, []);
-  });
-
   it('allows extraction validation to accept an empty candidate list', () => {
     assert.deepStrictEqual(validateCandidateListExtraction({ candidates: [] }), { candidates: [] });
   });
@@ -1195,44 +1048,6 @@ describe('candidate list readiness', () => {
       }),
       /candidate without candidateId/,
     );
-  });
-
-  it('includes loading diagnostics when the page never renders result content', async () => {
-    const page = createCandidateListPage({
-      bodyText: '',
-      resultListVisible: false,
-      candidateCardsVisible: false,
-      cardPayloads: [],
-      url: 'https://ehire.51job.com/Revision/talent/search?rt=1',
-      loadingVisible: true,
-      rootVisible: true,
-    });
-
-    await assert.rejects(
-      () => waitForCandidateResultsReady(page, { deadline: Date.now() - 1 }),
-      /emptyTextMatched=false.*loadingVisible=true.*resultListVisible=false.*candidateCardCount=0.*stableEmptyListObservedMs=0.*deadlineRemainingMs=0/,
-    );
-  });
-
-  it('rejects when an empty visible result list has not met the stable window before the deadline', async () => {
-    let now = 0;
-    const page = createCandidateListPage({
-      bodyText: '结果页已加载',
-      resultListVisible: true,
-      candidateCardsVisible: false,
-      cardPayloads: [],
-      onWaitForTimeout: (timeout) => {
-        now += timeout;
-      },
-    });
-
-    await captureDateNow(async () => {
-      Date.now = () => now;
-      await assert.rejects(
-        () => waitForCandidateResultsReady(page, { deadline: config.playwright.emptyResultsStableMs - 100 }),
-        /resultListVisible=true.*candidateCardCount=0.*stableEmptyListObservedMs=/,
-      );
-    });
   });
 
   it('passes the same search deadline from orchestration to open and extract', async () => {
@@ -1288,6 +1103,86 @@ describe('candidate list readiness', () => {
       { phase: 'open', deadline: 1000 + config.playwright.searchPageTimeoutMs },
       { phase: 'extract', deadline: 1000 + config.playwright.searchPageTimeoutMs },
     ]);
+  });
+
+  it('uses the 51job adapter candidate action for saved and direct capture and stops before all candidate side effects on a stable-result failure', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const job = buildNormalizedJob();
+    const session = {
+      page: { id: 'root-page' },
+      context: { id: 'browser-context' },
+    } as never;
+    let legacyPageExtractorCalls = 0;
+    let adapterExtractorCalls = 0;
+    let detailOpenCalls = 0;
+    let resumeParseCalls = 0;
+    const originalAdapterExtractor = indexModule.extractCandidateListWithAdapterRef.fn;
+
+    indexModule.extractionBoundary.extractCandidateListFromPage = async () => {
+      legacyPageExtractorCalls += 1;
+      return { candidates: [{ candidateId: 'legacy-must-not-run' }] };
+    };
+    indexModule.extractCandidateListRef.fn = async () => {
+      throw new Error('51job candidate-snapshot failed at result-stability');
+    };
+    indexModule.extractCandidateListWithAdapterRef.fn = async (adapter, page, options) => {
+      adapterExtractorCalls += 1;
+      return originalAdapterExtractor(adapter, page, options);
+    };
+    indexModule.openSubscribeSearchRef.fn = (async () => createSearchPage()) as typeof indexModule.openSubscribeSearchRef.fn;
+    indexModule.openDirectSearchRef.fn = (async () => createSearchPage()) as NonNullable<typeof indexModule.openDirectSearchRef.fn>;
+    indexModule.openResumeDetailRef.fn = (async () => {
+      detailOpenCalls += 1;
+      return createDetailPage();
+    }) as typeof indexModule.openResumeDetailRef.fn;
+    indexModule.extractResumeFromPageRef.fn = async () => {
+      resumeParseCalls += 1;
+      return { resume: buildResume('unexpected-candidate') };
+    };
+
+    try {
+      await assert.rejects(
+        () => indexModule.runResumeCaptureFlow(
+          '51job',
+          'job-51job-stable-result-saved',
+          job,
+          'search keyword',
+          store,
+          session,
+          '2026-08-07T00:00:00.000Z',
+          indexModule.resolvePlatformAdapter('51job'),
+          { searchSource: 'saved' },
+        ),
+        /candidate-snapshot failed at result-stability/,
+      );
+      await assert.rejects(
+        () => indexModule.runResumeCaptureFlow(
+          '51job',
+          'job-51job-stable-result-direct',
+          job,
+          'search keyword',
+          store,
+          session,
+          '2026-08-07T00:00:01.000Z',
+          indexModule.resolvePlatformAdapter('51job'),
+          { searchSource: 'direct' },
+        ),
+        /candidate-snapshot failed at result-stability/,
+      );
+
+      assert.equal(adapterExtractorCalls, 2);
+      assert.equal(legacyPageExtractorCalls, 0);
+      assert.equal(detailOpenCalls, 0);
+      assert.equal(resumeParseCalls, 0);
+      assert.deepStrictEqual(await store.readSeenIds('51job', 'job-51job-stable-result-saved'), []);
+      assert.deepStrictEqual(await store.readSeenIds('51job', 'job-51job-stable-result-direct'), []);
+      assert.deepStrictEqual(await store.listStoredResumes('51job', 'job-51job-stable-result-saved'), []);
+      assert.deepStrictEqual(await store.listStoredScoreArtifacts('51job', 'job-51job-stable-result-saved'), []);
+    } finally {
+      indexModule.extractCandidateListWithAdapterRef.fn = originalAdapterExtractor;
+    }
   });
 
   it('uses a platform-owned direct-search estimate without resetting the shared deadline', async () => {
@@ -2000,7 +1895,7 @@ describe('scoring run semantics', () => {
 
     try {
       await assert.rejects(
-        () => openSubscribeSearch(searchOpen.page, '泰国 英语', { deadline: Date.now() + 300 }),
+        () => openSubscribeSearch(searchOpen.page, '泰国 英语', { deadline: Date.now() + 1_000 }),
         /51job talent search page did not confirm saved search keyword "泰国 英语"\./,
       );
     } finally {
@@ -5246,6 +5141,57 @@ describe('scoring run semantics', () => {
     assert.equal(artifacts.length, 1);
     assert.equal(artifacts[0]?.candidateId, 'cand-share-link');
     assert.equal(artifacts[0]?.candidateShareUrl, candidateShareUrl);
+  });
+
+  it('classifies a Zhilian colleague-forward link failure as forward and keeps the candidate retryable', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-zhilian-share-link-failure';
+    const candidate = { candidateId: 'cand-share-link-failure' };
+    const detailPage = createDetailPage();
+    let parseCalls = 0;
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('zhilian'),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [candidate] }),
+      openResumeDetail: async () => detailPage,
+      afterResumeDetailOpened: async () => {
+        throw new Error('Synthetic Zhilian copied-link failure');
+      },
+      parseResumeDetail: async () => {
+        parseCalls += 1;
+        return buildResume(candidate.candidateId);
+      },
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    const originalWaitPlatformActionPace = indexModule.waitPlatformActionPaceRef.fn;
+    indexModule.waitPlatformActionPaceRef.fn = async () => undefined;
+
+    try {
+      const result = await indexModule.runResumeCaptureFlow(
+        'zhilian',
+        jobKey,
+        buildNormalizedJob(),
+        'search keyword',
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-07T08:00:00.000Z',
+        adapter,
+      );
+
+      assert.equal(parseCalls, 0);
+      assert.deepStrictEqual(result.capturedCandidateIds, []);
+      assert.deepStrictEqual(await store.readSeenIds('zhilian', jobKey), []);
+      assert.deepStrictEqual(result.runResult.captureFailures, [{
+        candidateId: candidate.candidateId,
+        stage: 'forward',
+        detailVerified: false,
+        error: 'Synthetic Zhilian copied-link failure',
+      }]);
+    } finally {
+      indexModule.waitPlatformActionPaceRef.fn = originalWaitPlatformActionPace;
+    }
   });
 
   it('runs Liepin frequent-contact forwarding only for new candidates before parsing resumes', async () => {
@@ -10575,10 +10521,10 @@ describe('scoring run semantics', () => {
     const indexModule = await loadIndexModule(tempDir);
 
     stubSuccessfulRun(indexModule);
-    indexModule.extractCandidateListRef.fn = async () => ({
-      candidates: [],
-    });
-    indexModule.extractionBoundary.extractCandidateListFromPage = async () => ({
+    // Ordinary 51job capture now enters through the platform-adapter action,
+    // so this fixture must override that orchestration seam rather than the
+    // retired legacy page-extraction path.
+    indexModule.extractCandidateListWithAdapterRef.fn = async () => ({
       candidates: [],
     });
     indexModule.exportJobResultsRef.fn = async (_platform: string, _jobKey: string) => {

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from '../browser/session.js';
 import { config } from '../config.js';
 import { diffCandidateListSummaries, summarizeCandidateList } from '../extraction/candidate-list-validation.js';
-import { extractCandidateListFromPage, extractCandidateListFromSource } from '../extraction/legacy-extractor.js';
+import { extractCandidateListFromSource } from '../extraction/legacy-extractor.js';
 import { buildRawPageSource } from '../extraction/page-source.js';
 import { getPlatformAdapter, parsePlatformArg } from '../platforms/registry.js';
 
@@ -13,7 +13,7 @@ interface ValidationArtifact {
   pagePath: string;
   diff?: ReturnType<typeof diffCandidateListSummaries>;
   failure?: {
-    legacy?: string;
+    page?: string;
     source?: string;
   };
 }
@@ -40,6 +40,9 @@ async function main(): Promise<void> {
   const platform = platformFlagIndex >= 0
     ? parsePlatformArg(argv[platformFlagIndex + 1])
     : parsePlatformArg(undefined);
+  if (platform !== '51job') {
+    throw new Error('Candidate-list source validation currently supports only --platform 51job.');
+  }
   const keyword = argv.filter((_, index) => index !== platformFlagIndex && index !== platformFlagIndex + 1)[0];
 
   if (!keyword) {
@@ -58,15 +61,15 @@ async function main(): Promise<void> {
     const pagePath = path.join(outputDir, `${fetchedAt.replace(/[:.]/g, '-')}.page-source.json`);
     await fs.writeFile(pagePath, `${JSON.stringify(source, null, 2)}\n`, 'utf8');
 
-    let legacySummary: ReturnType<typeof summarizeCandidateList> | undefined;
+    let pageSummary: ReturnType<typeof summarizeCandidateList> | undefined;
     let sourceSummary: ReturnType<typeof summarizeCandidateList> | undefined;
     const failure: ValidationArtifact['failure'] = {};
 
     try {
-      const legacyResult = await extractCandidateListFromPage(searchPage);
-      legacySummary = summarizeCandidateList(legacyResult.candidates);
+      const pageResult = await platformAdapter.extractCandidateList(searchPage);
+      pageSummary = summarizeCandidateList(pageResult.candidates);
     } catch (error) {
-      failure.legacy = error instanceof Error ? error.message : String(error);
+      failure.page = error instanceof Error ? error.message : String(error);
     }
 
     try {
@@ -76,15 +79,15 @@ async function main(): Promise<void> {
       failure.source = error instanceof Error ? error.message : String(error);
     }
 
-    const diff = !failure.legacy && !failure.source
-      ? diffCandidateListSummaries(legacySummary!, sourceSummary!)
+    const diff = !failure.page && !failure.source
+      ? diffCandidateListSummaries(pageSummary!, sourceSummary!)
       : undefined;
 
     const artifactPath = await writeArtifact(keyword, {
       keyword,
       fetchedAt,
       pagePath,
-      failure: failure.legacy || failure.source ? failure : undefined,
+      failure: failure.page || failure.source ? failure : undefined,
       diff: diff ?? undefined,
     });
 
@@ -93,8 +96,8 @@ async function main(): Promise<void> {
       fetchedAt,
       pagePath,
       artifactPath,
-      same: !failure.legacy && !failure.source && !diff,
-      failed: Boolean(failure.legacy || failure.source),
+      same: !failure.page && !failure.source && !diff,
+      failed: Boolean(failure.page || failure.source),
     }, null, 2));
   } finally {
     await closeBrowserSession(session);

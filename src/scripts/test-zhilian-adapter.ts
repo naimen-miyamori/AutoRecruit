@@ -7,7 +7,10 @@ import {
   advanceZhilianToNextCandidateBatch,
   readZhilianCurrentCandidateBatch,
 } from '../platforms/zhilian/actions/candidate-actions.js';
-import { readZhilianCandidateProfileDetail } from '../platforms/zhilian/actions/resume-actions.js';
+import {
+  readZhilianCandidateProfileDetail,
+  requireExactZhilianResumeModal,
+} from '../platforms/zhilian/actions/resume-actions.js';
 
 const zhilianShareLinkSelector = [
   'input',
@@ -20,6 +23,8 @@ const zhilianShareLinkSelector = [
   '[data-url]',
   '[title*="zhaopin.com"]',
 ].join(', ');
+
+const zhilianCanonicalResumeModalSelector = '.km-modal__wrapper.new-shortcut-resume__modal';
 
 function restoreGlobalProperty(propertyName: 'window' | 'navigator' | 'document', originalDescriptor: PropertyDescriptor | undefined): void {
   if (originalDescriptor) {
@@ -56,9 +61,13 @@ function createZhilianShareLinkPageStubs(
   let copiedText = '';
   let interceptedClipboardText = '';
   let clipboardInstalled = false;
+  let forwardDialogVisible = false;
 
   const clickVisibleText = async (pattern: RegExp) => {
     clickCalls.push(pattern.source);
+    if (/转给同事/.test(pattern.source)) {
+      forwardDialogVisible = true;
+    }
     if (/复制链接|复制/.test(pattern.source)) {
       copiedText = shareUrl;
       interceptedClipboardText = shareUrl;
@@ -119,6 +128,11 @@ function createZhilianShareLinkPageStubs(
         click: async () => clickVisibleText(pattern),
       }),
     }),
+    __isForwardDialogVisible: () => forwardDialogVisible,
+    __closeForwardDialog: async () => {
+      clickCalls.push('close:forward-dialog');
+      forwardDialogVisible = false;
+    },
   };
 }
 
@@ -131,6 +145,66 @@ test('zhilian adapter exposes the expected platform metadata', () => {
   assert.equal(zhilianAdapter.readCurrentCandidateBatch, readZhilianCurrentCandidateBatch);
   assert.equal(zhilianAdapter.advanceToNextCandidateBatch, advanceZhilianToNextCandidateBatch);
   assert.equal(zhilianAdapter.readCandidateProfileDetail, readZhilianCandidateProfileDetail);
+  const detailBudget = zhilianAdapter.estimateCandidateDetailBudget?.();
+  assert.ok(detailBudget);
+  assert.ok(detailBudget.timeoutMs >= 60_000);
+  assert.ok((detailBudget.cleanupReserveMs ?? 0) >= 8_000);
+});
+
+test('zhilian resume identity treats nested modal matches as one canonical resume wrapper', async () => {
+  const canonicalModal = {
+    isVisible: async () => true,
+    evaluate: async () => true,
+  };
+  const queriedSelectors: string[] = [];
+  const page = {
+    locator: (selector: string) => {
+      queriedSelectors.push(selector);
+      if (selector === zhilianCanonicalResumeModalSelector) {
+        return {
+          count: async () => 1,
+          nth: () => canonicalModal,
+        };
+      }
+      if (selector === '[role="dialog"]') {
+        return {
+          count: async () => 2,
+          nth: () => ({
+            isVisible: async () => true,
+            evaluate: async () => true,
+          }),
+        };
+      }
+      return {
+        count: async () => 0,
+        nth: () => ({ isVisible: async () => false }),
+      };
+    },
+  } as never;
+
+  const resolvedModal = await requireExactZhilianResumeModal(page, 'candidate-id', Date.now() + 5_000);
+  assert.equal(resolvedModal, canonicalModal);
+  assert.deepEqual(queriedSelectors, [zhilianCanonicalResumeModalSelector]);
+});
+
+test('zhilian resume identity still rejects multiple canonical resume wrappers', async () => {
+  const page = {
+    locator: (selector: string) => {
+      assert.equal(selector, zhilianCanonicalResumeModalSelector);
+      return {
+        count: async () => 2,
+        nth: () => ({
+          isVisible: async () => true,
+          evaluate: async () => true,
+        }),
+      };
+    },
+  } as never;
+
+  await assert.rejects(
+    requireExactZhilianResumeModal(page, 'candidate-id', Date.now() + 5_000),
+    /ambiguous/,
+  );
 });
 
 test('zhilian adapter rejects login fallback pages', async () => {
@@ -3680,15 +3754,42 @@ test('zhilian resume parser stays read-only and delivery metadata copies colleag
     '岳阳职业技术学院',
   ].join('\n');
   const clickCalls: string[] = [];
+  let resumeReadyTimeoutMs = 0;
   const shareLinkStubs = createZhilianShareLinkPageStubs(clickCalls);
   const page = {
     ...shareLinkStubs,
     url: () => 'https://rd6.zhaopin.com/app/search?resumeNumber=resume-no-1',
     waitForLoadState: async () => undefined,
-    waitForFunction: async () => undefined,
+    waitForFunction: async (_callback: unknown, _argument: unknown, options: { timeout: number }) => {
+      resumeReadyTimeoutMs = options.timeout;
+    },
     locator: (selector: string) => {
-      if (selector === '.km-modal__wrapper.new-shortcut-resume__modal') {
+      if (selector === '.km-modal__wrapper.forward-resume') {
         return {
+          count: async () => 1,
+          nth: () => ({
+            isVisible: async () => shareLinkStubs.__isForwardDialogVisible(),
+          }),
+        };
+      }
+
+      if (selector === '.km-modal__wrapper.forward-resume .km-modal__close-btn') {
+        return {
+          count: async () => 1,
+          nth: () => ({
+            isVisible: async () => shareLinkStubs.__isForwardDialogVisible(),
+            click: shareLinkStubs.__closeForwardDialog,
+          }),
+        };
+      }
+
+      if (selector === zhilianCanonicalResumeModalSelector) {
+        return {
+          count: async () => 1,
+          nth: () => ({
+            isVisible: async () => true,
+            evaluate: async () => true,
+          }),
           first: () => ({
             innerText: async () => modalResumeText,
           }),
@@ -3718,13 +3819,14 @@ test('zhilian resume parser stays read-only and delivery metadata copies colleag
     name: undefined,
     currentCompany: undefined,
     currentTitle: undefined,
-  });
+  }, { deadline: Date.now() + 5_000 });
 
   assert.equal(resume.candidateShareUrl, undefined);
+  assert.ok(resumeReadyTimeoutMs > 1_000, `expected caller deadline, received ${resumeReadyTimeoutMs}ms`);
   assert.deepEqual(clickCalls, []);
   const deliveryMetadata = await zhilianAdapter.afterResumeDetailOpened!(page, {
     candidateId: '1151819900',
   }, {});
   assert.equal(deliveryMetadata?.candidateShareUrl, 'https://m.zhaopin.com/b/resume-package?zhaopinToken=share-token-from-copy');
-  assert.deepEqual(clickCalls, ['转给同事', '链接转发', '复制链接|复制', 'key:Escape']);
+  assert.deepEqual(clickCalls, ['转给同事', '链接转发', '复制链接|复制', 'close:forward-dialog']);
 });

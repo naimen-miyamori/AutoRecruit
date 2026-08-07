@@ -3532,8 +3532,10 @@ export async function openZhilianResumeDetail(
 export async function parseZhilianResumeDetail(
   page: Page,
   candidate: CandidateListItem,
+  options?: CandidateProfileDetailOptions,
 ): Promise<CandidateResume> {
-  await waitForZhilianResumeDetailReady(page, { timeoutMs: Math.min(config.playwright.resumeDetailTimeoutMs, 1000) });
+  const deadline = options?.deadline ?? createDeadline();
+  await waitForZhilianResumeDetailReady(page, { deadline });
   const bodyRawText = await readZhilianResumeDetailText(page);
   const parsed = parseZhilianResumeText(bodyRawText, candidate, page.url());
   return {

@@ -19,9 +19,30 @@ export const openPageLevelSearchRef = {
   fn: openPageLevelSearch,
 };
 
-export async function openPageLevelSearch(page: Page): Promise<Page> {
-  await gotoPlatformPage(page, platform, subscribePageUrl, { waitUntil: 'domcontentloaded', timeout: config.playwright.searchPageTimeoutMs });
-  await gotoPlatformPage(page, platform, talentSearchPageUrl, { waitUntil: 'domcontentloaded', timeout: config.playwright.searchPageTimeoutMs });
+function resolveSearchDeadline(options?: SearchWaitOptions): number {
+  return options?.deadline ?? Date.now() + config.playwright.searchPageTimeoutMs;
+}
+
+function getRemainingTimeout(deadline: number): number {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error('51job direct search exceeded the shared search deadline before the next page action.');
+  }
+  return remaining;
+}
+
+function assertSearchNotAborted(options: SearchWaitOptions | undefined): void {
+  if (options?.signal?.aborted) {
+    throw new Error('51job direct search was cancelled before the next page action.');
+  }
+}
+
+export async function openPageLevelSearch(page: Page, options?: SearchWaitOptions): Promise<Page> {
+  const deadline = resolveSearchDeadline(options);
+  assertSearchNotAborted(options);
+  await gotoPlatformPage(page, platform, subscribePageUrl, { waitUntil: 'domcontentloaded', timeout: getRemainingTimeout(deadline) });
+  assertSearchNotAborted(options);
+  await gotoPlatformPage(page, platform, talentSearchPageUrl, { waitUntil: 'domcontentloaded', timeout: getRemainingTimeout(deadline) });
 
   if (await isLoginPage(page)) {
     throw new Error('51job authenticated talent search page is not available because the session has fallen back to the login screen.');
@@ -35,18 +56,25 @@ async function isLoginPage(page: Page): Promise<boolean> {
   return bodyText.includes('登录') || (bodyText.includes('账号') && bodyText.includes('密码'));
 }
 
-async function clear51jobSearchFilters(page: Page): Promise<void> {
+async function clear51jobSearchFilters(page: Page, deadline: number, options?: SearchWaitOptions): Promise<void> {
+  assertSearchNotAborted(options);
   const clearButton = page.getByText('清空筛选', { exact: true }).first();
-  const isVisible = await clearButton.isVisible({ timeout: 1500 }).catch(() => false);
+  const isVisible = await clearButton.isVisible({ timeout: Math.min(1500, getRemainingTimeout(deadline)) }).catch(() => false);
   if (!isVisible) {
     return;
   }
 
-  await clickPlatformLocator(clearButton, page, platform, 1500);
-  await page.waitForTimeout(300);
+  await clickPlatformLocator(clearButton, page, platform, getRemainingTimeout(deadline));
+  await page.waitForTimeout(Math.min(300, getRemainingTimeout(deadline)));
 }
 
-export async function fill51jobSearchKeyword(page: Page, keyword: string): Promise<void> {
+export async function fill51jobSearchKeyword(
+  page: Page,
+  keyword: string,
+  options?: SearchWaitOptions,
+): Promise<void> {
+  const deadline = resolveSearchDeadline(options);
+  assertSearchNotAborted(options);
   const didFillKeyword = await fillFirstVisibleInput(page, keyword, [
     '.talent_search_keywords_input input.el-input__inner',
     '.talent_search_keywords_input .el-input__inner',
@@ -54,19 +82,22 @@ export async function fill51jobSearchKeyword(page: Page, keyword: string): Promi
     'input[placeholder*="关键词"]',
     'input[type="search"]',
     'input[type="text"]',
-  ], 5000, platform);
+  ], Math.min(5000, getRemainingTimeout(deadline)), platform);
 
   if (!didFillKeyword) {
     throw new Error('Search subscription on 51job could not find the keyword input on the talent search page.');
   }
 
-  const didTriggerSearch = await clickPrimarySearchButton(page, 3000, platform);
+  assertSearchNotAborted(options);
+  const didTriggerSearch = await clickPrimarySearchButton(page, Math.min(3000, getRemainingTimeout(deadline)), platform);
   if (!didTriggerSearch) {
     throw new Error('Search subscription on 51job could not trigger the keyword search on the talent search page.');
   }
 }
 
-export async function expand51jobAdvancedFilters(page: Page): Promise<void> {
+export async function expand51jobAdvancedFilters(page: Page, options?: SearchWaitOptions): Promise<void> {
+  const deadline = resolveSearchDeadline(options);
+  assertSearchNotAborted(options);
   await clickFirstVisibleSelector(page, [
     '.more',
     '.expand',
@@ -75,24 +106,30 @@ export async function expand51jobAdvancedFilters(page: Page): Promise<void> {
     '[class*="more"]',
     '[class*="expand"]',
     '[class*="advanced"]',
-  ], 1000, platform).catch(() => false);
-  await clickFirstVisibleText(page, ['更多', '展开', '高级搜索', '更多筛选'], 1000, platform).catch(() => false);
+  ], Math.min(1000, getRemainingTimeout(deadline)), platform).catch(() => false);
+  assertSearchNotAborted(options);
+  await clickFirstVisibleText(page, ['更多', '展开', '高级搜索', '更多筛选'], Math.min(1000, getRemainingTimeout(deadline)), platform).catch(() => false);
 }
 
-export async function prepare51jobSearchConditionPage(page: Page, keyword: string): Promise<Page> {
-  const searchPage = await openPageLevelSearchRef.fn(page);
-  await clear51jobSearchFilters(searchPage);
-  await fill51jobSearchKeyword(searchPage, keyword);
-  await expand51jobAdvancedFilters(searchPage);
+export async function prepare51jobSearchConditionPage(
+  page: Page,
+  keyword: string,
+  options?: SearchWaitOptions,
+): Promise<Page> {
+  const deadline = resolveSearchDeadline(options);
+  const searchPage = await openPageLevelSearchRef.fn(page, { ...options, deadline });
+  await clear51jobSearchFilters(searchPage, deadline, options);
+  await fill51jobSearchKeyword(searchPage, keyword, { ...options, deadline });
+  await expand51jobAdvancedFilters(searchPage, { ...options, deadline });
   return searchPage;
 }
 
 export async function prepare51jobSearchConditionPageWithOptions(
   page: Page,
   keyword: string,
-  _options?: SearchWaitOptions,
+  options?: SearchWaitOptions,
 ): Promise<Page> {
-  return prepare51jobSearchConditionPage(page, keyword);
+  return prepare51jobSearchConditionPage(page, keyword, options);
 }
 
 export async function read51jobSearchResultTotal(page: Page): Promise<{ resultTotal: number; resultTotalSource: 'page' }> {

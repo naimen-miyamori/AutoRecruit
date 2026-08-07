@@ -1,16 +1,22 @@
 import { load } from 'cheerio';
-import { Page } from 'playwright';
-import { candidateCardSelector, collectCandidateList, parseCandidateCards } from '../browser/candidate-list.js';
+import type { Page } from 'playwright';
 import { parseResumeDetail, parseResumeFromSource } from '../browser/resume-detail.js';
 import { CandidateListItem, ResumeDomSnapshot } from '../types/job.js';
-import { CandidateListExtractionResult, ExtractionBoundary, ResumeExtractionResult, validateCandidateListExtraction, validateResumeExtraction } from './extractor.js';
+import {
+  fiftyOneJobCandidateAnchorSelector,
+  parse51jobCandidateCards,
+} from '../platforms/51job/parsing/candidate-list.js';
+import {
+  CandidateListExtractionResult,
+  ExtractionBoundary,
+  ResumeExtractionResult,
+  validateCandidateListExtraction,
+  validateResumeExtraction,
+} from './extractor.js';
 import { RawPageSource } from './page-source.js';
-import type { SearchWaitOptions } from '../platforms/types.js';
 
-export async function extractCandidateListFromPage(page: Page, options?: SearchWaitOptions): Promise<CandidateListExtractionResult> {
-  const candidates = await collectCandidateList(page, options);
-  return validateCandidateListExtraction({ candidates });
-}
+/** The legacy boundary keeps offline/source conversion and resume compatibility only. */
+export type LegacyExtractionBoundary = Omit<ExtractionBoundary, 'extractCandidateListFromPage'>;
 
 export async function extractResumeFromPage(page: Page, candidate: CandidateListItem): Promise<ResumeExtractionResult> {
   const parsed = await parseResumeDetail(page, candidate);
@@ -35,7 +41,7 @@ function resolveResumeUrl(href: string | undefined, baseUrl: string): string | u
 
 export async function extractCandidateListFromSource(source: RawPageSource): Promise<CandidateListExtractionResult> {
   const $ = load(source.html);
-  const cards = $('.virtual_list').first().find(candidateCardSelector)
+  const cards = $('.virtual_list').first().find(fiftyOneJobCandidateAnchorSelector)
     .map((_, element) => {
       const base = $(element);
       const container = base.closest('.talent-card, .resume-card, .candidate-card, li, .item, .result-item, [class*="card"]');
@@ -52,7 +58,7 @@ export async function extractCandidateListFromSource(source: RawPageSource): Pro
       };
     })
     .get();
-  const candidates = parseCandidateCards(cards);
+  const candidates = parse51jobCandidateCards(cards);
 
   return validateCandidateListExtraction({ candidates, source });
 }
@@ -65,9 +71,8 @@ export async function extractResumeFromSource(source: RawPageSource, candidate: 
   });
 }
 
-export function createLegacyExtractionBoundary(): ExtractionBoundary {
+export function createLegacyExtractionBoundary(): LegacyExtractionBoundary {
   return {
-    extractCandidateListFromPage,
     extractCandidateListFromSource,
     extractResumeFromPage,
     extractResumeFromSource,

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import type { Page } from 'playwright';
 import { buildJobKey, parseJobDescription } from './parsers/jd-parser.js';
 import { config } from './config.js';
 import { JobStore } from './storage/job-store.js';
@@ -42,7 +43,14 @@ import {
   openBossUnreadConversation,
 } from './platforms/boss-chat.js';
 import { normalizeBossCaptureTaskSnapshot, normalizeBossSavedSearchReference } from './server/task-normalizers.js';
-import type { BossForwardMode, CandidatePostOpenActions, CandidateProfileDetailOptions, PlatformAdapter, SupportedPlatform } from './platforms/types.js';
+import type {
+  BossForwardMode,
+  CandidatePostOpenActions,
+  CandidatePostOpenResult,
+  CandidateProfileDetailOptions,
+  PlatformAdapter,
+  SupportedPlatform,
+} from './platforms/types.js';
 import { answerCandidateQuestionFromJd, toJdRagSources, type JdRagSource } from './rag/jd-question-answering.js';
 import { answerQuestionWithRag } from './rag/service.js';
 import {
@@ -192,6 +200,45 @@ function createBossDetailLifecycleOptions(options: { forwarding?: boolean } = {}
     deadline: Date.now() + timeoutMs,
     cleanupReserveMs,
   };
+}
+
+function createCandidateDetailLifecycleOptions(
+  platform: SupportedPlatform,
+  platformAdapter: PlatformAdapter,
+): CandidateProfileDetailOptions | undefined {
+  if (platform === 'boss') {
+    return createBossDetailLifecycleOptions();
+  }
+
+  const estimate = platformAdapter.estimateCandidateDetailBudget?.();
+  if (!estimate) return undefined;
+  if (!Number.isFinite(estimate.timeoutMs) || estimate.timeoutMs <= 0) {
+    throw new Error(`Platform ${platform} returned an invalid candidate detail timeout estimate.`);
+  }
+  const cleanupReserveMs = estimate.cleanupReserveMs ?? 0;
+  if (!Number.isFinite(cleanupReserveMs) || cleanupReserveMs < 0 || cleanupReserveMs >= estimate.timeoutMs) {
+    throw new Error(`Platform ${platform} returned an invalid candidate detail cleanup reserve.`);
+  }
+  return {
+    deadline: Date.now() + estimate.timeoutMs,
+    ...(cleanupReserveMs > 0 ? { cleanupReserveMs } : {}),
+  };
+}
+
+async function waitCandidateDetailPaceWithinDeadline(
+  page: Page,
+  platform: SupportedPlatform,
+  options: CandidateProfileDetailOptions,
+  cleanupReserveMs = options.cleanupReserveMs ?? 0,
+): Promise<void> {
+  const paceUpperBoundMs = config.playwright.actionDelayMaxMsByPlatform[platform];
+  if (Date.now() + paceUpperBoundMs + cleanupReserveMs >= options.deadline) {
+    throw new Error(`Platform ${platform} candidate detail deadline cannot accommodate the required pacing interval.`);
+  }
+  await waitPlatformActionPaceRef.fn(page, platform);
+  if (Date.now() + cleanupReserveMs >= options.deadline) {
+    throw new Error(`Platform ${platform} candidate detail deadline was exhausted during pacing.`);
+  }
 }
 
 function continueBossDetailLifecycleAfterModel(
@@ -559,7 +606,9 @@ export const openResumeDetailRef = { fn: fiftyOneJobAdapter.openResumeDetail };
 export const visitBossSeenCandidateDetailRef = { fn: visitBossSeenCandidateDetail };
 export const readBossColleagueCommunicationFlagRef = { fn: readBossColleagueCommunicationFlag };
 export const extractCandidateListRef = {
-  fn: extractionBoundary.extractCandidateListFromPage,
+  // Compatibility seam for 51job orchestration tests. Its production target
+  // is the platform-owned candidate action, never the legacy page extractor.
+  fn: fiftyOneJobAdapter.extractCandidateList,
 };
 export const extractCandidateListWithAdapterRef = {
   fn: async (
@@ -3019,9 +3068,7 @@ async function captureCandidateResume(
   let detailPage = session.page;
   let detailOpened = false;
   let detailVerified = false;
-  const detailOptions = platform === 'boss'
-    ? createBossDetailLifecycleOptions()
-    : undefined;
+  const detailOptions = createCandidateDetailLifecycleOptions(platform, platformAdapter);
   const detailLifecycle: BossDetailLifecycleState = {
     detailOpened: false,
     detailIdentityVerified: false,
@@ -3034,15 +3081,24 @@ async function captureCandidateResume(
     detailPage = await platformAdapter.openResumeDetail(session.context, searchPage, candidate, detailOptions);
     detailOpened = true;
     detailLifecycle.detailOpened = true;
-    if (detailOptions) {
+    if (platform === 'boss' && detailOptions) {
       await waitBossActionPaceWithinDeadline(detailPage, detailOptions.deadline, detailOptions.cleanupReserveMs);
+    } else if (detailOptions) {
+      await waitCandidateDetailPaceWithinDeadline(detailPage, platform, detailOptions);
     } else {
       await waitPlatformActionPaceRef.fn(detailPage, platform);
     }
     failureStage = 'identity-verify';
-    const postOpenResult = postOpenActions === null
-      ? undefined
-      : await platformAdapter.afterResumeDetailOpened?.(detailPage, candidate, postOpenActions, detailOptions);
+    let postOpenResult: void | CandidatePostOpenResult = undefined;
+    if (postOpenActions !== null && platformAdapter.afterResumeDetailOpened) {
+      failureStage = 'forward';
+      postOpenResult = await platformAdapter.afterResumeDetailOpened(
+        detailPage,
+        candidate,
+        postOpenActions,
+        detailOptions,
+      );
+    }
     failureStage = 'forward';
     await beforeResumeParsed?.({
       detailPage: detailPage as Awaited<ReturnType<PlatformAdapter['openSubscribeSearch']>>,
@@ -3117,6 +3173,8 @@ async function captureCandidateResume(
     if (!preserveDetailPageForInspection && canCloseDetail) {
       if (!detailOptions) {
         await waitPlatformActionPaceRef.fn(detailPage, platform);
+      } else if (platform !== 'boss') {
+        await waitCandidateDetailPaceWithinDeadline(detailPage, platform, detailOptions, 0);
       }
       if (platformAdapter.closeResumeDetail) {
         let closed = false;
@@ -3883,9 +3941,11 @@ export async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: 
       })()
       : await platformAdapter.openSubscribeSearch(session.page, pageKeyword, searchOptions);
   session.page = searchPage;
-  const { candidates: extractedCandidates } = platformAdapter.platform === '51job'
-    ? await extractCandidateListRef.fn(searchPage, { deadline: searchDeadline })
-    : await extractCandidateListWithAdapterRef.fn(platformAdapter, searchPage, { deadline: searchDeadline });
+  const { candidates: extractedCandidates } = await extractCandidateListWithAdapterRef.fn(
+    platformAdapter,
+    searchPage,
+    { deadline: searchDeadline },
+  );
   // An ordinary Boss capture run is deliberately bounded by visible result
   // order. Apply the cap before seen/recovery filtering so candidates beyond
   // the first twenty cannot be recorded or reach any detail/score/forwarding

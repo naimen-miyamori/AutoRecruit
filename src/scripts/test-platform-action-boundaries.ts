@@ -17,6 +17,7 @@ const migratedPlatforms: MigratedPlatformBoundary[] = [
     platform: '51job',
     facadeFiles: ['platforms/51job-adapter.ts'],
     actionDirectory: 'platforms/51job/actions',
+    parsingDirectory: 'platforms/51job/parsing',
   },
   {
     platform: 'zhilian',
@@ -182,5 +183,29 @@ describe('migrated platform action boundaries', () => {
     assert.doesNotMatch(zhilianReadSource, /copyZhilianColleagueForwardLink/);
     const zhilianDeliverySource = await readSource('platforms/zhilian/actions/delivery-actions.ts');
     assert.match(zhilianDeliverySource, /collectZhilianResumeDeliveryMetadata/);
+  });
+
+  it('keeps 51job viewed-policy refresh and stable candidate snapshots in 51job actions', async () => {
+    const [resultAction, candidateAction, subscribeRuntime, candidateRuntime, indexSource, legacyExtractor] = await Promise.all([
+      readSource('platforms/51job/actions/result-actions.ts'),
+      readSource('platforms/51job/actions/candidate-actions.ts'),
+      readSource('browser/subscribe-search.ts'),
+      readSource('browser/candidate-list.ts'),
+      readSource('index.ts'),
+      readSource('extraction/legacy-extractor.ts'),
+    ]);
+
+    assert.match(resultAction, /export async function apply51jobViewedCandidatePolicy\b/);
+    assert.match(resultAction, /talent_hunt_resume_list/);
+    assert.match(resultAction, /MutationObserver/);
+    assert.match(resultAction, /refresh-start|refresh-response/);
+    assert.match(candidateAction, /collectStable51jobCandidateList/);
+    assert.doesNotMatch(candidateAction, /browser\/candidate-list/);
+
+    assert.match(subscribeRuntime, /apply51jobViewedCandidatePolicyRef/);
+    assert.doesNotMatch(subscribeRuntime, /set51jobViewedFilterChecked|viewedFilterSelector|label\.el-checkbox:has-text\("我已看"\)/);
+    assert.doesNotMatch(candidateRuntime, /\.virtual_list|no_interested_|el-loading-mask|base-page-loading/);
+    assert.doesNotMatch(indexSource, /platformAdapter\.platform === '51job'\s*\?\s*await extractCandidateListRef/);
+    assert.doesNotMatch(legacyExtractor, /export async function extractCandidateListFromPage\b/);
   });
 });

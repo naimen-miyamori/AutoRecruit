@@ -1,28 +1,32 @@
 import type { BrowserContext, Locator, Page } from 'playwright';
 import { waitPlatformActionPace } from '../../../browser/pacing.js';
 import { config } from '../../../config.js';
-import type { CandidateListItem } from '../../../types/job.js';
+import type { CandidateListItem, CandidateResume } from '../../../types/job.js';
 import type { CandidateProfileDetailResult } from '../../../types/talent-mapping.js';
 import type { CandidateProfileDetailOptions } from '../../types.js';
 import {
   closeZhilianResumeDetail,
   openZhilianResumeDetail,
-  parseZhilianResumeDetail,
+  parseZhilianResumeDetail as parseZhilianResumeDetailFromPage,
 } from './internal-page-actions.js';
+import { resolveZhilianDetailDeadline } from './context.js';
 
 export {
   closeZhilianResumeDetail,
   openZhilianResumeDetail,
-  parseZhilianResumeDetail,
 };
 
-const resumeModalSelector = [
-  '[role="dialog"]:visible',
-  '.ant-modal:visible',
-  '.resume-detail:visible',
-  '[class*="resume"][class*="modal"]:visible',
-  '[class*="resume"][class*="dialog"]:visible',
-].join(', ');
+const resumeModalSelectorsByPriority = [
+  '.km-modal__wrapper.new-shortcut-resume__modal',
+  '.resume-detail-wrap',
+  '.resume-detail.km-scrollbar.new-resume-detail',
+  '.new-shortcut-resume__inner',
+  '[role="dialog"]',
+  '.ant-modal',
+  '.resume-detail',
+  '[class*="resume"][class*="modal"]',
+  '[class*="resume"][class*="dialog"]',
+] as const;
 
 function remainingDetailMs(deadline: number): number {
   const remaining = deadline - Date.now();
@@ -47,8 +51,8 @@ async function withinDetailDeadline<T>(deadline: number, operation: Promise<T>):
   }
 }
 
-async function findVisibleResumeModals(page: Page): Promise<Locator[]> {
-  const locators = page.locator(resumeModalSelector);
+async function findVisibleResumeModals(page: Page, selector: string): Promise<Locator[]> {
+  const locators = page.locator(selector);
   const count = await locators.count().catch(() => 0);
   const visible: Locator[] = [];
   for (let index = 0; index < count; index += 1) {
@@ -98,26 +102,45 @@ async function modalContainsCandidateId(modal: Locator, candidateId: string): Pr
   }, candidateId).catch(() => false);
 }
 
-async function requireExactZhilianResumeModal(
+export async function requireExactZhilianResumeModal(
   page: Page,
   candidateId: string,
   deadline: number,
 ): Promise<Locator> {
-  const modals = await withinDetailDeadline(deadline, findVisibleResumeModals(page));
-  const exact: Locator[] = [];
-  for (const modal of modals) {
-    if (await withinDetailDeadline(deadline, modalContainsCandidateId(modal, candidateId))) {
-      exact.push(modal);
+  for (const selector of resumeModalSelectorsByPriority) {
+    const modals = await withinDetailDeadline(deadline, findVisibleResumeModals(page, selector));
+    const exact: Locator[] = [];
+    for (const modal of modals) {
+      if (await withinDetailDeadline(deadline, modalContainsCandidateId(modal, candidateId))) {
+        exact.push(modal);
+      }
+    }
+    if (exact.length > 1) {
+      throw new Error(`Zhilian resume modal identity ${candidateId} is ambiguous`);
+    }
+    if (exact.length === 1) {
+      return exact[0]!;
     }
   }
-  if (exact.length !== 1) {
+  throw new Error(`Zhilian resume modal does not expose exact candidate identity ${candidateId}`);
+}
+
+export async function parseZhilianResumeDetail(
+  page: Page,
+  candidate: CandidateListItem,
+  options?: CandidateProfileDetailOptions,
+): Promise<CandidateResume> {
+  const deadline = resolveZhilianDetailDeadline(options);
+  const resume = await withinDetailDeadline(
+    deadline,
+    parseZhilianResumeDetailFromPage(page, candidate, { deadline }),
+  );
+  if (resume.candidateId !== candidate.candidateId) {
     throw new Error(
-      exact.length === 0
-        ? `Zhilian resume modal does not expose exact candidate identity ${candidateId}`
-        : `Zhilian resume modal identity ${candidateId} is ambiguous`,
+      `Zhilian candidate profile identity mismatch: expected ${candidate.candidateId}, got ${resume.candidateId}`,
     );
   }
-  return exact[0];
+  return resume;
 }
 
 export async function readZhilianCandidateProfileDetail(
@@ -127,15 +150,15 @@ export async function readZhilianCandidateProfileDetail(
   options: CandidateProfileDetailOptions,
 ): Promise<CandidateProfileDetailResult> {
   const detailPage = await openZhilianResumeDetail(context, searchPage, candidate, options);
-  const modal = await requireExactZhilianResumeModal(detailPage, candidate.candidateId, options.deadline);
-  if (remainingDetailMs(options.deadline) <= config.playwright.actionDelayMaxMsByPlatform.zhilian) {
+  const deadline = resolveZhilianDetailDeadline(options);
+  const modal = await requireExactZhilianResumeModal(detailPage, candidate.candidateId, deadline);
+  if (remainingDetailMs(deadline) <= config.playwright.actionDelayMaxMsByPlatform.zhilian) {
     throw new Error('Zhilian candidate profile detail deadline cannot accommodate the required post-open pacing interval');
   }
   await waitPlatformActionPace(detailPage, 'zhilian');
-  const resume = await withinDetailDeadline(options.deadline, parseZhilianResumeDetail(detailPage, candidate));
-  if (resume.candidateId !== candidate.candidateId) {
-    throw new Error(`Zhilian candidate profile identity mismatch: expected ${candidate.candidateId}, got ${resume.candidateId}`);
-  }
-  const rawText = await withinDetailDeadline(options.deadline, modal.innerText()).catch(() => undefined);
+  const resume = await withinDetailDeadline(deadline, parseZhilianResumeDetail(detailPage, candidate, {
+    deadline,
+  }));
+  const rawText = await withinDetailDeadline(deadline, modal.innerText()).catch(() => undefined);
   return { resume, rawText, detailPage };
 }

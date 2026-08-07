@@ -1,9 +1,18 @@
 import type { Page } from 'playwright';
-import type { CandidatePostOpenResult } from '../../types.js';
+import type { CandidateListItem } from '../../../types/job.js';
+import type {
+  CandidatePostOpenActions,
+  CandidatePostOpenResult,
+  CandidateProfileDetailOptions,
+} from '../../types.js';
 import {
   clickPlatformLocator,
-  waitPlatformActionPace,
 } from '../../../browser/pacing.js';
+import {
+  estimateZhilianCandidateDetailBudget,
+  resolveZhilianDetailDeadline,
+} from './context.js';
+import { requireExactZhilianResumeModal } from './resume-actions.js';
 
 const zhilianPlatform = 'zhilian';
 
@@ -45,32 +54,68 @@ function extractSafeZhilianShareUrl(value: string | null | undefined): string | 
   return selectBestZhilianShareUrl([value]);
 }
 
-async function clickFirstVisibleZhilianText(page: Page, pattern: RegExp, timeout = 3000): Promise<boolean> {
+function remainingDeliveryMs(deadline: number): number {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error('Zhilian colleague-forward action exhausted its detail deadline.');
+  }
+  return remaining;
+}
+
+async function clickFirstVisibleZhilianText(page: Page, pattern: RegExp, deadline: number): Promise<boolean> {
   const locator = page.getByText(pattern, { exact: false });
   const count = await locator.count().catch(() => 0);
 
   for (let index = 0; index < count; index += 1) {
     const candidate = locator.nth(index);
-    try {
-      if (!(await candidate.isVisible({ timeout }).catch(() => false))) {
-        continue;
-      }
-
-      await clickPlatformLocator(candidate, page, zhilianPlatform, timeout);
-      return true;
-    } catch {
+    if (!(await candidate.isVisible({
+      timeout: Math.min(1_000, remainingDeliveryMs(deadline)),
+    }).catch(() => false))) {
       continue;
     }
+
+    await clickPlatformLocator(
+      candidate,
+      page,
+      zhilianPlatform,
+      remainingDeliveryMs(deadline),
+      {
+        beforeClick: async () => {
+          remainingDeliveryMs(deadline);
+          if (!(await candidate.isVisible().catch(() => false))) {
+            throw new Error('Zhilian colleague-forward control became stale before click.');
+          }
+        },
+      },
+    );
+    return true;
   }
 
+  const firstLocator = locator.first();
   try {
-    const firstLocator = locator.first();
-    await firstLocator.waitFor({ state: 'visible', timeout });
-    await clickPlatformLocator(firstLocator, page, zhilianPlatform, timeout);
-    return true;
+    await firstLocator.waitFor({
+      state: 'visible',
+      timeout: Math.min(1_000, remainingDeliveryMs(deadline)),
+    });
   } catch {
     return false;
   }
+
+  await clickPlatformLocator(
+    firstLocator,
+    page,
+    zhilianPlatform,
+    remainingDeliveryMs(deadline),
+    {
+      beforeClick: async () => {
+        remainingDeliveryMs(deadline);
+        if (!(await firstLocator.isVisible().catch(() => false))) {
+          throw new Error('Zhilian colleague-forward control became stale before click.');
+        }
+      },
+    },
+  );
+  return true;
 }
 
 async function readZhilianShareLinkFromPage(page: Page): Promise<string | undefined> {
@@ -242,13 +287,13 @@ async function waitForFreshZhilianCopiedShareLink(
     previousInterceptedClipboardLink?: string;
     previousClipboardLink?: string;
     clearedClipboard: boolean;
+    deadline: number;
   },
 ): Promise<string | undefined> {
-  const timeoutMs = 1500;
+  const pollingDeadline = Math.min(options.deadline, Date.now() + 5_000);
   const intervalMs = 100;
-  const startedAt = Date.now();
 
-  while (Date.now() - startedAt <= timeoutMs) {
+  while (Date.now() < pollingDeadline) {
     const interceptedClipboardLink = await readZhilianInterceptedClipboardText(page);
     if (
       interceptedClipboardLink
@@ -270,7 +315,7 @@ async function waitForFreshZhilianCopiedShareLink(
       return pageLink;
     }
 
-    await wait(intervalMs);
+    await wait(Math.min(intervalMs, Math.max(1, pollingDeadline - Date.now())));
   }
 
   return undefined;
@@ -294,63 +339,207 @@ async function grantZhilianClipboardPermissions(page: Page): Promise<void> {
   }
 }
 
-async function dismissZhilianColleagueForwardDialog(page: Page): Promise<void> {
-  const keyboard = (page as { keyboard?: { press?: (key: string) => Promise<void> } }).keyboard;
-  if (!keyboard?.press) {
+async function visibleLocatorCount(page: Page, selector: string, deadline: number): Promise<number> {
+  const locator = page.locator(selector);
+  const count = await locator.count().catch(() => 0);
+  let visibleCount = 0;
+  for (let index = 0; index < count; index += 1) {
+    if (await locator.nth(index).isVisible({
+      timeout: Math.min(1_000, remainingDeliveryMs(deadline)),
+    }).catch(() => false)) {
+      visibleCount += 1;
+    }
+  }
+  return visibleCount;
+}
+
+async function waitForForwardDialogClosedAndResumeRestored(page: Page, deadline: number): Promise<void> {
+  const waitForFunction = (page as Partial<Pick<Page, 'waitForFunction'>>).waitForFunction?.bind(page);
+  if (waitForFunction) {
+    await waitForFunction(
+      () => {
+        const isVisible = (element: Element | null): boolean => {
+          if (!(element instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && style.opacity !== '0'
+            && (rect.width > 0 || rect.height > 0);
+        };
+        const forwardDialogVisible = Array.from(
+          document.querySelectorAll('.km-modal__wrapper.forward-resume'),
+        ).some(isVisible);
+        const resumeDetailVisible = Array.from(document.querySelectorAll([
+          '.km-modal__wrapper.new-shortcut-resume__modal',
+          '.resume-detail-wrap',
+          '.new-shortcut-resume__inner',
+        ].join(', '))).some(isVisible);
+        return !forwardDialogVisible && resumeDetailVisible;
+      },
+      undefined,
+      { timeout: remainingDeliveryMs(deadline), polling: 100 },
+    );
     return;
   }
 
-  try {
-    await waitPlatformActionPace(page, zhilianPlatform);
-    await keyboard.press('Escape');
-  } catch {
-    // Best effort only. Resume parsing should not fail because the share dialog cannot be dismissed.
+  const forwardDialogCount = await visibleLocatorCount(
+    page,
+    '.km-modal__wrapper.forward-resume',
+    deadline,
+  );
+  const resumeDetailCount = await visibleLocatorCount(
+    page,
+    '.km-modal__wrapper.new-shortcut-resume__modal, .resume-detail-wrap, .new-shortcut-resume__inner',
+    deadline,
+  );
+  if (forwardDialogCount !== 0 || resumeDetailCount === 0) {
+    throw new Error('Zhilian colleague-forward dialog did not close while preserving the resume detail.');
   }
 }
 
-export async function copyZhilianColleagueForwardLink(page: Page): Promise<string | undefined> {
-  const openedForwardDialog = await clickFirstVisibleZhilianText(page, /转给同事/);
-  if (!openedForwardDialog) {
-    throw new Error('Could not find or click the visible Zhilian "转给同事" resume action.');
+async function dismissZhilianColleagueForwardDialog(page: Page, deadline: number): Promise<void> {
+  const forwardDialogSelector = '.km-modal__wrapper.forward-resume';
+  const closeSelector = `${forwardDialogSelector} .km-modal__close-btn`;
+  const visibleForwardDialogs = await visibleLocatorCount(page, forwardDialogSelector, deadline);
+  if (visibleForwardDialogs === 0) {
+    await waitForForwardDialogClosedAndResumeRestored(page, deadline);
+    return;
+  }
+  if (visibleForwardDialogs !== 1) {
+    throw new Error('Zhilian colleague-forward dialog is ambiguous; refusing to close it.');
   }
 
+  const closeLocators = page.locator(closeSelector);
+  const closeCount = await closeLocators.count().catch(() => 0);
+  const visibleCloseLocators = [];
+  for (let index = 0; index < closeCount; index += 1) {
+    const locator = closeLocators.nth(index);
+    if (await locator.isVisible({
+      timeout: Math.min(1_000, remainingDeliveryMs(deadline)),
+    }).catch(() => false)) {
+      visibleCloseLocators.push(locator);
+    }
+  }
+  if (visibleCloseLocators.length !== 1) {
+    throw new Error('Zhilian colleague-forward dialog does not expose one unique safe close control.');
+  }
+
+  const closeLocator = visibleCloseLocators[0]!;
+  await clickPlatformLocator(
+    closeLocator,
+    page,
+    zhilianPlatform,
+    remainingDeliveryMs(deadline),
+    {
+      beforeClick: async () => {
+        if (await visibleLocatorCount(page, forwardDialogSelector, deadline) !== 1
+          || await visibleLocatorCount(page, closeSelector, deadline) !== 1) {
+          throw new Error('Zhilian colleague-forward dialog changed before its close click.');
+        }
+      },
+    },
+  );
+  await waitForForwardDialogClosedAndResumeRestored(page, deadline);
+}
+
+function resolveDeliveryDetailOptions(
+  options?: CandidateProfileDetailOptions,
+): CandidateProfileDetailOptions {
+  if (options) return options;
+  const estimate = estimateZhilianCandidateDetailBudget();
+  return {
+    deadline: Date.now() + estimate.timeoutMs,
+    cleanupReserveMs: estimate.cleanupReserveMs,
+  };
+}
+
+async function copyZhilianColleagueForwardLink(
+  page: Page,
+  options?: CandidateProfileDetailOptions,
+): Promise<string> {
+  const detailOptions = resolveDeliveryDetailOptions(options);
+  const actionDeadline = resolveZhilianDetailDeadline(detailOptions);
+  const cleanupDeadline = resolveZhilianDetailDeadline(detailOptions, true);
+  let openedForwardDialog = false;
+  let copiedShareLink: string | undefined;
+  let actionError: unknown;
+
   try {
-    const openedLinkForward = await clickFirstVisibleZhilianText(page, /链接转发/);
+    await installZhilianClipboardWriteInterceptor(page);
+    await grantZhilianClipboardPermissions(page);
+    openedForwardDialog = await clickFirstVisibleZhilianText(page, /转给同事/, actionDeadline);
+    if (!openedForwardDialog) {
+      throw new Error('Could not find or click the visible Zhilian "转给同事" resume action.');
+    }
+
+    const openedLinkForward = await clickFirstVisibleZhilianText(page, /链接转发/, actionDeadline);
     if (!openedLinkForward) {
       throw new Error('Could not find or click the visible Zhilian "链接转发" option.');
     }
 
     const visiblePageLink = await readZhilianShareLinkFromPage(page);
     if (visiblePageLink) {
-      return visiblePageLink;
-    }
+      copiedShareLink = visiblePageLink;
+    } else {
+      const previousInterceptedClipboardLink = await readZhilianInterceptedClipboardText(page);
+      const previousClipboardLink = await readZhilianShareLinkFromClipboard(page);
+      const clearedClipboard = await clearZhilianClipboardBeforeCopy(page);
+      const clickedCopyLink = await clickFirstVisibleZhilianText(page, /复制链接|复制/, actionDeadline);
+      if (!clickedCopyLink) {
+        throw new Error('Could not find or click the visible Zhilian "复制链接" action.');
+      }
 
-    const previousInterceptedClipboardLink = await readZhilianInterceptedClipboardText(page);
-    await installZhilianClipboardWriteInterceptor(page);
-    await grantZhilianClipboardPermissions(page);
-    const previousClipboardLink = await readZhilianShareLinkFromClipboard(page);
-    const clearedClipboard = await clearZhilianClipboardBeforeCopy(page);
-    const clickedCopyLink = await clickFirstVisibleZhilianText(page, /复制链接|复制/);
-    if (!clickedCopyLink) {
-      throw new Error('Could not find or click the visible Zhilian "复制链接" action.');
+      copiedShareLink = await waitForFreshZhilianCopiedShareLink(page, {
+        previousInterceptedClipboardLink,
+        previousClipboardLink,
+        clearedClipboard,
+        deadline: actionDeadline,
+      });
+      if (!copiedShareLink) {
+        throw new Error('Could not read a copied Zhilian colleague-forward link after clicking "复制链接".');
+      }
     }
-
-    const copiedShareLink = await waitForFreshZhilianCopiedShareLink(page, {
-      previousInterceptedClipboardLink,
-      previousClipboardLink,
-      clearedClipboard,
-    });
-    if (!copiedShareLink) {
-      throw new Error('Could not read a copied Zhilian colleague-forward link after clicking "复制链接".');
-    }
-
-    return copiedShareLink;
-  } finally {
-    await dismissZhilianColleagueForwardDialog(page);
+  } catch (error) {
+    actionError = error;
   }
+
+  let cleanupError: unknown;
+  if (openedForwardDialog) {
+    try {
+      await dismissZhilianColleagueForwardDialog(page, cleanupDeadline);
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+
+  if (actionError) {
+    if (cleanupError) {
+      throw new Error(
+        `${actionError instanceof Error ? actionError.message : String(actionError)}; `
+        + `Zhilian colleague-forward cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+        { cause: actionError },
+      );
+    }
+    throw actionError;
+  }
+  if (cleanupError) throw cleanupError;
+  if (!copiedShareLink) {
+    throw new Error('Zhilian colleague-forward action completed without a share link.');
+  }
+  return copiedShareLink;
 }
 
-export async function collectZhilianResumeDeliveryMetadata(page: Page): Promise<CandidatePostOpenResult> {
-  const candidateShareUrl = await copyZhilianColleagueForwardLink(page);
-  return candidateShareUrl ? { candidateShareUrl } : {};
+export async function collectZhilianResumeDeliveryMetadata(
+  page: Page,
+  candidate: CandidateListItem,
+  _actions: CandidatePostOpenActions,
+  options?: CandidateProfileDetailOptions,
+): Promise<CandidatePostOpenResult> {
+  const detailOptions = resolveDeliveryDetailOptions(options);
+  const actionDeadline = resolveZhilianDetailDeadline(detailOptions);
+  await requireExactZhilianResumeModal(page, candidate.candidateId, actionDeadline);
+  const candidateShareUrl = await copyZhilianColleagueForwardLink(page, detailOptions);
+  await requireExactZhilianResumeModal(page, candidate.candidateId, actionDeadline);
+  return { candidateShareUrl };
 }

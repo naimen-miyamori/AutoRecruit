@@ -37,6 +37,14 @@ src/browser/AGENTS.md first.
 - Normal delivery obtains the current-run colleague-share link through the platform's forwarding
   flow and persists it as candidateShareUrl. A scored-candidate email requires exactly one unique
   current-run link per candidate; missing or duplicated links are delivery errors.
+- The forwarding-link action shares one caller-owned detail deadline, preserves cleanup reserve,
+  installs clipboard observation before any forwarding click, and revalidates the exact resume
+  modal before and after delivery. Close only the unique forwarding-dialog close control and prove
+  the underlying resume modal remains ready; Escape is unsafe because it also closes the resume.
+  Resolve identity at the highest-priority canonical resume wrapper: nested wrapper/content matches
+  from that same modal are one detail, while multiple matching canonical wrappers remain ambiguous.
+  Missing link evidence is a `forward` failure, while parsing waits on the remaining lifecycle
+  deadline rather than a fixed one-second window.
 - Subscription mode uses the verified saved quick-search state rather than replacing it with a raw
   box search. An explicit no-result state is successful.
 - Filter discovery stays in the verified search condition panel and opens the platform's additional

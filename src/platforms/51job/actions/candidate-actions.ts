@@ -1,5 +1,4 @@
 import type { Locator, Page } from 'playwright';
-import { collectCandidateList } from '../../../browser/candidate-list.js';
 import { clickPlatformLocator, waitPlatformActionPace } from '../../../browser/pacing.js';
 import { buildCandidateBatchIdentity } from '../../../talent-mapping/batch-identity.js';
 import type {
@@ -8,6 +7,7 @@ import type {
   CandidateResultBatch,
 } from '../../../types/talent-mapping.js';
 import type { PlatformAdapter, SearchWaitOptions } from '../../types.js';
+import { collectStable51jobCandidateList } from './result-actions.js';
 
 const nextControlSelectors = [
   '.el-pagination .btn-next',
@@ -100,7 +100,7 @@ export async function extract51jobCandidateList(
   ...args: Parameters<PlatformAdapter['extractCandidateList']>
 ): Promise<Awaited<ReturnType<PlatformAdapter['extractCandidateList']>>> {
   const [page, options] = args;
-  return { candidates: await collectCandidateList(page, options) };
+  return { candidates: await collectStable51jobCandidateList(page, options) };
 }
 
 export async function read51jobCurrentCandidateBatch(
@@ -110,7 +110,7 @@ export async function read51jobCurrentCandidateBatch(
   if (options.deadline !== undefined) {
     remainingMs(options.deadline);
   }
-  const candidates = await collectCandidateList(page, options);
+  const candidates = await collectStable51jobCandidateList(page, options);
   const batchNumber = await read51jobBatchNumber(page);
   const nextControl = candidates.length > 0 ? await find51jobNextBatchControl(page) : undefined;
   const terminalEvidence = await hasExplicit51jobEmptyResult(page)

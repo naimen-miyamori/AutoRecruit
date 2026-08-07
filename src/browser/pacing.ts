@@ -324,7 +324,7 @@ export async function clickLocatorWithMouse(
   locator: Locator,
   page: Page,
   timeoutMs: number,
-  options: { position?: MousePointerPoint } = {},
+  options: { position?: MousePointerPoint; beforeClick?: () => void | Promise<void> } = {},
 ): Promise<boolean> {
   const deadline = Date.now() + Math.max(timeoutMs, 1);
   const mouse = (page as Partial<Pick<Page, 'mouse'>>).mouse;
@@ -354,8 +354,9 @@ export async function clickLocatorWithMouse(
     : randomIntBetween(
       Math.round(box.y + verticalInset),
       Math.round(box.y + box.height - verticalInset),
-    );
+  );
   await moveMouseContinuously(page, { x: targetX, y: targetY }, { deadline });
+  await options.beforeClick?.();
   await mouse.click(targetX, targetY);
   return true;
 }
@@ -416,16 +417,26 @@ export async function clickPlatformLocator(
   page: Page,
   platform: SupportedPlatform,
   timeoutMs: number,
-  options: { force?: boolean; position?: MousePointerPoint; pace?: boolean } = {},
+  options: {
+    force?: boolean;
+    position?: MousePointerPoint;
+    pace?: boolean;
+    /** Runs after pointer movement and immediately before the target click. */
+    beforeClick?: () => void | Promise<void>;
+  } = {},
 ): Promise<void> {
   if (options.pace !== false) {
     await waitPlatformActionPace(page, platform);
   }
-  if (!options.force && await clickLocatorWithMouse(locator, page, timeoutMs, { position: options.position })) {
+  if (!options.force && await clickLocatorWithMouse(locator, page, timeoutMs, {
+    position: options.position,
+    beforeClick: options.beforeClick,
+  })) {
     return;
   }
 
   await moveMouseToLocatorPosition(locator, page, timeoutMs, options.position).catch(() => false);
+  await options.beforeClick?.();
   await locator.click({ timeout: timeoutMs, force: options.force, position: options.position }).catch(async (error) => {
     const message = error instanceof Error ? error.message : String(error);
     if (!/unexpected argument|too many arguments/i.test(message)) {

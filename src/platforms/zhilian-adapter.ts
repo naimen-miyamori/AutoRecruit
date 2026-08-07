@@ -28,6 +28,7 @@ import {
   parseZhilianResumeDetail,
   readZhilianCandidateProfileDetail,
 } from './zhilian/actions/resume-actions.js';
+import { estimateZhilianCandidateDetailBudget } from './zhilian/actions/context.js';
 import { collectZhilianResumeDeliveryMetadata } from './zhilian/actions/delivery-actions.js';
 import { zhilianTestExports } from './zhilian/actions/internal-page-actions.js';
 
@@ -50,6 +51,7 @@ export const zhilianAdapter: PlatformAdapter = {
   readSearchConditionResultTotal: readZhilianSearchConditionResultTotal,
   saveSearchCondition: savePreparedZhilianSearchCondition,
   extractCandidateList: extractZhilianCandidateList,
+  estimateCandidateDetailBudget: estimateZhilianCandidateDetailBudget,
   readCurrentCandidateBatch: readZhilianCurrentCandidateBatch,
   advanceToNextCandidateBatch: advanceZhilianToNextCandidateBatch,
   openResumeDetail: openZhilianResumeDetail,

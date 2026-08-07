@@ -1,5 +1,6 @@
 import { Locator, Page } from 'playwright';
 import { config } from '../config.js';
+import { apply51jobViewedCandidatePolicy as apply51jobViewedCandidatePolicyAction } from '../platforms/51job/actions/result-actions.js';
 import { clickPlatformLocator, gotoPlatformPage, moveMouseThroughWaypoints } from './pacing.js';
 import { openAuthenticatedHome as openAuthenticatedSubscribePage } from './session.js';
 import type { SearchWaitOptions, SupportedPlatform } from '../platforms/types.js';
@@ -25,10 +26,6 @@ const loadingMaskSelector = '.el-loading-mask';
 const subscriptionCardsSettleDelayMs = 3000;
 const subscriptionPanelPollMs = 100;
 const preferredSubscriptionPanelWaitMs = 2500;
-const viewedFilterSelector = 'label.el-checkbox:has-text("我已看"), label:has-text("我已看")';
-const viewedFilterSettleMs = 1000;
-const viewedFilterPollMs = 100;
-const viewedFilterMaxWaitMs = 8000;
 const searchConditionPollMs = 200;
 const platform = '51job';
 const subscribePageUrlPattern = /^https:\/\/ehire\.51job\.com\/Revision\/talent\/subscribe(?:[/?#].*)?$/i;
@@ -56,6 +53,10 @@ export const clickSearchTriggerRef = {
 };
 export const findSubscriptionCardRef = {
   fn: findSubscriptionCard,
+};
+/** Compatibility seam: browser orchestration delegates the semantic filter action to 51job. */
+export const apply51jobViewedCandidatePolicyRef = {
+  fn: apply51jobViewedCandidatePolicyAction,
 };
 
 function normalizeText(value: string | null | undefined): string {
@@ -447,8 +448,7 @@ async function waitFor51jobSearchKeywordCondition(page: Page, searchKeyword: str
     await page.waitForTimeout(waitMs).catch(() => undefined);
   }
 
-  const preview = latestText.replace(/\s+/g, ' ').trim().slice(0, 1000) || '(empty)';
-  throw new Error(`51job talent search page did not confirm saved search keyword "${searchKeyword}". URL: ${page.url()}. Page text preview: ${preview}`);
+  throw new Error(`51job talent search page did not confirm saved search keyword "${searchKeyword}". The shared search deadline elapsed before confirmation. URL: ${page.url()}.`);
 }
 
 async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: SearchTriggerClickOptions): Promise<void> {
@@ -475,66 +475,20 @@ async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: 
     : new Error('Talent search button did not become clickable before timing out.');
 }
 
-async function is51jobViewedFilterChecked(viewedFilter: Locator): Promise<boolean> {
-  return viewedFilter.evaluate((element) => {
-    if (!(element instanceof HTMLElement)) {
-      return false;
-    }
-
-    const checkbox = element.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
-    return checkbox?.checked === true || element.classList.contains('is-checked');
-  }).catch(() => false);
-}
-
 export async function clear51jobViewedFilter(page: Page, options?: SearchWaitOptions): Promise<void> {
-  await set51jobViewedFilterChecked(page, false, options);
+  await apply51jobViewedCandidatePolicyRef.fn(page, {
+    includeViewedCandidates: true,
+    deadline: resolveSearchDeadline(options),
+    signal: options?.signal,
+  });
 }
 
 export async function ensure51jobViewedFilterChecked(page: Page, options?: SearchWaitOptions): Promise<void> {
-  await set51jobViewedFilterChecked(page, true, options);
-}
-
-async function set51jobViewedFilterChecked(page: Page, checked: boolean, options?: SearchWaitOptions): Promise<boolean> {
-  const deadline = resolveSearchDeadline(options);
-  const waitUntil = Math.min(deadline, Date.now() + viewedFilterMaxWaitMs);
-  const viewedFilter = page.locator(viewedFilterSelector).first();
-  try {
-    await viewedFilter.waitFor({ state: 'visible', timeout: Math.max(1, waitUntil - Date.now()) });
-  } catch {
-    return false;
-  }
-
-  let clicked = false;
-  let stableSince: number | undefined;
-
-  while (Date.now() < waitUntil) {
-    const currentChecked = await is51jobViewedFilterChecked(viewedFilter);
-    if (currentChecked !== checked) {
-      stableSince = undefined;
-      await clickPlatformLocator(
-        viewedFilter,
-        page,
-        platform,
-        Math.min(1000, Math.max(1, waitUntil - Date.now())),
-      ).then(() => {
-        clicked = true;
-      }).catch(() => undefined);
-    } else {
-      if (!clicked) {
-        return false;
-      }
-
-      const now = Date.now();
-      stableSince ??= now;
-      if (now - stableSince >= viewedFilterSettleMs) {
-        return clicked;
-      }
-    }
-
-    await page.waitForTimeout(Math.min(viewedFilterPollMs, Math.max(1, waitUntil - Date.now()))).catch(() => undefined);
-  }
-
-  return clicked;
+  await apply51jobViewedCandidatePolicyRef.fn(page, {
+    includeViewedCandidates: false,
+    deadline: resolveSearchDeadline(options),
+    signal: options?.signal,
+  });
 }
 
 async function findSubscriptionCard(page: Page, searchKeyword: string, options?: SearchWaitOptions): Promise<Locator> {
@@ -646,10 +600,11 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
     await openOutcome.page.waitForLoadState('domcontentloaded', { timeout: getRemainingTimeout(deadline) });
     await waitFor51jobSearchKeywordCondition(openOutcome.page, searchKeyword, deadline);
     if (options?.includeViewedCandidates) {
-      await clear51jobViewedFilter(openOutcome.page, { deadline });
+      await clear51jobViewedFilter(openOutcome.page, { deadline, signal: options?.signal });
     } else {
-      await ensure51jobViewedFilterChecked(openOutcome.page, { deadline });
+      await ensure51jobViewedFilterChecked(openOutcome.page, { deadline, signal: options?.signal });
     }
+    await waitFor51jobSearchKeywordCondition(openOutcome.page, searchKeyword, deadline);
     await closeExtra51jobSubscribePages(openOutcome.page);
     return openOutcome.page;
   }
@@ -659,10 +614,11 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
     await gotoPlatformPage(page, platform, searchLinkHref, { waitUntil: 'domcontentloaded', timeout: getRemainingTimeout(deadline) });
     await waitFor51jobSearchKeywordCondition(page, searchKeyword, deadline);
     if (options?.includeViewedCandidates) {
-      await clear51jobViewedFilter(page, { deadline });
+      await clear51jobViewedFilter(page, { deadline, signal: options?.signal });
     } else {
-      await ensure51jobViewedFilterChecked(page, { deadline });
+      await ensure51jobViewedFilterChecked(page, { deadline, signal: options?.signal });
     }
+    await waitFor51jobSearchKeywordCondition(page, searchKeyword, deadline);
     await closeExtra51jobSubscribePages(page);
     return page;
   }

@@ -58,6 +58,11 @@ export interface CandidateProfileDetailOptions {
   cleanupReserveMs?: number;
 }
 
+export interface CandidateDetailBudgetEstimate {
+  timeoutMs: number;
+  cleanupReserveMs?: number;
+}
+
 export interface PlatformAdapter {
   platform: SupportedPlatform;
   displayName: string;
@@ -95,6 +100,8 @@ export interface PlatformAdapter {
   }>;
   saveSearchCondition?(page: Page, savedSearchName: string, options?: SearchWaitOptions): Promise<void | SearchConditionSaveResult>;
   extractCandidateList(page: Page, options?: SearchWaitOptions): Promise<{ candidates: CandidateListItem[] }>;
+  /** Platform-owned estimate; orchestration creates one absolute deadline for the whole detail lifecycle. */
+  estimateCandidateDetailBudget?(): CandidateDetailBudgetEstimate;
   openResumeDetail(context: BrowserContext, searchPage: Page, candidate: CandidateListItem, options?: CandidateProfileDetailOptions): Promise<Page>;
   afterResumeDetailOpened?(page: Page, candidate: CandidateListItem, actions: CandidatePostOpenActions, options?: CandidateProfileDetailOptions): Promise<void | CandidatePostOpenResult>;
   parseResumeDetail(page: Page, candidate: CandidateListItem, options?: CandidateProfileDetailOptions): Promise<CandidateResume>;
