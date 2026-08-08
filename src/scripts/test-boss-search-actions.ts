@@ -11,9 +11,13 @@ import {
   discoverBossSearchFilters,
   readBossDirectSearchVerificationSummary,
   resetBossSearchFilters,
+  restoreBossSearchFilterState,
   snapshotBossSearchFilterState,
 } from '../platforms/boss/actions/filter-actions.js';
-import { prepareBossSearchConditionPage } from '../platforms/boss/actions/search-actions.js';
+import {
+  applyBossSearchKeyword,
+  prepareBossSearchConditionPage,
+} from '../platforms/boss/actions/search-actions.js';
 import {
   openBossDirectSearch,
   openBossSubscribeSearch,
@@ -30,6 +34,7 @@ import {
   saveBossSearchCondition,
 } from '../platforms/boss/actions/subscription-actions.js';
 import { fingerprintSavedSearchConditionIdentity } from '../platforms/boss/saved-search-identity.js';
+import { parseBossSmokeKeyword } from './smoke-boss-search-flow.js';
 import {
   assertBossResumeTarget,
   BossForwardPreConfirmationError,
@@ -287,6 +292,15 @@ async function installNativeBossResumeFactory(page: Page, options: {
 }
 
 describe('Boss normal-search actions', () => {
+  it('keeps omitted Boss smoke keywords read-only and requires explicit keywords to be non-empty', () => {
+    assert.equal(parseBossSmokeKeyword([]), undefined);
+    assert.equal(parseBossSmokeKeyword(['--keyword', '  测试关键词  ']), '测试关键词');
+    assert.throws(
+      () => parseBossSmokeKeyword(['--keyword', '  ']),
+      /omit it to inspect the current visible result list without submitting a search/i,
+    );
+  });
+
   it('canonicalizes saved condition identity independently of field order and keeps viewed in the fingerprint', () => {
     const identity = {
       jobScope: '全铝箱包设计',
@@ -908,6 +922,147 @@ describe('Boss normal-search actions', () => {
       assert.equal(await frame.locator('.search-input').inputValue(), '新关键词');
       assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchEnterPresses), 0);
       assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('rejects an explicit empty saved-search keyword before page mutation or final submit', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const cases = ['', '  \n  '];
+    try {
+      for (const target of cases) {
+        const fixture = await createSearchFixture({ body: searchBody('<div class="geek-info-card">candidate card</div>') });
+        try {
+          const frame = fixture.page.frame({ name: 'searchFrame' });
+          assert.ok(frame);
+          await frame.locator('.search-input').fill('历史关键词');
+
+          await assert.rejects(
+            () => openBossSubscribeSearch(fixture.page, target, { deadline: Date.now() + 5_000 }),
+            /requires a non-empty keyword/i,
+          );
+
+          assert.equal(await frame.locator('.search-input').inputValue(), '历史关键词');
+          assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchEnterPresses), 0);
+          assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 0);
+        } finally {
+          await fixture.browser.close();
+        }
+      }
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+    }
+  });
+
+  it('rejects an explicit empty direct-search keyword before page mutation or final submit', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+
+      await assert.rejects(
+        () => applyBossDirectSearch(page, '', [], { deadline: Date.now() + 5_000 }),
+        /requires a non-empty keyword/i,
+      );
+
+      assert.equal(await frame.locator('.search-input').inputValue(), '测试关键词');
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('restores an explicit empty keyword without submitting a search', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody(`<span class="reset-btn" ka="search_reset_search_params" onclick="void 0">清空筛选</span>
+        <div class="search-job-list-C"><div class="ui-dropmenu-list"><ul><li class="active">不限职位</li></ul></div></div>
+        <div class="degree-ui"><span class="degree-item active">不限</span></div>
+        <div class="school-ui"><span class="degree-item active">不限</span></div>
+        <div class="experience-select"><span class="exp-item active">不限</span></div>
+        <div class="age-select"><span class="age-item active">不限</span></div>
+        <div class="more-filter-container"></div>
+        <label class="high_search_checkbox" ka="search_change_view_resume"><input type="checkbox">过滤近14天查看</label>
+        <label class="high_search_checkbox" ka="search_change_exchange_resume"><input type="checkbox">近30天未和同事交换简历</label>
+        <div class="geek-info-card">candidate card</div>`),
+    });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-input').fill('');
+      const emptyState = await snapshotBossSearchFilterState(page, Date.now() + 5_000);
+      assert.equal(emptyState.jobScopeIndex, 0);
+      await frame.locator('.search-input').fill('历史关键词');
+
+      await restoreBossSearchFilterState(page, emptyState, Date.now() + 5_000);
+
+      assert.equal(await frame.locator('.search-input').inputValue(), '');
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('applies an explicit empty keyword in the non-submitting exact-state action', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({ body: searchBody('<div class="geek-info-card">candidate card</div>') });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await frame.locator('.search-input').fill('历史关键词');
+
+      await applyBossSearchKeyword(page, '', Date.now() + 5_000);
+
+      assert.equal(await frame.locator('.search-input').inputValue(), '');
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 0);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails before final submit when an explicit empty keyword cannot be retained', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const body = searchBody(`<div class="geek-info-card">candidate card</div><script>
+      const guardedKeyword = document.querySelector('.search-input');
+      guardedKeyword.addEventListener('input', () => {
+        if (!guardedKeyword.value) guardedKeyword.value = '页面恢复值';
+      });
+    </script>`);
+    const { browser, page } = await createSearchFixture({ body });
+    try {
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      await assert.rejects(
+        () => applyBossSearchKeyword(page, '', Date.now() + 5_000),
+        /could not be cleared before simulated typing/i,
+      );
+      assert.equal(await frame.evaluate(() => (window as unknown as Record<string, number>).__bossSearchClicks), 0);
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;

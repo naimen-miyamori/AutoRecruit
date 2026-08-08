@@ -9,6 +9,7 @@ import {
   snapshotBossSearchFilterState,
 } from './filter-actions.js';
 import {
+  assertBossSubmittableSearchKeyword,
   prepareBossSearchPage,
   submitBossPreparedSearch,
 } from './search-actions.js';
@@ -53,6 +54,7 @@ export async function openBossSubscribeSearch(
   keyword: string,
   options?: SearchWaitOptions,
 ): Promise<Page> {
+  assertBossSubmittableSearchKeyword(keyword);
   const deadline = createSearchDeadline(options);
   const searchPage = await prepareBossSearchPage(page, keyword, deadline);
   if (options?.includeViewedCandidates !== undefined) {

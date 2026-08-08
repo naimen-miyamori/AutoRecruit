@@ -2,11 +2,17 @@ import { pathToFileURL } from 'node:url';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from '../browser/session.js';
 import { getPlatformAdapter } from '../platforms/registry.js';
 
-function parseKeyword(argv: string[]): string {
+export function parseBossSmokeKeyword(argv: string[]): string | undefined {
   const keywordIndex = argv.indexOf('--keyword');
-  const keyword = keywordIndex >= 0 ? argv[keywordIndex + 1] : undefined;
+  if (keywordIndex < 0) {
+    return undefined;
+  }
 
-  return keyword && !keyword.startsWith('--') ? keyword : '';
+  const keyword = argv[keywordIndex + 1]?.trim();
+  if (!keyword || keyword.startsWith('--')) {
+    throw new Error('Boss smoke --keyword must be non-empty when provided. Omit it to inspect the current visible result list without submitting a search.');
+  }
+  return keyword;
 }
 
 function hasArg(argv: string[], name: string): boolean {
@@ -14,14 +20,16 @@ function hasArg(argv: string[], name: string): boolean {
 }
 
 export async function runBossSearchSmokeFlow(argv = process.argv.slice(2)): Promise<void> {
-  const keyword = parseKeyword(argv);
+  const keyword = parseBossSmokeKeyword(argv);
   const openFirst = hasArg(argv, '--open-first');
   const parseFirst = hasArg(argv, '--parse-first');
   const adapter = getPlatformAdapter('boss');
   const session = await ensureAuthenticatedBrowserSession('boss');
 
   try {
-    const page = await adapter.openSubscribeSearch(session.page, keyword);
+    const page = keyword === undefined
+      ? session.page
+      : await adapter.openSubscribeSearch(session.page, keyword);
     const frame = page.frames().find((candidate) => /\/web\/frame\/search\//.test(candidate.url()))
       ?? page.frame({ name: 'searchFrame' });
     const selectedJob = frame
@@ -79,7 +87,8 @@ export async function runBossSearchSmokeFlow(argv = process.argv.slice(2)): Prom
 
     console.log(JSON.stringify({
       platform: adapter.platform,
-      keyword,
+      keywordProvided: keyword !== undefined,
+      searchSubmitted: keyword !== undefined,
       url: page.url(),
       frameUrl: frame?.url() ?? '',
       selectedJob: selectedJob.replace(/\s+/g, ' ').trim(),

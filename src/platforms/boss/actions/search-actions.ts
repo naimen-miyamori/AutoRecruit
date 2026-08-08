@@ -18,6 +18,12 @@ function normalizeText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+export function assertBossSubmittableSearchKeyword(keyword: string): void {
+  if (!normalizeText(keyword)) {
+    throw new Error('Boss search requires a non-empty keyword before final submit.');
+  }
+}
+
 function createSearchDeadline(options?: SearchWaitOptions): number {
   return options?.deadline ?? Date.now() + Math.max(config.playwright.searchPageTimeoutMs, 1);
 }
@@ -186,10 +192,6 @@ export async function waitForBossSearchResults(frame: Frame, deadline: number): 
 
 export async function applyBossSearchKeyword(page: Page, keyword: string, deadline: number): Promise<void> {
   const normalizedKeyword = normalizeText(keyword);
-  if (!normalizedKeyword) {
-    return;
-  }
-
   const frame = await waitForBossSearchFrame(page, deadline);
   const currentKeyword = await readBossSearchKeyword(page, deadline);
   if (currentKeyword === normalizedKeyword) {

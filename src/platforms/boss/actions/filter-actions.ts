@@ -32,6 +32,7 @@ import {
 } from './context.js';
 import {
   applyBossSearchKeyword,
+  assertBossSubmittableSearchKeyword,
   estimateBossDirectSearchTimeoutMs,
   prepareBossSearchConditionPage,
   readBossSearchKeyword,
@@ -159,6 +160,7 @@ export async function applyBossDirectSearch(
   options?: SearchWaitOptions,
 ): Promise<BossDirectSearchApplyResult> {
   throwIfBossSearchAborted(options?.signal);
+  assertBossSubmittableSearchKeyword(keyword);
   const deadline = createBossDirectSearchDeadline(conditions, options);
   const resolvedViewedPolicy = resolveBossDirectRecentViewedPolicy(conditions, options?.includeViewedCandidates);
   const searchPage = await prepareBossSearchConditionPage(page, keyword, { ...options, deadline });
