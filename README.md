@@ -130,7 +130,7 @@ storage-state.boss.json
 | Talent Mapping | `--talent-mapping-file` | 是 | 卡片扫描较低风险；详情补全可能改变“已查看”状态并需本轮确认 |
 | 订阅管理 | `--search-subscription-file` | 是 | 默认三平台；`all + --include-boss true` 扩展 Boss 原生订阅，保存/改名是平台状态变更 |
 | JD/RAG 问答 | `--jd-question` / `--rag-question` | 否 | 否 |
-| Boss 自动聊天 | `--boss-auto-chat true` | 是 | 可按配置转发或回复 |
+| Boss 自动聊天 | `--boss-auto-chat true` | 是 | 仅一次性或助手确认执行；可按配置转发或回复 |
 | Boss 人才发现 | `--boss-talent-source` | 是 | 默认只读；立即匹配需确认 |
 | Boss 单人打招呼 | `--boss-greet-candidate-id` | 是 | 是，需精确身份和确认 |
 | Boss 原子会话操作 | `--boss-chat-operation` | 是 | 读取默认安全；变更需 intent 和确认 |
@@ -139,7 +139,7 @@ storage-state.boss.json
 
 这些是互相隔离的运行模式。独立模式不能随意与普通抓取、批量、订阅管理或问答参数混用。
 
-控制台“新建任务”和“自动运行”中的搜索选择器直接展示五种业务模式：按岗位设置抓取、订阅搜索、直接搜索、批量抓取和订阅管理；名称、分组、顺序和副作用说明来自 `GET /api/operation-modes?surface=manual|schedule`。客户端先按请求 surface 对未知响应做运行时合同解析，再消费目录；搜索与独立任务始终只有一个活动选择。Talent Mapping、Boss 独立任务和登录刷新仍在独立入口中选择。模式目录读取失败或合同不一致时，搜索/抓取创建会明确报错并提供重试，独立任务和历史查看不受影响。
+控制台“新建任务”和“自动运行”中的搜索选择器直接展示五种业务模式：按岗位设置抓取、订阅搜索、直接搜索、批量抓取和订阅管理；名称、分组、顺序和副作用说明来自 `GET /api/operation-modes?surface=manual|schedule`。客户端先按请求 surface 对未知响应做运行时合同解析，再消费目录；搜索与独立任务始终只有一个活动选择。Talent Mapping、Boss 职位同步和登录刷新仍在自动化页的独立入口中选择；Boss 自动沟通保留在一次性新建任务和助手确认入口。模式目录读取失败或合同不一致时，搜索/抓取创建会明确报错并提供重试，独立任务和历史查看不受影响。
 
 ### 搜索模式断言
 
@@ -861,11 +861,10 @@ Talent Mapping 浏览器任务使用 `POST /api/tasks/talent-mapping`，分类�
 - 普通搜索任务
 - Talent Mapping `card-only` 市场扫描
 - Boss 职位/JD 同步
-- Boss 自动聊天
 
-计划按每日时间窗口和轮次间隔运行，并与手工任务共享一个全局队列。普通抓取或批量计划选择 `all` 时可显式保存“包含 Boss 直聘·直猎邦 Pro”；历史计划缺少该字段时按 `false` 解释。Boss 立即匹配、单人打招呼和原子会话变更不能加入自动运行计划；新增 Boss 独立模式中只有职位/JD 同步可调度。
+计划按每日时间窗口和轮次间隔运行，并与手工任务共享一个全局队列。普通抓取或批量计划选择 `all` 时可显式保存“包含 Boss 直聘·直猎邦 Pro”；历史计划缺少该字段时按 `false` 解释。`boss-auto-chat` 不属于循环调度资格：它保留 CLI、一次性 HTTP/控制台任务和助手确认执行，但新建或更新计划会在服务端以 `scheduled-task-kind-not-allowed` 拒绝。Boss 立即匹配、单人打招呼和原子会话变更同样不能加入自动运行计划；新增 Boss 独立模式中只有职位/JD 同步可调度。
 
-自动化页面的搜索计划与独立计划分开选择：前者使用上述五种 API 目录模式，后者保留 Talent Mapping、Boss 自动沟通和 Boss 职位同步的类型化入口。计划任务名称从服务端模式目录生成，提交时仍通过共享编译器生成兼容的 task kind 与输入字段。自动化中的订阅管理固定为只读：服务端拒绝任何 `saveSearchSubscription=true` 或订阅名称，手工/助手显式确认的订阅管理仍可保存；历史保存型计划仍可查看，但详情会提示它将在恢复或运行前被拒绝。计划创建成功会同时重置业务选择与平台表单，避免残留 Boss-only 选择。新建任务页会保留用户在模式切换前填写的条件集或旧筛选文件，但只有直接搜索、订阅管理以及显式 direct 的 batch 默认来源会把筛选字段发送到请求中。
+自动化页面的搜索计划与独立计划分开选择：前者使用上述五种 API 目录模式，后者只保留 Talent Mapping 和 Boss 职位同步的类型化入口。计划任务名称从服务端模式目录生成，提交时仍通过共享编译器生成兼容的 task kind 与输入字段。历史 `boss-auto-chat` 或未知 task kind 计划不会被删除或改写：scheduler recovery 会暂停它、清除下次运行时间并保存去敏阻断原因；详情仍可审计，但“启用”和“立即运行”被禁用。自动化中的订阅管理固定为只读：服务端拒绝任何 `saveSearchSubscription=true` 或订阅名称，手工/助手显式确认的订阅管理仍可保存；历史保存型计划仍可查看，但详情会提示它将在恢复或运行前被拒绝。计划创建成功会同时重置业务选择与平台表单，避免残留 Boss-only 选择。新建任务页会保留用户在模式切换前填写的条件集或旧筛选文件，但只有直接搜索、订阅管理以及显式 direct 的 batch 默认来源会把筛选字段发送到请求中。若历史文件的任务或计划元数据结构损坏，自动化详情仍保持可读，只返回逐字段白名单投影和固定去敏阻断原因；浏览器客户端仍会逐字段、逐任务验证当前版本响应，不把 `readViewVersion` 当作可信证明。此时启用/立即运行被禁用，暂停/停止仍可用，修复需提交完整受支持的计划配置。并发控制或调度扫描会按最新计划重新判断，不会用旧快照覆盖刚完成的修改，也不会把 lease、队列提交或写入冲突计入普通任务失败。
 
 控制计划：
 
@@ -875,6 +874,14 @@ npm run schedule:control -- pause --schedule-id <scheduleId>
 npm run schedule:control -- start --schedule-id <scheduleId>
 npm run schedule:control -- run-now --schedule-id <scheduleId>
 ```
+
+计划写入发现死 owner 或损坏的 lease 时会返回 `schedule-lease-recovery-required`，普通 API/scheduler 进程不会自动删除或抢占该锁。只有确认所有 API 与 scheduler 进程均已停止后，才可对一个精确计划 ID 执行离线恢复；该命令把锁移动到同目录 quarantine 文件，不直接删除：
+
+```bash
+npm run schedule:recover-lease -- --schedule-id <scheduleId> --confirm-processes-stopped true
+```
+
+如需防止检查后 owner 已变化，可额外提供当时读取到的 `--owner-token <token>`；token 不一致时命令拒绝恢复。命令完成前不要重新启动 API 或 scheduler。
 
 `rag:api` 和控制台 API 是内部接口，不是完整认证网关。若需要跨机器访问，应在上游增加认证、授权、TLS、限流和审计。
 

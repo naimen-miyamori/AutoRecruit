@@ -5,9 +5,11 @@ import {
   assertOperationModeCatalogIntegrity,
   compileSearchOperationMode,
   deriveCliSearchModeId,
+  isRecurringScheduleTaskKind,
   listOperationModeDefinitionsForPicker,
   listOperationModePickerGroups,
   listOperationModeDefinitions,
+  recurringScheduleTaskKindIds,
   resolveOperationModeEffects,
 } from '../operation-modes.js';
 import { parseOperationModeCatalogResponse } from '../server/api-contracts.js';
@@ -113,7 +115,19 @@ test('operation mode catalog exposes manual boundaries', async () => {
   assert.equal(listOperationModeDefinitions('manual').length, catalog.modes.length);
   assert.ok(listOperationModeDefinitions('manual').some((mode) => mode.modeId === 'boss.auto-chat'));
   assert.ok(listOperationModeDefinitions('manual').some((mode) => mode.modeId === 'rag.answer'));
+  assert.ok(listOperationModeDefinitions('assistant').some((mode) => mode.modeId === 'boss.auto-chat'));
+  assert.ok(!listOperationModeDefinitions('schedule').some((mode) => mode.modeId === 'boss.auto-chat'));
   assert.ok(listOperationModeDefinitions('schedule').some((mode) => mode.modeId === 'session.login-refresh'));
+  assert.deepEqual(recurringScheduleTaskKindIds, [
+    'resume-capture',
+    'batch',
+    'talent-mapping',
+    'search-subscription',
+    'boss-job-sync',
+  ]);
+  assert.equal(isRecurringScheduleTaskKind('boss-auto-chat'), false);
+  assert.equal(isRecurringScheduleTaskKind('login-refresh'), false);
+  assert.equal(isRecurringScheduleTaskKind('boss-job-sync'), true);
 
   for (const surface of ['assistant', 'manual', 'schedule', 'cli'] as const) {
     const surfaceResponse = await handleApiRequest({

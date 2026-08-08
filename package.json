@@ -74,6 +74,7 @@
     "rag:seed-fixtures": "node --import ./scripts/node-ts-hooks.mjs src/scripts/rag-seed-fixtures.ts",
     "schedule:control": "node --import ./scripts/node-ts-hooks.mjs src/scripts/schedule-control.ts",
     "schedule:stop": "node --import ./scripts/node-ts-hooks.mjs src/scripts/schedule-control.ts stop",
+    "schedule:recover-lease": "node --import ./scripts/node-ts-hooks.mjs src/scripts/recover-schedule-lease.ts",
     "debug:liepin-forward": "node --import ./scripts/node-ts-hooks.mjs src/scripts/debug-liepin-forward-contact.ts",
     "debug:zhilian": "node --import ./scripts/node-ts-hooks.mjs src/scripts/debug-zhilian-search-state.ts",
     "smoke:liepin": "node --import ./scripts/node-ts-hooks.mjs src/scripts/smoke-liepin-flow.ts",

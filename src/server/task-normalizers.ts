@@ -9,6 +9,7 @@ import { loadTalentMappingPlanFile } from '../talent-mapping/plan.js';
 import { assertSafeSearchConditionSetId } from '../search/search-condition-set-store.js';
 import { normalizeBossCaptureSettingsSnapshot } from '../scoring/boss-screening.js';
 import { deriveCliSearchModeId, getOperationModeDefinition, resolveOperationModeEffects } from '../operation-modes.js';
+import { assertRecurringScheduleTaskKind } from './schedule-template-validation.js';
 import {
   fingerprintSavedSearchConditionIdentity,
   normalizeBossSavedSearchIdentity,
@@ -1529,6 +1530,7 @@ export async function normalizeSchedulableTask(
   input: Record<string, unknown>,
   dataDir: string,
 ): Promise<NormalizedSchedulableTask> {
+  assertRecurringScheduleTaskKind(kind);
   switch (kind) {
     case 'resume-capture': {
       const normalized = normalizeResumeCaptureTask(input);
@@ -1558,14 +1560,12 @@ export async function normalizeSchedulableTask(
       }
       return { kind, ...normalized };
     }
-    case 'boss-auto-chat': {
-      const normalized = normalizeBossAutoChatTask(input);
-      return { kind, ...normalized };
-    }
     case 'boss-job-sync': {
       const normalized = normalizeBossJobSyncTask(input);
       return { kind, ...normalized };
     }
+    default:
+      throw new Error(`scheduled-task-kind-unknown: ${String(kind)}`);
   }
 }
 

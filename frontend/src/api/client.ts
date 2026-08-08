@@ -1,4 +1,4 @@
-import { parseOperationModeCatalogResponse } from './contracts';
+import { parseOperationModeCatalogResponse, parseScheduleDetailResponse } from './contracts';
 import type {
   ApplicationFilterOptions,
   AssistantChatRequest,
@@ -147,11 +147,13 @@ export const api = {
   submitTask: (kind: TaskKind, body: Record<string, unknown>) => postJson<TaskDetail>(`/tasks/${kind}`, body),
 
   listSchedules: (signal?: AbortSignal) => requestJson<{ schedules: ScheduleSummary[] }>('/schedules', { signal }),
-  getSchedule: (scheduleId: string, signal?: AbortSignal) => requestJson<ScheduleDefinition>(`/schedules/${encodeURIComponent(scheduleId)}`, { signal }),
+  getSchedule: (scheduleId: string, signal?: AbortSignal) => requestJson<unknown>(`/schedules/${encodeURIComponent(scheduleId)}`, { signal })
+    .then((value) => parseScheduleDetailResponse(value, scheduleId).schedule),
   listScheduleRuns: (scheduleId: string, signal?: AbortSignal) => requestJson<{ runs: ScheduleRunRecord[] }>(`/schedules/${encodeURIComponent(scheduleId)}/runs`, { signal }),
   createSchedule: (body: Record<string, unknown>) => postJson<ScheduleDefinition>('/schedules', body),
   updateSchedule: (scheduleId: string, body: Record<string, unknown>) => postJson<ScheduleDefinition>(`/schedules/${encodeURIComponent(scheduleId)}/update`, body),
-  controlSchedule: (scheduleId: string, action: 'start' | 'pause' | 'stop' | 'run-now') => postJson<ScheduleDefinition>(`/schedules/${encodeURIComponent(scheduleId)}/${action}`),
+  controlSchedule: (scheduleId: string, action: 'start' | 'pause' | 'stop' | 'run-now') => postJson<unknown>(`/schedules/${encodeURIComponent(scheduleId)}/${action}`)
+    .then((value) => parseScheduleDetailResponse(value, scheduleId).schedule),
   stopAllSchedules: () => postJson<{ schedules: ScheduleSummary[] }>('/schedules/stop-all'),
 
   listJobs: (platform?: string, signal?: AbortSignal) => requestJson<{ jobs: JobSummary[] }>(`/jobs${platform && platform !== 'all' ? `?platform=${encodeURIComponent(platform)}` : ''}`, { signal }),

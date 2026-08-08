@@ -8,6 +8,7 @@ import { handleApiRequest } from '../server/routes.js';
 import { finalizeAssistantDraft } from '../server/cli-assistant.js';
 import { TaskQueue } from '../server/task-queue.js';
 import { TaskScheduler } from '../server/task-scheduler.js';
+import { ScheduleStore } from '../server/schedule-store.js';
 import { fingerprintSavedSearchConditionIdentity } from '../platforms/boss/saved-search-identity.js';
 import type { SearchConditionSetService } from '../search/search-condition-sets.js';
 import type { BossCapturePlanResolver } from '../server/boss-capture-snapshot.js';
@@ -318,15 +319,15 @@ it('returns health status', async () => {
         taskScheduler: scheduler,
         dataDir,
         body: {
-          name: '夜间 Boss 审查',
+          name: '夜间 Boss 职位同步',
           enabled: false,
           dailyWindow: { start: '09:00', end: '18:00' },
           repeat: { mode: 'after-completion', delaySeconds: 0, failureDelaySeconds: 300 },
           tasks: [{
-            taskKey: 'boss-review',
-            name: 'Boss 审查',
-            kind: 'boss-auto-chat',
-            input: { platform: 'boss', scoreThreshold: 70 },
+            taskKey: 'boss-sync',
+            name: 'Boss 职位同步',
+            kind: 'boss-job-sync',
+            input: { platform: 'boss', includeClosed: true },
           }],
         },
       });
@@ -359,6 +360,290 @@ it('returns health status', async () => {
     }
   });
 
+  it('rejects Boss auto-chat schedule payloads with a stable error code', async () => {
+    const dataDir = await makeTempDir();
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async () => buildRunSummary(),
+    });
+    const scheduler = new TaskScheduler({ taskQueue: queue, dataDir });
+    const autoChatTemplate = {
+      taskKey: 'boss-review',
+      name: 'Boss 审查',
+      kind: 'boss-auto-chat',
+      input: { platform: 'boss', scoreThreshold: 70 },
+    };
+
+    try {
+      const rejectedCreate = await handleApiRequest({
+        method: 'POST',
+        pathname: '/api/schedules',
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+        body: {
+          name: '不允许的 Boss 自动沟通',
+          enabled: false,
+          dailyWindow: { start: '09:00', end: '18:00' },
+          repeat: { mode: 'after-completion', delaySeconds: 0, failureDelaySeconds: 300 },
+          tasks: [autoChatTemplate],
+        },
+      });
+      assert.equal(rejectedCreate.statusCode, 400);
+      assert.deepStrictEqual(rejectedCreate.body, {
+        error: {
+          code: 'scheduled-task-kind-not-allowed',
+          message: 'scheduled-task-kind-not-allowed: boss-auto-chat; run it manually or through an assistant-confirmed task',
+        },
+      });
+      assert.deepStrictEqual(await scheduler.listSchedules(), []);
+
+      const safeCreate = await handleApiRequest({
+        method: 'POST',
+        pathname: '/api/schedules',
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+        body: {
+          name: '允许的 Boss 职位同步',
+          enabled: false,
+          dailyWindow: { start: '09:00', end: '18:00' },
+          repeat: { mode: 'after-completion', delaySeconds: 0, failureDelaySeconds: 300 },
+          tasks: [{
+            taskKey: 'boss-sync',
+            name: 'Boss 职位同步',
+            kind: 'boss-job-sync',
+            input: { platform: 'boss', includeClosed: true },
+          }],
+        },
+      });
+      assert.equal(safeCreate.statusCode, 201);
+      const scheduleId = (safeCreate.body as { scheduleId: string }).scheduleId;
+      const rejectedUpdate = await handleApiRequest({
+        method: 'POST',
+        pathname: `/api/schedules/${scheduleId}/update`,
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+        body: { tasks: [autoChatTemplate] },
+      });
+      assert.equal(rejectedUpdate.statusCode, 400);
+      assert.equal((rejectedUpdate.body as { error: { code: string } }).error.code, 'scheduled-task-kind-not-allowed');
+      const unchanged = await scheduler.getSchedule(scheduleId);
+      assert.equal(unchanged?.tasks[0]?.kind, 'boss-job-sync');
+    } finally {
+      scheduler.close();
+    }
+  });
+
+  it('returns a structured conflict when a schedule lease needs offline recovery', async () => {
+    const dataDir = await makeTempDir();
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async () => buildRunSummary(),
+    });
+    const scheduler = new TaskScheduler({ taskQueue: queue, dataDir });
+    const store = new ScheduleStore(dataDir);
+
+    try {
+      const schedule = await scheduler.createSchedule({
+        name: '锁恢复测试',
+        enabled: false,
+        dailyWindow: { start: '09:00', end: '18:00' },
+        repeat: { mode: 'after-completion', delaySeconds: 0, failureDelaySeconds: 300 },
+        tasks: [{
+          taskKey: 'boss-sync',
+          name: 'Boss 职位同步',
+          kind: 'boss-job-sync',
+          input: { platform: 'boss' },
+        }],
+      });
+      const lockDir = path.join(dataDir, 'runtime', 'schedule-locks');
+      await fs.mkdir(lockDir, { recursive: true });
+      await fs.writeFile(path.join(lockDir, `${schedule.scheduleId}.lock`), `${JSON.stringify({
+        version: 1,
+        token: 'dead-api-owner',
+        pid: 999_999_999,
+        acquiredAt: '2026-08-08T00:00:00.000Z',
+      })}\n`, 'utf8');
+
+      const response = await handleApiRequest({
+        method: 'POST',
+        pathname: `/api/schedules/${schedule.scheduleId}/pause`,
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+      });
+      assert.equal(response.statusCode, 409);
+      assert.equal(
+        (response.body as { error: { code: string } }).error.code,
+        'schedule-lease-recovery-required',
+      );
+      scheduler.close();
+      await store.recoverScheduleLease(schedule.scheduleId, {
+        processesStopped: true,
+        confirmedToken: 'dead-api-owner',
+      });
+    } finally {
+      scheduler.close();
+    }
+  });
+
+  it('keeps malformed historical schedules readable through list and detail APIs', async () => {
+    const dataDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir: path.join(dataDir, 'runtime', 'tasks'),
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+    const malformedScheduleId = crypto.randomUUID();
+    const safeScheduleId = crypto.randomUUID();
+    const scheduleBase = {
+      timeZone: 'Asia/Shanghai',
+      dailyWindow: { start: '09:00', end: '18:00' },
+      repeat: { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300 },
+      failurePolicy: 'stop-round',
+      pauseAfterConsecutiveFailures: 3,
+      createdAt: '2026-08-08T00:00:00.000Z',
+      updatedAt: '2026-08-08T00:00:00.000Z',
+      consecutiveFailures: 0,
+      status: 'paused',
+    } as const;
+    await writeJson(path.join(dataDir, 'runtime', 'schedules', `${malformedScheduleId}.json`), {
+      ...scheduleBase,
+      scheduleId: malformedScheduleId,
+      name: '畸形历史计划',
+      tasks: [{ taskKey: 'broken-sync', kind: 'boss-job-sync', enabled: true, input: { summaryEmail: 'secret@example.com' } }],
+    });
+    await writeJson(path.join(dataDir, 'runtime', 'schedules', `${safeScheduleId}.json`), {
+      ...scheduleBase,
+      scheduleId: safeScheduleId,
+      name: '安全职位同步',
+      tasks: [{ taskKey: 'safe-sync', name: 'Boss 职位同步', kind: 'boss-job-sync', enabled: true, input: { platform: 'boss' } }],
+    });
+    const scheduler = new TaskScheduler({ taskQueue: queue, dataDir });
+
+    try {
+      const listed = await handleApiRequest({
+        method: 'GET',
+        pathname: '/api/schedules',
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+      });
+      assert.equal(listed.statusCode, 200);
+      const summaries = (listed.body as { schedules: Array<{ scheduleId: string; validationIssues?: Array<{ code: string }> }> }).schedules;
+      assert.equal(summaries.length, 2);
+      assert.equal(summaries.find((item) => item.scheduleId === malformedScheduleId)?.validationIssues?.[0]?.code, 'scheduled-task-template-invalid');
+
+      const malformedPath = path.join(dataDir, 'runtime', 'schedules', `${malformedScheduleId}.json`);
+      const persisted = JSON.parse(await fs.readFile(malformedPath, 'utf8')) as Record<string, unknown>;
+      persisted.unexpectedSecret = 'top-level-secret@example.com';
+      persisted.scheduleId = { secret: 'identity-secret@example.com' };
+      persisted.name = { secret: 'name-secret@example.com' };
+      persisted.status = { secret: 'status-secret@example.com' };
+      persisted.timeZone = ['timezone-secret@example.com'];
+      persisted.failurePolicy = { secret: 'policy-secret@example.com' };
+      persisted.pauseAfterConsecutiveFailures = { secret: 'pause-secret@example.com' };
+      persisted.createdAt = { secret: 'created-secret@example.com' };
+      persisted.updatedAt = { secret: 'updated-secret@example.com' };
+      persisted.nextRunAt = { secret: 'next-secret@example.com' };
+      persisted.lastRunAt = { secret: 'last-secret@example.com' };
+      persisted.stopRequestedAt = { secret: 'stop-secret@example.com' };
+      persisted.activeRunId = { secret: 'run-secret@example.com' };
+      persisted.consecutiveFailures = { secret: 'count-secret@example.com' };
+      persisted.storageRevision = { secret: 'revision-secret@example.com' };
+      persisted.dailyWindow = { start: '09:00', end: '18:00', internalSecret: 'window-secret@example.com' };
+      persisted.repeat = { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300, internalSecret: '/tmp/repeat-private' };
+      persisted.validationIssues = [{
+        code: 'scheduled-task-template-invalid',
+        taskKey: 'broken-sync',
+        kind: 'boss-job-sync',
+        message: 'persisted-secret@example.com /tmp/private',
+      }, {
+        code: 'scheduled-task-kind-unknown',
+        taskKey: 'candidate-secret@example.com',
+        kind: 'api-key/private/value',
+        message: 'candidate-secret@example.com /tmp/private api-key/private/value',
+      }];
+      await writeJson(malformedPath, persisted);
+
+      const relisted = await handleApiRequest({
+        method: 'GET',
+        pathname: '/api/schedules',
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+      });
+      assert.equal(relisted.statusCode, 200);
+      assert.equal(JSON.stringify(relisted.body).includes('secret@example.com'), false);
+      const relistedMalformed = (relisted.body as { schedules: Array<{ scheduleId: string; validationIssues?: Array<{ code: string }> }> })
+        .schedules.find((item) => item.scheduleId === malformedScheduleId);
+      assert.ok(relistedMalformed?.validationIssues?.some((issue) => issue.code === 'schedule-record-invalid'));
+
+      const detail = await handleApiRequest({
+        method: 'GET',
+        pathname: `/api/schedules/${malformedScheduleId}`,
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+      });
+      assert.equal(detail.statusCode, 200);
+      const detailBody = detail.body as {
+        readViewVersion?: number;
+        tasks: Array<{ input: Record<string, unknown> }>;
+        validationIssues?: Array<{ message: string }>;
+      };
+      const task = detailBody.tasks[0];
+      assert.deepStrictEqual(task.input, {});
+      assert.equal(detailBody.readViewVersion, 1);
+      assert.equal(JSON.stringify(detail.body).includes('secret@example.com'), false);
+      assert.equal(JSON.stringify(detail.body).includes('/tmp/private'), false);
+      assert.equal(JSON.stringify(detail.body).includes('window-secret@example.com'), false);
+      assert.equal(JSON.stringify(detail.body).includes('/tmp/repeat-private'), false);
+      assert.equal(JSON.stringify(detail.body).includes('api-key/private/value'), false);
+      assert.ok(detailBody.validationIssues?.some((issue) => issue.message === 'schedule-record-invalid: <metadata>; replace the malformed schedule metadata with a complete valid configuration'));
+      assert.ok(detailBody.validationIssues?.some((issue) => issue.message === 'scheduled-task-template-invalid: boss-job-sync; replace it with a complete supported recurring schedule task'));
+      assert.ok(detailBody.validationIssues?.some((issue) => JSON.stringify(issue) === JSON.stringify({
+        code: 'scheduled-task-kind-unknown',
+        taskKey: 'task-2',
+        kind: '<invalid>',
+        message: 'scheduled-task-kind-unknown: <invalid>; replace it with a supported recurring schedule task',
+      })));
+
+      const repaired = await handleApiRequest({
+        method: 'POST',
+        pathname: `/api/schedules/${malformedScheduleId}/update`,
+        taskQueue: queue,
+        taskScheduler: scheduler,
+        dataDir,
+        body: {
+          name: '已修复历史计划',
+          timeZone: 'Asia/Shanghai',
+          dailyWindow: { start: '09:00', end: '18:00' },
+          repeat: { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300 },
+          failurePolicy: 'stop-round',
+          pauseAfterConsecutiveFailures: 3,
+          tasks: [{
+            taskKey: 'repaired-sync',
+            name: 'Boss 职位同步',
+            kind: 'boss-job-sync',
+            input: { platform: 'boss', includeClosed: true },
+          }],
+        },
+      });
+      assert.equal(repaired.statusCode, 200);
+      assert.equal((repaired.body as { name: string }).name, '已修复历史计划');
+      assert.equal((repaired.body as { validationIssues?: unknown }).validationIssues, undefined);
+      assert.deepStrictEqual(calls, []);
+    } finally {
+      scheduler.close();
+    }
+  });
+
   it('rejects client-provided schedule IDs before they can escape schedule storage', async () => {
     const dataDir = await makeTempDir();
     const escapedPath = path.join(dataDir, 'escaped.json');
@@ -382,10 +667,10 @@ it('returns health status', async () => {
           dailyWindow: { start: '09:00', end: '18:00' },
           repeat: { mode: 'after-completion', delaySeconds: 0, failureDelaySeconds: 300 },
           tasks: [{
-            taskKey: 'boss-review',
-            name: 'Boss 审查',
-            kind: 'boss-auto-chat',
-            input: { platform: 'boss', scoreThreshold: 70 },
+            taskKey: 'boss-sync',
+            name: 'Boss 职位同步',
+            kind: 'boss-job-sync',
+            input: { platform: 'boss', includeClosed: true },
           }],
         },
       });
@@ -1880,6 +2165,46 @@ it('returns health status', async () => {
       '--include-viewed',
       'true',
     ]);
+  });
+
+  it('keeps assistant-confirmed Boss auto-chat as a one-off queued task', async () => {
+    const taskDir = await makeTempDir();
+    const calls: string[][] = [];
+    const queue = new TaskQueue({
+      taskDir,
+      runner: async (argv) => {
+        calls.push([...argv]);
+        return buildRunSummary();
+      },
+    });
+    const response = await handleApiRequest({
+      method: 'POST',
+      pathname: '/api/assistant/confirm',
+      taskQueue: queue,
+      body: {
+        draft: {
+          modeId: 'boss.auto-chat',
+          kind: 'boss-auto-chat',
+          input: {
+            platform: 'boss',
+            scoreThreshold: 70,
+          },
+          missingFields: [],
+          warnings: [],
+          argvPreview: [],
+        },
+        riskAccepted: true,
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal((response.body as { kind?: string }).kind, 'boss-auto-chat');
+    const task = (response.body as { task: TaskDetail }).task;
+    const completed = await waitForTask(queue, task.taskId);
+    assert.equal(completed.status, 'succeeded');
+    assert.deepStrictEqual(calls, [[
+      '--platform', 'boss', '--boss-auto-chat', 'true', '--boss-chat-score-threshold', '70',
+    ]]);
   });
 
   it('confirms a mode-based Boss subscription-search draft with a complete saved reference snapshot', async () => {

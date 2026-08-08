@@ -46,7 +46,7 @@ function dashboardHealth(): Record<string, unknown> {
   };
 }
 
-async function mockApi(page: Page, options: { assistantValidationGate?: Promise<void>; operationModesFailure?: boolean; operationModesSentinel?: boolean; operationModesVariant?: 'null' | 'false' | 'array' | 'error-object' | 'missing-field' | 'duplicate-mode' | 'duplicate-group' | 'effect-mismatch' | 'surface-drift' | 'picker-drift'; includeSummaryTask?: boolean; legacySavingSchedule?: boolean } = {}): Promise<void> {
+async function mockApi(page: Page, options: { assistantValidationGate?: Promise<void>; operationModesFailure?: boolean; operationModesSentinel?: boolean; operationModesVariant?: 'null' | 'false' | 'array' | 'error-object' | 'missing-field' | 'duplicate-mode' | 'duplicate-group' | 'effect-mismatch' | 'surface-drift' | 'picker-drift'; includeSummaryTask?: boolean; legacySavingSchedule?: boolean; legacyAutoChatSchedule?: boolean; legacyAutoChatScheduleWithoutIssues?: boolean; malformedSchedule?: boolean; malformedVersionSchedule?: 'container' | 'item' | 'missing-input' | 'placeholder' | 'metadata'; rawMalformedSchedule?: 'item' | 'null' | 'object' } = {}): Promise<void> {
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const requestUrl = new URL(request.url());
@@ -73,12 +73,11 @@ async function mockApi(page: Page, options: { assistantValidationGate?: Promise<
           { modeId: 'subscription.manage', label: '订阅管理', taskKind: 'search-subscription', effectSummary: '会做：应用订阅条件并读取结果。不会做：不抓取候选、打开详情、写 seen、评分、导出或发送报告。外部变化：仅在显式开启保存时保存或改名平台订阅。', declaredEffects: '会做：应用订阅条件并读取结果。不会做：不抓取候选、打开详情、写 seen、评分、导出或发送报告。外部变化：仅在显式开启保存时保存或改名平台订阅。', surfaces: ['assistant', 'manual', 'schedule', 'cli'], pickerTargets: ['manual-search-create', 'schedule-search-create'], pickerGroupId: 'subscription-management', pickerOrder: 10 },
           ...(surface === 'manual' ? [
             { modeId: 'talent-mapping.run', label: '人才地图', taskKind: 'talent-mapping', effectSummary: '执行独立的人才市场研究流程，不进入普通抓取状态。', declaredEffects: '执行独立的人才市场研究流程，不进入普通抓取状态。', surfaces: ['assistant', 'manual', 'schedule'], pickerTargets: [] },
-            { modeId: 'boss.auto-chat', label: 'Boss 自动沟通', taskKind: 'boss-auto-chat', effectSummary: '审查 Boss 未读会话并按确认的沟通策略执行。', declaredEffects: '审查 Boss 未读会话并按确认的沟通策略执行。', surfaces: ['assistant', 'manual', 'schedule'], pickerTargets: [] },
+            { modeId: 'boss.auto-chat', label: 'Boss 自动沟通', taskKind: 'boss-auto-chat', effectSummary: '审查 Boss 未读会话并按确认的沟通策略执行。', declaredEffects: '审查 Boss 未读会话并按确认的沟通策略执行。', surfaces: ['assistant', 'manual'], pickerTargets: [] },
             { modeId: 'session.login-refresh', label: '登录态刷新', taskKind: 'login-refresh', effectSummary: '通过平台登录流程刷新指定平台的会话状态。', declaredEffects: '通过平台登录流程刷新指定平台的会话状态。', surfaces: ['assistant', 'manual', 'schedule'], pickerTargets: [] },
             { modeId: 'rag.answer', label: 'JD/RAG 问答', taskKind: 'rag-answer', effectSummary: '只基于岗位事实回答问题，不打开浏览器或执行抓取。', declaredEffects: '只基于岗位事实回答问题，不打开浏览器或执行抓取。', surfaces: ['assistant', 'manual'], pickerTargets: [] },
           ] : [
             { modeId: 'talent-mapping.run', label: '人才地图', taskKind: 'talent-mapping', effectSummary: '执行独立的人才市场研究流程，不进入普通抓取状态。', declaredEffects: '执行独立的人才市场研究流程，不进入普通抓取状态。', surfaces: ['assistant', 'manual', 'schedule'], pickerTargets: [] },
-            { modeId: 'boss.auto-chat', label: 'Boss 自动沟通', taskKind: 'boss-auto-chat', effectSummary: '审查 Boss 未读会话并按确认的沟通策略执行。', declaredEffects: '审查 Boss 未读会话并按确认的沟通策略执行。', surfaces: ['assistant', 'manual', 'schedule'], pickerTargets: [] },
             { modeId: 'boss.job-sync', label: 'Boss 职位同步', taskKind: 'boss-job-sync', effectSummary: '读取 Boss 职位并同步已验证的 JD 与职位身份。', declaredEffects: '读取 Boss 职位并同步已验证的 JD 与职位身份。', surfaces: ['assistant', 'schedule'], pickerTargets: [] },
             { modeId: 'session.login-refresh', label: '登录态刷新', taskKind: 'login-refresh', effectSummary: '通过平台登录流程刷新指定平台的会话状态。', declaredEffects: '通过平台登录流程刷新指定平台的会话状态。', surfaces: ['assistant', 'manual', 'schedule'], pickerTargets: [] },
           ]),
@@ -493,6 +492,31 @@ async function mockApi(page: Page, options: { assistantValidationGate?: Promise<
       body = { entityLinks: { platformProfileCount: 2, confirmedEntityCount: 2, activeLinks: [], revokedLinks: [], suggestions: [{ suggestionId: 'link-suggestion-1', platformCandidateKeys: ['51job:candidate-1', 'liepin:candidate-2'], evidence: ['姓名完全一致', '当前公司一致', '当前岗位一致'] }] } };
     } else if (pathname === '/api/talent-mappings/mapping-1/classification-suggestions') {
       body = { suggestions: [] };
+    } else if ((options.legacyAutoChatSchedule || options.legacyAutoChatScheduleWithoutIssues) && pathname === '/api/schedules') {
+      body = { schedules: [{ scheduleId: 'legacy-auto-chat', name: '旧 Boss 自动沟通计划', status: 'paused', timeZone: 'Asia/Shanghai', dailyWindow: { start: '09:00', end: '18:00' }, repeat: { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300 }, taskCount: 1, consecutiveFailures: 0, updatedAt: '2026-08-08T00:00:00.000Z', ...(options.legacyAutoChatSchedule ? { validationIssues: [{ code: 'scheduled-task-kind-not-allowed', taskKey: 'legacy-review', kind: 'boss-auto-chat', message: 'scheduled-task-kind-not-allowed: boss-auto-chat; run it manually or through an assistant-confirmed task' }] } : {}) }] };
+    } else if ((options.legacyAutoChatSchedule || options.legacyAutoChatScheduleWithoutIssues) && pathname === '/api/schedules/legacy-auto-chat/runs') {
+      body = { runs: [] };
+    } else if ((options.legacyAutoChatSchedule || options.legacyAutoChatScheduleWithoutIssues) && pathname === '/api/schedules/legacy-auto-chat') {
+      body = { scheduleId: 'legacy-auto-chat', name: '旧 Boss 自动沟通计划', status: 'paused', timeZone: 'Asia/Shanghai', dailyWindow: { start: '09:00', end: '18:00' }, repeat: { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300 }, failurePolicy: 'stop-round', pauseAfterConsecutiveFailures: 3, tasks: [{ taskKey: 'legacy-review', name: '旧 Boss 自动沟通', enabled: true, kind: 'boss-auto-chat', input: { platform: 'boss' } }], createdAt: '2026-08-06T00:00:00.000Z', updatedAt: '2026-08-08T00:00:00.000Z', consecutiveFailures: 0, ...(options.legacyAutoChatSchedule ? { validationIssues: [{ code: 'scheduled-task-kind-not-allowed', taskKey: 'legacy-review', kind: 'boss-auto-chat', message: 'scheduled-task-kind-not-allowed: boss-auto-chat; run it manually or through an assistant-confirmed task' }] } : {}) };
+    } else if ((options.malformedSchedule || options.malformedVersionSchedule || options.rawMalformedSchedule) && pathname === '/api/schedules') {
+      body = { schedules: [{ scheduleId: 'malformed-schedule', name: '畸形历史计划', status: 'paused', timeZone: 'Asia/Shanghai', dailyWindow: { start: '09:00', end: '18:00' }, repeat: { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300 }, taskCount: 0, consecutiveFailures: 0, updatedAt: '2026-08-08T00:00:00.000Z' }] };
+    } else if ((options.malformedSchedule || options.malformedVersionSchedule || options.rawMalformedSchedule) && pathname === '/api/schedules/malformed-schedule/runs') {
+      body = { runs: [] };
+    } else if (options.malformedSchedule && pathname === '/api/schedules/malformed-schedule') {
+      body = { readViewVersion: 1, scheduleId: 'malformed-schedule', name: '畸形历史计划', status: 'paused', timeZone: 'Asia/Shanghai', dailyWindow: { start: '09:00', end: '18:00' }, repeat: { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300 }, failurePolicy: 'stop-round', pauseAfterConsecutiveFailures: 3, tasks: [{ taskKey: 'task-1', name: 'Historical task 1', enabled: false, kind: '<missing>', input: {} }], validationIssues: [{ code: 'scheduled-task-template-invalid', taskKey: 'task-1', kind: '<missing>', message: 'scheduled-task-template-invalid: <missing>' }], createdAt: '2026-08-06T00:00:00.000Z', updatedAt: '2026-08-08T00:00:00.000Z', consecutiveFailures: 0 };
+    } else if (options.malformedVersionSchedule && pathname === '/api/schedules/malformed-schedule') {
+      const tasks = options.malformedVersionSchedule === 'container'
+        ? null
+        : options.malformedVersionSchedule === 'item'
+          ? [null]
+          : options.malformedVersionSchedule === 'missing-input'
+            ? [{ taskKey: 'broken-current', name: '损坏当前任务', enabled: true, kind: 'boss-job-sync' }]
+            : options.malformedVersionSchedule === 'metadata'
+              ? [{ taskKey: 'safe-sync', name: 'Boss 职位同步', enabled: true, kind: 'boss-job-sync', input: { platform: 'boss' } }]
+              : [{ taskKey: 'task-1', name: 'Historical task 1', enabled: false, kind: '<missing>', input: {} }];
+      body = { readViewVersion: 1, scheduleId: 'malformed-schedule', name: options.malformedVersionSchedule === 'metadata' ? { secret: 'frontend-secret@example.com' } : '畸形版本计划', status: options.malformedVersionSchedule === 'metadata' ? ['enabled'] : 'paused', timeZone: 'Asia/Shanghai', dailyWindow: { start: '09:00', end: '18:00' }, repeat: { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300 }, failurePolicy: 'stop-round', pauseAfterConsecutiveFailures: 3, tasks, createdAt: '2026-08-06T00:00:00.000Z', updatedAt: '2026-08-08T00:00:00.000Z', consecutiveFailures: 0 };
+    } else if (options.rawMalformedSchedule && pathname === '/api/schedules/malformed-schedule') {
+      body = { scheduleId: 'malformed-schedule', name: '畸形历史计划', status: 'paused', timeZone: 'Asia/Shanghai', dailyWindow: { start: '09:00', end: '18:00' }, repeat: { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300 }, failurePolicy: 'stop-round', pauseAfterConsecutiveFailures: 3, tasks: options.rawMalformedSchedule === 'item' ? [null] : options.rawMalformedSchedule === 'null' ? null : { invalid: true }, createdAt: '2026-08-06T00:00:00.000Z', updatedAt: '2026-08-08T00:00:00.000Z', consecutiveFailures: 0 };
     } else if (options.legacySavingSchedule && pathname === '/api/schedules') {
       body = { schedules: [{ scheduleId: 'legacy-saving-subscription', name: '旧订阅保存计划', status: 'paused', timeZone: 'Asia/Shanghai', dailyWindow: { start: '09:00', end: '18:00' }, repeat: { mode: 'after-completion', delaySeconds: 1800, failureDelaySeconds: 300 }, taskCount: 1, consecutiveFailures: 0, updatedAt: '2026-08-06T00:00:00.000Z' }] };
     } else if (options.legacySavingSchedule && pathname === '/api/schedules/legacy-saving-subscription/runs') {
@@ -1199,17 +1223,113 @@ describe('frontend client', () => {
     await page.close();
   });
 
-  it('resets Boss-only schedule selection and platform together after creation', async () => {
+  it('keeps legacy auto-chat schedules readable but blocks their execution controls', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page, { legacyAutoChatScheduleWithoutIssues: true });
+    await page.goto(`${baseUrl}/automation`, { waitUntil: 'networkidle' });
+
+    const independentKind = page.getByLabel('独立计划类型', { exact: true });
+    assert.deepStrictEqual(
+      await independentKind.locator('option').evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value)),
+      ['', 'talent-mapping', 'boss-job-sync'],
+    );
+    await page.getByText('循环计划已阻断（scheduled-task-kind-not-allowed）', { exact: false }).waitFor({ state: 'visible' });
+    await page.getByText(/不能作为循环计划运行/).waitFor({ state: 'visible' });
+    assert.equal(await page.getByRole('button', { name: '立即运行', exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '启用', exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '当前任务后停止', exact: true }).isEnabled(), true);
+    await page.close();
+  });
+
+  it('deduplicates persisted and derived schedule validation issues', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await mockApi(page, { legacyAutoChatSchedule: true });
+    await page.goto(`${baseUrl}/automation`, { waitUntil: 'networkidle' });
+
+    assert.equal(await page.getByText('循环计划已阻断（scheduled-task-kind-not-allowed）', { exact: false }).count(), 1);
+    await page.close();
+  });
+
+  it('renders malformed historical task payloads without exposing execution controls', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const consoleErrors: string[] = [];
+    page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text());
+    });
+    await mockApi(page, { malformedSchedule: true });
+    await page.goto(`${baseUrl}/automation`, { waitUntil: 'networkidle' });
+
+    await page.getByText('循环计划已阻断（scheduled-task-template-invalid）', { exact: false }).waitFor({ state: 'visible' });
+    assert.equal(await page.getByText('循环计划已阻断（scheduled-task-template-invalid）', { exact: false }).count(), 1);
+    assert.equal(await page.getByText('循环计划已阻断（scheduled-task-kind-not-allowed）', { exact: false }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: '立即运行', exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '启用', exact: true }).isDisabled(), true);
+    assert.deepStrictEqual(consoleErrors, []);
+    await page.close();
+  });
+
+  it('falls back safely for an old server returning raw null task items', async () => {
+    for (const rawMalformedSchedule of ['item', 'null', 'object'] as const) {
+      const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+      await mockApi(page, { rawMalformedSchedule });
+      await page.goto(`${baseUrl}/automation`, { waitUntil: 'networkidle' });
+
+      assert.equal(await page.getByText('循环计划已阻断（scheduled-task-template-invalid）', { exact: false }).count(), 1);
+      assert.equal(await page.getByText('循环计划已阻断（scheduled-task-kind-unknown）', { exact: false }).count(), 0);
+      assert.equal(await page.getByRole('button', { name: '立即运行', exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: '启用', exact: true }).isDisabled(), true);
+      await page.close();
+    }
+  });
+
+  it('fails closed when a current read-view version carries malformed task items or an issue-free placeholder', async () => {
+    for (const malformedVersionSchedule of ['container', 'item', 'missing-input', 'placeholder'] as const) {
+      const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+      const consoleErrors: string[] = [];
+      page.on('console', (message) => {
+        if (message.type() === 'error') consoleErrors.push(message.text());
+      });
+      await mockApi(page, { malformedVersionSchedule });
+      await page.goto(`${baseUrl}/automation`, { waitUntil: 'networkidle' });
+
+      assert.equal(await page.getByText('循环计划已阻断（scheduled-task-template-invalid）', { exact: false }).count(), 1);
+      assert.equal(await page.getByRole('button', { name: '立即运行', exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: '启用', exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole('button', { name: '当前任务后停止', exact: true }).isEnabled(), true);
+      assert.deepStrictEqual(consoleErrors, []);
+      await page.close();
+    }
+  });
+
+  it('fails closed without rendering raw objects when current schedule metadata is malformed', async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    const consoleErrors: string[] = [];
+    page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text());
+    });
+    await mockApi(page, { malformedVersionSchedule: 'metadata' });
+    await page.goto(`${baseUrl}/automation`, { waitUntil: 'networkidle' });
+
+    assert.equal(await page.getByText('循环计划已阻断（schedule-record-invalid）', { exact: false }).count(), 1);
+    assert.equal(await page.getByText(/frontend-secret@example.com/).count(), 0);
+    assert.equal(await page.getByRole('button', { name: '立即运行', exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '启用', exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '当前任务后停止', exact: true }).isEnabled(), true);
+    assert.deepStrictEqual(consoleErrors, []);
+    await page.close();
+  });
+
+  it('resets Boss job-sync schedule selection and platform together after creation', async () => {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await mockApi(page);
     await page.goto(`${baseUrl}/automation`, { waitUntil: 'networkidle' });
 
     const independentKind = page.getByLabel('独立计划类型', { exact: true });
     const platform = page.locator('label').filter({ hasText: /^平台/ }).first().locator('select');
-    await independentKind.selectOption('boss-auto-chat');
+    await independentKind.selectOption('boss-job-sync');
     assert.equal(await platform.inputValue(), 'boss');
     assert.equal(await platform.isDisabled(), true);
-    await page.getByLabel('计划名称', { exact: true }).fill('Boss 自动沟通');
+    await page.getByLabel('计划名称', { exact: true }).fill('Boss 职位同步');
     const firstRequest = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/schedules');
     await page.getByRole('button', { name: '创建暂停计划', exact: true }).click();
     await firstRequest;

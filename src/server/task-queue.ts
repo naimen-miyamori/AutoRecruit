@@ -52,19 +52,51 @@ export interface QueueTaskDefinition {
 
 interface QueuedTaskGroup {
   groupId: string;
+  scheduleId: string;
   taskIds: string[];
   failurePolicy: WorkflowFailurePolicy;
+  fingerprint: string;
   stopRequested: boolean;
+}
+
+interface TaskGroupManifest {
+  version: 1;
+  groupId: string;
+  taskIds: string[];
+  failurePolicy: WorkflowFailurePolicy;
+  fingerprint: string;
+  scheduleId: string;
+  createdAt: string;
 }
 
 export type TaskTerminalListener = (task: TaskDetail) => void;
 
-interface TaskQueueOptions {
+export interface TaskQueueOptions {
   taskDir?: string;
   runner?: TaskRunner;
   loginRefreshRunner?: LoginRefreshRunner;
   ragOpsRunner?: RagOpsRunner;
   talentMappingClassificationRunner?: TalentMappingClassificationRunner;
+  beforeTaskFileWrite?: (task: Readonly<TaskRecord>) => Promise<void> | void;
+  beforeGroupManifestWrite?: (manifest: Readonly<TaskGroupManifest>) => Promise<void> | void;
+}
+
+export class TaskGroupConflictError extends Error {
+  readonly code = 'task-group-conflict' as const;
+
+  constructor(readonly groupId: string) {
+    super(`Task group identity conflicts with a different payload: ${groupId}`);
+    this.name = 'TaskGroupConflictError';
+  }
+}
+
+export class TaskGroupPersistenceError extends Error {
+  readonly code = 'task-group-persistence-failed' as const;
+
+  constructor(readonly groupId: string, cause: unknown) {
+    super(`Task group could not be committed: ${groupId}`, { cause });
+    this.name = 'TaskGroupPersistenceError';
+  }
 }
 
 async function ensureDir(dirPath: string): Promise<void> {
@@ -74,6 +106,50 @@ async function ensureDir(dirPath: string): Promise<void> {
 async function readJsonFile<T>(filePath: string): Promise<T> {
   const content = await fs.readFile(filePath, 'utf8');
   return JSON.parse(content) as T;
+}
+
+async function writeJsonAtomically(filePath: string, value: unknown): Promise<void> {
+  await ensureDir(path.dirname(filePath));
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`;
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(tempPath, 'wx', 0o600);
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await fs.link(tempPath, filePath);
+    await fs.unlink(tempPath).catch(() => undefined);
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    await fs.unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, item]) => [key, canonicalize(item)]));
+}
+
+function groupFingerprint(
+  tasks: readonly QueueTaskDefinition[],
+  failurePolicy: WorkflowFailurePolicy,
+): string {
+  const payload = canonicalize({
+    failurePolicy,
+    tasks: tasks.map((task) => ({
+      kind: task.kind,
+      input: task.input,
+      inputSummary: task.inputSummary,
+      argv: task.argv,
+      schedule: task.schedule,
+    })),
+  });
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 
 function toTaskFileName(taskId: string): string {
@@ -371,27 +447,34 @@ function buildOutputSummary(output: TaskOutput): Record<string, unknown> {
 
 export class TaskQueue {
   private readonly taskDir: string;
+  private readonly taskGroupDir: string;
   private readonly runner: TaskRunner;
   private readonly loginRefreshRunner: LoginRefreshRunner;
   private readonly ragOpsRunner: RagOpsRunner;
   private readonly talentMappingClassificationRunner: TalentMappingClassificationRunner;
+  private readonly beforeTaskFileWrite?: TaskQueueOptions['beforeTaskFileWrite'];
+  private readonly beforeGroupManifestWrite?: TaskQueueOptions['beforeGroupManifestWrite'];
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly pendingTaskIds: string[] = [];
   private readonly persistChains = new Map<string, Promise<void>>();
   private readonly groups = new Map<string, QueuedTaskGroup>();
   private readonly taskTerminalListeners = new Set<TaskTerminalListener>();
   private loading: Promise<void>;
+  private admissionSerial: Promise<void> = Promise.resolve();
   private drainPromise?: Promise<void>;
   private runningTaskId?: string;
 
   constructor(options: TaskQueueOptions = {}) {
     this.taskDir = options.taskDir ?? path.join(config.dataDir, 'runtime', 'tasks');
+    this.taskGroupDir = path.join(path.dirname(this.taskDir), 'task-groups');
     this.runner = options.runner ?? ((argv) => runCliMain(argv, {
       reportSearchMode: (message) => console.log(message),
     }));
     this.ragOpsRunner = options.ragOpsRunner ?? runRagOpsTask;
     this.talentMappingClassificationRunner = options.talentMappingClassificationRunner
       ?? ((input) => runTalentMappingClassificationTask(input));
+    this.beforeTaskFileWrite = options.beforeTaskFileWrite;
+    this.beforeGroupManifestWrite = options.beforeGroupManifestWrite;
     this.loginRefreshRunner = options.loginRefreshRunner ?? (async (input) => {
       await waitForManualLoginAndPersistSession(input.platform, {
         openLoginSession: openLoginSessionRef.fn,
@@ -419,10 +502,9 @@ export class TaskQueue {
     await this.loading;
 
     const task = this.createQueuedTask(options);
-
+    await this.persistTask(task);
     this.tasks.set(task.taskId, task);
     this.pendingTaskIds.push(task.taskId);
-    await this.persistTask(task);
     this.scheduleDrain();
     return toTaskDetail(task);
   }
@@ -433,28 +515,69 @@ export class TaskQueue {
     failurePolicy: WorkflowFailurePolicy;
   }): Promise<{ accepted: true; taskIds: string[] } | { accepted: false; reason: 'busy' | 'empty' }> {
     await this.loading;
-    if (options.tasks.length === 0) {
-      return { accepted: false, reason: 'empty' };
-    }
-    if (this.runningTaskId || this.pendingTaskIds.length > 0) {
-      return { accepted: false, reason: 'busy' };
-    }
+    return this.runAdmissionSerialized(async () => {
+      if (options.tasks.length === 0) {
+        return { accepted: false as const, reason: 'empty' as const };
+      }
+      const scheduleId = options.tasks[0]!.schedule.scheduleId;
+      if (options.tasks.some((task, index) => task.schedule.scheduleId !== scheduleId
+        || task.schedule.scheduleRunId !== options.groupId
+        || task.schedule.scheduleTaskIndex !== index)) {
+        throw new TaskGroupConflictError(options.groupId);
+      }
+      const fingerprint = groupFingerprint(options.tasks, options.failurePolicy);
+      const existing = this.groups.get(options.groupId);
+      if (existing) {
+        if (existing.fingerprint !== fingerprint) {
+          throw new TaskGroupConflictError(options.groupId);
+        }
+        if (existing.taskIds.some((taskId) => this.tasks.get(taskId)?.status === 'queued')) {
+          this.scheduleDrain();
+        }
+        return { accepted: true as const, taskIds: [...existing.taskIds] };
+      }
+      if (this.runningTaskId || this.pendingTaskIds.length > 0) {
+        return { accepted: false as const, reason: 'busy' as const };
+      }
 
-    const tasks = options.tasks.map((definition) => this.createQueuedTask(definition));
-    const group: QueuedTaskGroup = {
-      groupId: options.groupId,
-      taskIds: tasks.map((task) => task.taskId),
-      failurePolicy: options.failurePolicy,
-      stopRequested: false,
-    };
-    this.groups.set(options.groupId, group);
-    for (const task of tasks) {
-      this.tasks.set(task.taskId, task);
-      this.pendingTaskIds.push(task.taskId);
-    }
-    await Promise.all(tasks.map((task) => this.persistTask(task)));
-    this.scheduleDrain();
-    return { accepted: true, taskIds: group.taskIds };
+      const tasks = options.tasks.map((definition) => this.createQueuedTask(definition));
+      const manifest: TaskGroupManifest = {
+        version: 1,
+        groupId: options.groupId,
+        taskIds: tasks.map((task) => task.taskId),
+        failurePolicy: options.failurePolicy,
+        fingerprint,
+        scheduleId,
+        createdAt: tasks[0]!.createdAt,
+      };
+      try {
+        const persistence = await Promise.allSettled(tasks.map((task) => this.persistTask(task)));
+        const failure = persistence.find((result) => result.status === 'rejected');
+        if (failure?.status === 'rejected') {
+          throw failure.reason;
+        }
+        await this.persistGroupManifest(manifest);
+      } catch (error) {
+        await Promise.allSettled(tasks.map((task) => fs.unlink(this.taskPath(task.taskId))));
+        throw new TaskGroupPersistenceError(options.groupId, error);
+      }
+
+      const group: QueuedTaskGroup = {
+        groupId: options.groupId,
+        scheduleId: manifest.scheduleId,
+        taskIds: [...manifest.taskIds],
+        failurePolicy: options.failurePolicy,
+        fingerprint,
+        stopRequested: false,
+      };
+      this.groups.set(options.groupId, group);
+      for (const task of tasks) {
+        this.tasks.set(task.taskId, task);
+        this.pendingTaskIds.push(task.taskId);
+      }
+      this.scheduleDrain();
+      return { accepted: true as const, taskIds: [...group.taskIds] };
+    });
   }
 
   async requestGroupStopAfterCurrentTask(groupId: string): Promise<{ runningTaskId?: string; cancelledTaskIds: string[] }> {
@@ -481,6 +604,28 @@ export class TaskQueue {
   async isIdle(): Promise<boolean> {
     await this.loading;
     return !this.runningTaskId && this.pendingTaskIds.length === 0;
+  }
+
+  async findLatestScheduleTaskGroup(scheduleId: string): Promise<{
+    groupId: string;
+    taskIds: string[];
+  } | undefined> {
+    await this.loading;
+    const matching = [...this.tasks.values()]
+      .filter((task) => task.schedule?.scheduleId === scheduleId
+        && task.schedule.scheduleRunId
+        && this.groups.has(task.schedule.scheduleRunId))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    const groupId = matching[0]?.schedule?.scheduleRunId;
+    if (!groupId) return undefined;
+    const group = this.groups.get(groupId);
+    return group ? { groupId, taskIds: [...group.taskIds] } : undefined;
+  }
+
+  async getTaskGroup(groupId: string): Promise<{ groupId: string; taskIds: string[] } | undefined> {
+    await this.loading;
+    const group = this.groups.get(groupId);
+    return group ? { groupId, taskIds: [...group.taskIds] } : undefined;
   }
 
   async listTasks(): Promise<TaskSummary[]> {
@@ -519,21 +664,86 @@ export class TaskQueue {
 
   private async loadPersistedTasks(): Promise<void> {
     await ensureDir(this.taskDir);
+    await this.loadPersistedGroups();
     const entries = await fs.readdir(this.taskDir);
     const files = entries.filter((entry) => entry.endsWith('.json')).sort();
 
     for (const file of files) {
       const filePath = path.join(this.taskDir, file);
       const task = await readJsonFile<TaskRecord>(filePath);
+      const groupId = task.schedule?.scheduleRunId;
+      const committedGroup = groupId ? this.groups.get(groupId) : undefined;
+      const committedTask = !groupId || Boolean(committedGroup?.taskIds.includes(task.taskId));
       if (task.status === 'queued' || task.status === 'running') {
-        this.appendLog(task, 'error', 'Task was interrupted before completion');
+        this.appendLog(
+          task,
+          'error',
+          committedTask
+            ? 'Task was interrupted before completion'
+            : 'Uncommitted scheduled task was isolated during recovery',
+        );
         task.status = 'failed';
-        task.error = 'Task was interrupted before completion';
+        task.error = committedTask
+          ? 'Task was interrupted before completion'
+          : 'Uncommitted scheduled task was isolated during recovery';
         task.finishedAt = task.finishedAt ?? new Date().toISOString();
         task.updatedAt = task.finishedAt;
         await this.persistTask(task);
       }
       this.tasks.set(task.taskId, task);
+    }
+    for (const [groupId, group] of this.groups) {
+      const uniqueTaskIds = new Set(group.taskIds);
+      const definitions = group.taskIds.flatMap((taskId, scheduleTaskIndex) => {
+        const task = this.tasks.get(taskId);
+        if (!task?.schedule
+          || task.schedule.scheduleId !== group.scheduleId
+          || task.schedule.scheduleRunId !== groupId
+          || task.schedule.scheduleTaskIndex !== scheduleTaskIndex) {
+          return [];
+        }
+        return [{
+          kind: task.kind,
+          input: task.input,
+          inputSummary: task.inputSummary,
+          argv: task.argv,
+          schedule: task.schedule,
+        } satisfies QueueTaskDefinition];
+      });
+      const valid = group.taskIds.length > 0
+        && uniqueTaskIds.size === group.taskIds.length
+        && definitions.length === group.taskIds.length
+        && groupFingerprint(definitions, group.failurePolicy) === group.fingerprint;
+      if (!valid) this.groups.delete(groupId);
+    }
+  }
+
+  private async loadPersistedGroups(): Promise<void> {
+    await ensureDir(this.taskGroupDir);
+    const entries = await fs.readdir(this.taskGroupDir);
+    for (const entry of entries.filter((item) => item.endsWith('.json')).sort()) {
+      const value = await readJsonFile<unknown>(path.join(this.taskGroupDir, entry)).catch(() => undefined);
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const manifest = value as Partial<TaskGroupManifest>;
+      if (manifest.version !== 1
+        || typeof manifest.groupId !== 'string'
+        || !Array.isArray(manifest.taskIds)
+        || !manifest.taskIds.every((taskId) => typeof taskId === 'string')
+        || (manifest.failurePolicy !== 'stop-round' && manifest.failurePolicy !== 'continue')
+        || typeof manifest.fingerprint !== 'string'
+        || !/^[a-f0-9]{64}$/.test(manifest.fingerprint)
+        || typeof manifest.scheduleId !== 'string'
+        || path.basename(this.manifestPath(manifest.groupId)) !== entry) {
+        continue;
+      }
+      this.groups.set(manifest.groupId, {
+        groupId: manifest.groupId,
+        scheduleId: manifest.scheduleId,
+        taskIds: [...manifest.taskIds],
+        failurePolicy: manifest.failurePolicy,
+        fingerprint: manifest.fingerprint,
+        stopRequested: false,
+      });
     }
   }
 
@@ -541,6 +751,9 @@ export class TaskQueue {
     if (!this.drainPromise) {
       this.drainPromise = this.drain().finally(() => {
         this.drainPromise = undefined;
+        if (!this.runningTaskId && this.pendingTaskIds.length > 0) {
+          this.scheduleDrain();
+        }
       });
     }
   }
@@ -632,22 +845,7 @@ export class TaskQueue {
   }
 
   private getOrCreateGroup(groupId: string): QueuedTaskGroup | undefined {
-    const existing = this.groups.get(groupId);
-    if (existing) {
-      return existing;
-    }
-    const matchingTasks = [...this.tasks.values()].filter((task) => task.schedule?.scheduleRunId === groupId);
-    if (matchingTasks.length === 0) {
-      return undefined;
-    }
-    const group: QueuedTaskGroup = {
-      groupId,
-      taskIds: matchingTasks.map((task) => task.taskId),
-      failurePolicy: 'stop-round',
-      stopRequested: false,
-    };
-    this.groups.set(groupId, group);
-    return group;
+    return this.groups.get(groupId);
   }
 
   private async afterTaskTerminal(task: TaskRecord): Promise<void> {
@@ -774,10 +972,31 @@ export class TaskQueue {
   }
 
   private async writeTaskFile(task: TaskRecord): Promise<void> {
+    await this.beforeTaskFileWrite?.(task);
     await ensureDir(this.taskDir);
-    const filePath = path.join(this.taskDir, toTaskFileName(task.taskId));
+    const filePath = this.taskPath(task.taskId);
     const tempPath = `${filePath}.${process.pid}.${Date.now()}.${crypto.randomUUID()}.tmp`;
     await fs.writeFile(tempPath, `${JSON.stringify(task, null, 2)}\n`, 'utf8');
     await fs.rename(tempPath, filePath);
+  }
+
+  private taskPath(taskId: string): string {
+    return path.join(this.taskDir, toTaskFileName(taskId));
+  }
+
+  private manifestPath(groupId: string): string {
+    const fileName = `${crypto.createHash('sha256').update(groupId).digest('hex')}.json`;
+    return path.join(this.taskGroupDir, fileName);
+  }
+
+  private async persistGroupManifest(manifest: TaskGroupManifest): Promise<void> {
+    await this.beforeGroupManifestWrite?.(manifest);
+    await writeJsonAtomically(this.manifestPath(manifest.groupId), manifest);
+  }
+
+  private runAdmissionSerialized<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.admissionSerial.then(operation, operation);
+    this.admissionSerial = result.then(() => undefined, () => undefined);
+    return result;
   }
 }

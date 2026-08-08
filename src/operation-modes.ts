@@ -31,6 +31,22 @@ export type OperationModeTaskKind =
   | 'rag-ops'
   | 'rag-answer';
 
+/**
+ * The only task kinds that may be persisted as recurring scheduler templates.
+ * This intentionally differs from an operation mode's `schedule` surface:
+ * a surface may expose a one-off automation workspace entry without granting
+ * an open-ended recurring execution authorization.
+ */
+export const recurringScheduleTaskKindIds = [
+  'resume-capture',
+  'batch',
+  'talent-mapping',
+  'search-subscription',
+  'boss-job-sync',
+] as const satisfies readonly OperationModeTaskKind[];
+
+export type RecurringScheduleTaskKind = (typeof recurringScheduleTaskKindIds)[number];
+
 export type OperationModeSearchSource = 'saved' | 'direct' | 'reuse-job-settings' | undefined;
 
 export interface OperationModePickerGroup {
@@ -140,7 +156,7 @@ export const OPERATION_MODE_DEFINITIONS: readonly OperationModeDefinition[] = [
     taskKind: 'boss-auto-chat',
     searchSource: undefined,
     effectSummary: '审查 Boss 未读会话并按确认的沟通策略执行。',
-    surfaces: ['assistant', 'manual', 'schedule'],
+    surfaces: ['assistant', 'manual'],
     pickerTargets: [],
   },
   {
@@ -274,6 +290,16 @@ export function assertOperationModeCatalogIntegrity(): void {
       modePickerKeys.add(key);
     }
   }
+  const scheduledModeKinds = new Set(
+    OPERATION_MODE_DEFINITIONS
+      .filter((definition) => definition.surfaces.includes('schedule'))
+      .map((definition) => definition.taskKind),
+  );
+  for (const taskKind of recurringScheduleTaskKindIds) {
+    if (!scheduledModeKinds.has(taskKind)) {
+      throw new Error(`operation-mode-recurring-kind-without-schedule-surface: ${taskKind}`);
+    }
+  }
 }
 
 assertOperationModeCatalogIntegrity();
@@ -328,6 +354,14 @@ export function getOperationModeDefinition(modeId: OperationModeId): OperationMo
 
 export function isOperationModeId(value: unknown): value is OperationModeId {
   return typeof value === 'string' && OPERATION_MODE_BY_ID.has(value as OperationModeId);
+}
+
+export function isOperationModeTaskKind(value: unknown): value is OperationModeTaskKind {
+  return typeof value === 'string' && operationModeTaskKindIds.includes(value as OperationModeTaskKind);
+}
+
+export function isRecurringScheduleTaskKind(value: unknown): value is RecurringScheduleTaskKind {
+  return typeof value === 'string' && recurringScheduleTaskKindIds.includes(value as RecurringScheduleTaskKind);
 }
 
 export function isCliSearchModeId(value: unknown): value is CliSearchModeId {

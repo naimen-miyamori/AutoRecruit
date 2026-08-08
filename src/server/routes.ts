@@ -48,6 +48,13 @@ import {
 } from './boss-capture-snapshot.js';
 import { preflightTaskSearchConditionSets } from './search-condition-set-preflight.js';
 import { TaskQueue } from './task-queue.js';
+import { ScheduleTemplateValidationError } from './schedule-template-validation.js';
+import {
+  ScheduleLeaseOwnershipLostError,
+  ScheduleLeaseRecoveryRequiredError,
+  ScheduleLeaseTimeoutError,
+  ScheduleStoreConflictError,
+} from './schedule-store.js';
 import {
   listOperationModeDefinitions,
   listOperationModePickerGroups,
@@ -1088,6 +1095,32 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
 
     return notFound(`No route for ${method} ${pathname}`);
   } catch (error) {
+    if (error instanceof ScheduleLeaseRecoveryRequiredError
+      || error instanceof ScheduleLeaseOwnershipLostError
+      || error instanceof ScheduleStoreConflictError) {
+      return jsonResponse(409, {
+        error: {
+          code: error.code,
+          message: error.message,
+        },
+      });
+    }
+    if (error instanceof ScheduleLeaseTimeoutError) {
+      return jsonResponse(503, {
+        error: {
+          code: error.code,
+          message: error.message,
+        },
+      });
+    }
+    if (error instanceof ScheduleTemplateValidationError) {
+      return jsonResponse(400, {
+        error: {
+          code: error.code,
+          message: error.message,
+        },
+      });
+    }
     if (error instanceof SearchConditionSetConflictError) {
       const latest = await searchConditionSetService.get(error.reference)
         .then(toApiSearchConditionSetDetail)

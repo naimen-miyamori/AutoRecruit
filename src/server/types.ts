@@ -1,4 +1,5 @@
 import type { MainResult } from '../index.js';
+import type { RecurringScheduleTaskKind } from '../operation-modes.js';
 import type { BossForwardMode, SupportedPlatform } from '../platforms/types.js';
 import type { SearchConditionSetReference } from '../search/search-condition-sets.js';
 import type {
@@ -48,7 +49,11 @@ export type TaskKind = 'resume-capture'
 export type AssistantActionKind = Exclude<TaskKind, 'talent-mapping-classification'> | 'rag-answer';
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type TaskLogLevel = 'info' | 'warn' | 'error';
-export type SchedulableTaskKind = 'resume-capture' | 'batch' | 'talent-mapping' | 'search-subscription' | 'boss-auto-chat' | 'boss-job-sync';
+export type SchedulableTaskKind = RecurringScheduleTaskKind;
+/** A known historical kind that can be read but can never run as a recurring template. */
+export type LegacyScheduledTaskKind = 'boss-auto-chat';
+/** Known current and historical persisted kind names. Unknown strings remain readable as well. */
+export type PersistedScheduledTaskKind = SchedulableTaskKind | LegacyScheduledTaskKind;
 export type ScheduleStatus = 'enabled' | 'paused' | 'stop_requested' | 'stopped';
 export type ScheduleRunStatus = 'queued' | 'running' | 'stopping' | 'succeeded' | 'failed' | 'stopped' | 'interrupted' | 'skipped';
 export type WorkflowFailurePolicy = 'stop-round' | 'continue';
@@ -264,8 +269,39 @@ export interface ScheduledTaskTemplate {
   taskKey: string;
   name: string;
   enabled: boolean;
-  kind: SchedulableTaskKind;
+  kind: string;
   input: Record<string, unknown>;
+}
+
+export interface NormalizedScheduledTaskTemplate extends Omit<ScheduledTaskTemplate, 'kind'> {
+  kind: SchedulableTaskKind;
+}
+
+/** The raw JSON shape used only while reading or quarantining persisted schedules. */
+export type PersistedScheduleDefinition = Omit<ScheduleDefinition, 'tasks' | 'validationIssues'> & {
+  tasks: unknown;
+  validationIssues?: unknown;
+  storageRevision?: number;
+};
+
+/** The safe task projection returned by schedule list/detail APIs. */
+export interface ScheduledTaskReadView extends ScheduledTaskTemplate {}
+
+export type NormalizedScheduleDefinition = Omit<ScheduleDefinition, 'tasks'> & {
+  tasks: NormalizedScheduledTaskTemplate[];
+  storageRevision?: number;
+};
+
+export type ScheduleDetailView = Omit<ScheduleDefinition, 'tasks'> & {
+  readViewVersion: 1;
+  tasks: ScheduledTaskReadView[];
+};
+
+export interface ScheduleValidationIssue {
+  code: 'scheduled-task-kind-not-allowed' | 'scheduled-task-kind-unknown' | 'scheduled-task-template-invalid' | 'schedule-record-invalid';
+  taskKey: string;
+  kind: string;
+  message: string;
 }
 
 export interface ScheduleDefinition {
@@ -292,6 +328,7 @@ export interface ScheduleDefinition {
   nextRunAt?: string;
   lastRunAt?: string;
   consecutiveFailures: number;
+  validationIssues?: ScheduleValidationIssue[];
 }
 
 export interface ScheduleRunRecord {
@@ -501,6 +538,7 @@ export interface ScheduleSummary {
   lastRunAt?: string;
   consecutiveFailures: number;
   updatedAt: string;
+  validationIssues?: ScheduleValidationIssue[];
 }
 
 export interface RunResultView extends RunResult {
