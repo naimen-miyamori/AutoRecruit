@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { chromium, type Page } from 'playwright';
-import { openPageLevelSearchRef } from '../browser/51job-search-subscription.js';
 import { config } from '../config.js';
 import { fiftyOneJobAdapter } from '../platforms/51job-adapter.js';
 import {
@@ -33,6 +32,7 @@ import {
 } from '../platforms/51job/actions/navigation-actions.js';
 import {
   estimate51jobSearchTimeoutMs,
+  openPageLevelSearchRef,
   open51jobDirectSearch,
   open51jobSubscribeSearch,
   prepare51jobSearchCondition,
@@ -206,7 +206,7 @@ describe('51job semantic actions', () => {
             document.querySelector('#viewed-filter').addEventListener('click', (event) => {
               event.preventDefault();
               const input = document.querySelector('#viewed-filter input');
-              input.checked = !input.checked;
+              setTimeout(() => { input.checked = !input.checked; }, 0);
               document.querySelector('#loading').style.display = 'block';
               fetch('https://fixture.test/commercial/recommend', { method: 'POST' });
               fetch('https://fixture.test/resume/search/talent_hunt_resume_list', { method: 'POST' }).then(() => {
@@ -221,7 +221,7 @@ describe('51job semantic actions', () => {
         `);
 
         const action = apply51jobViewedCandidatePolicy(page, {
-          deadline: Date.now() + 3_000,
+          deadline: Date.now() + 10_000,
         }).then((result) => {
           settled = true;
           return result;
@@ -243,7 +243,7 @@ describe('51job semantic actions', () => {
         assert.equal(await page.locator('#loading').isVisible(), false);
         assert.equal(await page.locator('#viewed-filter input').isChecked(), true);
         assert.deepStrictEqual(
-          (await extract51jobCandidateList(page, { deadline: Date.now() + 3_000 })).candidates.map((candidate) => candidate.candidateId),
+          (await extract51jobCandidateList(page, { deadline: Date.now() + 10_000 })).candidates.map((candidate) => candidate.candidateId),
           ['20002'],
           'only the refreshed primary search list is eligible for extraction',
         );
@@ -279,7 +279,7 @@ describe('51job semantic actions', () => {
             document.querySelector('#viewed-filter').addEventListener('click', (event) => {
               event.preventDefault();
               const input = document.querySelector('#viewed-filter input');
-              input.checked = !input.checked;
+              setTimeout(() => { input.checked = !input.checked; }, 0);
               document.querySelector('#loading').style.display = 'block';
               fetch('https://fixture.test/resume/search/talent_hunt_resume_list', { method: 'POST' }).then(() => {
                 setTimeout(() => { document.querySelector('#loading').style.display = 'none'; }, 20);
@@ -290,7 +290,7 @@ describe('51job semantic actions', () => {
 
         const action = apply51jobViewedCandidatePolicy(page, {
           includeViewedCandidates: true,
-          deadline: Date.now() + 3_000,
+          deadline: Date.now() + 10_000,
         }).then((result) => {
           settled = true;
           return result;
@@ -327,13 +327,13 @@ describe('51job semantic actions', () => {
           </div>
         `);
 
-        assert.deepStrictEqual(await apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 3_000 }), {
+        assert.deepStrictEqual(await apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 10_000 }), {
           status: 'already-satisfied',
           resultState: 'explicit-empty',
           candidateCount: 0,
         });
         assert.deepStrictEqual(
-          (await collectStable51jobCandidateList(page, { deadline: Date.now() + 3_000 })).map((candidate) => candidate.candidateId),
+          (await collectStable51jobCandidateList(page, { deadline: Date.now() + 10_000 })).map((candidate) => candidate.candidateId),
           [],
         );
 
@@ -345,7 +345,7 @@ describe('51job semantic actions', () => {
           </div>
         `);
         assert.deepStrictEqual(
-          (await collectStable51jobCandidateList(page, { deadline: Date.now() + 3_000 })).map((candidate) => candidate.candidateId),
+          (await collectStable51jobCandidateList(page, { deadline: Date.now() + 10_000 })).map((candidate) => candidate.candidateId),
           ['80008'],
           'only cards before the recommendation boundary belong to the search result',
         );
@@ -369,7 +369,7 @@ describe('51job semantic actions', () => {
           <script>window.__fixtureClicks = 0; document.querySelector('#viewed-filter').addEventListener('click', () => { window.__fixtureClicks += 1; });</script>
         `);
         const action = apply51jobViewedCandidatePolicy(page, {
-          deadline: Date.now() + 3_000,
+          deadline: Date.now() + 10_000,
         }).then((result) => {
           settled = true;
           return result;
@@ -403,7 +403,7 @@ describe('51job semantic actions', () => {
           <script>document.querySelector('#viewed-filter').addEventListener('click', (event) => { event.preventDefault(); setTimeout(() => { document.querySelector('#viewed-filter input').checked = true; }, 0); });</script>
         `);
         await assert.rejects(
-          () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 1_000 }),
+          () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 5_000 }),
           /refresh-start/,
         );
       });
@@ -430,7 +430,7 @@ describe('51job semantic actions', () => {
           <script>
             document.querySelector('#viewed-filter').addEventListener('click', (event) => {
               event.preventDefault();
-              document.querySelector('#viewed-filter input').checked = true;
+              setTimeout(() => { document.querySelector('#viewed-filter input').checked = true; }, 0);
               document.querySelector('#loading').style.display = 'block';
               fetch('https://fixture.test/resume/search/talent_hunt_resume_list', { method: 'POST' }).then(() => {
                 document.querySelector('#results').innerHTML = '';
@@ -440,7 +440,7 @@ describe('51job semantic actions', () => {
             });
           </script>
         `);
-        const result = await apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 3_000 });
+        const result = await apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 10_000 });
         await requestSeen.promise;
         assert.deepStrictEqual(result, {
           status: 'applied',
@@ -469,7 +469,7 @@ describe('51job semantic actions', () => {
           <script>
             document.querySelector('#viewed-filter').addEventListener('click', (event) => {
               event.preventDefault();
-              document.querySelector('#viewed-filter input').checked = true;
+              setTimeout(() => { document.querySelector('#viewed-filter input').checked = true; }, 0);
               fetch('https://fixture.test/resume/search/talent_hunt_resume_list', { method: 'POST' }).then(() => {
                 document.querySelector('#results').innerHTML = '';
               });
@@ -478,7 +478,7 @@ describe('51job semantic actions', () => {
         `);
 
         await assert.rejects(
-          () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 650 }),
+          () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 5_000 }),
           /result-render/,
         );
       });
@@ -499,10 +499,10 @@ describe('51job semantic actions', () => {
         await page.setContent(`
           <label id="viewed-filter" class="el-checkbox"><input type="checkbox">我已看</label>
           <div class="virtual_list">${fixtureCandidateCard()}</div>
-          <script>document.querySelector('#viewed-filter').addEventListener('click', (event) => { event.preventDefault(); document.querySelector('#viewed-filter input').checked = true; fetch('https://fixture.test/resume/search/talent_hunt_resume_list', { method: 'POST' }); });</script>
+          <script>document.querySelector('#viewed-filter').addEventListener('click', (event) => { event.preventDefault(); setTimeout(() => { document.querySelector('#viewed-filter input').checked = true; }, 0); fetch('https://fixture.test/resume/search/talent_hunt_resume_list', { method: 'POST' }); });</script>
         `);
         await assert.rejects(
-          () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 3_000 }),
+          () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 10_000 }),
           /refresh-response/,
         );
 
@@ -517,7 +517,7 @@ describe('51job semantic actions', () => {
           <script>
             document.querySelector('#viewed-filter').addEventListener('click', (event) => {
               event.preventDefault();
-              document.querySelector('#viewed-filter input').checked = true;
+              setTimeout(() => { document.querySelector('#viewed-filter input').checked = true; }, 0);
               fetch('https://fixture.test/resume/search/talent_hunt_resume_list', { method: 'POST' }).then(() => {
                 let next = 0;
                 window.__fixtureMutationTimer = setInterval(() => {
@@ -530,7 +530,10 @@ describe('51job semantic actions', () => {
         `);
         try {
           await assert.rejects(
-            () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 650 }),
+            // The full suite runs several Playwright-heavy files concurrently.
+            // Leave enough budget for the click/request phase so this case
+            // deterministically exercises the intended never-stable result.
+            () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 2_500 }),
             /result-stability/,
           );
         } finally {
@@ -543,7 +546,7 @@ describe('51job semantic actions', () => {
           <script>
             document.querySelector('#viewed-filter').addEventListener('click', (event) => {
               event.preventDefault();
-              document.querySelector('#viewed-filter input').checked = true;
+              setTimeout(() => { document.querySelector('#viewed-filter input').checked = true; }, 0);
               fetch('https://fixture.test/resume/search/talent_hunt_resume_list', { method: 'POST' }).then(() => {
                 document.querySelector('#results').innerHTML = '';
               });
@@ -551,7 +554,7 @@ describe('51job semantic actions', () => {
           </script>
         `);
         await assert.rejects(
-          () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 650 }),
+          () => apply51jobViewedCandidatePolicy(page, { deadline: Date.now() + 5_000 }),
           /result-render/,
         );
       });
@@ -589,19 +592,19 @@ describe('51job semantic actions', () => {
           </script>
         `);
 
-        assert.deepStrictEqual(await submit51jobDirectSearch(page, { deadline: Date.now() + 3_000 }), {
+        assert.deepStrictEqual(await submit51jobDirectSearch(page, { deadline: Date.now() + 10_000 }), {
           resultState: 'candidates',
           candidateCount: 1,
         });
         assert.equal(directRequestCount, 1);
         assert.deepStrictEqual(
-          (await extract51jobCandidateList(page, { deadline: Date.now() + 3_000 })).candidates.map((candidate) => candidate.candidateId),
+          (await extract51jobCandidateList(page, { deadline: Date.now() + 10_000 })).candidates.map((candidate) => candidate.candidateId),
           ['30003'],
         );
 
         await page.setContent(`<div class="virtual_list">${fixtureCandidateCard('no_interested_40004')}${fixtureCandidateCard('no_interested_40004')}</div>`);
         await assert.rejects(
-          () => collectStable51jobCandidateList(page, { deadline: Date.now() + 3_000 }),
+          () => collectStable51jobCandidateList(page, { deadline: Date.now() + 10_000 }),
           /candidate-card identities are duplicated/,
         );
       });

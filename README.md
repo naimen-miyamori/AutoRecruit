@@ -228,6 +228,11 @@ npm run api
 ```
 
 打开 `http://127.0.0.1:4180`。`npm run build` 已同时包含服务端编译和前端 production bundle 构建。
+控制台保持 local-first：绑定 `127.0.0.1` 时 API key 可选；如果把
+`AUTORECRUIT_CONSOLE_HOST` 配置为非 loopback 地址，必须同时配置
+`AUTORECRUIT_CONSOLE_API_KEY` 和逗号分隔的精确
+`AUTORECRUIT_CONSOLE_ALLOWED_ORIGINS`，否则服务拒绝启动。该轻量保护不构成多用户或多租户 Auth Gateway，
+非本机访问仍应置于受控网络和 TLS 反向代理之后。
 
 开发模式需要 API 和 Vite 同时运行：
 
@@ -839,7 +844,7 @@ npm run test:rag:offline
 
 本地控制台的一级工作区包括控制台、任务中心、岗位与人才、人才地图、Boss 工作台、自动化、知识与运营、智能助手和设置。人才地图页面读取本地项目、公司矩阵、人才清单、覆盖和运行记录；详情补全按钮显示本轮确定性选择的精确人数，并要求当轮安全确认。Boss 工作台集中提供职位/JD 同步、人才发现、会话中心、自动沟通审核和幂等操作回执；立即匹配、打招呼和会话变更仍需精确身份、`confirmed` 和实际 `intentId`。HTTP 或助手确认的浏览器任务统一通过 `TaskQueue` 串行执行，预览命令不是执行来源。
 
-设置了 `AUTORECRUIT_CONSOLE_API_KEY` 时，可在客户端设置页输入控制台 Bearer token。API 地址可以写入 `localStorage`，控制台 token 只写入当前标签页会话的 `sessionStorage`；模型 API key 与控制台 token 分离，也只写入 `sessionStorage`。生产客户端在 API 故障时显示真实错误，不回退到 mock 业务数据。
+设置了 `AUTORECRUIT_CONSOLE_API_KEY` 时，可在客户端设置页输入控制台 Bearer token。API 地址可以写入 `localStorage`，控制台 token 只写入当前标签页会话的 `sessionStorage`；模型 API key 与控制台 token 分离，也只写入 `sessionStorage`。CORS 只回显配置允许的精确 origin，不使用通配 origin。生产客户端在 API 故障时显示真实错误，不回退到 mock 业务数据。
 
 Boss 持久化读模型通过以下 GET 接口提供职位、同步记录、自动沟通审核和操作回执：
 

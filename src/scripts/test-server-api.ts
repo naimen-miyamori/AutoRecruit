@@ -20,6 +20,7 @@ import type { ApplicationFilterOptions } from '../search/filter-application-opti
 import type { BossCaptureSettingsSnapshot, BossCaptureTaskSnapshot, CandidateResume, CandidateScoreArtifact, JobRecord, RunResult } from '../types/job.js';
 import { SearchSubscriptionRunError } from '../search/search-subscription.js';
 import { parseOperationModeCatalogResponse } from '../server/api-contracts.js';
+import { inspectConsoleRequestSecurity, resolveConsoleApiConfig } from '../server/http.js';
 
 async function makeTempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-server-api-'));
@@ -180,6 +181,70 @@ function passthroughBossCapturePlanResolver(overrides: {
     };
   };
 }
+
+describe('console HTTP security boundary', () => {
+  it('keeps loopback defaults local and uses an exact origin allowlist', () => {
+    const config = resolveConsoleApiConfig({
+      host: '127.0.0.1',
+      port: 4180,
+      apiKey: '',
+      allowedOrigins: ['http://127.0.0.1:4180', 'http://localhost:5173'],
+    });
+    assert.equal(config.apiKey, undefined);
+    assert.deepStrictEqual(config.allowedOrigins, ['http://127.0.0.1:4180', 'http://localhost:5173']);
+
+    const sameOrigin = inspectConsoleRequestSecurity({ origin: 'http://127.0.0.1:4180' }, config);
+    assert.equal(sameOrigin.originAllowed, true);
+    assert.equal(sameOrigin.authorized, true);
+    assert.equal(sameOrigin.responseHeaders['access-control-allow-origin'], 'http://127.0.0.1:4180');
+    assert.notEqual(sameOrigin.responseHeaders['access-control-allow-origin'], '*');
+
+    const rejected = inspectConsoleRequestSecurity({ origin: 'https://attacker.example' }, config);
+    assert.equal(rejected.originAllowed, false);
+    assert.equal(rejected.responseHeaders['access-control-allow-origin'], undefined);
+  });
+
+  it('requires bearer protection and explicit origins for non-loopback binding', () => {
+    assert.throws(
+      () => resolveConsoleApiConfig({ host: '0.0.0.0', apiKey: '', allowedOrigins: [] }),
+      /AUTORECRUIT_CONSOLE_API_KEY is required/,
+    );
+    assert.throws(
+      () => resolveConsoleApiConfig({ host: '0.0.0.0', apiKey: 'console-secret', allowedOrigins: [] }),
+      /AUTORECRUIT_CONSOLE_ALLOWED_ORIGINS is required/,
+    );
+
+    const config = resolveConsoleApiConfig({
+      host: '0.0.0.0',
+      apiKey: 'console-secret',
+      allowedOrigins: ['https://console.example.com'],
+    });
+    const missing = inspectConsoleRequestSecurity({ origin: 'https://console.example.com' }, config);
+    assert.equal(missing.originAllowed, true);
+    assert.equal(missing.authorized, false);
+    const wrong = inspectConsoleRequestSecurity({
+      origin: 'https://console.example.com',
+      authorization: 'Bearer another-secret',
+    }, config);
+    assert.equal(wrong.authorized, false);
+    const accepted = inspectConsoleRequestSecurity({
+      origin: 'https://console.example.com',
+      authorization: 'Bearer console-secret',
+    }, config);
+    assert.equal(accepted.originAllowed, true);
+    assert.equal(accepted.authorized, true);
+  });
+
+  it('rejects malformed origins instead of normalizing them into broader authority', () => {
+    assert.throws(
+      () => resolveConsoleApiConfig({
+        host: '127.0.0.1',
+        allowedOrigins: ['https://console.example.com/path'],
+      }),
+      /must contain HTTP\(S\) origins only/,
+    );
+  });
+});
 
 describe('console API routes', () => {
 it('serves operation-mode catalogs that pass the surface-aware public parser', async () => {

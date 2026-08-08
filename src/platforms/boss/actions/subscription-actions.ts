@@ -15,8 +15,10 @@ import {
   applyBossDirectSearch,
   applyBossSearchSortPolicy,
   applyBossViewedCandidatePolicy,
-  prepareBossSearchConditionPage,
   snapshotBossSearchFilterState,
+} from './filter-actions.js';
+import {
+  prepareBossSearchConditionPage,
   submitBossPreparedSearch,
   waitForBossSearchFrame,
 } from './search-actions.js';

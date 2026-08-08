@@ -11,7 +11,7 @@ import {
   resetBossSearchFilters,
   restoreBossSearchFilterState,
   snapshotBossSearchFilterState,
-} from '../platforms/boss/actions/search-actions.js';
+} from '../platforms/boss/actions/filter-actions.js';
 import type { SearchCondition } from '../types/job.js';
 
 export interface VerifyBossApplicationFilterOptionsCliInput {

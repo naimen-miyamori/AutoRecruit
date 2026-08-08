@@ -17,7 +17,9 @@ exception in their closest common parent before implementation; do not choose on
 Keep ownership boundaries intact:
 
 - Platform-specific behavior belongs under src/platforms/.
-- Shared orchestration belongs in src/index.ts.
+- Public CLI dispatch and shared cross-platform selection belong in src/index.ts. Stable business-mode
+  orchestration belongs under src/mode-runners/ and must reuse the public mode catalog and owning domain
+  workflows rather than creating surface-specific runners.
 - Shared browser/session helpers belong in src/browser/.
 - Ordinary job persistence belongs in src/storage/. A domain with an independent lifecycle and
   authoritative fact model may own its local store, such as Talent Mapping or RAG.
@@ -39,6 +41,7 @@ More specific instructions are routed as follows:
 | RAG facts, retrieval, answers, and quality loops | src/rag/AGENTS.md |
 | Console assistant, HTTP routes, queue, and scheduler | src/server/AGENTS.md |
 | React operations console | frontend/AGENTS.md |
+| Stable business-mode runners | src/mode-runners/AGENTS.md |
 
 Changes in src/index.ts, src/config.ts, src/search/, src/scripts/, src/scoring/, src/reporting/, or
 tests that alter a domain must also consult that domain's scoped instructions.

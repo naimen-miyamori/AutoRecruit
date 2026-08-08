@@ -179,8 +179,8 @@ describe('migrated platform action boundaries', () => {
       assert.doesNotMatch(resumeSource, /TaskQueue|TalentMappingStore/);
     }
 
-    const zhilianReadSource = await readSource('platforms/zhilian/actions/internal-page-actions.ts');
-    assert.doesNotMatch(zhilianReadSource, /copyZhilianColleagueForwardLink/);
+    const zhilianReadSource = await readSource('platforms/zhilian/actions/resume-actions.ts');
+    assert.doesNotMatch(zhilianReadSource, /copyZhilianColleagueForwardLink|delivery-actions/);
     const zhilianDeliverySource = await readSource('platforms/zhilian/actions/delivery-actions.ts');
     assert.match(zhilianDeliverySource, /collectZhilianResumeDeliveryMetadata/);
   });
@@ -207,5 +207,89 @@ describe('migrated platform action boundaries', () => {
     assert.doesNotMatch(candidateRuntime, /\.virtual_list|no_interested_|el-loading-mask|base-page-loading/);
     assert.doesNotMatch(indexSource, /platformAdapter\.platform === '51job'\s*\?\s*await extractCandidateListRef/);
     assert.doesNotMatch(legacyExtractor, /export async function extractCandidateListFromPage\b/);
+  });
+
+  it('keeps 51job search-subscription controls in the platform action owner', async () => {
+    const searchAction = await readSource('platforms/51job/actions/search-actions.ts');
+    assert.match(searchAction, /export async function openPageLevelSearch\b/);
+    assert.match(searchAction, /export async function fill51jobSearchKeyword\b/);
+    assert.match(searchAction, /export async function expand51jobAdvancedFilters\b/);
+    assert.match(searchAction, /export async function save51jobSearchCondition\b/);
+    await assert.rejects(
+      readSource('browser/51job-search-subscription.ts'),
+      /ENOENT/,
+    );
+  });
+
+  it('keeps Liepin page behavior in concrete domain action owners', async () => {
+    const [authenticationSource, navigationSource, searchSource, filterSource, candidateSource, resumeSource, forwardingSource] = await Promise.all([
+      readSource('platforms/liepin/actions/authentication.ts'),
+      readSource('platforms/liepin/actions/navigation-actions.ts'),
+      readSource('platforms/liepin/actions/search-actions.ts'),
+      readSource('platforms/liepin/actions/filter-actions.ts'),
+      readSource('platforms/liepin/actions/candidate-actions.ts'),
+      readSource('platforms/liepin/actions/resume-actions.ts'),
+      readSource('platforms/liepin/actions/forwarding-actions.ts'),
+    ]);
+
+    assert.match(authenticationSource, /export async function assertLiepinAuthenticated\b/);
+    assert.match(navigationSource, /export async function openLiepinRecruiterSearchPage\b/);
+    assert.match(navigationSource, /export async function openLiepinAuthenticatedHome\b/);
+    assert.match(searchSource, /export async function openLiepinDirectSearch\b/);
+    assert.match(searchSource, /export async function openLiepinSubscribeSearch\b/);
+    assert.match(filterSource, /export async function applyLiepinSearchCondition\b/);
+    assert.match(filterSource, /export async function discoverLiepinSearchFilters\b/);
+    assert.match(candidateSource, /export async function extractLiepinCandidateList\b/);
+    assert.match(resumeSource, /export async function openLiepinResumePage\b/);
+    assert.match(resumeSource, /export async function parseLiepinResumeDetail\b/);
+    assert.match(forwardingSource, /export async function forwardLiepinResumeToFrequentContact\b/);
+    assert.match(forwardingSource, /data-autorecruit-liepin-forward-target/);
+
+    for (const domainSource of [navigationSource, searchSource, filterSource, candidateSource, resumeSource, forwardingSource]) {
+      assert.doesNotMatch(domainSource, /internal-page-actions/);
+    }
+    await assert.rejects(
+      readSource('platforms/liepin/actions/internal-page-actions.ts'),
+      /ENOENT/,
+    );
+  });
+
+  it('keeps Zhilian page behavior in concrete domain action owners', async () => {
+    const [authenticationSource, navigationSource, searchSource, searchWorkflowSource, filterSource, candidateSource, resumeSource, deliverySource] = await Promise.all([
+      readSource('platforms/zhilian/actions/authentication.ts'),
+      readSource('platforms/zhilian/actions/navigation-actions.ts'),
+      readSource('platforms/zhilian/actions/search-actions.ts'),
+      readSource('platforms/zhilian/actions/search-entry-actions.ts'),
+      readSource('platforms/zhilian/actions/filter-actions.ts'),
+      readSource('platforms/zhilian/actions/candidate-actions.ts'),
+      readSource('platforms/zhilian/actions/resume-actions.ts'),
+      readSource('platforms/zhilian/actions/delivery-actions.ts'),
+    ]);
+
+    assert.match(authenticationSource, /export async function assertZhilianAuthenticated\b/);
+    assert.match(navigationSource, /export async function openZhilianRecruiterHome\b/);
+    assert.match(searchSource, /export async function openZhilianSubscribeSearch\b/);
+    assert.match(searchSource, /export async function prepareZhilianSearchSurface\b/);
+    assert.match(searchWorkflowSource, /export async function openZhilianDirectSearch\b/);
+    assert.match(searchWorkflowSource, /export async function prepareZhilianSearchConditionPage\b/);
+    assert.match(filterSource, /export async function applyZhilianSearchCondition\b/);
+    assert.match(filterSource, /export async function discoverZhilianStaticSearchFilters\b/);
+    assert.match(candidateSource, /export async function extractZhilianCandidateList\b/);
+    assert.match(resumeSource, /export async function openZhilianResumeDetail\b/);
+    assert.match(resumeSource, /async function parseZhilianResumeDetailFromPage\b/);
+    assert.match(deliverySource, /export async function collectZhilianResumeDeliveryMetadata\b/);
+
+    assert.doesNotMatch(searchSource, /from ['"]\.\/filter-actions\.js['"]/);
+    assert.doesNotMatch(filterSource, /from ['"]\.\/search-entry-actions\.js['"]/);
+    assert.match(searchWorkflowSource, /from ['"]\.\/search-actions\.js['"]/);
+    assert.match(searchWorkflowSource, /from ['"]\.\/filter-actions\.js['"]/);
+
+    for (const domainSource of [navigationSource, searchSource, searchWorkflowSource, filterSource, candidateSource, resumeSource, deliverySource]) {
+      assert.doesNotMatch(domainSource, /internal-page-actions/);
+    }
+    await assert.rejects(
+      readSource('platforms/zhilian/actions/internal-page-actions.ts'),
+      /ENOENT/,
+    );
   });
 });

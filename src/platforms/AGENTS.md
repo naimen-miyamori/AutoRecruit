@@ -20,8 +20,9 @@ contracts.
 
 - Platform code owns platform selectors, page behavior, filter replay, candidate extraction, detail
   parsing integration, compatibility fallbacks, pacing, readiness, and semantic actions.
-- Shared orchestration belongs in src/index.ts, platform-neutral browser primitives in src/browser/,
-  and persistence, confirmation, queueing, and mode selection in their owning workflows/domains.
+- Public dispatch and shared cross-platform selection belong in src/index.ts, stable business-mode
+  orchestration in src/mode-runners/, platform-neutral browser primitives in src/browser/, and
+  persistence, confirmation, queueing, and mode selection in their owning workflows/domains.
 - Boss keeps one platform key and adapter. Normal capture/batch and search subscription may opt into
   it as the fourth stage only through their explicit `all + includeBoss` selection; plain `all`
   registries, questions, filter discovery, and Talent Mapping remain three-platform.

@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,8 +12,62 @@ export interface ConsoleApiConfig {
   host: string;
   port: number;
   apiKey?: string;
+  allowedOrigins: string[];
   maxBodyBytes: number;
   frontendDistDir: string;
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
+}
+
+function normalizeAllowedOrigin(value: string): string {
+  const trimmed = value.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`AUTORECRUIT_CONSOLE_ALLOWED_ORIGINS contains an invalid origin: ${trimmed || '<empty>'}`);
+  }
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+    || parsed.username
+    || parsed.password
+    || parsed.pathname !== '/'
+    || parsed.search
+    || parsed.hash) {
+    throw new Error(`AUTORECRUIT_CONSOLE_ALLOWED_ORIGINS must contain HTTP(S) origins only: ${trimmed}`);
+  }
+  return parsed.origin;
+}
+
+function parseAllowedOrigins(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  const origins = value.split(',').map((item) => item.trim()).filter(Boolean).map(normalizeAllowedOrigin);
+  return [...new Set(origins)];
+}
+
+function defaultLoopbackOrigins(port: number): string[] {
+  return [
+    `http://127.0.0.1:${port}`,
+    `http://localhost:${port}`,
+    'http://127.0.0.1:5173',
+    'http://localhost:5173',
+  ];
+}
+
+function validateConsoleApiConfig(config: ConsoleApiConfig): ConsoleApiConfig {
+  const host = config.host.trim();
+  const apiKey = config.apiKey?.trim() || undefined;
+  const allowedOrigins = [...new Set(config.allowedOrigins.map(normalizeAllowedOrigin))];
+  if (!host) throw new Error('AUTORECRUIT_CONSOLE_HOST must not be empty');
+  if (!isLoopbackHost(host) && !apiKey) {
+    throw new Error('AUTORECRUIT_CONSOLE_API_KEY is required when AUTORECRUIT_CONSOLE_HOST is not loopback');
+  }
+  if (!isLoopbackHost(host) && allowedOrigins.length === 0) {
+    throw new Error('AUTORECRUIT_CONSOLE_ALLOWED_ORIGINS is required when AUTORECRUIT_CONSOLE_HOST is not loopback');
+  }
+  return { ...config, host, apiKey, allowedOrigins };
 }
 
 function parseOptionalPositiveInteger(value: string | undefined, label: string): number | undefined {
@@ -29,22 +84,54 @@ function parseOptionalPositiveInteger(value: string | undefined, label: string):
 }
 
 export function resolveConsoleApiConfig(overrides: Partial<ConsoleApiConfig> = {}): ConsoleApiConfig {
+  const host = overrides.host ?? process.env.AUTORECRUIT_CONSOLE_HOST?.trim() ?? '127.0.0.1';
+  const port = overrides.port ?? parseOptionalPositiveInteger(process.env.AUTORECRUIT_CONSOLE_PORT?.trim(), 'AUTORECRUIT_CONSOLE_PORT') ?? 4180;
   const apiKey = overrides.apiKey ?? process.env.AUTORECRUIT_CONSOLE_API_KEY?.trim();
-  return {
-    host: overrides.host ?? process.env.AUTORECRUIT_CONSOLE_HOST?.trim() ?? '127.0.0.1',
-    port: overrides.port ?? parseOptionalPositiveInteger(process.env.AUTORECRUIT_CONSOLE_PORT?.trim(), 'AUTORECRUIT_CONSOLE_PORT') ?? 4180,
+  const configuredOrigins = overrides.allowedOrigins
+    ?? parseAllowedOrigins(process.env.AUTORECRUIT_CONSOLE_ALLOWED_ORIGINS);
+  return validateConsoleApiConfig({
+    host,
+    port,
     apiKey: apiKey || undefined,
+    allowedOrigins: configuredOrigins ?? (isLoopbackHost(host) ? defaultLoopbackOrigins(port) : []),
     maxBodyBytes: overrides.maxBodyBytes ?? parseOptionalPositiveInteger(process.env.AUTORECRUIT_CONSOLE_MAX_BODY_BYTES?.trim(), 'AUTORECRUIT_CONSOLE_MAX_BODY_BYTES') ?? 2 * 1024 * 1024,
     frontendDistDir: overrides.frontendDistDir ?? process.env.AUTORECRUIT_CONSOLE_FRONTEND_DIR?.trim() ?? path.resolve('frontend/dist'),
-  };
+  });
 }
 
-function isAuthorized(headers: http.IncomingHttpHeaders, apiKey: string | undefined): boolean {
+function isAuthorized(authorization: string | undefined, apiKey: string | undefined): boolean {
   if (!apiKey) {
     return true;
   }
+  const actual = crypto.createHash('sha256').update(authorization ?? '').digest();
+  const expected = crypto.createHash('sha256').update(`Bearer ${apiKey}`).digest();
+  return crypto.timingSafeEqual(actual, expected);
+}
 
-  return headers.authorization === `Bearer ${apiKey}`;
+export interface ConsoleRequestSecurityInspection {
+  originAllowed: boolean;
+  authorized: boolean;
+  responseHeaders: Record<string, string>;
+}
+
+export function inspectConsoleRequestSecurity(
+  headers: Pick<http.IncomingHttpHeaders, 'authorization' | 'origin'>,
+  config: Pick<ConsoleApiConfig, 'apiKey' | 'allowedOrigins'>,
+): ConsoleRequestSecurityInspection {
+  const origin = typeof headers.origin === 'string' ? headers.origin : undefined;
+  const originAllowed = origin === undefined || config.allowedOrigins.includes(origin);
+  return {
+    originAllowed,
+    authorized: isAuthorized(headers.authorization, config.apiKey),
+    responseHeaders: {
+      vary: 'Origin',
+      ...(originAllowed && origin ? {
+        'access-control-allow-origin': origin,
+        'access-control-allow-methods': 'GET,POST,OPTIONS',
+        'access-control-allow-headers': 'authorization,content-type',
+      } : {}),
+    },
+  };
 }
 
 function readRequestBody(request: http.IncomingMessage, maxBodyBytes: number): Promise<unknown> {
@@ -79,18 +166,10 @@ function readRequestBody(request: http.IncomingMessage, maxBodyBytes: number): P
   });
 }
 
-function corsHeaders(): Record<string, string> {
-  return {
-    'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
-    'access-control-allow-headers': 'authorization,content-type',
-  };
-}
-
-function writeJson(response: http.ServerResponse, result: ApiResponse): void {
+function writeJson(response: http.ServerResponse, result: ApiResponse, securityHeaders: Record<string, string>): void {
   if (Buffer.isBuffer(result.body)) {
     response.writeHead(result.statusCode, {
-      ...corsHeaders(),
+      ...securityHeaders,
       ...result.headers,
     });
     response.end(result.body);
@@ -98,7 +177,7 @@ function writeJson(response: http.ServerResponse, result: ApiResponse): void {
   }
 
   response.writeHead(result.statusCode, {
-    ...corsHeaders(),
+    ...securityHeaders,
     'content-type': 'application/json; charset=utf-8',
     ...result.headers,
   });
@@ -132,6 +211,7 @@ async function serveStaticFile(
   requestPathname: string,
   response: http.ServerResponse,
   frontendDistDir: string,
+  securityHeaders: Record<string, string>,
 ): Promise<boolean> {
   const root = path.resolve(frontendDistDir);
   const pathname = requestPathname === '/' ? '/index.html' : requestPathname;
@@ -139,7 +219,7 @@ async function serveStaticFile(
   const resolved = path.resolve(root, `.${decoded}`);
 
   if (!resolved.startsWith(`${root}${path.sep}`) && resolved !== root) {
-    response.writeHead(403, corsHeaders());
+    response.writeHead(403, securityHeaders);
     response.end('Forbidden');
     return true;
   }
@@ -148,7 +228,7 @@ async function serveStaticFile(
   try {
     const content = await fs.readFile(filePath);
     response.writeHead(200, {
-      ...corsHeaders(),
+      ...securityHeaders,
       'content-type': contentTypeFor(filePath),
     });
     response.end(content);
@@ -163,23 +243,38 @@ async function serveStaticFile(
 }
 
 export function createConsoleApiServer(config: ConsoleApiConfig): http.Server {
+  const validatedConfig = validateConsoleApiConfig(config);
   const taskQueue = new TaskQueue();
   const taskScheduler = new TaskScheduler({ taskQueue });
   const jobReadModel = new JobReadModel();
 
   const server = http.createServer(async (request, response) => {
     response.on('error', () => undefined);
-    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? `${config.host}:${config.port}`}`);
+    const security = inspectConsoleRequestSecurity(request.headers, validatedConfig);
+    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? `${validatedConfig.host}:${validatedConfig.port}`}`);
+
+    if (!security.originAllowed) {
+      writeJson(response, {
+        statusCode: 403,
+        body: {
+          error: {
+            code: 'origin_not_allowed',
+            message: 'Request origin is not allowed',
+          },
+        },
+      }, security.responseHeaders);
+      return;
+    }
 
     if (request.method === 'OPTIONS') {
-      response.writeHead(204, corsHeaders());
+      response.writeHead(204, security.responseHeaders);
       response.end();
       return;
     }
 
     try {
       if (url.pathname.startsWith('/api/')) {
-        if (!isAuthorized(request.headers, config.apiKey)) {
+        if (!security.authorized) {
           writeJson(response, {
             statusCode: 401,
             body: {
@@ -188,13 +283,13 @@ export function createConsoleApiServer(config: ConsoleApiConfig): http.Server {
                 message: 'Missing or invalid bearer token',
               },
             },
-          });
+          }, security.responseHeaders);
           return;
         }
 
         const body = request.method === 'GET'
           ? undefined
-          : await readRequestBody(request, config.maxBodyBytes);
+          : await readRequestBody(request, validatedConfig.maxBodyBytes);
         writeJson(response, await handleApiRequest({
           method: request.method ?? 'GET',
           pathname: url.pathname,
@@ -203,11 +298,11 @@ export function createConsoleApiServer(config: ConsoleApiConfig): http.Server {
           taskQueue,
           taskScheduler,
           jobReadModel,
-        }));
+        }), security.responseHeaders);
         return;
       }
 
-      if (request.method === 'GET' && await serveStaticFile(url.pathname, response, config.frontendDistDir)) {
+      if (request.method === 'GET' && await serveStaticFile(url.pathname, response, validatedConfig.frontendDistDir, security.responseHeaders)) {
         return;
       }
 
@@ -219,7 +314,7 @@ export function createConsoleApiServer(config: ConsoleApiConfig): http.Server {
             message: `No route for ${request.method ?? 'GET'} ${url.pathname}`,
           },
         },
-      });
+      }, security.responseHeaders);
     } catch (error) {
       writeJson(response, {
         statusCode: 400,
@@ -229,7 +324,7 @@ export function createConsoleApiServer(config: ConsoleApiConfig): http.Server {
             message: error instanceof Error ? error.message : String(error),
           },
         },
-      });
+      }, security.responseHeaders);
     }
   });
   server.once('close', () => taskScheduler.close());
@@ -248,6 +343,7 @@ async function main(): Promise<void> {
     host: config.host,
     port: config.port,
     auth: config.apiKey ? 'bearer' : 'none',
+    allowedOrigins: config.allowedOrigins,
     frontend: config.frontendDistDir,
     endpoints: [
       'GET /api/health',

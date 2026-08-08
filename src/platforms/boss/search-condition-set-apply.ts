@@ -8,9 +8,9 @@ import {
 import type { SearchCondition } from '../../types/job.js';
 import {
   applyBossDirectSearch,
-  estimateBossDirectSearchTimeoutMs,
   resetBossSearchFilters,
-} from './actions/search-actions.js';
+} from './actions/filter-actions.js';
+import { estimateBossDirectSearchTimeoutMs } from './actions/search-actions.js';
 import { acquireBossSearchLease } from './search-lease.js';
 
 export type BossRecentViewedPolicy = 'exclude' | 'include' | 'condition-set';

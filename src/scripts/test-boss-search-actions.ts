@@ -9,16 +9,20 @@ import {
   applyBossSearchCondition,
   assertBossSearchFilterStateRestorable,
   discoverBossSearchFilters,
-  extractBossCandidateList,
-  openBossDirectSearch,
-  openBossResumeDetail,
-  openBossSubscribeSearch,
-  prepareBossSearchConditionPage,
   readBossDirectSearchVerificationSummary,
   resetBossSearchFilters,
   snapshotBossSearchFilterState,
+} from '../platforms/boss/actions/filter-actions.js';
+import { prepareBossSearchConditionPage } from '../platforms/boss/actions/search-actions.js';
+import {
+  openBossDirectSearch,
+  openBossSubscribeSearch,
+} from '../platforms/boss/actions/search-entry-actions.js';
+import { extractBossCandidateList } from '../platforms/boss/actions/candidate-actions.js';
+import {
+  openBossResumeDetail,
   visitBossSeenCandidateDetail,
-} from '../platforms/boss/actions/search-actions.js';
+} from '../platforms/boss/actions/candidate-detail-actions.js';
 import {
   buildBossSavedSearchReference,
   openBossSavedSubscriptionSearch,

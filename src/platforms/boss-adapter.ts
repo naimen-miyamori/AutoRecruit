@@ -1,22 +1,30 @@
 import type { PlatformAdapter } from './types.js';
 import {
   applyBossSearchCondition,
+  discoverBossSearchFilters,
+  readBossSearchConditionResultTotal,
+} from './boss/actions/filter-actions.js';
+import {
   assertBossAuthenticated,
   bossChatSearchUrl,
   bossLoginUrl,
-  closeBossResumeDetail,
-  discoverBossSearchFilters,
-  estimateBossSearchTimeoutMs,
-  extractBossCandidateList,
   openBossAuthenticatedHome,
-  openBossDirectSearch,
   openBossLoginPage,
-  openBossResumeDetail,
-  openBossSubscribeSearch,
+} from './boss/actions/navigation-actions.js';
+import {
+  estimateBossSearchTimeoutMs,
   prepareBossSearchConditionPage,
-  readBossSearchConditionResultTotal,
-  runBossPostOpenActions,
 } from './boss/actions/search-actions.js';
+import {
+  openBossDirectSearch,
+  openBossSubscribeSearch,
+} from './boss/actions/search-entry-actions.js';
+import { extractBossCandidateList } from './boss/actions/candidate-actions.js';
+import { openBossResumeDetail } from './boss/actions/candidate-detail-actions.js';
+import {
+  closeBossResumeDetail,
+  runBossPostOpenActions,
+} from './boss/actions/post-open-actions.js';
 import {
   executeBossSearchConditionPlan,
   openBossSavedSubscriptionSearch,
@@ -27,7 +35,7 @@ import { parseBossResumeData } from './boss/actions/resume-actions.js';
 
 export {
   closeBossResumeDetail,
-} from './boss/actions/search-actions.js';
+} from './boss/actions/post-open-actions.js';
 export {
   BossUnexpectedContactDialogError,
   BossForwardPreConfirmationError,
