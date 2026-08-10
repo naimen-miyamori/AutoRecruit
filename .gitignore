@@ -14,3 +14,4 @@ playwright-report/
 test-results/
 .assistant/
 tmp-*.png
+tmp/
