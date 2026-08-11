@@ -57,6 +57,11 @@ owning domain instructions for screens that expose platform, RAG, Boss, or Talen
   review, task completion, or schedule change.
 - Pass AbortSignal through read requests where the client supports it, and render explicit loading,
   empty, access/error, and retry states rather than treating a failed request as an empty result.
+- Browser-runtime UI consumes the server-parsed safe view and is informational only. It may show a
+  short generation fingerprint, reachability, issue codes, and a bounded operation summary; it must
+  not infer authentication/execution authority or expose cookies, full URLs, profile paths, target
+  IDs, or browser endpoints. Stop/recover remain explicit server-side operations, never a hidden
+  client-only permission.
 - Talent Mapping permits 51job, Liepin, Zhilian, or all only; Boss must not be offered. Detail
   opening requires the project's explicit confirmation contract. Classification generation is a
   queued task, and entity/classification acceptance or revocation remains a human-reviewed mutation.

@@ -1,5 +1,5 @@
-export type { ArtifactDescriptor } from '../../../src/server/api-contracts.js';
-export { parseOperationModeCatalogResponse } from '../../../src/server/api-contracts.js';
+export type { ArtifactDescriptor, PlatformRuntimeSafeViewResponse } from '../../../src/server/api-contracts.js';
+export { parseOperationModeCatalogResponse, parsePlatformRuntimeListResponse } from '../../../src/server/api-contracts.js';
 export type {
   OperationModeCatalog,
   OperationModeCatalogItem,

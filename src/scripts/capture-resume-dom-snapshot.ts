@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { config } from '../config.js';
+import { runBrowserCliMain } from '../browser/cli-lifecycle.js';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from '../browser/session.js';
 import { getResumeDomSnapshot, collectResumePageEvidence, waitForResumeDetailContentRef } from '../browser/resume-detail.js';
 import { JobStore } from '../storage/job-store.js';
@@ -138,8 +139,5 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  });
+  void runBrowserCliMain(main);
 }

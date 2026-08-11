@@ -8,7 +8,7 @@ import {
   openAuthenticatedSubscribePageRef,
   openLoginSessionRef,
   persistBrowserSessionRef,
-  verifyPersistedBrowserSessionRef,
+  verifyPublishedBrowserRuntimeRef,
 } from '../browser/session.js';
 import { waitForManualLoginAndPersistSession } from '../browser/manual-login-refresh.js';
 import { runRagOpsTask } from './rag-ops-runner.js';
@@ -33,6 +33,7 @@ import type {
   WorkflowFailurePolicy,
 } from './types.js';
 import type { SearchSubscriptionSummary } from '../types/job.js';
+import { PlatformRuntimeError } from '../browser/platform-runtime-inspector.js';
 
 export type TaskRunner = (argv: readonly string[], task: TaskRecord) => Promise<MainResult>;
 export type LoginRefreshRunner = (input: LoginRefreshTaskInput, task: TaskRecord) => Promise<LoginRefreshTaskOutput>;
@@ -168,6 +169,8 @@ function summarizeTask(task: TaskRecord): TaskSummary {
     inputSummary: task.inputSummary,
     outputSummary: task.outputSummary,
     error: task.error,
+    failureCode: task.failureCode,
+    failureClass: task.failureClass,
   };
 }
 
@@ -197,6 +200,17 @@ function formatConsoleArgs(args: unknown[]): string {
       return String(arg);
     }
   }).join(' ').slice(0, 8000);
+}
+
+function findPlatformRuntimeError(error: unknown): PlatformRuntimeError | undefined {
+  let current = error;
+  const seen = new Set<unknown>();
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof PlatformRuntimeError) return current;
+    seen.add(current);
+    current = current.cause;
+  }
+  return undefined;
 }
 
 /**
@@ -480,7 +494,7 @@ export class TaskQueue {
         openLoginSession: openLoginSessionRef.fn,
         openAuthenticatedHome: openAuthenticatedSubscribePageRef.fn,
         persistBrowserSession: persistBrowserSessionRef.fn,
-        verifyPersistedBrowserSession: verifyPersistedBrowserSessionRef.fn,
+        verifyPublishedBrowserRuntime: verifyPublishedBrowserRuntimeRef.fn,
         closeBrowserSession: closeBrowserSessionRef.fn,
       }, { keepOpen: false });
 
@@ -810,6 +824,9 @@ export class TaskQueue {
         task.outputSummary = buildOutputSummary(error.summary);
       }
       task.error = error instanceof Error ? error.message : String(error);
+      const runtimeError = findPlatformRuntimeError(error);
+      task.failureCode = runtimeError?.code;
+      task.failureClass = runtimeError ? 'infrastructure' : 'business';
       task.finishedAt = finishedAt;
       task.updatedAt = finishedAt;
       this.appendLog(task, 'error', task.error);

@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { runBrowserCliMain } from '../browser/cli-lifecycle.js';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from '../browser/session.js';
 import { getPlatformAdapter } from '../platforms/registry.js';
 
@@ -66,8 +67,5 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  });
+  void runBrowserCliMain(main);
 }

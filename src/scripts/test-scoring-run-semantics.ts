@@ -11,7 +11,7 @@ import { config, resolveStorageStatePath } from '../config.js';
 import { buildJobKey } from '../parsers/jd-parser.js';
 import { getResumeDomSnapshot, collectResumePageEvidence, openResumeDetail } from '../browser/resume-detail.js';
 import { apply51jobViewedCandidatePolicyRef, clickSearchTriggerRef, findSubscriptionCardRef, openAuthenticatedSubscribePageRef, openSubscribeSearch, waitForAuthenticatedSubscribeReadyRef, waitForSearchTriggerReadyRef } from '../browser/subscribe-search.js';
-import { BrowserSession, closeBrowserSessionRef, createFreshBrowserSessionRef, createPersistentBrowserSessionRef, isLiepinReusableBrowserEnabled, isReusableBrowserEnabled, openLoginSessionRef, persistBrowserSessionRef, openAuthenticatedSubscribePageRef as openAuthenticatedSubscribePageSessionRef, resolveBrowserHeadless, verifyPersistedBrowserSessionRef } from '../browser/session.js';
+import { BrowserSession, closeBrowserSessionRef, openOrRefreshPlatformRuntimeForLoginRef, openLoginSessionRef, persistBrowserSessionRef, openAuthenticatedSubscribePageRef as openAuthenticatedSubscribePageSessionRef, verifyPublishedBrowserRuntimeRef } from '../browser/session.js';
 import { validateCandidateListExtraction } from '../extraction/extractor.js';
 import { resolveOpenAISettings } from '../llm/openai-client.js';
 import { CodexSessionProviderError } from '../llm/codex-session-provider.js';
@@ -717,8 +717,7 @@ function createManualLoginSessionStub() {
   const closeCalls: number[] = [];
   const verifyCalls: string[] = [];
   const openLoginCalls: string[] = [];
-  const createFreshCalls: string[] = [];
-  const createPersistentCalls: string[] = [];
+  const openRuntimeCalls: string[] = [];
   let authFailuresRemaining = 0;
   let persistShouldThrow: unknown;
   let verifyShouldThrow: unknown;
@@ -760,12 +759,8 @@ function createManualLoginSessionStub() {
     setVerifyError(error: unknown) {
       verifyShouldThrow = error;
     },
-    createFreshBrowserSession: async () => {
-      createFreshCalls.push('fresh');
-      return session;
-    },
-    createPersistentBrowserSession: async (platform: string) => {
-      createPersistentCalls.push(platform);
+    openOrRefreshRuntimeForLogin: async (platform: string) => {
+      openRuntimeCalls.push(platform);
       return session;
     },
     openLoginSession: async (platform: string) => {
@@ -785,7 +780,7 @@ function createManualLoginSessionStub() {
         throw persistShouldThrow;
       }
     },
-    verifyPersistedBrowserSession: async (platform: string) => {
+    verifyPublishedBrowserRuntime: async (platform: string) => {
       verifyCalls.push(platform);
       if (verifyShouldThrow) {
         throw verifyShouldThrow;
@@ -799,34 +794,8 @@ function createManualLoginSessionStub() {
     getPersistCalls: () => persistCalls,
     getVerifyCalls: () => verifyCalls,
     getOpenLoginCalls: () => openLoginCalls,
-    getCreateFreshCalls: () => createFreshCalls,
-    getCreatePersistentCalls: () => createPersistentCalls,
+    getOpenRuntimeCalls: () => openRuntimeCalls,
     getCloseCalls: () => closeCalls,
-  };
-}
-
-function createClosableBrowserSessionStub(options: { temporaryUserDataDir?: string; closeBrowser?: boolean; keepOpenOnExit?: boolean } = {}) {
-  const closeOrder: string[] = [];
-  const session = {
-    context: {
-      close: async () => {
-        closeOrder.push('context');
-      },
-    },
-    browser: {
-      close: async () => {
-        closeOrder.push('browser');
-      },
-    },
-    page: {} as never,
-    temporaryUserDataDir: options.temporaryUserDataDir,
-    closeBrowser: options.closeBrowser,
-    keepOpenOnExit: options.keepOpenOnExit,
-  } as unknown as BrowserSession;
-
-  return {
-    session,
-    getCloseOrder: () => [...closeOrder],
   };
 }
 
@@ -925,6 +894,7 @@ function createDomSnapshotPageStub() {
 }
 
 function stubSuccessfulRun(indexModule: Awaited<ReturnType<typeof loadIndexModule>>) {
+  indexModule.preflightPlatformRuntimeManifestsRef.fn = async () => undefined;
   indexModule.parseJobDescriptionRef.fn = async () => buildNormalizedJob();
   indexModule.extractionBoundary.extractCandidateListFromPage = async () => ({
     candidates: [{ candidateId: 'cand-1' }],
@@ -981,6 +951,7 @@ function stubSuccessfulRun(indexModule: Awaited<ReturnType<typeof loadIndexModul
     context: { close: async () => undefined },
     browser: { close: async () => undefined },
   } as never);
+  indexModule.closeBrowserSessionRef.fn = async () => undefined;
 }
 
 async function captureConsole(fn: () => Promise<void>) {
@@ -1717,13 +1688,13 @@ describe('scoring run semantics', () => {
     assert.equal(searchOpen.isViewedFilterChecked(), true);
   });
 
-  it('closes 51job subscribe tabs after a popup search page opens', async () => {
+
+  it('keeps 51job subscription pages until the runtime can commit popup handoff', async () => {
     const searchOpen = createSubscribeSearchOpenStub();
     searchOpen.showPopup();
     searchOpen.showCardTextTrigger();
     searchOpen.setCurrentUrl('https://ehire.51job.com/Revision/talent/subscribe?rt=current');
     searchOpen.addExtraPage('stale-subscribe', 'https://ehire.51job.com/Revision/talent/subscribe?rt=stale');
-    searchOpen.addExtraPage('unrelated-search', 'https://ehire.51job.com/Revision/talent/search?rt=old');
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageRef.fn;
     const originalFindSubscriptionCard = findSubscriptionCardRef.fn;
     const originalWaitForSearchTriggerReady = waitForSearchTriggerReadyRef.fn;
@@ -1736,14 +1707,13 @@ describe('scoring run semantics', () => {
 
     try {
       await openSubscribeSearch(searchOpen.page, '泰国 英语');
+      assert.deepStrictEqual(searchOpen.getClosedPageLabels(), []);
     } finally {
       openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
       findSubscriptionCardRef.fn = originalFindSubscriptionCard;
       waitForSearchTriggerReadyRef.fn = originalWaitForSearchTriggerReady;
       clickSearchTriggerRef.fn = originalClickSearchTrigger;
     }
-
-    assert.deepStrictEqual(searchOpen.getClosedPageLabels(), ['main', 'stale-subscribe']);
   });
 
   it('clears the 51job viewed filter when viewed candidates are explicitly included', async () => {
@@ -2195,10 +2165,9 @@ describe('scoring run semantics', () => {
     assert.equal(waits[0]! >= 2000 && waits[0]! <= 4000, true);
   });
 
-  it('opens manual login in an isolated persistent browser profile', async () => {
+  it('opens manual login through the single login-owned runtime owner', async () => {
     const loginSession = createManualLoginSessionStub();
-    const originalCreateFreshBrowserSession = createFreshBrowserSessionRef.fn;
-    const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;
+    const originalOpenOrRefreshPlatformRuntimeForLogin = openOrRefreshPlatformRuntimeForLoginRef.fn;
     const originalGoto = loginSession.page.goto;
     const originalUrl = loginSession.page.url;
     const originalLocator = loginSession.page.locator;
@@ -2207,8 +2176,7 @@ describe('scoring run semantics', () => {
     let currentUrl = 'about:blank';
     let currentBodyText = '';
 
-    createFreshBrowserSessionRef.fn = (async () => loginSession.createFreshBrowserSession()) as typeof createFreshBrowserSessionRef.fn;
-    createPersistentBrowserSessionRef.fn = (async (platform) => loginSession.createPersistentBrowserSession(platform)) as typeof createPersistentBrowserSessionRef.fn;
+    openOrRefreshPlatformRuntimeForLoginRef.fn = (async (platform) => loginSession.openOrRefreshRuntimeForLogin(platform)) as typeof openOrRefreshPlatformRuntimeForLoginRef.fn;
     loginSession.page.goto = (async (url: string) => {
       gotoCalls.push(url);
       currentUrl = url;
@@ -2230,12 +2198,10 @@ describe('scoring run semantics', () => {
       const session = await openLoginSessionRef.fn('liepin');
 
       assert.equal(session, loginSession.session);
-      assert.deepStrictEqual(loginSession.getCreateFreshCalls(), []);
-      assert.deepStrictEqual(loginSession.getCreatePersistentCalls(), ['liepin']);
+      assert.deepStrictEqual(loginSession.getOpenRuntimeCalls(), ['liepin']);
       assert.deepStrictEqual(gotoCalls, ['https://h.liepin.com/account/login']);
     } finally {
-      createFreshBrowserSessionRef.fn = originalCreateFreshBrowserSession;
-      createPersistentBrowserSessionRef.fn = originalCreatePersistentBrowserSession;
+      openOrRefreshPlatformRuntimeForLoginRef.fn = originalOpenOrRefreshPlatformRuntimeForLogin;
       loginSession.page.goto = originalGoto;
       loginSession.page.url = originalUrl;
       loginSession.page.locator = originalLocator;
@@ -2244,14 +2210,14 @@ describe('scoring run semantics', () => {
 
   it('accepts a staged Liepin manual login landing when the login page body is blank', async () => {
     const loginSession = createManualLoginSessionStub();
-    const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;
+    const originalOpenOrRefreshPlatformRuntimeForLogin = openOrRefreshPlatformRuntimeForLoginRef.fn;
     const originalGoto = loginSession.page.goto;
     const originalUrl = loginSession.page.url;
     const originalLocator = loginSession.page.locator;
 
     let currentUrl = 'about:blank';
 
-    createPersistentBrowserSessionRef.fn = (async (platform) => loginSession.createPersistentBrowserSession(platform)) as typeof createPersistentBrowserSessionRef.fn;
+    openOrRefreshPlatformRuntimeForLoginRef.fn = (async (platform) => loginSession.openOrRefreshRuntimeForLogin(platform)) as typeof openOrRefreshPlatformRuntimeForLoginRef.fn;
     loginSession.page.goto = (async (url: string) => {
       currentUrl = url;
     }) as typeof loginSession.page.goto;
@@ -2272,10 +2238,10 @@ describe('scoring run semantics', () => {
       });
 
       assert.deepStrictEqual(output.stdout, ['Browser opened for Liepin manual login. Complete the login flow, then return to the terminal when you are done.']);
-      assert.deepStrictEqual(loginSession.getCreatePersistentCalls(), ['liepin']);
+      assert.deepStrictEqual(loginSession.getOpenRuntimeCalls(), ['liepin']);
       assert.equal(currentUrl, 'https://h.liepin.com/account/login');
     } finally {
-      createPersistentBrowserSessionRef.fn = originalCreatePersistentBrowserSession;
+      openOrRefreshPlatformRuntimeForLoginRef.fn = originalOpenOrRefreshPlatformRuntimeForLogin;
       loginSession.page.goto = originalGoto;
       loginSession.page.url = originalUrl;
       loginSession.page.locator = originalLocator;
@@ -2284,14 +2250,14 @@ describe('scoring run semantics', () => {
 
   it('accepts a staged Liepin manual login landing that stays on the login page', async () => {
     const loginSession = createManualLoginSessionStub();
-    const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;
+    const originalOpenOrRefreshPlatformRuntimeForLogin = openOrRefreshPlatformRuntimeForLoginRef.fn;
     const originalGoto = loginSession.page.goto;
     const originalUrl = loginSession.page.url;
     const originalLocator = loginSession.page.locator;
 
     let currentUrl = 'about:blank';
 
-    createPersistentBrowserSessionRef.fn = (async (platform) => loginSession.createPersistentBrowserSession(platform)) as typeof createPersistentBrowserSessionRef.fn;
+    openOrRefreshPlatformRuntimeForLoginRef.fn = (async (platform) => loginSession.openOrRefreshRuntimeForLogin(platform)) as typeof openOrRefreshPlatformRuntimeForLoginRef.fn;
     loginSession.page.goto = (async (url: string) => {
       currentUrl = url;
     }) as typeof loginSession.page.goto;
@@ -2315,7 +2281,7 @@ describe('scoring run semantics', () => {
         'Browser opened for Liepin manual login. Complete the login flow, then return to the terminal when you are done.',
       ]);
     } finally {
-      createPersistentBrowserSessionRef.fn = originalCreatePersistentBrowserSession;
+      openOrRefreshPlatformRuntimeForLoginRef.fn = originalOpenOrRefreshPlatformRuntimeForLogin;
       loginSession.page.goto = originalGoto;
       loginSession.page.url = originalUrl;
       loginSession.page.locator = originalLocator;
@@ -2324,12 +2290,12 @@ describe('scoring run semantics', () => {
 
   it('keeps non-Liepin manual login on the existing adapter-driven path', async () => {
     const loginSession = createManualLoginSessionStub();
-    const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;
+    const originalOpenOrRefreshPlatformRuntimeForLogin = openOrRefreshPlatformRuntimeForLoginRef.fn;
     const originalGoto = loginSession.page.goto;
 
     const gotoCalls: string[] = [];
 
-    createPersistentBrowserSessionRef.fn = (async (platform) => loginSession.createPersistentBrowserSession(platform)) as typeof createPersistentBrowserSessionRef.fn;
+    openOrRefreshPlatformRuntimeForLoginRef.fn = (async (platform) => loginSession.openOrRefreshRuntimeForLogin(platform)) as typeof openOrRefreshPlatformRuntimeForLoginRef.fn;
     loginSession.page.goto = (async (url: string) => {
       gotoCalls.push(url);
     }) as typeof loginSession.page.goto;
@@ -2337,22 +2303,22 @@ describe('scoring run semantics', () => {
     try {
       await openLoginSessionRef.fn('51job');
     } finally {
-      createPersistentBrowserSessionRef.fn = originalCreatePersistentBrowserSession;
+      openOrRefreshPlatformRuntimeForLoginRef.fn = originalOpenOrRefreshPlatformRuntimeForLogin;
       loginSession.page.goto = originalGoto;
     }
 
-    assert.deepStrictEqual(loginSession.getCreatePersistentCalls(), ['51job']);
+    assert.deepStrictEqual(loginSession.getOpenRuntimeCalls(), ['51job']);
     assert.deepStrictEqual(gotoCalls, ['https://ehire.51job.com/Revision/talent/subscribe']);
   });
 
   it('opens Zhilian manual login on the passport login page', async () => {
     const loginSession = createManualLoginSessionStub();
-    const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;
+    const originalOpenOrRefreshPlatformRuntimeForLogin = openOrRefreshPlatformRuntimeForLoginRef.fn;
     const originalGoto = loginSession.page.goto;
 
     const gotoCalls: string[] = [];
 
-    createPersistentBrowserSessionRef.fn = (async (platform) => loginSession.createPersistentBrowserSession(platform)) as typeof createPersistentBrowserSessionRef.fn;
+    openOrRefreshPlatformRuntimeForLoginRef.fn = (async (platform) => loginSession.openOrRefreshRuntimeForLogin(platform)) as typeof openOrRefreshPlatformRuntimeForLoginRef.fn;
     loginSession.page.goto = (async (url: string) => {
       gotoCalls.push(url);
     }) as typeof loginSession.page.goto;
@@ -2360,22 +2326,22 @@ describe('scoring run semantics', () => {
     try {
       await openLoginSessionRef.fn('zhilian');
     } finally {
-      createPersistentBrowserSessionRef.fn = originalCreatePersistentBrowserSession;
+      openOrRefreshPlatformRuntimeForLoginRef.fn = originalOpenOrRefreshPlatformRuntimeForLogin;
       loginSession.page.goto = originalGoto;
     }
 
-    assert.deepStrictEqual(loginSession.getCreatePersistentCalls(), ['zhilian']);
+    assert.deepStrictEqual(loginSession.getOpenRuntimeCalls(), ['zhilian']);
     assert.deepStrictEqual(gotoCalls, ['https://passport.zhaopin.com/org/login']);
   });
 
   it('opens Boss manual login on the provided Boss login page', async () => {
     const loginSession = createManualLoginSessionStub();
-    const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;
+    const originalOpenOrRefreshPlatformRuntimeForLogin = openOrRefreshPlatformRuntimeForLoginRef.fn;
     const originalGoto = loginSession.page.goto;
 
     const gotoCalls: string[] = [];
 
-    createPersistentBrowserSessionRef.fn = (async (platform) => loginSession.createPersistentBrowserSession(platform)) as typeof createPersistentBrowserSessionRef.fn;
+    openOrRefreshPlatformRuntimeForLoginRef.fn = (async (platform) => loginSession.openOrRefreshRuntimeForLogin(platform)) as typeof openOrRefreshPlatformRuntimeForLoginRef.fn;
     loginSession.page.goto = (async (url: string) => {
       gotoCalls.push(url);
     }) as typeof loginSession.page.goto;
@@ -2383,22 +2349,22 @@ describe('scoring run semantics', () => {
     try {
       await openLoginSessionRef.fn('boss');
     } finally {
-      createPersistentBrowserSessionRef.fn = originalCreatePersistentBrowserSession;
+      openOrRefreshPlatformRuntimeForLoginRef.fn = originalOpenOrRefreshPlatformRuntimeForLogin;
       loginSession.page.goto = originalGoto;
     }
 
-    assert.deepStrictEqual(loginSession.getCreatePersistentCalls(), ['boss']);
+    assert.deepStrictEqual(loginSession.getOpenRuntimeCalls(), ['boss']);
     assert.deepStrictEqual(gotoCalls, ['https://www.zhipin.com/web/user/?ka=header-login']);
   });
 
   it('fails Liepin manual login entry when staged navigation lands on an unexpected page', async () => {
     const loginSession = createManualLoginSessionStub();
-    const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;
+    const originalOpenOrRefreshPlatformRuntimeForLogin = openOrRefreshPlatformRuntimeForLoginRef.fn;
     const originalGoto = loginSession.page.goto;
     const originalUrl = loginSession.page.url;
     const originalLocator = loginSession.page.locator;
 
-    createPersistentBrowserSessionRef.fn = (async (platform) => loginSession.createPersistentBrowserSession(platform)) as typeof createPersistentBrowserSessionRef.fn;
+    openOrRefreshPlatformRuntimeForLoginRef.fn = (async (platform) => loginSession.openOrRefreshRuntimeForLogin(platform)) as typeof openOrRefreshPlatformRuntimeForLoginRef.fn;
     loginSession.page.goto = (async (url: string) => {
       void url;
     }) as typeof loginSession.page.goto;
@@ -2418,7 +2384,7 @@ describe('scoring run semantics', () => {
         /unexpected page.*https:\/\/h\.liepin\.com\/account\/verify/,
       );
     } finally {
-      createPersistentBrowserSessionRef.fn = originalCreatePersistentBrowserSession;
+      openOrRefreshPlatformRuntimeForLoginRef.fn = originalOpenOrRefreshPlatformRuntimeForLogin;
       loginSession.page.goto = originalGoto;
       loginSession.page.url = originalUrl;
       loginSession.page.locator = originalLocator;
@@ -2427,7 +2393,7 @@ describe('scoring run semantics', () => {
 
   it('fails Liepin manual login entry when staged navigation lands on a wow redirect page', async () => {
     const loginSession = createManualLoginSessionStub();
-    const originalCreatePersistentBrowserSession = createPersistentBrowserSessionRef.fn;
+    const originalOpenOrRefreshPlatformRuntimeForLogin = openOrRefreshPlatformRuntimeForLoginRef.fn;
     const originalGoto = loginSession.page.goto;
     const originalUrl = loginSession.page.url;
     const originalLocator = loginSession.page.locator;
@@ -2435,7 +2401,7 @@ describe('scoring run semantics', () => {
     const gotoCalls: string[] = [];
     let currentUrl = 'about:blank';
 
-    createPersistentBrowserSessionRef.fn = (async (platform) => loginSession.createPersistentBrowserSession(platform)) as typeof createPersistentBrowserSessionRef.fn;
+    openOrRefreshPlatformRuntimeForLoginRef.fn = (async (platform) => loginSession.openOrRefreshRuntimeForLogin(platform)) as typeof openOrRefreshPlatformRuntimeForLoginRef.fn;
     loginSession.page.goto = (async (url: string) => {
       gotoCalls.push(url);
       currentUrl = 'https://wow.liepin.com/t1012695/4410f519.html';
@@ -2456,80 +2422,13 @@ describe('scoring run semantics', () => {
         /redirect\/interstitial page.*wow\.liepin\.com\/t1012695\/4410f519\.html/,
       );
     } finally {
-      createPersistentBrowserSessionRef.fn = originalCreatePersistentBrowserSession;
+      openOrRefreshPlatformRuntimeForLoginRef.fn = originalOpenOrRefreshPlatformRuntimeForLogin;
       loginSession.page.goto = originalGoto;
       loginSession.page.url = originalUrl;
       loginSession.page.locator = originalLocator;
     }
 
     assert.deepStrictEqual(gotoCalls, ['https://h.liepin.com/account/login']);
-  });
-
-  it('removes temporary persistent profile directories after closing the browser session', async () => {
-    const temporaryUserDataDir = await makeIsolatedTempDir();
-    const closableSession = createClosableBrowserSessionStub({ temporaryUserDataDir });
-
-    await closeBrowserSessionRef.fn(closableSession.session);
-
-    await assert.rejects(fs.access(temporaryUserDataDir));
-    assert.deepStrictEqual(closableSession.getCloseOrder(), ['context', 'browser']);
-  });
-
-  it('keeps a Liepin headed browser session open until manual close is requested', async () => {
-    const closableSession = createClosableBrowserSessionStub({ keepOpenOnExit: true });
-
-    await closeBrowserSessionRef.fn(closableSession.session);
-
-    assert.deepStrictEqual(closableSession.getCloseOrder(), []);
-  });
-
-  it('forces Liepin browser sessions to headed mode even when headless is requested', () => {
-    assert.equal(resolveBrowserHeadless('liepin', true), false);
-    assert.equal(resolveBrowserHeadless('liepin', false), false);
-    assert.equal(resolveBrowserHeadless('51job', true), true);
-    assert.equal(resolveBrowserHeadless('zhilian', true), true);
-  });
-
-  it('enables reusable Liepin browser sessions only for headed Liepin runs unless explicitly disabled', () => {
-    const originalReuseBrowser = config.playwright.reuseBrowserByPlatform.liepin;
-
-    try {
-      (config.playwright.reuseBrowserByPlatform as { liepin: boolean }).liepin = true;
-      assert.equal(isLiepinReusableBrowserEnabled(true), true);
-      assert.equal(isLiepinReusableBrowserEnabled(false), true);
-
-      (config.playwright.reuseBrowserByPlatform as { liepin: boolean }).liepin = false;
-      assert.equal(isLiepinReusableBrowserEnabled(false), false);
-    } finally {
-      (config.playwright.reuseBrowserByPlatform as { liepin: boolean }).liepin = originalReuseBrowser;
-    }
-  });
-
-  it('supports reusable browser sessions per platform with production platforms enabled by default', () => {
-    const originalReuseBrowser = { ...config.playwright.reuseBrowserByPlatform };
-    const originalHeadless = config.playwright.headless;
-
-    try {
-      (config.playwright as { headless: boolean }).headless = false;
-      assert.equal(isReusableBrowserEnabled('liepin'), true);
-      assert.equal(isReusableBrowserEnabled('51job'), true);
-      assert.equal(isReusableBrowserEnabled('zhilian'), true);
-
-      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean })['51job'] = false;
-      assert.equal(isReusableBrowserEnabled('51job', false), false);
-      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean }).zhilian = false;
-      assert.equal(isReusableBrowserEnabled('zhilian', false), false);
-
-      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean })['51job'] = true;
-      (config.playwright.reuseBrowserByPlatform as { '51job': boolean; zhilian: boolean }).zhilian = true;
-      assert.equal(isReusableBrowserEnabled('51job', false), true);
-      assert.equal(isReusableBrowserEnabled('zhilian', false), true);
-      assert.equal(isReusableBrowserEnabled('51job', true), false);
-      assert.equal(isReusableBrowserEnabled('zhilian', true), false);
-    } finally {
-      (config.playwright as { headless: boolean }).headless = originalHeadless;
-      Object.assign(config.playwright.reuseBrowserByPlatform, originalReuseBrowser);
-    }
   });
 
   it('diagnoses manual login session module identity', async () => {
@@ -2547,7 +2446,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     const originalUrl = loginSession.page.url;
@@ -2563,9 +2462,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -2612,7 +2511,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.session.context.storageState = originalSessionStorageState;
       loginSession.page.url = originalUrl;
@@ -2642,7 +2541,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     const originalUrl = loginSession.page.url;
@@ -2658,9 +2557,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -2707,7 +2606,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.session.context.storageState = originalSessionStorageState;
       loginSession.page.url = originalUrl;
@@ -2738,7 +2637,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     let now = 0;
@@ -2757,9 +2656,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -2796,7 +2695,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
     }
@@ -2837,7 +2736,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     let now = 0;
@@ -2856,9 +2755,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -2895,7 +2794,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
     }
@@ -2933,7 +2832,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     let now = 0;
@@ -2952,9 +2851,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -2991,7 +2890,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
     }
@@ -3018,7 +2917,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     let now = 0;
@@ -3037,9 +2936,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3076,7 +2975,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
     }
@@ -3096,14 +2995,14 @@ describe('scoring run semantics', () => {
     assert.equal(loginSession.getCloseCalls().length, 1);
   });
 
-  it('saves and verifies a Zhilian session without opening a probe tab when auth cookies exist on passport', async () => {
+  it('uses the owned Zhilian page for authenticated-home readiness without opening a probe tab', async () => {
     const loginSession = createManualLoginSessionStub();
     const loginPage = loginSession.page as unknown as Page;
     const originalArgv = process.argv;
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     let now = 0;
@@ -3117,15 +3016,14 @@ describe('scoring run semantics', () => {
       if (platform !== 'zhilian') {
         throw new Error(`Unexpected platform: ${platform}`);
       }
-      void page;
-      throw new Error('login page should not be probed once auth cookies exist');
+      return page;
     }) as typeof openAuthenticatedSubscribePageSessionRef.fn;
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3167,7 +3065,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
     }
@@ -3175,10 +3073,11 @@ describe('scoring run semantics', () => {
     assert.equal(loginSucceeded, true);
     assert.deepStrictEqual(output.stdout, [
       'Waiting for login to complete.',
-      'Authenticated page confirmed, storage state saved, and fresh-session reuse verified.',
+      buildManualLoginReadyLog('zhilian', 'https://passport.zhaopin.com/org/login', ''),
+      'Authenticated page confirmed, storage state saved, and published runtime verified.',
     ]);
     assert.equal(caughtError, undefined);
-    assert.deepStrictEqual(checkedPages, []);
+    assert.deepStrictEqual(checkedPages, [loginPage]);
     assert.equal(newPageCalls, 0);
     assert.deepStrictEqual(loginSession.getOpenLoginCalls(), ['zhilian']);
     assert.deepStrictEqual(loginSession.getOpenAuthenticatedCalls(), []);
@@ -3195,7 +3094,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     let now = 0;
@@ -3214,9 +3113,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3257,7 +3156,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
     }
@@ -3282,7 +3181,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     let now = 0;
@@ -3319,9 +3218,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3362,7 +3261,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
     }
@@ -3387,7 +3286,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     let now = 0;
@@ -3423,9 +3322,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3465,7 +3364,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
     }
@@ -3490,7 +3389,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     let now = 0;
@@ -3524,9 +3423,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3560,7 +3459,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
     }
@@ -3579,7 +3478,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     const checkedPages: unknown[] = [];
@@ -3614,9 +3513,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3653,7 +3552,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
     }
 
@@ -3681,7 +3580,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     const checkedPages: unknown[] = [];
@@ -3704,9 +3603,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3754,7 +3653,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
     }
 
@@ -3780,7 +3679,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     let readyAttempts = 0;
@@ -3801,9 +3700,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3856,7 +3755,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
     }
 
@@ -3879,7 +3778,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     let newPageCalls = 0;
@@ -3896,9 +3795,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -3933,7 +3832,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
     }
 
@@ -3952,7 +3851,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     const originalUrl = loginSession.page.url;
     const originalTitle = loginSession.page.title;
@@ -3974,9 +3873,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -4023,7 +3922,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
       loginSession.page.title = originalTitle;
@@ -4056,7 +3955,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     const originalUrl = loginSession.page.url;
@@ -4072,9 +3971,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -4106,7 +4005,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
       loginSession.page.title = originalTitle;
@@ -4116,7 +4015,7 @@ describe('scoring run semantics', () => {
     assert.deepStrictEqual(output.stdout, [
       'Waiting for login to complete.',
       buildManualLoginReadyLog('51job', 'https://ehire.51job.com/Revision/talent/subscribe', '简历订阅'),
-      'Authenticated page confirmed, storage state saved, and fresh-session reuse verified.',
+      'Authenticated page confirmed, storage state saved, and published runtime verified.',
     ]);
     assert.equal(caughtError, undefined);
     assert.deepStrictEqual(loginSession.getOpenLoginCalls(), ['51job']);
@@ -4136,7 +4035,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     const persistError = new Error('storage save failed');
@@ -4151,9 +4050,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -4175,7 +4074,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
     }
 
@@ -4193,7 +4092,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     const originalUrl = loginSession.page.url;
@@ -4209,9 +4108,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -4240,7 +4139,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
       loginSession.page.url = originalUrl;
       loginSession.page.locator = originalLocator;
@@ -4260,7 +4159,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
 
@@ -4275,10 +4174,10 @@ describe('scoring run semantics', () => {
     }) as typeof persistBrowserSessionRef.fn;
 
     const verifyCalls: Array<{ platform: string; options?: { headless?: boolean } }> = [];
-    verifyPersistedBrowserSessionRef.fn = (async (platform, options) => {
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform, options) => {
       verifyCalls.push({ platform, options });
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
 
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
@@ -4331,43 +4230,11 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
     }
   });
 
-  it('brings authenticated headed Zhilian and Boss sessions to the front', async () => {
-    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
-    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
-    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
-    const originalHeadless = config.playwright.headless;
-    const bringToFrontCalls: string[] = [];
-
-    (config.playwright as { headless: boolean }).headless = false;
-    sessionModule.createBrowserSessionRef.fn = (async (platform: string) => ({
-      page: {
-        bringToFront: async () => {
-          bringToFrontCalls.push(platform);
-        },
-      },
-      context: {},
-      browser: {},
-    } as unknown as BrowserSession)) as typeof sessionModule.createBrowserSessionRef.fn;
-    sessionModule.openAuthenticatedSubscribePageRef.fn = (async (page: Page) => page) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
-
-    try {
-      await sessionModule.ensureAuthenticatedBrowserSession('zhilian');
-      await sessionModule.ensureAuthenticatedBrowserSession('boss');
-      await sessionModule.ensureAuthenticatedBrowserSession('51job');
-      await sessionModule.ensureAuthenticatedBrowserSession('liepin');
-    } finally {
-      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
-      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
-      (config.playwright as { headless: boolean }).headless = originalHeadless;
-    }
-
-    assert.deepStrictEqual(bringToFrontCalls, ['zhilian', 'boss']);
-  });
 
   it('skips foregrounding in headless mode and for platforms without foreground behavior', async () => {
     const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
@@ -4417,426 +4284,6 @@ describe('scoring run semantics', () => {
     assert.match(warnings[0]!, /Could not bring Zhilian browser page to front.*window manager denied focus/);
   });
 
-  it('brings the newly authenticated Zhilian session to the front after login refresh', async () => {
-    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
-    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
-    const originalCloseBrowserSession = sessionModule.closeBrowserSessionRef.fn;
-    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
-    const originalRefreshExpiredLoginSession = sessionModule.refreshExpiredLoginSessionRef.fn;
-    const originalHeadless = config.playwright.headless;
-    const staleSession = {
-      page: {
-        title: async () => '登录',
-        locator: () => ({ innerText: async () => '企业登录' }),
-        url: () => 'https://passport.zhaopin.com/org/login',
-      },
-      context: {},
-      browser: {},
-    } as unknown as BrowserSession;
-    let bringToFrontCalls = 0;
-    const refreshedSession = {
-      page: {
-        bringToFront: async () => {
-          bringToFrontCalls += 1;
-        },
-      },
-      context: {},
-      browser: {},
-    } as unknown as BrowserSession;
-    const createCalls: string[] = [];
-    const closeCalls: BrowserSession[] = [];
-    const refreshCalls: string[] = [];
-
-    (config.playwright as { headless: boolean }).headless = false;
-    sessionModule.createBrowserSessionRef.fn = (async (platform: string) => {
-      createCalls.push(platform);
-      return createCalls.length === 1 ? staleSession : refreshedSession;
-    }) as typeof sessionModule.createBrowserSessionRef.fn;
-    sessionModule.closeBrowserSessionRef.fn = (async (session: BrowserSession) => {
-      closeCalls.push(session);
-    }) as typeof sessionModule.closeBrowserSessionRef.fn;
-    sessionModule.openAuthenticatedSubscribePageRef.fn = (async (page: Page) => {
-      if (page === staleSession.page) {
-        throw new Error('Zhilian login state is invalid');
-      }
-      return page;
-    }) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
-    sessionModule.refreshExpiredLoginSessionRef.fn = async (platform: string) => {
-      refreshCalls.push(platform);
-    };
-
-    try {
-      const session = await sessionModule.ensureAuthenticatedBrowserSession('zhilian');
-      assert.equal(session, refreshedSession);
-    } finally {
-      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
-      sessionModule.closeBrowserSessionRef.fn = originalCloseBrowserSession;
-      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
-      sessionModule.refreshExpiredLoginSessionRef.fn = originalRefreshExpiredLoginSession;
-      (config.playwright as { headless: boolean }).headless = originalHeadless;
-    }
-
-    assert.deepStrictEqual(createCalls, ['zhilian', 'zhilian']);
-    assert.deepStrictEqual(closeCalls, [staleSession]);
-    assert.deepStrictEqual(refreshCalls, ['zhilian']);
-    assert.equal(bringToFrontCalls, 1);
-  });
-
-  it('verifies a persisted Liepin session from fresh auth state by requiring recruiter search readiness', async () => {
-    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
-    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
-    const originalCloseBrowserSession = sessionModule.closeBrowserSessionRef.fn;
-    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
-    const gotoCalls: Array<{ url: string; waitUntil?: string }> = [];
-    const freshPage = {
-      goto: async (url: string, options?: { waitUntil?: string }) => {
-        gotoCalls.push({ url, waitUntil: options?.waitUntil });
-      },
-      waitForLoadState: async () => undefined,
-      locator: () => ({
-        waitFor: async () => undefined,
-        innerText: async () => '',
-      }),
-      url: () => 'https://h.liepin.com/search/getConditionItem',
-      context: () => ({
-        cookies: async () => [
-          { name: 'UniqueKey' },
-          { name: 'liepin_login_valid' },
-          { name: 'lt_auth' },
-        ],
-      }),
-    } as never;
-    const freshSession = {
-      page: freshPage,
-      context: { close: async () => undefined },
-      browser: { close: async () => undefined },
-    } as unknown as BrowserSession;
-    const openAuthenticatedCalls: string[] = [];
-    let closeCalls = 0;
-
-    sessionModule.createBrowserSessionRef.fn = (async () => freshSession) as typeof sessionModule.createBrowserSessionRef.fn;
-    sessionModule.closeBrowserSessionRef.fn = (async () => {
-      closeCalls += 1;
-    }) as typeof sessionModule.closeBrowserSessionRef.fn;
-    sessionModule.openAuthenticatedSubscribePageRef.fn = (async (page: never, platform: string) => {
-      openAuthenticatedCalls.push(platform);
-      assert.equal(page, freshPage);
-      return freshPage;
-    }) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
-
-    try {
-      await assert.doesNotReject(() => sessionModule.verifyPersistedBrowserSession('liepin'));
-    } finally {
-      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
-      sessionModule.closeBrowserSessionRef.fn = originalCloseBrowserSession;
-      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
-    }
-
-    assert.deepStrictEqual(openAuthenticatedCalls, ['liepin']);
-    assert.deepStrictEqual(gotoCalls, []);
-    assert.equal(closeCalls, 1);
-  });
-
-  it('surfaces Liepin fresh-session verification diagnostics when persisted state reuse fails', async () => {
-    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
-    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
-    const originalCloseBrowserSession = sessionModule.closeBrowserSessionRef.fn;
-    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
-    const authError = new Error('Liepin authenticated page is not available because the session has fallen back to the login screen.');
-    const freshPage = {
-      title: async () => '猎头-猎头招聘服务',
-      locator: (selector?: string) => {
-        assert.equal(selector, 'body');
-        return {
-          innerText: async () => '立即登录/注册 密码登录',
-        };
-      },
-      url: () => 'https://h.liepin.com/account/login',
-    } as never;
-    const freshSession = {
-      page: freshPage,
-      context: { close: async () => undefined },
-      browser: { close: async () => undefined },
-    } as unknown as BrowserSession;
-    let closeCalls = 0;
-
-    sessionModule.createBrowserSessionRef.fn = (async () => freshSession) as typeof sessionModule.createBrowserSessionRef.fn;
-    sessionModule.closeBrowserSessionRef.fn = (async () => {
-      closeCalls += 1;
-    }) as typeof sessionModule.closeBrowserSessionRef.fn;
-    sessionModule.openAuthenticatedSubscribePageRef.fn = (async () => {
-      throw authError;
-    }) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
-
-    try {
-      await assert.rejects(
-        () => sessionModule.verifyPersistedBrowserSession('liepin'),
-        /Saved Liepin storage state could not be reused in a fresh browser session\. Original error: Liepin authenticated page is not available because the session has fallen back to the login screen\..*finalUrl.*https:\/\/h\.liepin\.com\/account\/login.*title.*猎头-猎头招聘服务.*bodyPreview.*立即登录\/注册 密码登录/s,
-      );
-    } finally {
-      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
-      sessionModule.closeBrowserSessionRef.fn = originalCloseBrowserSession;
-      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
-    }
-
-    assert.equal(closeCalls, 1);
-  });
-
-  it('reuses a persisted Liepin session for authenticated browser setup only after recruiter search is ready', async () => {
-    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
-    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
-    const originalCloseBrowserSession = sessionModule.closeBrowserSessionRef.fn;
-    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
-    const gotoCalls: Array<{ url: string; waitUntil?: string }> = [];
-    const freshPage = {
-      goto: async (url: string, options?: { waitUntil?: string }) => {
-        gotoCalls.push({ url, waitUntil: options?.waitUntil });
-      },
-      waitForLoadState: async () => undefined,
-      locator: () => ({
-        waitFor: async () => undefined,
-        innerText: async () => '',
-      }),
-      url: () => 'https://h.liepin.com/search/getConditionItem',
-      context: () => ({
-        cookies: async () => [
-          { name: 'UniqueKey' },
-          { name: 'liepin_login_valid' },
-          { name: 'lt_auth' },
-        ],
-      }),
-    } as never;
-    const freshSession = {
-      page: freshPage,
-      context: { close: async () => undefined },
-      browser: { close: async () => undefined },
-    } as unknown as BrowserSession;
-    const openAuthenticatedCalls: string[] = [];
-    let closeCalls = 0;
-
-    sessionModule.createBrowserSessionRef.fn = (async () => freshSession) as typeof sessionModule.createBrowserSessionRef.fn;
-    sessionModule.closeBrowserSessionRef.fn = (async () => {
-      closeCalls += 1;
-    }) as typeof sessionModule.closeBrowserSessionRef.fn;
-    sessionModule.openAuthenticatedSubscribePageRef.fn = (async (page: never, platform: string) => {
-      openAuthenticatedCalls.push(platform);
-      assert.equal(page, freshPage);
-      return freshPage;
-    }) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
-
-    try {
-      const session = await sessionModule.ensureAuthenticatedBrowserSession('liepin');
-      assert.equal(session, freshSession);
-    } finally {
-      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
-      sessionModule.closeBrowserSessionRef.fn = originalCloseBrowserSession;
-      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
-    }
-
-    assert.deepStrictEqual(openAuthenticatedCalls, ['liepin']);
-    assert.deepStrictEqual(gotoCalls, []);
-    assert.equal(closeCalls, 0);
-  });
-
-  it('uses headed Liepin browser setup even when global headless mode is enabled', async () => {
-    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
-    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
-    const originalCloseBrowserSession = sessionModule.closeBrowserSessionRef.fn;
-    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
-    const originalHeadless = config.playwright.headless;
-    const authError = new Error('Liepin authenticated page is not available because the session has fallen back to the login screen.');
-    const refreshRef = (sessionModule as unknown as {
-      refreshExpiredLoginSessionRef: { fn: (platform: string) => Promise<void> };
-    }).refreshExpiredLoginSessionRef;
-    const originalRefreshExpiredLoginSession = refreshRef.fn;
-    const freshPage = {
-      title: async () => '猎头-猎头招聘服务',
-      locator: (selector?: string) => {
-        assert.equal(selector, 'body');
-        return {
-          innerText: async () => '立即登录/注册 密码登录',
-        };
-      },
-      url: () => 'https://h.liepin.com/account/login',
-    } as never;
-    const freshSession = {
-      page: freshPage,
-      context: { close: async () => undefined },
-      browser: { close: async () => undefined },
-    } as unknown as BrowserSession;
-    let closeCalls = 0;
-    const refreshCalls: string[] = [];
-    let authenticated = false;
-
-    (config.playwright as { headless: boolean }).headless = true;
-    sessionModule.createBrowserSessionRef.fn = (async () => freshSession) as typeof sessionModule.createBrowserSessionRef.fn;
-    sessionModule.closeBrowserSessionRef.fn = (async () => {
-      closeCalls += 1;
-    }) as typeof sessionModule.closeBrowserSessionRef.fn;
-    sessionModule.openAuthenticatedSubscribePageRef.fn = (async () => {
-      if (!authenticated) {
-        throw authError;
-      }
-
-      return freshPage;
-    }) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
-    refreshRef.fn = async (platform: string) => {
-      refreshCalls.push(platform);
-      authenticated = true;
-    };
-
-    try {
-      const session = await sessionModule.ensureAuthenticatedBrowserSession('liepin');
-      assert.equal(session, freshSession);
-    } finally {
-      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
-      sessionModule.closeBrowserSessionRef.fn = originalCloseBrowserSession;
-      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
-      refreshRef.fn = originalRefreshExpiredLoginSession;
-      (config.playwright as { headless: boolean }).headless = originalHeadless;
-    }
-
-    assert.equal(closeCalls, 1);
-    assert.deepStrictEqual(refreshCalls, ['liepin']);
-  });
-
-  it('refreshes expired login state in headed mode and returns a newly authenticated session', async () => {
-    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
-    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
-    const originalCloseBrowserSession = sessionModule.closeBrowserSessionRef.fn;
-    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
-    const originalHeadless = config.playwright.headless;
-    const refreshRef = (sessionModule as unknown as {
-      refreshExpiredLoginSessionRef: { fn: (platform: string) => Promise<void> };
-    }).refreshExpiredLoginSessionRef;
-    const originalRefreshExpiredLoginSession = refreshRef.fn;
-    const authError = new Error('51job authenticated subscribe page is not available because the session has fallen back to the login screen.');
-    const stalePage = {
-      title: async () => '登录',
-      locator: (selector?: string) => {
-        assert.equal(selector, 'body');
-        return {
-          innerText: async () => '账号登录',
-        };
-      },
-      url: () => 'https://ehire.51job.com/login',
-    } as never;
-    const refreshedPage = {
-      title: async () => '人才订阅',
-      locator: () => ({
-        innerText: async () => '人才订阅 搜索',
-      }),
-      url: () => 'https://ehire.51job.com/Revision/talent/subscribe',
-    } as never;
-    const staleSession = {
-      page: stalePage,
-      context: { close: async () => undefined },
-      browser: { close: async () => undefined },
-    } as unknown as BrowserSession;
-    const refreshedSession = {
-      page: refreshedPage,
-      context: { close: async () => undefined },
-      browser: { close: async () => undefined },
-    } as unknown as BrowserSession;
-    const createCalls: string[] = [];
-    const closeCalls: BrowserSession[] = [];
-    const openAuthenticatedCalls: Array<{ page: never; platform: string }> = [];
-    const refreshCalls: string[] = [];
-
-    (config.playwright as { headless: boolean }).headless = false;
-    sessionModule.createBrowserSessionRef.fn = (async (platform: string) => {
-      createCalls.push(platform);
-      return createCalls.length === 1 ? staleSession : refreshedSession;
-    }) as typeof sessionModule.createBrowserSessionRef.fn;
-    sessionModule.closeBrowserSessionRef.fn = (async (session: BrowserSession) => {
-      closeCalls.push(session);
-    }) as typeof sessionModule.closeBrowserSessionRef.fn;
-    sessionModule.openAuthenticatedSubscribePageRef.fn = (async (page: never, platform: string) => {
-      openAuthenticatedCalls.push({ page, platform });
-      if (page === stalePage) {
-        throw authError;
-      }
-      return refreshedPage;
-    }) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
-    refreshRef.fn = async (platform: string) => {
-      refreshCalls.push(platform);
-    };
-
-    try {
-      const session = await sessionModule.ensureAuthenticatedBrowserSession('51job');
-
-      assert.equal(session, refreshedSession);
-    } finally {
-      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
-      sessionModule.closeBrowserSessionRef.fn = originalCloseBrowserSession;
-      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
-      refreshRef.fn = originalRefreshExpiredLoginSession;
-      (config.playwright as { headless: boolean }).headless = originalHeadless;
-    }
-
-    assert.deepStrictEqual(createCalls, ['51job', '51job']);
-    assert.deepStrictEqual(refreshCalls, ['51job']);
-    assert.deepStrictEqual(closeCalls, [staleSession]);
-    assert.deepStrictEqual(openAuthenticatedCalls, [
-      { page: stalePage, platform: '51job' },
-      { page: refreshedPage, platform: '51job' },
-    ]);
-  });
-
-  it('keeps headless expired-login behavior as an actionable failure', async () => {
-    const sessionModule = await import(`../browser/session.js?test=${Date.now()}-${Math.random()}`);
-    const originalCreateBrowserSession = sessionModule.createBrowserSessionRef.fn;
-    const originalCloseBrowserSession = sessionModule.closeBrowserSessionRef.fn;
-    const originalOpenAuthenticatedSubscribePage = sessionModule.openAuthenticatedSubscribePageRef.fn;
-    const originalHeadless = config.playwright.headless;
-    const refreshRef = (sessionModule as unknown as {
-      refreshExpiredLoginSessionRef: { fn: (platform: string) => Promise<void> };
-    }).refreshExpiredLoginSessionRef;
-    const originalRefreshExpiredLoginSession = refreshRef.fn;
-    const authError = new Error('51job authenticated subscribe page is not available because the session has fallen back to the login screen.');
-    const page = {
-      title: async () => '登录',
-      locator: () => ({
-        innerText: async () => '账号登录',
-      }),
-      url: () => 'https://ehire.51job.com/login',
-    } as never;
-    const session = {
-      page,
-      context: { close: async () => undefined },
-      browser: { close: async () => undefined },
-    } as unknown as BrowserSession;
-    const refreshCalls: string[] = [];
-    let closeCalls = 0;
-
-    (config.playwright as { headless: boolean }).headless = true;
-    sessionModule.createBrowserSessionRef.fn = (async () => session) as typeof sessionModule.createBrowserSessionRef.fn;
-    sessionModule.closeBrowserSessionRef.fn = (async () => {
-      closeCalls += 1;
-    }) as typeof sessionModule.closeBrowserSessionRef.fn;
-    sessionModule.openAuthenticatedSubscribePageRef.fn = (async () => {
-      throw authError;
-    }) as typeof sessionModule.openAuthenticatedSubscribePageRef.fn;
-    refreshRef.fn = async (platform: string) => {
-      refreshCalls.push(platform);
-    };
-
-    try {
-      await assert.rejects(
-        () => sessionModule.ensureAuthenticatedBrowserSession('51job'),
-        /51job login state is invalid and cannot be refreshed in headless mode\. Re-run with PLAYWRIGHT_HEADLESS=false\./,
-      );
-    } finally {
-      sessionModule.createBrowserSessionRef.fn = originalCreateBrowserSession;
-      sessionModule.closeBrowserSessionRef.fn = originalCloseBrowserSession;
-      sessionModule.openAuthenticatedSubscribePageRef.fn = originalOpenAuthenticatedSubscribePage;
-      refreshRef.fn = originalRefreshExpiredLoginSession;
-      (config.playwright as { headless: boolean }).headless = originalHeadless;
-    }
-
-    assert.deepStrictEqual(refreshCalls, []);
-    assert.equal(closeCalls, 1);
-  });
 
   it('surfaces persisted-state verification failures after saving the session', async () => {
     const loginSession = createManualLoginSessionStub();
@@ -4844,7 +4291,7 @@ describe('scoring run semantics', () => {
     const originalOpenLoginSession = openLoginSessionRef.fn;
     const originalOpenAuthenticatedSubscribePage = openAuthenticatedSubscribePageSessionRef.fn;
     const originalPersistBrowserSession = persistBrowserSessionRef.fn;
-    const originalVerifyPersistedBrowserSession = verifyPersistedBrowserSessionRef.fn;
+    const originalVerifyPublishedBrowserRuntime = verifyPublishedBrowserRuntimeRef.fn;
     const originalCloseBrowserSession = closeBrowserSessionRef.fn;
     let now = 0;
     const verifyError = new Error('saved state could not be reused');
@@ -4859,9 +4306,9 @@ describe('scoring run semantics', () => {
     persistBrowserSessionRef.fn = (async (_session, platform) => {
       await loginSession.persistBrowserSession(platform);
     }) as typeof persistBrowserSessionRef.fn;
-    verifyPersistedBrowserSessionRef.fn = (async (platform) => {
-      await loginSession.verifyPersistedBrowserSession(platform);
-    }) as typeof verifyPersistedBrowserSessionRef.fn;
+    verifyPublishedBrowserRuntimeRef.fn = (async (platform) => {
+      await loginSession.verifyPublishedBrowserRuntime(platform);
+    }) as typeof verifyPublishedBrowserRuntimeRef.fn;
     closeBrowserSessionRef.fn = (async () => {
       await loginSession.closeBrowserSession();
     }) as typeof closeBrowserSessionRef.fn;
@@ -4883,7 +4330,7 @@ describe('scoring run semantics', () => {
       openLoginSessionRef.fn = originalOpenLoginSession;
       openAuthenticatedSubscribePageSessionRef.fn = originalOpenAuthenticatedSubscribePage;
       persistBrowserSessionRef.fn = originalPersistBrowserSession;
-      verifyPersistedBrowserSessionRef.fn = originalVerifyPersistedBrowserSession;
+      verifyPublishedBrowserRuntimeRef.fn = originalVerifyPublishedBrowserRuntime;
       closeBrowserSessionRef.fn = originalCloseBrowserSession;
     }
 
@@ -5735,7 +5182,9 @@ describe('scoring run semantics', () => {
     };
     const originalSendJobReportEmail = sendJobReportEmailRef.fn;
     const rejectionEmails: Array<{ recipient: string; subject: string; markdown: string; messageId?: string }> = [];
+    let browserPhaseReleased = false;
     sendJobReportEmailRef.fn = async ({ recipient, subject, markdown, messageId }) => {
+      assert.equal(browserPhaseReleased, true, 'Boss rejection SMTP must start after the browser phase is released');
       const persisted = (await store.listBossRejectionEmailOutboxEntries('boss', jobKey))
         .find((entry) => entry.candidateId === 'boss-rejected');
       assert.ok(persisted?.detailClosedAt, 'verified detail-close proof must be persisted before SMTP');
@@ -5766,8 +5215,10 @@ describe('scoring run semantics', () => {
           bossScreening: {
             ...buildModelScreeningSettings(),
           },
+          releaseBrowserPhase: async () => { browserPhaseReleased = true; },
         },
       );
+      browserPhaseReleased = false;
       const rerun = await indexModule.runResumeCaptureFlow(
         'boss',
         jobKey,
@@ -5786,6 +5237,7 @@ describe('scoring run semantics', () => {
           bossForwardRecipient: 'primary-forward@example.com',
           bossForwardCc: ['primary-forward-audit@example.com'],
           bossScreening: buildModelScreeningSettings(),
+          releaseBrowserPhase: async () => { browserPhaseReleased = true; },
         },
       );
       assert.equal(rejectionEmails.length, 1);

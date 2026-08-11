@@ -31,6 +31,10 @@ contracts.
   use modal readiness without resetting that segment. Boss enabled screening may keep the verified
   detail open during a non-browser model wait, then use one fresh bounded continuation on that same
   detail; the normal path must not open it a second time.
+- A platform-produced replacement search page registers as a
+  bounded temporary page and returns without closing the canonical predecessor. The runtime owner
+  alone promotes it through revision CAS and cleans the prior work page; page actions do not expose
+  callbacks or publish runtime state.
 - A stable or explicit empty result is a successful zero-candidate result. In direct capture, every
   requested condition must be applied and confirmed; skipped or failed conditions abort before
   candidate extraction.

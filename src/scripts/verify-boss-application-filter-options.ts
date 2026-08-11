@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { runBrowserCliMain } from '../browser/cli-lifecycle.js';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from '../browser/session.js';
 import { config } from '../config.js';
 import type { ApplicationFilterField, ApplicationFilterOptions } from '../search/filter-application-options.js';
@@ -482,8 +483,5 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
 const entrypointUrl = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
 if (import.meta.url === entrypointUrl) {
-  main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  });
+  void runBrowserCliMain(main);
 }

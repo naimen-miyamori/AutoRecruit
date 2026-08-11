@@ -13,14 +13,16 @@ export interface SearchSubscriptionRunnerDependencies {
   resolveAdapter: (platform: SupportedPlatform) => PlatformAdapter;
   openSession: (platform: SupportedPlatform) => Promise<BrowserSession>;
   closeSession: (session: BrowserSession) => Promise<void>;
+  handoffWorkPage?: (session: BrowserSession, oldPage: BrowserSession['page'], newPage: BrowserSession['page']) => Promise<void>;
   runWorkflow: (
     adapter: PlatformAdapter,
     page: BrowserSession['page'],
     plan: SearchConditionPlan,
-    options: { save: boolean; savedSearchName?: string; sortPolicy?: 'match-priority' },
+    options: { save: boolean; savedSearchName?: string; sortPolicy?: 'match-priority'; onWorkPageResolved?: (page: BrowserSession['page']) => Promise<void> },
   ) => Promise<SearchSubscriptionSummary>;
   report: (result: SearchSubscriptionSummary | SearchSubscriptionSummary[] | undefined) => void;
   reportFailure: (summary: unknown) => void;
+  preflightRuntimes?: (platforms: readonly SupportedPlatform[]) => Promise<void>;
 }
 
 export async function runSearchSubscriptionMode(
@@ -29,8 +31,10 @@ export async function runSearchSubscriptionMode(
 ): Promise<SearchSubscriptionSummary | SearchSubscriptionSummary[]> {
   const summaries: SearchSubscriptionSummary[] = [];
   const conditionSetService = input.searchConditionSetRefs ? new SearchConditionSetService() : undefined;
+  const platforms = dependencies.listPlatforms(input.platform, input.includeBoss);
+  await dependencies.preflightRuntimes?.(platforms);
 
-  for (const platform of dependencies.listPlatforms(input.platform, input.includeBoss)) {
+  for (const platform of platforms) {
     let session: BrowserSession | undefined;
     let stageSummary: SearchSubscriptionSummary | undefined;
     let failure: unknown;
@@ -51,10 +55,18 @@ export async function runSearchSubscriptionMode(
         ? { ...plan, conditions: [...plan.conditions, ...conditionSet.conditions] }
         : plan;
       session = await dependencies.openSession(adapter.platform);
+      const initialWorkPage = session.page;
       stageSummary = await dependencies.runWorkflow(adapter, session.page, resolvedPlan, {
         save: input.save,
         savedSearchName: input.savedSearchName,
         ...(platform === 'boss' ? { sortPolicy: 'match-priority' as const } : {}),
+        ...(session.runtimeLease && dependencies.handoffWorkPage ? {
+          onWorkPageResolved: async (resolvedPage) => {
+            if (resolvedPage !== session!.page) {
+              await dependencies.handoffWorkPage!(session!, initialWorkPage, resolvedPage);
+            }
+          },
+        } : {}),
       });
     } catch (error) {
       failure = error;

@@ -85,6 +85,10 @@ when they are affected.
   queueing.
 - Preserve intent IDs in task input/summaries for audit. Platform receipts enforce mutation retry
   idempotency; queue delivery is not assumed exactly once.
+- Browser-runtime status endpoints are read-only safe views: no TaskQueue construction, Playwright
+  attach, navigation, repair, cookie, absolute profile path, full URL, or page content. Runtime
+  failures retain their stable code and are classified as pre-acceptance infrastructure failures;
+  queue admission and a status view never prove attach authorization.
 - A failed all-platform search-subscription task retains structured summaries for completed stages
   and the exact stopped platform while remaining failed. Earlier external saves are never rolled
   back or hidden by a later-stage error.

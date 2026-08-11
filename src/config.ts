@@ -88,24 +88,6 @@ export function describeScoringModel(
   return options.openAIModel?.trim() || 'openai-compatible:unconfigured';
 }
 
-function getBooleanEnv(name: string): boolean | undefined {
-  const value = process.env[name];
-  if (value === undefined || value === '') {
-    return undefined;
-  }
-
-  const normalizedValue = value.trim().toLowerCase();
-  if (normalizedValue === 'true') {
-    return true;
-  }
-
-  if (normalizedValue === 'false') {
-    return false;
-  }
-
-  throw new Error(`Environment variable ${name} must be true or false`);
-}
-
 function getBrowserEngineEnv(): BrowserEngine {
   const value = (process.env.BROWSER_ENGINE ?? 'cloakbrowser').trim().toLowerCase();
 
@@ -154,12 +136,6 @@ function getPlatformNumberEnv(platform: SupportedPlatform, suffix: string, fallb
     ?? fallback;
 }
 
-function getPlatformBooleanEnv(platform: SupportedPlatform, suffix: string, fallback: boolean): boolean {
-  return getBooleanEnv(`PLAYWRIGHT_${platformEnvPrefixes[platform]}_${suffix}`)
-    ?? getBooleanEnv(`PLAYWRIGHT_${suffix}`)
-    ?? fallback;
-}
-
 const actionDelayMinMsByPlatform: Record<SupportedPlatform, number> = {
   '51job': getPlatformNumberEnv('51job', 'ACTION_DELAY_MIN_MS', 2000),
   liepin: getPlatformNumberEnv('liepin', 'ACTION_DELAY_MIN_MS', 2000),
@@ -189,12 +165,6 @@ const mouseSpeedMaxPxPerSecond = getPositiveIntegerEnv('PLAYWRIGHT_MOUSE_SPEED_M
 if (mouseSpeedMinPxPerSecond > mouseSpeedMaxPxPerSecond) {
   throw new Error('PLAYWRIGHT_MOUSE_SPEED_MIN_PX_PER_SECOND must not exceed PLAYWRIGHT_MOUSE_SPEED_MAX_PX_PER_SECOND');
 }
-const reuseBrowserByPlatform: Record<SupportedPlatform, boolean> = {
-  '51job': getPlatformBooleanEnv('51job', 'REUSE_BROWSER', true),
-  liepin: getPlatformBooleanEnv('liepin', 'REUSE_BROWSER', true),
-  zhilian: getPlatformBooleanEnv('zhilian', 'REUSE_BROWSER', true),
-  boss: getPlatformBooleanEnv('boss', 'REUSE_BROWSER', true),
-};
 const reuseCdpPortByPlatform: Record<SupportedPlatform, number> = {
   '51job': getOptionalNumberEnv('PLAYWRIGHT_51JOB_REUSE_CDP_PORT', 19325),
   liepin: getOptionalNumberEnv('PLAYWRIGHT_LIEPIN_REUSE_CDP_PORT', 19327),
@@ -231,13 +201,11 @@ export const config = {
     mouseSpeedMaxPxPerSecond,
     bossTypingDelayMinMs,
     bossTypingDelayMaxMs,
-    reuseBrowserByPlatform,
     reuseCdpPortByPlatform,
     liepinActionDelayMinMs: actionDelayMinMsByPlatform.liepin,
     liepinActionDelayMaxMs: actionDelayMaxMsByPlatform.liepin,
     liepinCandidateDelayMinMs: candidateDelayMinMsByPlatform.liepin,
     liepinCandidateDelayMaxMs: candidateDelayMaxMsByPlatform.liepin,
-    liepinReuseBrowser: reuseBrowserByPlatform.liepin,
     liepinReuseCdpPort: reuseCdpPortByPlatform.liepin,
   },
   openai: {

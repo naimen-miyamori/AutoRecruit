@@ -115,7 +115,7 @@ test('resolveStorageStatePath rejects cross-platform or shared STORAGE_STATE_PAT
   }
 });
 
-test('browser pacing and reuse defaults are platform-specific', () => {
+test('browser pacing and CDP defaults are platform-specific', () => {
   assert.deepEqual(config.playwright.actionDelayMinMsByPlatform, {
     '51job': 2000,
     liepin: 2000,
@@ -139,12 +139,6 @@ test('browser pacing and reuse defaults are platform-specific', () => {
     liepin: 4000,
     zhilian: 4000,
     boss: 4000,
-  });
-  assert.deepEqual(config.playwright.reuseBrowserByPlatform, {
-    '51job': true,
-    liepin: true,
-    zhilian: true,
-    boss: true,
   });
   assert.deepEqual(config.playwright.reuseCdpPortByPlatform, {
     '51job': 19325,

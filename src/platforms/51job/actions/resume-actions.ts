@@ -3,6 +3,7 @@ import { waitPlatformActionPace } from '../../../browser/pacing.js';
 import { config } from '../../../config.js';
 import type { CandidateProfileDetailResult } from '../../../types/talent-mapping.js';
 import type { CandidateProfileDetailOptions, PlatformAdapter } from '../../types.js';
+import { registerTemporaryRuntimePageForContext } from '../../../browser/runtime-page-registry.js';
 
 function remainingDetailMs(deadline: number): number {
   const remaining = deadline - Date.now();
@@ -30,7 +31,16 @@ async function withinDetailDeadline<T>(deadline: number, operation: Promise<T>):
 export async function open51jobResumeDetail(
   ...args: Parameters<PlatformAdapter['openResumeDetail']>
 ): Promise<Awaited<ReturnType<PlatformAdapter['openResumeDetail']>>> {
-  return openResumeDetail(...args);
+  const detailPage = await openResumeDetail(...args);
+  const [context, searchPage, candidate] = args;
+  if (detailPage !== searchPage) {
+    registerTemporaryRuntimePageForContext(context, detailPage, {
+      purpose: 'candidate-detail',
+      identity: candidate.candidateId,
+      cleanupPolicy: 'close',
+    });
+  }
+  return detailPage;
 }
 
 export async function parse51jobResumeDetail(

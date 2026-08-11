@@ -16,6 +16,7 @@ import {
   waitLiepinActionPace,
 } from './context.js';
 import { waitForLiepinPageReady } from './readiness.js';
+import { registerTemporaryRuntimePageForContext } from '../../../browser/runtime-page-registry.js';
 
 export {
   isLiepinPublicZhaopinUrl,
@@ -162,6 +163,11 @@ export async function openLiepinResumePage(
 
   if (candidate.resumeUrl && isSafeLiepinResumeUrl(candidate.resumeUrl)) {
     const page = await context.newPage();
+    registerTemporaryRuntimePageForContext(context, page, {
+      purpose: 'candidate-detail',
+      identity: candidate.candidateId,
+      cleanupPolicy: 'retain-for-inspection',
+    });
     await waitLiepinActionPace(page);
     await page.goto(candidate.resumeUrl, { waitUntil: 'domcontentloaded', timeout: remainingTime(deadline) });
     await waitForLiepinPageReady(page, { deadline });
@@ -180,6 +186,13 @@ export async function openLiepinResumePage(
       () => clickLiepinLocator(candidateLink, searchPage, remainingTime(deadline)),
     );
     if (detailPage) {
+      if (detailPage !== searchPage) {
+        registerTemporaryRuntimePageForContext(context, detailPage, {
+          purpose: 'candidate-detail',
+          identity: candidate.candidateId,
+          cleanupPolicy: 'retain-for-inspection',
+        });
+      }
       return detailPage;
     }
     if (searchPage.url() !== previousUrl && !isLiepinPublicZhaopinUrl(searchPage.url())) {

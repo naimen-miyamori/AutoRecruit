@@ -117,7 +117,23 @@ storage-state.zhilian.json
 storage-state.boss.json
 ```
 
-有头运行遇到过期会话时可以人工重新登录；无头运行会停止并提示如何刷新登录态。
+浏览器运行时固定为 `login-owned`，不再提供策略或平台复用开关。只有 `login:session` / 登录刷新任务可以启动平台浏览器和初始工作页；成功发布后浏览器仍保持打开。首次登录若在发布前失败或超时，会由仍持有 session/lease 的登录 owner 正式关闭未发布浏览器，以便安全重试。普通 CLI、HTTP、助手、调度、Talent Mapping 和维护脚本只能连接已发布的同平台运行时，缺失、失效、占用或身份歧义时会在页面动作前失败，不会隐式打开浏览器或自动登录。
+
+四个平台都要求 `PLAYWRIGHT_HEADLESS=false`。先逐平台执行上述登录命令，再查看只读状态：
+
+```bash
+npm run runtime:browser -- status
+npm run runtime:browser -- status --platform 51job
+```
+
+状态只显示短 generation 指纹、发布时间、CDP 可达性、稳定问题码和去敏占用摘要，不读取 cookie、页面正文或完整 URL，也不会用 Playwright attach。浏览器崩溃、工作页丢失或遗留租约不会在线自动接管；按状态中的 generation 指纹显式处理：
+
+```bash
+npm run runtime:browser -- stop --platform 51job --generation 1a2b3c4d --confirmed true
+npm run runtime:browser -- recover --platform 51job --generation 1a2b3c4d --confirmed true
+```
+
+`stop` 只关闭精确匹配的项目浏览器并隔离 manifest，不删除 profile 或 storage state；若同 generation 的遗留租约 owner 已证明死亡，显式 stop 会先隔离该租约，普通业务任务永不借此接管在线页面。`recover` 只处理已停止浏览器的遗留证据，且拒绝仍存活的 owner；两者都不是业务 mode 或自动调度能力。控制台首页的运行时矩阵是只读视图，实际任务仍在跨进程租约内重新验证 generation、精确 work target、平台 origin 和认证状态。
 
 ---
 
@@ -922,7 +938,6 @@ npm run schedule:recover-lease -- --schedule-id <scheduleId> --confirm-processes
 | `PLAYWRIGHT_HEADLESS` | 是否使用无头浏览器 |
 | `PLAYWRIGHT_SEARCH_PAGE_TIMEOUT_MS` | 搜索流程总超时 |
 | `PLAYWRIGHT_RESUME_DETAIL_TIMEOUT_MS` | 候选人详情总超时 |
-| `PLAYWRIGHT_<PLATFORM>_REUSE_BROWSER` | 平台级浏览器复用开关 |
 | `PLAYWRIGHT_<PLATFORM>_ACTION_DELAY_MIN_MS/MAX_MS` | 平台网页动作间隔 |
 | `PLAYWRIGHT_<PLATFORM>_CANDIDATE_DELAY_MIN_MS/MAX_MS` | 平台候选人切换间隔 |
 | `PLAYWRIGHT_MOUSE_SPEED_MIN_PX_PER_SECOND/MAX_PX_PER_SECOND` | 全平台共享指针移动速度，默认 `700-1200 CSS px/s` |

@@ -23,6 +23,7 @@ import {
   buildBossRoutedMainRunEmailSummary,
   type MainRunSummary,
 } from './run-summary.js';
+import { preflightPlatformRuntimeManifests } from '../browser/platform-runtime.js';
 
 export interface ResolvedResumeCaptureContext {
   jobKey: string;
@@ -93,6 +94,7 @@ export interface CaptureRunnerDependencies {
       reportDelivery?: ReportDeliveryOptions;
       secondaryReportDelivery?: ReportDeliveryOptions;
       searchExecution?: ResolvedResumeCaptureContext['searchExecution'];
+      releaseBrowserPhase?: () => Promise<void>;
     },
   ) => Promise<CaptureFlowResult>;
   exportResults: (platform: SupportedPlatform, jobKey: string) => Promise<ExportJobResultsSummary>;
@@ -118,8 +120,10 @@ export async function preflightCaptureRun(
     | 'assertRoutingPreflight'
     | 'readTextFile'> & {
       buildSinglePlatformInput: (input: RunnableJobInput, platform: SupportedPlatform) => SinglePlatformCliInput;
+      preflightRuntimes?: (platforms: readonly SupportedPlatform[]) => Promise<void>;
     },
 ): Promise<void> {
+  await (dependencies.preflightRuntimes ?? preflightPlatformRuntimeManifests)(platforms);
   const store = dependencies.createStore();
   const checks = inputs.flatMap((input) => platforms.map(async (platform) => {
     try {
@@ -265,13 +269,27 @@ export async function runSinglePlatformCapture(
     dependencies.warn('Crawl4AI adapter unavailable at startup; continuing with built-in extraction only.');
   }
 
-  const bossSearchLease = input.platform === 'boss'
-    ? await dependencies.acquireBossSearchLease()
-    : undefined;
+  let bossSearchLease: ReleaseHandle | undefined;
   let session: BrowserSession | undefined;
+  const releaseBrowserPhase = async (): Promise<void> => {
+    try {
+      if (bossSearchLease) {
+        const ownedLease = bossSearchLease;
+        bossSearchLease = undefined;
+        await ownedLease.release();
+      }
+    } finally {
+      if (session) {
+        const ownedSession = session;
+        session = undefined;
+        await dependencies.closeSession(ownedSession);
+      }
+    }
+  };
 
   try {
     session = await dependencies.openSession(platformAdapter.platform);
+    if (input.platform === 'boss') bossSearchLease = await dependencies.acquireBossSearchLease();
     const { candidates, capturedCandidateIds, runResult, resultPath } = await dependencies.runCaptureFlow(
       input.platform,
       jobKey,
@@ -296,6 +314,7 @@ export async function runSinglePlatformCapture(
         reportDelivery: delivery,
         secondaryReportDelivery: bossScreening?.secondaryDelivery ?? postScoreRouting?.secondaryDelivery,
         searchExecution: captureContext.searchExecution,
+        releaseBrowserPhase,
       },
     );
 
@@ -383,10 +402,6 @@ export async function runSinglePlatformCapture(
     if (options.printSummary) dependencies.report(summary);
     return summary;
   } finally {
-    try {
-      if (session) await dependencies.closeSession(session);
-    } finally {
-      await bossSearchLease?.release();
-    }
+    await releaseBrowserPhase();
   }
 }

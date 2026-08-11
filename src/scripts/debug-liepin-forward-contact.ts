@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import type { Page } from 'playwright';
+import { runBrowserCliMain } from '../browser/cli-lifecycle.js';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from '../browser/session.js';
 import { isLiepinSearchUrl } from '../platforms/liepin-adapter.js';
 import { getPlatformAdapter } from '../platforms/registry.js';
@@ -49,7 +50,6 @@ export async function runLiepinForwardContactDebug(argv = process.argv.slice(2))
   const confirmForward = parseBooleanFlag(argv, '--confirm');
   const adapter = getPlatformAdapter('liepin');
   const session = await ensureAuthenticatedBrowserSession('liepin');
-  session.keepOpenOnExit = true;
   let searchPage: Page | undefined;
   let detailPage: Page | undefined;
 
@@ -102,8 +102,5 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  });
+  void runBrowserCliMain(main);
 }

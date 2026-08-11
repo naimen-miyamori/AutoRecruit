@@ -13,7 +13,7 @@ export type ManualLoginRefreshDependencies = {
   openLoginSession(platform: SupportedPlatform): Promise<BrowserSession>;
   openAuthenticatedHome(page: Page, platform: SupportedPlatform): Promise<Page>;
   persistBrowserSession(session: BrowserSession, platform: SupportedPlatform): Promise<void>;
-  verifyPersistedBrowserSession(platform: SupportedPlatform, options?: { headless?: boolean }): Promise<void>;
+  verifyPublishedBrowserRuntime(platform: SupportedPlatform, options?: { headless?: boolean }): Promise<void>;
   closeBrowserSession(session: BrowserSession): Promise<void>;
 };
 
@@ -194,6 +194,7 @@ async function findZhilianReadyPage(
   deps: ExistingManualLoginRefreshDependencies,
 ): Promise<{
   loginReady: boolean;
+  readyPage: Page | null;
 }> {
   const contextPages = typeof session.context.pages === 'function' ? session.context.pages() : [session.page];
   const existingPages = contextPages.filter((page) => !isPageClosed(page));
@@ -208,14 +209,14 @@ async function findZhilianReadyPage(
     }
 
     try {
-      await deps.openAuthenticatedHome(page, 'zhilian');
-      return { loginReady: true };
+      const readyPage = await deps.openAuthenticatedHome(page, 'zhilian');
+      return { loginReady: true, readyPage };
     } catch {
       continue;
     }
   }
 
-  return { loginReady: await hasZhilianAuthenticatedCookies(session) };
+  return { loginReady: await hasZhilianAuthenticatedCookies(session), readyPage: null };
 }
 
 async function logAuthenticatedReadyPage(platform: SupportedPlatform, page: Page): Promise<void> {
@@ -290,7 +291,10 @@ export async function waitForManualLoginAndPersistExistingSession(
         if (!readyState.loginReady) {
           throw new Error('login not ready');
         }
-        readyPage = null;
+        readyPage = readyState.readyPage;
+        if (!readyPage) {
+          readyPage = await deps.openAuthenticatedHome(session.page, 'zhilian');
+        }
       } else {
         readyPage = await deps.openAuthenticatedHome(session.page, platform);
       }
@@ -299,18 +303,15 @@ export async function waitForManualLoginAndPersistExistingSession(
       continue;
     }
 
-    if (readyPage) {
-      await logAuthenticatedReadyPage(platform, readyPage);
-    }
+    if (readyPage) await logAuthenticatedReadyPage(platform, readyPage);
+    await focusReadyPage(session, readyPage);
     await deps.persistBrowserSession(session, platform);
     if (platform !== 'liepin') {
-      await deps.verifyPersistedBrowserSession(platform, getManualLoginVerificationOptions(platform));
+      await deps.verifyPublishedBrowserRuntime(platform, getManualLoginVerificationOptions(platform));
     }
-    await focusReadyPage(session, readyPage);
-
     const successMessage = platform === 'liepin'
       ? 'Authenticated page confirmed and storage state saved.'
-      : 'Authenticated page confirmed, storage state saved, and fresh-session reuse verified.';
+      : 'Authenticated page confirmed, storage state saved, and published runtime verified.';
 
     if (!keepOpen) {
       console.log(successMessage);

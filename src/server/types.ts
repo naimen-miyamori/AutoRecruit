@@ -500,6 +500,8 @@ export interface TaskRecord {
   output?: TaskOutput;
   outputSummary?: Record<string, unknown>;
   error?: string;
+  failureCode?: string;
+  failureClass?: 'infrastructure' | 'business';
   argv: string[];
   logs: TaskLogEntry[];
   schedule?: ScheduledTaskMetadata;
@@ -516,6 +518,8 @@ export interface TaskSummary {
   inputSummary: Record<string, unknown>;
   outputSummary?: Record<string, unknown>;
   error?: string;
+  failureCode?: string;
+  failureClass?: 'infrastructure' | 'business';
 }
 
 export interface TaskDetail extends TaskSummary {

@@ -70,6 +70,55 @@ export const apiErrorSchema = z.object({
   }),
 });
 
+export const platformRuntimeSafeStatusSchema = z.enum([
+  'absent',
+  'starting',
+  'login_required',
+  'published',
+  'busy',
+  'unreachable',
+  'invalid',
+  'degraded',
+  'recovery_required',
+]);
+
+export const platformRuntimeIssueCodeSchema = z.enum([
+  'browser-runtime-missing',
+  'browser-runtime-manifest-invalid',
+  'browser-runtime-unreachable',
+  'browser-runtime-generation-mismatch',
+  'browser-runtime-work-page-missing',
+  'browser-runtime-work-page-ambiguous',
+  'browser-runtime-auth-required',
+  'browser-runtime-busy',
+  'browser-runtime-lease-lost',
+  'browser-runtime-recovery-required',
+  'browser-runtime-config-conflict',
+  'browser-runtime-handoff-uncertain',
+  'browser-runtime-unpublished-endpoint',
+  'browser-runtime-degraded',
+]);
+
+export const platformRuntimeSafeViewSchema = z.object({
+  platform: supportedPlatformSchema,
+  status: platformRuntimeSafeStatusSchema,
+  issueCodes: z.array(platformRuntimeIssueCodeSchema),
+  generationFingerprint: z.string().regex(/^[0-9a-f]{8}$/i).optional(),
+  revision: z.number().int().positive().optional(),
+  authenticatedAt: z.string().datetime().optional(),
+  publishedAt: z.string().datetime().optional(),
+  endpointReachable: z.boolean().optional(),
+  occupiedBy: z.object({
+    operationId: z.string().min(1).max(256),
+    operationKind: z.string().min(1).max(128),
+    acquiredAt: z.string().datetime(),
+  }).strict().optional(),
+}).strict();
+
+export const platformRuntimeListResponseSchema = z.object({
+  runtimes: z.array(platformRuntimeSafeViewSchema),
+}).strict();
+
 export const artifactDescriptorSchema = z.object({
   artifactId: z.string().min(1),
   label: z.string().min(1),
@@ -81,6 +130,24 @@ export type ApiErrorBody = z.infer<typeof apiErrorSchema>;
 export type ArtifactDescriptor = z.infer<typeof artifactDescriptorSchema>;
 export type OperationModeCatalog = z.infer<typeof operationModeCatalogSchema>;
 export type OperationModeCatalogItem = z.infer<typeof operationModeCatalogItemSchema>;
+export type PlatformRuntimeSafeViewResponse = z.infer<typeof platformRuntimeSafeViewSchema>;
+
+export function parsePlatformRuntimeListResponse(value: unknown): {
+  runtimes: PlatformRuntimeSafeViewResponse[];
+} {
+  try {
+    const parsed = platformRuntimeListResponseSchema.parse(value);
+    const expected = new Set(['51job', 'liepin', 'zhilian', 'boss']);
+    if (parsed.runtimes.length !== expected.size
+      || new Set(parsed.runtimes.map((runtime) => runtime.platform)).size !== expected.size
+      || parsed.runtimes.some((runtime) => !expected.has(runtime.platform))) {
+      throw new Error('runtime platform set is incomplete or duplicated');
+    }
+    return parsed;
+  } catch (error) {
+    throw new Error(`platform-browser-runtime-shape: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 function assertExactIdSet(actual: readonly string[], expected: readonly string[], label: string): void {
   const actualSet = new Set(actual);

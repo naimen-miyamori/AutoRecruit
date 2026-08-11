@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { runBrowserCliMain } from '../browser/cli-lifecycle.js';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from '../browser/session.js';
 import { config } from '../config.js';
 import { diffCandidateListSummaries, summarizeCandidateList } from '../extraction/candidate-list-validation.js';
@@ -104,7 +105,4 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+void runBrowserCliMain(main);

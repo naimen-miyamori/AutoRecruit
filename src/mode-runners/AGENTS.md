@@ -16,6 +16,10 @@ root `AGENTS.md` and every owning domain document used by a runner.
   request parsing, or frontend authorization.
 - Keep irreversible boundaries explicit. Queue admission is not evidence that an external mutation
   completed; preserve identity, confirmation, receipt/outbox, and ambiguous-no-retry contracts.
+- Login-owned platform runtime leases cover only the browser phase. Release the legacy Boss search
+  lease first and the platform runtime lease second after final page cleanup, before ordinary
+  offline scoring, export, report aggregation, or SMTP; the documented Boss same-detail model wait
+  remains the sole retention exception.
 - Shared runner context contains explicit, replaceable dependencies only. Do not hide execution
   authority in mutable globals or duplicate public mode semantics outside `src/operation-modes.ts`.
 

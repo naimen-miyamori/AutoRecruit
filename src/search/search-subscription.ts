@@ -29,6 +29,7 @@ interface LoadSearchConditionPlanFileOptions {
 interface RunSearchSubscriptionWorkflowOptions extends SearchWaitOptions {
   save: boolean;
   savedSearchName?: string;
+  onWorkPageResolved?: (page: Page) => Promise<void>;
 }
 
 export class SearchSubscriptionRunError extends Error {
@@ -448,6 +449,7 @@ export async function runSearchSubscriptionWorkflow(
   }
   const conditionStatusCounts = countConditionStatuses(conditionResults);
   const allConditionsApplied = conditionStatusCounts.skipped === 0 && conditionStatusCounts.failed === 0;
+  await options.onWorkPageResolved?.(searchPage);
   const savedSearchName = options.savedSearchName ?? plan.savedSearchName;
   let saved = false;
   let saveOutcome: SearchSubscriptionSummary['saveOutcome'];

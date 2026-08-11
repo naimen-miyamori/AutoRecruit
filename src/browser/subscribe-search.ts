@@ -1,5 +1,6 @@
 import { Locator, Page } from 'playwright';
 import { config } from '../config.js';
+import { registerTemporaryRuntimePageForContext } from './runtime-page-registry.js';
 import { apply51jobViewedCandidatePolicy as apply51jobViewedCandidatePolicyAction } from '../platforms/51job/actions/result-actions.js';
 import { clickPlatformLocator, gotoPlatformPage, moveMouseThroughWaypoints } from './pacing.js';
 import { openAuthenticatedHome as openAuthenticatedSubscribePage } from './session.js';
@@ -605,7 +606,15 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
       await ensure51jobViewedFilterChecked(openOutcome.page, { deadline, signal: options?.signal });
     }
     await waitFor51jobSearchKeywordCondition(openOutcome.page, searchKeyword, deadline);
-    await closeExtra51jobSubscribePages(openOutcome.page);
+    if (openOutcome.page !== page) {
+      registerTemporaryRuntimePageForContext(page.context(), openOutcome.page, {
+        purpose: 'search-page-handoff',
+        identity: searchKeyword,
+        cleanupPolicy: 'close',
+      });
+    } else {
+      await closeExtra51jobSubscribePages(openOutcome.page);
+    }
     return openOutcome.page;
   }
 

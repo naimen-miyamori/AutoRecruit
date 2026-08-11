@@ -23,7 +23,8 @@ src/browser/AGENTS.md first.
   requested condition, and searches without invoking a saved subscription.
 - Default capture explicitly enables the viewed-candidate filter; include-viewed explicitly clears
   it. After entering talent search, close stale subscription tabs and preserve the useful reusable
-  search page.
+  search page. A popup search page is registered and returned before any
+  subscription-page cleanup; the runtime handoff commits it and owns cleanup of the prior page.
 - An explicit no-result state is a successful zero-candidate result. Preserve compatible selector
   fallbacks in the owning action and update direct action tests when the platform changes.
 - Candidate actions must use a verified detail trigger, not decorative or rejection controls inside

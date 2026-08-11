@@ -1,3 +1,4 @@
+import { runBrowserCliMain } from '../browser/cli-lifecycle.js';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from '../browser/session.js';
 import { getPlatformAdapter } from '../platforms/registry.js';
 
@@ -84,7 +85,4 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : String(error));
-  process.exitCode = 1;
-});
+void runBrowserCliMain(main);

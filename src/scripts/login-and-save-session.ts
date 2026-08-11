@@ -4,9 +4,10 @@ import {
   openAuthenticatedSubscribePageRef,
   openLoginSessionRef,
   persistBrowserSessionRef,
-  verifyPersistedBrowserSessionRef,
+  verifyPublishedBrowserRuntimeRef,
 } from '../browser/session.js';
 import { waitForManualLoginAndPersistSession } from '../browser/manual-login-refresh.js';
+import { runBrowserCliMain } from '../browser/cli-lifecycle.js';
 import { parsePlatformArg } from '../platforms/registry.js';
 import type { SupportedPlatform } from '../platforms/types.js';
 
@@ -46,7 +47,7 @@ export async function runManualLoginSessionSave(argv = process.argv.slice(2)): P
     openLoginSession: openLoginSessionRef.fn,
     openAuthenticatedHome: openAuthenticatedSubscribePageRef.fn,
     persistBrowserSession: persistBrowserSessionRef.fn,
-    verifyPersistedBrowserSession: verifyPersistedBrowserSessionRef.fn,
+    verifyPublishedBrowserRuntime: verifyPublishedBrowserRuntimeRef.fn,
     closeBrowserSession: closeBrowserSessionRef.fn,
   }, { keepOpen });
 }
@@ -58,8 +59,5 @@ async function main(): Promise<void> {
 const entrypointUrl = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
 
 if (import.meta.url === entrypointUrl) {
-  main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  });
+  void runBrowserCliMain(main);
 }

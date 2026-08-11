@@ -1,4 +1,4 @@
-import { parseOperationModeCatalogResponse, parseScheduleDetailResponse } from './contracts';
+import { parseOperationModeCatalogResponse, parsePlatformRuntimeListResponse, parseScheduleDetailResponse } from './contracts';
 import type {
   ApplicationFilterOptions,
   AssistantChatRequest,
@@ -141,6 +141,8 @@ export const api = {
   health: (signal?: AbortSignal) => requestJson<{ status: string; service: string }>('/health', { signal }),
   listOperationModes: (surface?: 'assistant' | 'manual' | 'schedule' | 'cli', signal?: AbortSignal) => requestJson<unknown>(`/operation-modes${surface ? `?surface=${encodeURIComponent(surface)}` : ''}`, { signal })
     .then((value) => parseOperationModeCatalogResponse(value, { surface })),
+  listPlatformBrowserRuntimes: (signal?: AbortSignal) => requestJson<unknown>('/platform-browser-runtimes', { signal })
+    .then(parsePlatformRuntimeListResponse),
   dashboardHealth: (signal?: AbortSignal) => requestJson<DashboardHealth>('/dashboard/health', { signal }),
   listTasks: (signal?: AbortSignal) => requestJson<{ tasks: TaskSummary[] }>('/tasks', { signal }),
   getTask: (taskId: string, signal?: AbortSignal) => requestJson<TaskDetail>(`/tasks/${encodeURIComponent(taskId)}`, { signal }),
@@ -217,6 +219,7 @@ export const api = {
 export const queryKeys = {
   health: ['health'] as const,
   operationModes: (surface?: string) => ['operation-modes', surface ?? 'all'] as const,
+  platformBrowserRuntimes: ['platform-browser-runtimes'] as const,
   dashboard: ['dashboard'] as const,
   tasks: ['tasks'] as const,
   task: (taskId: string) => ['tasks', taskId] as const,

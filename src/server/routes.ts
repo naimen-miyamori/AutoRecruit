@@ -96,6 +96,8 @@ import type {
   TaskInput,
   ResumeCaptureTaskInput,
 } from './types.js';
+import { inspectAllPlatformRuntimeStatuses } from '../browser/platform-runtime.js';
+import { PlatformRuntimeError } from '../browser/platform-runtime-inspector.js';
 
 export interface ApiResponse<T = unknown> {
   statusCode: number;
@@ -533,6 +535,13 @@ async function confirmAssistantDraft(
 
 export async function handleApiRequest(request: RouteRequest): Promise<ApiResponse> {
   const dataDir = request.dataDir ?? config.dataDir;
+  const earlyMethod = request.method.toUpperCase();
+  const earlyPathname = request.pathname.replace(/\/+$/, '') || '/';
+  if (earlyMethod === 'GET' && earlyPathname === '/api/platform-browser-runtimes') {
+    return jsonResponse(200, {
+      runtimes: await inspectAllPlatformRuntimeStatuses({ dataDir }),
+    });
+  }
   const taskQueue = request.taskQueue ?? new TaskQueue();
   const searchConditionSetService = request.searchConditionSetService
     ?? new SearchConditionSetService({ dataDir });
@@ -1095,6 +1104,21 @@ export async function handleApiRequest(request: RouteRequest): Promise<ApiRespon
 
     return notFound(`No route for ${method} ${pathname}`);
   } catch (error) {
+    if (error instanceof PlatformRuntimeError) {
+      const statusCode = error.code === 'browser-runtime-busy'
+        || error.code === 'browser-runtime-generation-mismatch'
+        || error.code === 'browser-runtime-recovery-required'
+        ? 409
+        : error.code === 'browser-runtime-unreachable'
+          ? 503
+          : 400;
+      return jsonResponse(statusCode, {
+        error: {
+          code: error.code,
+          message: error.message,
+        },
+      });
+    }
     if (error instanceof ScheduleLeaseRecoveryRequiredError
       || error instanceof ScheduleLeaseOwnershipLostError
       || error instanceof ScheduleStoreConflictError) {

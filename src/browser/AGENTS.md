@@ -26,6 +26,25 @@ to the matching src/platforms/<platform>/AGENTS.md.
 - Reuse the authenticated context and useful page whenever supported. Do not create repeated login
   tabs or replace a usable current page; close only stale tabs or detail pages when the owning
   platform contract requires it.
+- Under `login-owned`, login refresh is the only production browser/base-page launch owner. Business
+  work attaches to a complete canonical manifest, acquires the platform directory lease, resolves
+  the exact CDP target/context identity, and releases without closing the browser or work page.
+  Missing, malformed, unreachable, busy, or recovery-required evidence fails before page actions;
+  no online stale-lease takeover or URL-first work-page fallback is allowed.
+- A platform-created search page becomes canonical only through the runtime handoff CAS. Temporary
+  detail pages are registered to the current owner and cleanup policy; retained inspection state
+  makes the runtime recovery-required. Runtime status reads manifest/lease and localhost CDP HTTP
+  metadata only and never attach through Playwright or repair state.
+- Playwright exposes no public CDP detach that preserves the remote browser. Completed CLI
+  entrypoints therefore exit explicitly only after all awaited work and runtime release finish;
+  long-lived HTTP/server entrypoints cache and reuse the connection and never use the CLI lifecycle helper.
+- A first login attempt that fails before manifest publication closes its owned browser through CDP
+  before releasing the lease. It must not leave a live manifest-less endpoint for a retry to guess
+  or adopt. A failed refresh preserves the prior published runtime contract.
+- Confirmed generation-matching stop may first quarantine a lease only when its recorded owner PID
+  is proven dead; this is an operator stop boundary, never online takeover for page work. It then
+  sends the public CDP `Browser.close` command and proves the endpoint and profile lock are offline
+  before quarantining the canonical manifest. A client disconnect alone is not stop evidence.
 - Browser engine and reusable-profile defaults remain configuration concerns. Do not duplicate
   platform port, profile, or login-page inventories here.
 

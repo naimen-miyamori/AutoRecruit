@@ -3,6 +3,7 @@ import type { Page } from 'playwright';
 import { config } from './config.js';
 import { JobStore } from './storage/job-store.js';
 import type { BrowserSession } from './browser/session.js';
+import { handoffPlatformWorkPage } from './browser/platform-runtime.js';
 import { waitPlatformActionPace, waitPlatformCandidatePace } from './browser/pacing.js';
 import { createProductionExtractionBoundary } from './extraction/production-extractor.js';
 import { getPlatformAdapter } from './platforms/registry.js';
@@ -565,20 +566,6 @@ async function recoverBossRejectionEmailOutbox(
       throw new Error(`Boss rejection email ${entry.deliveryId} conflicts with its routing artifact; refusing SMTP delivery.`);
     }
     const reportable = entry.policyHash === policyHash && isUnresolvedBossRejectionEmail(entry);
-    if (entry.status === 'sending' || (hasRetryableBossRejectionEmail(entry) && entry.detailClosedAt)) {
-      let smtpAttemptCount = 0;
-      const recoveredEntry = await executeBossRejectionEmailDelivery(
-        store,
-        jobKey,
-        entry,
-        () => { smtpAttemptCount += 1; },
-      );
-      return {
-        entry: recoveredEntry,
-        reportable,
-        smtpAttemptCount,
-      };
-    }
     return { entry, reportable, smtpAttemptCount: 0 };
   }));
   return {
@@ -1644,6 +1631,8 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
   reportDelivery?: ReportDeliveryOptions;
   secondaryReportDelivery?: ReportDeliveryOptions;
   searchExecution?: Omit<NonNullable<RunResult['searchExecution']>, 'includeViewedCandidates'>;
+  /** Releases the platform runtime after the last detail cleanup and before offline scoring/report work. */
+  releaseBrowserPhase?: () => Promise<void>;
 } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; capturedCandidateIds: string[]; runResult: RunResult; resultPath: string }> {
   const bossScreeningEnabled = platform === 'boss' && options.bossScreening?.enabled === true;
   const bossScreeningPolicyHash = bossScreeningEnabled
@@ -1782,6 +1771,9 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
         return platformAdapter.openSavedSearch(session.page, options.savedSearch, searchOptions);
       })()
       : await platformAdapter.openSubscribeSearch(session.page, pageKeyword, searchOptions);
+  if (session.runtimeLease && searchPage !== session.page) {
+    await handoffPlatformWorkPage(session, session.page, searchPage);
+  }
   session.page = searchPage;
   const { candidates: extractedCandidates } = await extractCandidateListWithAdapterRef.fn(
     platformAdapter,
@@ -2183,7 +2175,7 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
         async () => {
           if (!rejectedAwaitingClose || !resumeForScreening) return;
           try {
-            let finalized = await finalizeBossRejectedCandidateAfterDetailClose({
+            const finalized = await finalizeBossRejectedCandidateAfterDetailClose({
               jobKey,
               job,
               resume: resumeForScreening,
@@ -2194,12 +2186,6 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
             });
             await store.deleteBossScreeningWorkItem('boss', jobKey, candidate.candidateId);
             screeningWorkByCandidateId.delete(candidate.candidateId);
-            finalized.rejectionEmailOutbox = await executeBossRejectionEmailDelivery(
-              store,
-              jobKey,
-              finalized.rejectionEmailOutbox!,
-              () => { rejectionEmailSmtpAttemptCount += 1; },
-            );
             bossScreeningResults.push(finalized);
           } catch (error) {
             bossScreeningFailures.push({
@@ -2303,6 +2289,34 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
 
   if (!bossScreeningEnabled) {
     await store.markCapturedCandidatesSeen(platform, jobKey, capturedCandidateIds);
+  }
+
+  await options.releaseBrowserPhase?.();
+
+  if (bossScreeningEnabled) {
+    const reportableDeliveryIds = new Set(reportableRecoveredRejectionEmails.map((entry) => entry.deliveryId));
+    preloadedRejectionEmailOutbox = await Promise.all(preloadedRejectionEmailOutbox.map(async (entry) => {
+      if (entry.status !== 'sending' && (!hasRetryableBossRejectionEmail(entry) || !entry.detailClosedAt)) {
+        return entry;
+      }
+      return executeBossRejectionEmailDelivery(
+        store,
+        jobKey,
+        entry,
+        () => { rejectionEmailSmtpAttemptCount += 1; },
+      );
+    }));
+    reportableRecoveredRejectionEmails = preloadedRejectionEmailOutbox
+      .filter((entry) => reportableDeliveryIds.has(entry.deliveryId));
+    for (const result of bossScreeningResults) {
+      if (!result.rejectionEmailOutbox) continue;
+      result.rejectionEmailOutbox = await executeBossRejectionEmailDelivery(
+        store,
+        jobKey,
+        result.rejectionEmailOutbox,
+        () => { rejectionEmailSmtpAttemptCount += 1; },
+      );
+    }
   }
 
   const scoringResult: CandidateScoringResult = bossScreeningEnabled

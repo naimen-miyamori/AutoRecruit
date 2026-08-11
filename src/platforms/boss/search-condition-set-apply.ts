@@ -207,10 +207,11 @@ export async function applyBossSearchConditionSetWorkflow(
   let phase: BossSearchConditionSetApplyError['phase'] = 'lock';
   try {
     throwIfAborted(input.signal);
-    ({ release: releaseLock } = await acquireBossSearchLease(input.lockFilePath));
     phase = 'session';
     throwIfAborted(input.signal);
     session = await ensureAuthenticatedBrowserSessionRef.fn('boss');
+    phase = 'lock';
+    ({ release: releaseLock } = await acquireBossSearchLease(input.lockFilePath));
     phase = 'apply';
     throwIfAborted(input.signal);
     const applied = await applyBossDirectSearchRef.fn(session.page, keyword, resolved.conditions, {
@@ -254,9 +255,9 @@ export async function applyBossSearchConditionSetWorkflow(
       cause: error,
     });
   } finally {
+    await releaseLock?.().catch(() => undefined);
     if (session) {
       await closeBrowserSessionRef.fn(session, { announceKeptOpen: false }).catch(() => undefined);
     }
-    await releaseLock?.().catch(() => undefined);
   }
 }

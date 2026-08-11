@@ -63,10 +63,11 @@ export async function runBossSavedSearchBindingMode(
       ? Math.max(1, estimatedTimeoutMs)
       : 0,
   );
-  const lease = await dependencies.acquireSearchLease();
+  let lease: { release: () => Promise<void> } | undefined;
   let session: BrowserSession | undefined;
   try {
     session = await dependencies.openSession();
+    lease = await dependencies.acquireSearchLease();
     await adapter.openSavedSearch(session.page, input.savedSearch, {
       deadline,
       includeViewedCandidates: false,
@@ -96,9 +97,9 @@ export async function runBossSavedSearchBindingMode(
     return summary;
   } finally {
     try {
-      if (session) await dependencies.closeSession(session);
+      await lease?.release();
     } finally {
-      await lease.release();
+      if (session) await dependencies.closeSession(session);
     }
   }
 }

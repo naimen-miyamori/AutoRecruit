@@ -4,6 +4,8 @@ import { buildJobKey, parseJobDescription } from './parsers/jd-parser.js';
 import { config } from './config.js';
 import { JobStore } from './storage/job-store.js';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from './browser/session.js';
+import { handoffPlatformWorkPage, preflightPlatformRuntimeManifests } from './browser/platform-runtime.js';
+import { runBrowserCliMain } from './browser/cli-lifecycle.js';
 import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listCapturePlatforms, listSearchSubscriptionPlatforms, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { acquireBossSearchLease } from './platforms/boss/search-lease.js';
@@ -173,6 +175,7 @@ export const sendJobReportRef = { fn: sendJobReport };
 export const sendBossRoutedReportsRef = { fn: sendBossRoutedReports };
 export const ensureAuthenticatedBrowserSessionRef = { fn: ensureAuthenticatedBrowserSession };
 export const closeBrowserSessionRef = { fn: closeBrowserSession };
+export const preflightPlatformRuntimeManifestsRef = { fn: preflightPlatformRuntimeManifests };
 export const runSearchSubscriptionWorkflowRef = { fn: runSearchSubscriptionWorkflow };
 export const loadTalentMappingPlanFileRef = { fn: loadTalentMappingPlanFile };
 export const runTalentMappingWorkflowRef = { fn: runTalentMappingWorkflow };
@@ -1201,6 +1204,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2), opti
     preflight: (jobs, platforms) => preflightCaptureRun(jobs, platforms, {
       ...captureRunnerDependencies,
       buildSinglePlatformInput,
+      preflightRuntimes: preflightPlatformRuntimeManifestsRef.fn,
     }),
     warnBossOptIn: warnBossCaptureOptIn,
     buildSinglePlatformInput,
@@ -1290,6 +1294,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2), opti
       resolveAdapter: resolvePlatformAdapter,
       openSession: (platform) => ensureAuthenticatedBrowserSessionRef.fn(platform),
       closeSession: (session) => closeBrowserSessionRef.fn(session),
+      handoffWorkPage: handoffPlatformWorkPage,
+      preflightRuntimes: preflightPlatformRuntimeManifests,
       runWorkflow: (adapter, page, plan, workflowOptions) => runSearchSubscriptionWorkflowRef.fn(adapter, page, plan, workflowOptions),
       report: (result) => console.log(JSON.stringify(result, null, 2)),
       reportFailure: (summary) => console.error(JSON.stringify(summary, null, 2)),
@@ -1326,8 +1332,5 @@ export async function main(argv: readonly string[] = process.argv.slice(2), opti
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main().catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  });
+  void runBrowserCliMain(() => main());
 }
