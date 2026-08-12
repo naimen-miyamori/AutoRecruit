@@ -93,6 +93,15 @@ scheduled work.
   afterward. A missing close proof never authorizes SMTP but remains visible in the current run;
   recovered outcomes remain reportable even when the candidate is absent or already indexed by a
   historical run.
+  Route every executable rejection outbox through the browser-independent, run-local reporting
+  dispatcher after durable outbox/routing read-back. The dispatcher owns no Page, BrowserSession,
+  adapter, selector, or Boss action. Enqueue is non-blocking, live items take priority over recovery
+  items that have not started, and one cross-process job lease plus the existing delivery lease
+  allows at most one SMTP call in flight for a Boss job. Attempt starts are at least 3000ms apart.
+  A known-not-sent deferred failure, uncertain result, inherited sending state, malformed evidence,
+  or lock conflict opens the run-local circuit; later items remain pending with no attempt consumed.
+  Close input after candidate production, release the browser runtime, then drain and reconcile from
+  JobStore before publishing RunResult. Aggregate report SMTP remains outside this dispatcher.
   Boss page-forwarding primary and copy addresses have separate durable states; sent and uncertain
   confirmations are never auto-retried, and a failed copy must not repeat a successful primary
   delivery. A rejection email's TO and CC addresses instead form one SMTP delivery and share one

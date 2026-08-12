@@ -23,8 +23,12 @@ root `AGENTS.md` and every owning domain document used by a runner.
   completed; preserve identity, confirmation, receipt/outbox, and ambiguous-no-retry contracts.
 - Login-owned platform runtime leases cover only the browser phase. Release the legacy Boss search
   lease first and the platform runtime lease second after final page cleanup, before ordinary
-  offline scoring, export, report aggregation, or SMTP; the documented Boss same-detail model wait
-  remains the sole retention exception.
+  offline scoring, export, report aggregation, or SMTP. The only SMTP overlap is the browser-free
+  Boss rejection-email dispatcher after that exact rejected detail is strictly closed and its
+  immutable routing/outbox evidence is durably read back; the browser producer only enqueues and
+  never awaits delivery. Release the runtime before dispatcher drain and before aggregate-report
+  SMTP. The documented Boss same-detail model wait remains the only exception that retains an open
+  detail during non-browser work.
 - Shared runner context contains explicit, replaceable dependencies only. Do not hide execution
   authority in mutable globals or duplicate public mode semantics outside `src/operation-modes.ts`.
 

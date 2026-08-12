@@ -153,6 +153,9 @@ interface JobPaths {
   forwardingOutboxDir: string;
   rejectionEmailOutboxDir: string;
   rejectionEmailLocksDir: string;
+  rejectionEmailDispatchDir: string;
+  rejectionEmailDispatchLockPath: string;
+  rejectionEmailDispatchStatePath: string;
   snapshotsDir: string;
   domSnapshotsDir: string;
   jdPath: string;
@@ -226,6 +229,22 @@ interface BossRejectionEmailDeliveryLockRecord {
   acquiredAt: string;
 }
 
+interface BossRejectionEmailDispatchLockRecord {
+  version: 1;
+  pid: number;
+  token: string;
+  acquiredAt: string;
+}
+
+export interface BossRejectionEmailDispatchLease {
+  readonly token: string;
+}
+
+export interface BossRejectionEmailDispatchState {
+  readonly version: 1;
+  readonly lastAttemptStartedAt: string;
+}
+
 export interface BossRejectionEmailDeliveryLease {
   readonly token: string;
 }
@@ -239,6 +258,15 @@ export class BossRejectionEmailDeliveryBusyError extends Error {
   }
 }
 
+export class BossRejectionEmailDispatchBusyError extends Error {
+  readonly code = 'BOSS_REJECTION_EMAIL_DISPATCH_BUSY' as const;
+
+  constructor(readonly jobKey: string) {
+    super(`Boss rejection email dispatch for job ${jobKey} is already owned by another live process.`);
+    this.name = 'BossRejectionEmailDispatchBusyError';
+  }
+}
+
 function isBossRejectionEmailDeliveryLockRecord(value: unknown): value is BossRejectionEmailDeliveryLockRecord {
   if (!value || typeof value !== 'object') return false;
   const record = value as Record<string, unknown>;
@@ -249,6 +277,18 @@ function isBossRejectionEmailDeliveryLockRecord(value: unknown): value is BossRe
     && record.token.length > 0
     && typeof record.acquiredAt === 'string'
     && record.acquiredAt.length > 0;
+}
+
+function isBossRejectionEmailDispatchLockRecord(value: unknown): value is BossRejectionEmailDispatchLockRecord {
+  return isBossRejectionEmailDeliveryLockRecord(value);
+}
+
+function isBossRejectionEmailDispatchState(value: unknown): value is BossRejectionEmailDispatchState {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return record.version === 1
+    && typeof record.lastAttemptStartedAt === 'string'
+    && Number.isFinite(Date.parse(record.lastAttemptStartedAt));
 }
 
 function processIsAlive(pid: number): boolean {
@@ -550,6 +590,9 @@ export class JobStore {
       forwardingOutboxDir: path.join(jobDir, 'routing', 'outbox'),
       rejectionEmailOutboxDir: path.join(jobDir, 'routing', 'rejection-email-outbox'),
       rejectionEmailLocksDir: path.join(jobDir, 'routing', 'rejection-email-locks'),
+      rejectionEmailDispatchDir: path.join(jobDir, 'routing', 'rejection-email-dispatch'),
+      rejectionEmailDispatchLockPath: path.join(jobDir, 'routing', 'rejection-email-dispatch', 'dispatch.lock'),
+      rejectionEmailDispatchStatePath: path.join(jobDir, 'routing', 'rejection-email-dispatch', 'state.json'),
       snapshotsDir: path.join(jobDir, 'snapshots'),
       domSnapshotsDir: path.join(jobDir, 'snapshots-dom'),
       jdPath: path.join(jobDir, 'jd.json'),
@@ -569,6 +612,7 @@ export class JobStore {
       ensureDir(paths.forwardingOutboxDir),
       ensureDir(paths.rejectionEmailOutboxDir),
       ensureDir(paths.rejectionEmailLocksDir),
+      ensureDir(paths.rejectionEmailDispatchDir),
       ensureDir(paths.snapshotsDir),
       ensureDir(paths.domSnapshotsDir),
     ]);
@@ -1253,6 +1297,117 @@ export class JobStore {
     ));
   }
 
+  private async acquireBossRejectionEmailDispatchLease(
+    paths: JobPaths,
+    jobKey: string,
+  ): Promise<BossRejectionEmailDispatchLockRecord> {
+    const lease: BossRejectionEmailDispatchLockRecord = {
+      version: 1,
+      pid: process.pid,
+      token: randomUUID(),
+      acquiredAt: new Date().toISOString(),
+    };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (await tryCreateExclusiveJsonFile(paths.rejectionEmailDispatchLockPath, lease)) return lease;
+      let existing: unknown;
+      try {
+        existing = await readJsonObject(paths.rejectionEmailDispatchLockPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw new BossRejectionEmailDispatchBusyError(jobKey);
+      }
+      if (!isBossRejectionEmailDispatchLockRecord(existing) || processIsAlive(existing.pid)) {
+        throw new BossRejectionEmailDispatchBusyError(jobKey);
+      }
+      const stalePath = `${paths.rejectionEmailDispatchLockPath}.stale-${lease.token}`;
+      try {
+        await fs.rename(paths.rejectionEmailDispatchLockPath, stalePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      await fs.rm(stalePath, { force: true });
+    }
+    throw new BossRejectionEmailDispatchBusyError(jobKey);
+  }
+
+  private async assertBossRejectionEmailDispatchLease(
+    paths: JobPaths,
+    token: string,
+  ): Promise<void> {
+    let current: unknown;
+    try {
+      current = await readJsonObject(paths.rejectionEmailDispatchLockPath);
+    } catch {
+      throw new Error('Boss rejection email dispatch lease is missing or unreadable.');
+    }
+    if (!isBossRejectionEmailDispatchLockRecord(current)
+      || current.pid !== process.pid
+      || current.token !== token) {
+      throw new Error('Boss rejection email dispatch lease ownership changed.');
+    }
+  }
+
+  private async releaseBossRejectionEmailDispatchLease(
+    paths: JobPaths,
+    lease: BossRejectionEmailDispatchLockRecord,
+  ): Promise<void> {
+    await this.assertBossRejectionEmailDispatchLease(paths, lease.token);
+    await fs.rm(paths.rejectionEmailDispatchLockPath);
+  }
+
+  async withBossRejectionEmailDispatchLock<T>(
+    platform: 'boss',
+    jobKey: string,
+    operation: (lease: BossRejectionEmailDispatchLease) => Promise<T>,
+  ): Promise<T> {
+    const paths = await this.initializeJob(platform, jobKey);
+    const lease = await this.acquireBossRejectionEmailDispatchLease(paths, jobKey);
+    try {
+      return await operation({ token: lease.token });
+    } finally {
+      await this.releaseBossRejectionEmailDispatchLease(paths, lease);
+    }
+  }
+
+  async readBossRejectionEmailDispatchState(
+    platform: 'boss',
+    jobKey: string,
+    leaseToken: string,
+  ): Promise<BossRejectionEmailDispatchState | undefined> {
+    const paths = await this.initializeJob(platform, jobKey);
+    await this.assertBossRejectionEmailDispatchLease(paths, leaseToken);
+    const raw = await readJsonFile<unknown>(paths.rejectionEmailDispatchStatePath, undefined);
+    if (raw === undefined) return undefined;
+    if (!isBossRejectionEmailDispatchState(raw)) {
+      throw new Error('Boss rejection email dispatch cadence state is malformed.');
+    }
+    return raw;
+  }
+
+  async saveBossRejectionEmailDispatchState(
+    platform: 'boss',
+    jobKey: string,
+    state: BossRejectionEmailDispatchState,
+    leaseToken: string,
+  ): Promise<void> {
+    const paths = await this.initializeJob(platform, jobKey);
+    await this.assertBossRejectionEmailDispatchLease(paths, leaseToken);
+    if (!isBossRejectionEmailDispatchState(state)) {
+      throw new Error('Boss rejection email dispatch cadence state is malformed.');
+    }
+    const existing = await readJsonFile<unknown>(paths.rejectionEmailDispatchStatePath, undefined);
+    if (existing !== undefined) {
+      if (!isBossRejectionEmailDispatchState(existing)) {
+        throw new Error('Boss rejection email dispatch cadence state is malformed.');
+      }
+      if (Date.parse(state.lastAttemptStartedAt) < Date.parse(existing.lastAttemptStartedAt)) {
+        throw new Error('Boss rejection email dispatch cadence cannot move backward.');
+      }
+    }
+    await writeJsonIfChanged(paths.rejectionEmailDispatchStatePath, state);
+  }
+
   private async acquireBossRejectionEmailDeliveryLease(
     paths: JobPaths,
     deliveryId: string,
@@ -1353,6 +1508,7 @@ export class JobStore {
         subject: existing.subject,
         markdown: existing.markdown,
         contentHash: existing.contentHash,
+        detailClosedAt: existing.detailClosedAt,
       };
       const immutableIncoming = {
         version: entry.version,
@@ -1367,6 +1523,7 @@ export class JobStore {
         subject: entry.subject,
         markdown: entry.markdown,
         contentHash: entry.contentHash,
+        detailClosedAt: entry.detailClosedAt,
       };
       if (!isDeepStrictEqual(immutableExisting, immutableIncoming)) {
         throw new Error(`Rejection email delivery ${entry.deliveryId} already exists with different immutable content.`);

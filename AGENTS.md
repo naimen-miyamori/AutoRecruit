@@ -268,6 +268,14 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
   that wait, then starts one fresh bounded continuation and revalidates the same candidate before
   detection, forwarding, or strict close. This exception never authorizes a normal-path second open.
   Pacing is intentional user-like delay, not an unbudgeted wait that consumes readiness time.
+- SMTP normally starts only after the platform runtime is released. The sole overlap exception is a
+  Boss candidate-level rejection-email dispatcher: the exact rejected detail must already be strictly
+  closed, its immutable routing/outbox facts committed and read back, and the dispatcher must have no
+  browser/session/page capability. Candidate browser progress never awaits that SMTP outcome. One
+  dispatcher per `(boss, jobKey)` serializes actual calls under a cross-process lease, preserves at
+  least 3000ms between attempt starts, and stops consuming after a known-not-sent deferred failure,
+  uncertain result, or evidence/ownership conflict. Aggregate reports and every other SMTP path still
+  require browser release first.
 - Action and candidate pacing defaults to 2000–4000ms with a weighted 2000–3000ms majority.
   Navigation, clicks, input, keys, forwarding, and candidate transitions use shared pacing;
   detailed platform typing and post-detail dwell rules live in scoped platform documents.

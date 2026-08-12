@@ -50,15 +50,21 @@ import {
   scoreAndEvaluatePostScoreRouting,
 } from './scoring/boss-screening.js';
 import {
-  assertDeliverableEmailAddress,
   assertSmtpConfigurationReady,
-  normalizeMailDeliveryError,
   sendJobReportEmail,
 } from './reporting/mailer.js';
 import {
   buildBossRejectionEmailMessageId,
   buildBossRejectionEmailPayload,
 } from './reporting/boss-rejection-email.js';
+import {
+  BOSS_REJECTION_EMAIL_MINIMUM_ATTEMPT_GAP_MS,
+  bossRejectionEmailImmutableFactsMatch,
+  createBossRejectionEmailDispatcher,
+  executeBossRejectionEmailDeliveryForTest,
+  isUnresolvedBossRejectionEmail,
+  type BossRejectionEmailDispatcher,
+} from './reporting/boss-rejection-email-dispatcher.js';
 import { sendJobReportEmailRef } from './scripts/send-job-report-email.js';
 import type {
   BossCandidateRoutingArtifact,
@@ -66,6 +72,7 @@ import type {
   BossForwardingOutboxEntry,
   BossForwardingSettings,
   BossForwardingStatus,
+  BossRejectionEmailDispatchPauseCode,
   BossRejectionEmailOutboxEntry,
   BossRoutingDecision,
   BossScreeningWorkItem,
@@ -238,9 +245,23 @@ const scoreResumeAgainstJobRef = { fn: scoreResumeAgainstJob };
 /** Test seam for the combined Boss score-and-negative-condition evaluation. */
 const scoreAndEvaluateBossScreeningRef = { fn: scoreAndEvaluateBossScreening };
 const scoreAndEvaluatePostScoreRoutingRef = { fn: scoreAndEvaluatePostScoreRouting };
-/** Test seam for rejection-email preflight, one bounded retry, and recovery. */
-const executeBossRejectionEmailDeliveryRef = { fn: executeBossRejectionEmailDelivery };
 const waitBossRejectionEmailRetryRef = { fn: waitBossRejectionEmailRetry };
+/** Test seam for rejection-email preflight, one bounded retry, and recovery. */
+const executeBossRejectionEmailDeliveryRef = {
+  fn: async (
+    store: JobStore,
+    jobKey: string,
+    input: BossRejectionEmailOutboxEntry,
+    onSmtpAttempt?: () => void,
+  ) => executeBossRejectionEmailDeliveryForTest(store, jobKey, input, {
+    assertSmtpConfigurationReady: () => {
+      if (sendJobReportEmailRef.fn === sendJobReportEmail) assertSmtpConfigurationReady();
+    },
+    sendMail: (params) => sendJobReportEmailRef.fn(params),
+    waitImmediateRetry: () => waitBossRejectionEmailRetryRef.fn(),
+    ...(onSmtpAttempt ? { onSmtpAttempt: () => onSmtpAttempt() } : {}),
+  }),
+};
 const waitPlatformActionPaceRef = { fn: waitPlatformActionPace };
 const waitPlatformCandidatePaceRef = { fn: waitPlatformCandidatePace };
 const forwardBossResumeRef = { fn: forwardBossResume };
@@ -351,250 +372,10 @@ function createBossRejectionEmailOutboxEntry(input: {
   };
 }
 
-function composeBossRejectionEmailOutboxState(
-  entry: BossRejectionEmailOutboxEntry,
-  status: BossForwardingStatus,
-  updatedAt: string,
-  error?: string,
-): BossRejectionEmailOutboxEntry {
-  return {
-    ...entry,
-    status,
-    updatedAt,
-    ...(status === 'sent' ? { completedAt: updatedAt } : {}),
-    ...(error && status !== 'sent' ? { error } : {}),
-  };
-}
-
-const BOSS_REJECTION_EMAIL_MAX_ATTEMPTS = 2;
 const BOSS_REJECTION_EMAIL_RETRY_DELAY_MS = 1_500;
-
-function normalizedBossRejectionEmailAttemptCount(entry: BossRejectionEmailOutboxEntry): number {
-  if (entry.attemptCount === undefined) return 0;
-  if (!Number.isInteger(entry.attemptCount) || entry.attemptCount < 0 || entry.attemptCount > BOSS_REJECTION_EMAIL_MAX_ATTEMPTS) {
-    throw new Error(`Invalid Boss rejection email attempt count for ${entry.deliveryId}.`);
-  }
-  return entry.attemptCount;
-}
-
-function hasRetryableBossRejectionEmail(entry: BossRejectionEmailOutboxEntry): boolean {
-  return entry.status === 'pending'
-    || (entry.status === 'retryable-failed'
-      && entry.retryExhausted !== true
-      && normalizedBossRejectionEmailAttemptCount(entry) < BOSS_REJECTION_EMAIL_MAX_ATTEMPTS);
-}
-
-function isUnresolvedBossRejectionEmail(entry: BossRejectionEmailOutboxEntry): boolean {
-  return entry.status === 'pending'
-    || entry.status === 'sending'
-    || entry.status === 'retryable-failed'
-    || entry.status === 'uncertain';
-}
-
-function redactRejectionEmailError(value: string): string {
-  return value.replace(/[^\s@]+@[^\s@]+\.[^\s@]+/gu, '[redacted-email]');
-}
 
 async function waitBossRejectionEmailRetry(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, BOSS_REJECTION_EMAIL_RETRY_DELAY_MS));
-}
-
-async function executeBossRejectionEmailDelivery(
-  store: JobStore,
-  jobKey: string,
-  input: BossRejectionEmailOutboxEntry,
-  onSmtpAttempt?: () => void,
-): Promise<BossRejectionEmailOutboxEntry> {
-  return store.withBossRejectionEmailDeliveryLock('boss', jobKey, input.deliveryId, async ({ token }) => {
-    const persisted = await store.readBossRejectionEmailOutboxEntry('boss', jobKey, input.deliveryId);
-    return executeBossRejectionEmailDeliveryLocked(store, jobKey, persisted ?? input, token, onSmtpAttempt);
-  });
-}
-
-async function executeBossRejectionEmailDeliveryLocked(
-  store: JobStore,
-  jobKey: string,
-  input: BossRejectionEmailOutboxEntry,
-  leaseToken: string,
-  onSmtpAttempt?: () => void,
-): Promise<BossRejectionEmailOutboxEntry> {
-  const saveEntry = (entry: BossRejectionEmailOutboxEntry): Promise<string> =>
-    store.saveBossRejectionEmailOutboxEntry('boss', jobKey, entry, { leaseToken });
-  let entry: BossRejectionEmailOutboxEntry = {
-    ...input,
-    ...(input.attemptCount === undefined ? { attemptCount: 0 } : {}),
-  };
-  if (entry.status === 'sending') {
-    entry = composeBossRejectionEmailOutboxState(
-      entry,
-      'uncertain',
-      new Date().toISOString(),
-      'The prior process ended after the rejection email send began; verify the mailbox before any manual action.',
-    );
-    await saveEntry(entry);
-    return entry;
-  }
-  if (!hasRetryableBossRejectionEmail(entry) || entry.status === 'sent' || entry.status === 'uncertain' || entry.status === 'superseded') {
-    return entry;
-  }
-  if (!entry.recipientEmail.trim() || !entry.subject.trim() || !entry.markdown.trim()) {
-    const failed = composeBossRejectionEmailOutboxState(
-      entry,
-      'superseded',
-      new Date().toISOString(),
-      'Rejection email payload is incomplete and immutable; delivery was superseded and no SMTP call was attempted.',
-    );
-    await saveEntry(failed);
-    return failed;
-  }
-  try {
-    assertDeliverableEmailAddress(entry.recipientEmail, 'recipient');
-    for (const [index, ccEmail] of entry.ccEmails.entries()) {
-      assertDeliverableEmailAddress(ccEmail, `cc[${index}]`);
-    }
-  } catch {
-    const failed = composeBossRejectionEmailOutboxState(
-      entry,
-      'superseded',
-      new Date().toISOString(),
-      'Rejection email has an invalid immutable recipient; delivery was superseded and no SMTP call was attempted.',
-    );
-    await saveEntry(failed);
-    return failed;
-  }
-  if (sendJobReportEmailRef.fn === sendJobReportEmail) {
-    try {
-      assertSmtpConfigurationReady();
-    } catch {
-      const failed = composeBossRejectionEmailOutboxState(
-        entry,
-        'retryable-failed',
-        new Date().toISOString(),
-        'Rejection email SMTP configuration is incomplete; no SMTP call was attempted.',
-      );
-      await saveEntry(failed);
-      return failed;
-    }
-  }
-  const contentHash = createHash('sha256').update(entry.markdown).digest('hex');
-  if (contentHash !== entry.contentHash) {
-    const failed = composeBossRejectionEmailOutboxState(
-      entry,
-      'superseded',
-      new Date().toISOString(),
-      'Rejection email immutable content hash changed; delivery was superseded and no SMTP call was attempted.',
-    );
-    await saveEntry(failed);
-    return failed;
-  }
-
-  while (true) {
-    const previousAttemptCount = normalizedBossRejectionEmailAttemptCount(entry);
-    if (entry.retryExhausted === true || previousAttemptCount >= BOSS_REJECTION_EMAIL_MAX_ATTEMPTS) {
-      return entry;
-    }
-    const attemptCount = previousAttemptCount + 1;
-    const attemptedAt = new Date().toISOString();
-    entry = {
-      ...entry,
-      status: 'sending',
-      attemptCount,
-      attemptedAt,
-      updatedAt: attemptedAt,
-      error: undefined,
-      lastSmtpFailure: undefined,
-    };
-    await saveEntry(entry);
-    try {
-      onSmtpAttempt?.();
-      await sendJobReportEmailRef.fn({
-        recipient: entry.recipientEmail,
-        ccEmails: entry.ccEmails,
-        subject: entry.subject,
-        markdown: entry.markdown,
-        messageId: entry.messageId,
-      });
-      entry = {
-        ...composeBossRejectionEmailOutboxState(entry, 'sent', new Date().toISOString()),
-        error: undefined,
-        lastSmtpFailure: undefined,
-        retryExhausted: undefined,
-      };
-      await saveEntry(entry);
-      return entry;
-    } catch (error) {
-      const normalizedError = normalizeMailDeliveryError(error);
-      const evidence = normalizedError.evidence;
-      const updatedAt = new Date().toISOString();
-      const summary = redactRejectionEmailError(normalizedError.message).slice(0, 500);
-      const knownNotSent = evidence.retrySafety === 'known-not-sent';
-      entry = {
-        ...composeBossRejectionEmailOutboxState(
-          entry,
-          knownNotSent ? 'retryable-failed' : 'uncertain',
-          updatedAt,
-          summary,
-        ),
-        lastSmtpFailure: {
-          ...evidence,
-          occurredAt: updatedAt,
-          summary,
-        },
-        ...(knownNotSent && !entry.retryAuthorization ? {
-          retryAuthorization: {
-            ...evidence,
-            failedAttempt: 1 as const,
-            occurredAt: updatedAt,
-            summary,
-          },
-        } : {}),
-        ...(knownNotSent && attemptCount >= BOSS_REJECTION_EMAIL_MAX_ATTEMPTS
-          ? { retryExhausted: true }
-          : {}),
-      };
-      await saveEntry(entry);
-      if (!knownNotSent
-        || attemptCount >= BOSS_REJECTION_EMAIL_MAX_ATTEMPTS
-        || evidence.retryDisposition !== 'immediate-once') {
-        return entry;
-      }
-      await waitBossRejectionEmailRetryRef.fn();
-    }
-  }
-}
-
-async function recoverBossRejectionEmailOutbox(
-  store: JobStore,
-  jobKey: string,
-  policyHash: string,
-): Promise<{
-  entries: BossRejectionEmailOutboxEntry[];
-  /** Every unresolved or in-flight entry this run inspected, including its recovered terminal state. */
-  reportableEntries: BossRejectionEmailOutboxEntry[];
-  /** Actual sendMail calls made while recovering these entries in this run. */
-  smtpAttemptCount: number;
-}> {
-  const entries = await store.listBossRejectionEmailOutboxEntries('boss', jobKey);
-  const artifacts = await store.listBossCandidateRoutingArtifacts('boss', jobKey);
-  const artifactsByDecisionId = new Map(artifacts
-    .filter((artifact) => artifact.routingDecisionId)
-    .map((artifact) => [artifact.routingDecisionId!, artifact]));
-  const recovered = await Promise.all(entries.map(async (entry) => {
-    const existing = artifactsByDecisionId.get(entry.routingDecisionId);
-    if (!existing) {
-      await store.saveBossCandidateRoutingArtifact('boss', jobKey, entry.routingArtifact);
-      artifactsByDecisionId.set(entry.routingDecisionId, entry.routingArtifact);
-    } else if (JSON.stringify(existing) !== JSON.stringify(entry.routingArtifact)) {
-      throw new Error(`Boss rejection email ${entry.deliveryId} conflicts with its routing artifact; refusing SMTP delivery.`);
-    }
-    const reportable = entry.policyHash === policyHash && isUnresolvedBossRejectionEmail(entry);
-    return { entry, reportable, smtpAttemptCount: 0 };
-  }));
-  return {
-    entries: recovered.map((item) => item.entry),
-    reportableEntries: recovered.filter((item) => item.reportable).map((item) => item.entry),
-    smtpAttemptCount: recovered.reduce((total, item) => total + item.smtpAttemptCount, 0),
-  };
 }
 
 function createBossForwardingOutboxEntry(
@@ -1097,9 +878,27 @@ async function finalizeBossRejectedCandidateAfterDetailClose(input: {
   // rescoring or reopening this rejected candidate.
   await input.store.saveBossRejectionEmailOutboxEntry('boss', input.jobKey, rejectionEmailOutbox);
   await input.store.saveBossCandidateRoutingArtifact('boss', input.jobKey, input.result.routingArtifact);
+  const [persistedOutbox, persistedArtifact] = await Promise.all([
+    input.store.readBossRejectionEmailOutboxEntry('boss', input.jobKey, rejectionEmailOutbox.deliveryId),
+    input.store.readBossCandidateRoutingArtifactByDecisionId(
+      'boss',
+      input.jobKey,
+      rejectionEmailOutbox.routingDecisionId,
+    ),
+  ]);
+  if (!persistedOutbox
+    || persistedOutbox.status !== 'pending'
+    || persistedOutbox.detailClosedAt !== input.detailClosedAt
+    || !bossRejectionEmailImmutableFactsMatch(persistedOutbox, rejectionEmailOutbox)
+    || !persistedArtifact
+    || JSON.stringify(persistedArtifact) !== JSON.stringify(input.result.routingArtifact)) {
+    throw new Error(
+      `Boss rejection email ${rejectionEmailOutbox.deliveryId} was not durably read back with its exact close and routing evidence.`,
+    );
+  }
   return {
     ...input.result,
-    rejectionEmailOutbox,
+    rejectionEmailOutbox: persistedOutbox,
   };
 }
 
@@ -1659,7 +1458,7 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
     evidence: PlatformSavedSearchOpenEvidence,
     target?: CoreSavedSearchTarget,
   ) => Promise<void>;
-  /** Releases the platform runtime after the last detail cleanup and before offline scoring/report work. */
+  /** Releases the platform runtime after the last detail cleanup and before dispatcher drain/offline report work. */
   releaseBrowserPhase?: () => Promise<void>;
 } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; capturedCandidateIds: string[]; runResult: RunResult; resultPath: string }> {
   const bossScreeningEnabled = platform === 'boss' && options.bossScreening?.enabled === true;
@@ -1679,7 +1478,9 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
   let preloadedScreeningWorkItems: BossScreeningWorkItem[] = [];
   let preloadedRejectionEmailOutbox: BossRejectionEmailOutboxEntry[] = [];
   let reportableRecoveredRejectionEmails: BossRejectionEmailOutboxEntry[] = [];
+  let rejectionEmailDispatcher: BossRejectionEmailDispatcher | undefined;
   let rejectionEmailSmtpAttemptCount = 0;
+  let rejectionEmailDispatcherPauseCode: BossRejectionEmailDispatchPauseCode | undefined;
   if (bossScreeningEnabled) {
     const [pendingItems, outboxEntries, rejectionEmailEntries] = await Promise.all([
       store.listBossScreeningWorkItems('boss', jobKey),
@@ -1700,11 +1501,28 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
       );
     }
     preloadedScreeningWorkItems = pendingItems;
-    const recovery = await recoverBossRejectionEmailOutbox(store, jobKey, bossScreeningPolicyHash!);
-    preloadedRejectionEmailOutbox = recovery.entries;
-    reportableRecoveredRejectionEmails = recovery.reportableEntries;
-    rejectionEmailSmtpAttemptCount = recovery.smtpAttemptCount;
+    preloadedRejectionEmailOutbox = rejectionEmailEntries;
+    reportableRecoveredRejectionEmails = rejectionEmailEntries.filter((entry) =>
+      entry.policyHash === bossScreeningPolicyHash && isUnresolvedBossRejectionEmail(entry));
+    rejectionEmailDispatcher = createBossRejectionEmailDispatcher({
+      store,
+      jobKey,
+      policyHash: bossScreeningPolicyHash!,
+      recoveryEntries: reportableRecoveredRejectionEmails,
+      dependencies: {
+        now: () => new Date(),
+        delay: async (delayMs) => {
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        },
+        minimumAttemptGapMs: BOSS_REJECTION_EMAIL_MINIMUM_ATTEMPT_GAP_MS,
+        assertSmtpConfigurationReady: () => {
+          if (sendJobReportEmailRef.fn === sendJobReportEmail) assertSmtpConfigurationReady();
+        },
+        sendMail: (params) => sendJobReportEmailRef.fn(params),
+      },
+    });
   }
+  try {
   let preloadedPostScoreRoutingWorkItems: PostScoreRoutingWorkItem[] = [];
   let recoveredPostScoreRoutingArtifacts: CandidateRoutingArtifact[] = [];
   if (postScoreRoutingEnabled) {
@@ -2281,9 +2099,15 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
               result: rejectedAwaitingClose,
               detailClosedAt: new Date().toISOString(),
             });
+            const enqueueResult = rejectionEmailDispatcher?.enqueueLive(finalized.rejectionEmailOutbox!);
+            if (enqueueResult === 'closed') {
+              throw new Error(
+                `Boss rejection email ${finalized.rejectionEmailOutbox!.deliveryId} could not enter the closed run dispatcher.`,
+              );
+            }
+            bossScreeningResults.push(finalized);
             await store.deleteBossScreeningWorkItem('boss', jobKey, candidate.candidateId);
             screeningWorkByCandidateId.delete(candidate.candidateId);
-            bossScreeningResults.push(finalized);
           } catch (error) {
             bossScreeningFailures.push({
               candidateId: candidate.candidateId,
@@ -2390,29 +2214,21 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
 
   await options.releaseBrowserPhase?.();
 
-  if (bossScreeningEnabled) {
+  if (bossScreeningEnabled && rejectionEmailDispatcher) {
     const reportableDeliveryIds = new Set(reportableRecoveredRejectionEmails.map((entry) => entry.deliveryId));
-    preloadedRejectionEmailOutbox = await Promise.all(preloadedRejectionEmailOutbox.map(async (entry) => {
-      if (entry.status !== 'sending' && (!hasRetryableBossRejectionEmail(entry) || !entry.detailClosedAt)) {
-        return entry;
-      }
-      return executeBossRejectionEmailDelivery(
-        store,
-        jobKey,
-        entry,
-        () => { rejectionEmailSmtpAttemptCount += 1; },
-      );
-    }));
+    const rejectionEmailDispatchSummary = await rejectionEmailDispatcher.closeAndDrain();
+    rejectionEmailSmtpAttemptCount = rejectionEmailDispatchSummary.smtpAttemptCount;
+    rejectionEmailDispatcherPauseCode = rejectionEmailDispatchSummary.pause?.code;
+    const latestEntryByDeliveryId = new Map(rejectionEmailDispatchSummary.entries
+      .map((entry) => [entry.deliveryId, entry]));
+    preloadedRejectionEmailOutbox = preloadedRejectionEmailOutbox.map((entry) =>
+      latestEntryByDeliveryId.get(entry.deliveryId) ?? entry);
     reportableRecoveredRejectionEmails = preloadedRejectionEmailOutbox
       .filter((entry) => reportableDeliveryIds.has(entry.deliveryId));
     for (const result of bossScreeningResults) {
       if (!result.rejectionEmailOutbox) continue;
-      result.rejectionEmailOutbox = await executeBossRejectionEmailDelivery(
-        store,
-        jobKey,
-        result.rejectionEmailOutbox,
-        () => { rejectionEmailSmtpAttemptCount += 1; },
-      );
+      result.rejectionEmailOutbox = latestEntryByDeliveryId.get(result.rejectionEmailOutbox.deliveryId)
+        ?? result.rejectionEmailOutbox;
     }
   }
 
@@ -2606,6 +2422,9 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
         rejectionEmailStatusCounts,
         rejectionEmailSmtpAttemptCount,
         rejectionEmailRetryExhaustedCount,
+        ...(rejectionEmailDispatcherPauseCode
+          ? { rejectionEmailDispatcherPauseCode }
+          : {}),
       };
     })()
     : undefined;
@@ -2675,6 +2494,24 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
   const resultPath = await store.saveRunResult(platform, jobKey, runResult);
 
   return { candidates, newCandidates, capturedCandidateIds, runResult, resultPath };
+  } catch (error) {
+    // On a browser or workflow failure, browser ownership is released before
+    // the browser-independent mail lane is closed and reconciled. Preserve
+    // the original failure even if cleanup evidence is itself malformed.
+    if (rejectionEmailDispatcher) {
+      try {
+        await options.releaseBrowserPhase?.();
+      } catch {
+        // The outer capture owner retains its own idempotent release/finally.
+      }
+      try {
+        await rejectionEmailDispatcher.closeAndDrain();
+      } catch {
+        // The original browser/workflow error remains the primary failure.
+      }
+    }
+    throw error;
+  }
 }
 
 return {

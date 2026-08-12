@@ -5190,6 +5190,11 @@ describe('scoring run semantics', () => {
     const callOrder: string[] = [];
     const detailPage = createDetailPage();
     let activeDetailOptions: { deadline: number } | undefined;
+    let browserPhaseReleased = false;
+    let markRejectionSendStarted!: () => void;
+    let releaseRejectionSend!: () => void;
+    const rejectionSendStarted = new Promise<void>((resolve) => { markRejectionSendStarted = resolve; });
+    const rejectionSendGate = new Promise<void>((resolve) => { releaseRejectionSend = resolve; });
     const originalMarkCapturedCandidatesSeen = store.markCapturedCandidatesSeen.bind(store);
 
     store.markCapturedCandidatesSeen = async (platform, key, candidateIds) => {
@@ -5209,6 +5214,18 @@ describe('scoring run semantics', () => {
         ],
       }),
       openResumeDetail: async (_context, _searchPage, candidate, detailOptions) => {
+        if (candidate.candidateId === 'boss-score-failed') {
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error('progressive rejection SMTP did not start before the next Boss detail')),
+              2_000,
+            );
+            void rejectionSendStarted.then(() => {
+              clearTimeout(timeout);
+              resolve();
+            }, reject);
+          });
+        }
         callOrder.push(`open:${candidate.candidateId}`);
         assert.ok(detailOptions);
         activeDetailOptions = detailOptions;
@@ -5244,6 +5261,7 @@ describe('scoring run semantics', () => {
       assert.ok(activeDetailOptions);
       activeDetailOptions.deadline = Date.now() - 1;
       if (resume.candidateId === 'boss-score-failed') {
+        releaseRejectionSend();
         throw new CodexSessionProviderError(
           'boss-screening',
           'Codex App Server exited while the turn was running',
@@ -5281,14 +5299,15 @@ describe('scoring run semantics', () => {
     };
     const originalSendJobReportEmail = sendJobReportEmailRef.fn;
     const rejectionEmails: Array<{ recipient: string; subject: string; markdown: string; messageId?: string }> = [];
-    let browserPhaseReleased = false;
     sendJobReportEmailRef.fn = async ({ recipient, subject, markdown, messageId }) => {
-      assert.equal(browserPhaseReleased, true, 'Boss rejection SMTP must start after the browser phase is released');
+      assert.equal(browserPhaseReleased, false, 'candidate-level rejection SMTP may start before whole-browser release');
       const persisted = (await store.listBossRejectionEmailOutboxEntries('boss', jobKey))
         .find((entry) => entry.candidateId === 'boss-rejected');
       assert.ok(persisted?.detailClosedAt, 'verified detail-close proof must be persisted before SMTP');
       assert.equal(persisted.status, 'sending');
       rejectionEmails.push({ recipient, subject, markdown, messageId });
+      markRejectionSendStarted();
+      await rejectionSendGate;
       return { recipient, subject };
     };
 
@@ -5342,6 +5361,7 @@ describe('scoring run semantics', () => {
       assert.equal(rejectionEmails.length, 1);
       assert.deepEqual(rerun.runResult.bossRouting?.rejectionEmailStatusCounts, {});
     } finally {
+      releaseRejectionSend();
       sendJobReportEmailRef.fn = originalSendJobReportEmail;
     }
 
@@ -6134,12 +6154,33 @@ describe('scoring run semantics', () => {
       assert.deepStrictEqual(result.candidates, []);
       assert.deepStrictEqual(result.runResult.bossRouting?.rejectedCandidateIds, [candidateId]);
       assert.deepStrictEqual(result.runResult.bossRouting?.rejectionEmailStatusCounts, { uncertain: 1 });
+      assert.equal(result.runResult.bossRouting?.rejectionEmailDispatcherPauseCode, 'uncertain');
       assert.ok(result.runResult.processingFailures?.some((failure) =>
         failure.candidateId === candidateId && failure.stage === 'rejection-email'));
       assert.ok(result.runResult.failedCandidates.some((failure) => failure.candidateId === candidateId));
       const persisted = await store.readBossRejectionEmailOutboxEntry('boss', jobKey, outbox.deliveryId);
       assert.equal(persisted?.status, 'uncertain');
       assert.doesNotMatch(persisted?.error ?? '', /private@example.com/);
+
+      const rerun = await indexModule.runResumeCaptureFlow(
+        'boss',
+        jobKey,
+        buildNormalizedJob(),
+        '物业电工',
+        store,
+        { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+        '2026-08-01T04:03:00.000Z',
+        adapter,
+        {
+          searchSource: 'direct',
+          bossForwardMode: 'email',
+          bossForwardRecipient: 'primary-forward@example.com',
+          bossScreening: screening,
+        },
+      );
+      assert.equal(sendCalls, 1, 'an existing uncertain rejection email must not be sent again');
+      assert.equal(rerun.runResult.bossRouting?.rejectionEmailDispatcherPauseCode, 'uncertain');
+      assert.deepStrictEqual(rerun.runResult.bossRouting?.rejectionEmailStatusCounts, { uncertain: 1 });
 
       const emailSummary = indexModule.buildBossRoutedMainRunEmailSummary({
         primary: {
@@ -6475,6 +6516,93 @@ describe('scoring run semantics', () => {
       /detail modal remained visible/,
     );
     assert.deepStrictEqual(opened, ['boss-close-first']);
+  });
+
+  it('preserves a later browser failure while draining an in-flight progressive rejection email', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-orchestration-boss-progressive-email-browser-fatal';
+    const rejectedCandidateId = 'boss-progressive-rejected';
+    const fatalCandidateId = 'boss-progressive-browser-fatal';
+    let markSendStarted!: () => void;
+    let releaseSend!: () => void;
+    const sendStarted = new Promise<void>((resolve) => { markSendStarted = resolve; });
+    const sendGate = new Promise<void>((resolve) => { releaseSend = resolve; });
+    let browserReleased = false;
+    const adapter = {
+      ...indexModule.resolvePlatformAdapter('boss'),
+      openDirectSearch: async () => createSearchPage(),
+      openSubscribeSearch: async () => createSearchPage(),
+      extractCandidateList: async () => ({ candidates: [
+        { candidateId: rejectedCandidateId },
+        { candidateId: fatalCandidateId },
+      ] }),
+      openResumeDetail: async (_context, _page, candidate) => {
+        if (candidate.candidateId === fatalCandidateId) {
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error('progressive rejection SMTP did not start before the fatal detail')),
+              2_000,
+            );
+            void sendStarted.then(() => {
+              clearTimeout(timeout);
+              resolve();
+            }, reject);
+          });
+          releaseSend();
+          throw new BossUnexpectedContactDialogError(
+            'fixture browser failure after progressive rejection SMTP started',
+          );
+        }
+        return createDetailPage();
+      },
+      parseResumeDetail: async (_page, candidate) => buildResume(candidate.candidateId),
+      closeResumeDetail: async () => undefined,
+    } satisfies import('../platforms/types.js').PlatformAdapter;
+    indexModule.scoreAndEvaluateBossScreeningRef.fn = async () => ({
+      score: buildScore(),
+      evaluations: [buildModelRequirementEvaluation('missing', rejectedCandidateId)],
+    });
+    const originalSendJobReportEmail = sendJobReportEmailRef.fn;
+    let sendCalls = 0;
+    sendJobReportEmailRef.fn = async ({ recipient, subject }) => {
+      sendCalls += 1;
+      markSendStarted();
+      await sendGate;
+      return { recipient, subject };
+    };
+
+    try {
+      await assert.rejects(
+        () => indexModule.runResumeCaptureFlow(
+          'boss',
+          jobKey,
+          buildNormalizedJob(),
+          'progressive fatal safety',
+          store,
+          { page: { id: 'root-page' }, context: { id: 'browser-context' } } as never,
+          '2026-08-01T15:15:00.000Z',
+          adapter,
+          {
+            searchSource: 'direct',
+            bossForwardMode: 'email',
+            bossForwardRecipient: 'primary-forward@example.com',
+            bossScreening: buildModelScreeningSettings(),
+            releaseBrowserPhase: async () => { browserReleased = true; },
+          },
+        ),
+        /fixture browser failure after progressive rejection SMTP started/,
+      );
+      assert.equal(browserReleased, true);
+      assert.equal(sendCalls, 1);
+      const outbox = (await store.listBossRejectionEmailOutboxEntries('boss', jobKey))[0];
+      assert.equal(outbox?.candidateId, rejectedCandidateId);
+      assert.equal(outbox?.status, 'sent');
+    } finally {
+      releaseSend();
+      sendJobReportEmailRef.fn = originalSendJobReportEmail;
+    }
   });
 
   it('stops Boss capture after an unexpected contact purchase dialog without recording the candidate', async () => {

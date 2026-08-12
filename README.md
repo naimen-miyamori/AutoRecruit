@@ -448,7 +448,9 @@ Boss 普通抓取可按岗位开启“先评分、后转发”的模型要求分
 
 qualified/review 仅在邮件转发模式读取当前详情的同事沟通布尔状态，有记录时在转发留言中追加 `同事已沟通`；rejected
 和评分失败不执行该检测。qualified/review 在同一详情完成转发后关闭；rejected 必须先严格关闭详情并保存关闭凭证，随后
-才能形成并发送候选人级否定邮件。
+才能形成候选人级否定邮件。outbox 与分流事实保存并回读一致后，浏览器无关的单消费者会立即接收该邮件；候选人主流程
+不等待 SMTP，可以继续处理下一位。整个候选列表结束后先释放浏览器运行时，再等待投递器收敛并形成 RunResult；主聚合报告
+仍在完整运行结束后独立发送。
 
 模型连接、进程、协议、输出解析或结构化校验失败都不属于 review，也不产生任何分流决定或候选级外部交付。失败评分产物和
 pending-score 会保存 provider、kind、phase、首个输出状态和耗时等脱敏诊断；后续运行只在相同 policy 下重试。任务详情以
@@ -463,7 +465,8 @@ pending-score 会保存 provider、kind、phase、首个输出状态和耗时等
 `rejected-candidates-delivered-individually` 跳过。候选人级状态另写入 `bossRouting.rejectionEmailStatusCounts`，任务
 摘要的 `rejectionEmails` 返回 eligible、pending、sending、sent、retryableFailed、retryExhausted、uncertain、superseded、失败候选 ID，
 以及本轮 outbox 固化的 `deliveryTargets`；`bossRouting.rejectionEmailSmtpAttemptCount` 只统计本轮实际进入
-`sendMail()` 的次数。顶层兼容字段会把主聚合报告和所有必要的否定邮件一起归约：任一本轮实际 SMTP 调用即
+`sendMail()` 的次数。投递器因明确未发送、结果不确定或证据/锁冲突而暂停时，
+`bossRouting.rejectionEmailDispatcherPauseCode` 只暴露稳定脱敏原因，不包含候选内容、邮箱或 SMTP 原始响应。顶层兼容字段会把主聚合报告和所有必要的否定邮件一起归约：任一本轮实际 SMTP 调用即
 `emailAttempted=true`，所有必要邮件确认成功才有
 `emailDelivered=true`。
 任务详情会显示副收件人/CC、每份否定邮件状态以及 `sending`/`uncertain`/`retryExhausted` 人工核对提示；自动重试已用尽的邮件
@@ -479,9 +482,12 @@ Nodemailer 可能在 DATA 后仍把 socket timeout/close 记为 `command=CONN`�
 其他 CONN 一律进入 `uncertain`，不得自动重发。RCPT、DATA、阶段未知、部分收件人 accepted/rejected/pending、遗留
 `sending` 和任何结果不确定的调用同样保持 `uncertain`。同一候选人的 TO 与 CC 是一封 SMTP 消息并共享一个状态；每个
 delivery 在跨进程原子锁内重新读取 outbox、递增尝试次数并调用 SMTP，最多两次，第二次仍证明未提交时写入
-`retryExhausted`。
+`retryExhausted`。同一 Boss 岗位还持有岗位级 dispatch lease，因此不同候选人的 SMTP 也不会并行；第一次可立即开始，
+后续 attempt 的开始时间至少相隔 3 秒。实时新邮件优先于尚未开始的历史恢复项，但不会抢占已经开始的调用。
+一项 AUTH/MAIL 等明确未发送的 deferred 失败、`uncertain`、遗留 `sending`、证据冲突或锁冲突会暂停本轮投递器；
+后续尚未开始的 outbox 保持 `pending` 且不消耗 attempt。
 
-抓取详情严格关闭后才允许形成否定邮件 outbox；不可变收件人、正文、分流事实和已验证的关闭时间一次落盘，随后 SMTP 才能开始。重跑只依据这个持久化凭证恢复，不通过候选人离开前 20、历史 run 已收录或浏览器重启推断关闭成功；没有关闭凭证
+抓取详情严格关闭后才允许形成否定邮件 outbox；不可变收件人、正文、分流事实和已验证的关闭时间一次落盘并回读，随后 SMTP 才能开始。候选人级 SMTP 可以与后续候选人的浏览器处理重叠，但投递器不持有或读取 Page、session、adapter 或任何 Boss 页面动作；没有这一完整前置条件就不能使用该例外。重跑只依据这个持久化凭证恢复，不通过候选人离开前 20、历史 run 已收录或浏览器重启推断关闭成功；没有关闭凭证
 的邮件不发送但会进入本轮失败摘要。已具备凭证的 `pending/retryable-failed` 即使候选人不再出现在当前卡片中也可恢复，恢复后的
 `sent/uncertain/superseded` 同样进入本轮 RunResult。停留在 `sending` 的进程中断会转成 `uncertain`，必须人工核对且不自动重发。
 

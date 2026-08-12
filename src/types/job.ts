@@ -333,6 +333,17 @@ export interface BossRoutingDecision {
 
 export type BossForwardingStatus = 'pending' | 'sending' | 'sent' | 'retryable-failed' | 'uncertain' | 'superseded';
 
+/** Stable, de-identified reason that a run-local rejection-email dispatcher stopped consuming work. */
+export type BossRejectionEmailDispatchPauseCode =
+  | 'known-not-sent'
+  | 'uncertain'
+  | 'delivery-not-executable'
+  | 'routing-conflict'
+  | 'dispatch-busy'
+  | 'delivery-busy'
+  | 'dispatch-state-invalid'
+  | 'internal-error';
+
 /** Normalized SMTP failure phase; provider-specific raw error fields never leave the mailer. */
 export type SmtpFailurePhase = 'connect' | 'auth' | 'envelope' | 'data' | 'unknown';
 export type SmtpRetrySafety = 'known-not-sent' | 'uncertain';
@@ -910,6 +921,8 @@ export interface RunResult {
     /** Actual rejection-email sendMail calls made during this run. */
     rejectionEmailSmtpAttemptCount?: number;
     rejectionEmailRetryExhaustedCount?: number;
+    /** Present only when the single-consumer mail lane stopped before consuming all authorized work. */
+    rejectionEmailDispatcherPauseCode?: BossRejectionEmailDispatchPauseCode;
   };
   /** Lightweight routing index for non-Boss post-score routing runs. */
   postScoreRouting?: {
