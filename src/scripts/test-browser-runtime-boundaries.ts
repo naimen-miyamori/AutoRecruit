@@ -72,7 +72,10 @@ describe('login-owned browser runtime boundaries', () => {
     for (const file of (await listFiles(path.join(sourceRoot, 'scripts')))
       .filter((item) => item.endsWith('.ts') && !path.basename(item).startsWith('test-'))) {
       const source = await fs.readFile(file, 'utf8');
-      if (source.includes('ensureAuthenticatedBrowserSession') && !source.includes('runBrowserCliMain')) {
+      const ownsBrowserCliLifecycle = source.includes('ensureAuthenticatedBrowserSession')
+        || source.includes('verifyCoreSavedSearchTarget')
+        || path.basename(file) === 'run-search-operation.ts';
+      if (ownsBrowserCliLifecycle && !source.includes('runBrowserCliMain')) {
         offenders.push(path.relative(sourceRoot, file));
       }
     }

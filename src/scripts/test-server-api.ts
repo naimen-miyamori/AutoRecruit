@@ -138,7 +138,24 @@ function takeBossCaptureSettingsSnapshot(argv: readonly string[]): {
 
 function acceptingSearchConditionSetService(): SearchConditionSetService {
   return {
-    resolve: async () => undefined,
+    resolve: async (reference: { conditionSetId: string; platform: string; revision: number }) => ({
+      reference,
+      revision: {
+        ...reference,
+        schemaVersion: 1,
+        name: '测试条件集',
+        applicationFilterInput: {},
+        compiledConditions: [],
+        catalogEvidence: { capturedAt: '2026-08-11T00:00:00.000Z', selectedFieldsFingerprint: 'test' },
+        status: 'active',
+        createdAt: '2026-08-11T00:00:00.000Z',
+        updatedAt: '2026-08-11T00:00:00.000Z',
+      },
+      applicationFilterInput: {},
+      conditions: [],
+      catalogEvidence: { capturedAt: '2026-08-11T00:00:00.000Z', selectedFieldsFingerprint: 'test' },
+      catalogChanged: false,
+    }),
   } as unknown as SearchConditionSetService;
 }
 
@@ -751,6 +768,8 @@ it('returns health status', async () => {
 
   it('queues resume-capture tasks and builds CLI-compatible argv', async () => {
     const taskDir = await makeTempDir();
+    const filterPath = path.join(taskDir, 'filters.json');
+    await writeJson(filterPath, {});
     const calls: string[][] = [];
     const queue = new TaskQueue({
       taskDir,
@@ -769,7 +788,7 @@ it('returns health status', async () => {
         jd: '负责门店运营',
         includeViewed: true,
         searchSource: 'direct',
-        applicationFilterInputFile: './filters.json',
+        applicationFilterInputFile: filterPath,
         email: 'ops@example.com',
         cc: ['a@example.com', 'b@example.com'],
       },
@@ -777,6 +796,13 @@ it('returns health status', async () => {
 
     assert.equal(response.statusCode, 202);
     const queued = response.body as TaskDetail;
+    assert.equal('executionEnvelope' in queued, false);
+    const persistedTask = JSON.parse(await fs.readFile(path.join(taskDir, `${queued.taskId}.json`), 'utf8')) as {
+      executionEnvelope?: { version?: number; envelopeHash?: string; plans?: unknown[] };
+    };
+    assert.equal(persistedTask.executionEnvelope?.version, 1);
+    assert.match(persistedTask.executionEnvelope?.envelopeHash ?? '', /^[a-f0-9]{64}$/u);
+    assert.equal(persistedTask.executionEnvelope?.plans?.length, 1);
     const completed = await waitForTask(queue, queued.taskId);
 
     assert.equal(completed.status, 'succeeded');
@@ -793,7 +819,7 @@ it('returns health status', async () => {
       '--search-source',
       'direct',
       '--application-filter-input-file',
-      './filters.json',
+      filterPath,
       '--email',
       'ops@example.com',
       '--cc',

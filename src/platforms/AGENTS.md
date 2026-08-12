@@ -59,6 +59,11 @@ contracts.
 - Page actions validate page state and candidate identity but do not write job records, receipts,
   reports, or queue state. Workflows compose actions, enforce mode/confirmation rules, and persist
   results. Read actions do not import mutation/forwarding/delivery actions.
+- Saved-capture actions receive a typed platform target and return per-open evidence. 51job and
+  Liepin require one unique exact saved-search name plus the expected page keyword. Zhilian requires
+  a stable native condition ID, complete condition fingerprint, exact page keyword, and unique
+  component-to-DOM mapping; its user label is not remote-name evidence. Boss keeps its stronger
+  native ID/job-scope/condition-fingerprint contract. Evidence is not a reusable authorization.
 - The shared platform-action context contains selector-free page/deadline bookkeeping only. Do not
   move platform controls, modal/popup differences, post-action verification, or platform pacing
   into shared browser modules.

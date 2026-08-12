@@ -14,6 +14,9 @@ when they are affected.
 - HTTP tasks, assistant-confirmed tasks, and scheduled tasks reuse TaskQueue. Shared validation and
   argv construction belong in task-normalizers.ts; preview argv is explanatory, never execution
   authority.
+- Public capture payloads must reject private execution plans, executable conditions, and
+  per-platform targets. Exact job identity/name authority, JD title, saved-search name, and page
+  keyword are separate read-model fields; the server must not synthesize one from another.
 - Do not add assistant- or scheduler-specific runners that bypass normalizers, queueing, platform
   isolation, CLI semantics, domain confirmation, or identity checks. Routes do not call live Boss
   browser modules directly.

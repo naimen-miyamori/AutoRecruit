@@ -47,6 +47,7 @@ import {
   type BossCapturePlanResolver,
 } from './boss-capture-snapshot.js';
 import { preflightTaskSearchConditionSets } from './search-condition-set-preflight.js';
+import { buildServerCaptureExecutionEnvelope } from './capture-execution-envelope.js';
 import { TaskQueue } from './task-queue.js';
 import { ScheduleTemplateValidationError } from './schedule-template-validation.js';
 import {
@@ -330,12 +331,18 @@ async function saveApplicationFilterInputFile(input: {
 async function enqueueTask(
   queue: TaskQueue,
   kind: TaskKind,
-  normalized: { input: TaskInput; argv: string[]; inputSummary: Record<string, unknown> },
+  normalized: {
+    input: TaskInput;
+    argv: string[];
+    inputSummary: Record<string, unknown>;
+    executionEnvelope?: import('../mode-runners/capture-targets.js').CaptureExecutionEnvelope;
+  },
 ): Promise<TaskDetail> {
   return queue.enqueue({
     kind,
     input: normalized.input,
     inputSummary: normalized.inputSummary,
+    executionEnvelope: normalized.executionEnvelope,
     argv: normalized.argv,
   });
 }
@@ -367,7 +374,11 @@ async function enqueueResumeCaptureTaskWithPreflight(
     searchConditionSets: options.searchConditionSetService,
   });
   await preflightTaskSearchConditionSets(snapshot.input, options.searchConditionSetService);
-  return enqueueTask(queue, 'resume-capture', snapshot);
+  const executionEnvelope = await buildServerCaptureExecutionEnvelope('resume-capture', snapshot.input, {
+    dataDir: options.dataDir,
+    searchConditionSets: options.searchConditionSetService,
+  });
+  return enqueueTask(queue, 'resume-capture', { ...snapshot, executionEnvelope });
 }
 
 async function enqueueBatchTaskWithPreflight(
@@ -387,7 +398,11 @@ async function enqueueBatchTaskWithPreflight(
     searchConditionSets: options.searchConditionSetService,
   });
   await preflightTaskSearchConditionSets(snapshot.input, options.searchConditionSetService);
-  return enqueueTask(queue, 'batch', snapshot);
+  const executionEnvelope = await buildServerCaptureExecutionEnvelope('batch', snapshot.input, {
+    dataDir: options.dataDir,
+    searchConditionSets: options.searchConditionSetService,
+  });
+  return enqueueTask(queue, 'batch', { ...snapshot, executionEnvelope });
 }
 
 async function answerRagRequest(request: RouteDependencies, payload: unknown): Promise<Record<string, unknown>> {

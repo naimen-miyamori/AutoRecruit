@@ -27,11 +27,22 @@ import {
 import {
   clearZhilianUnviewedFilter,
   hasAppliedZhilianQuickSearchKeyword,
+  hasExactlyAppliedZhilianQuickSearchKeyword,
+  parseExactlyAppliedZhilianQuickSearchKeyword,
   isZhilianQuickSearchApplied,
+  inspectExistingZhilianSavedSearch,
   listVisibleZhilianQuickSearchTags,
+  openBoundZhilianSavedSearch,
   openZhilianSubscribeSearch,
   readZhilianSearchConditionResultTotal,
   savePreparedZhilianSearchCondition,
+  zhilianQuickSearchSummaryHasExactKeyword,
+  fingerprintZhilianNativeQuickSearchConditions,
+  parseZhilianNativeQuickSearchSnapshots,
+  readZhilianNativeQuickSearchInventory,
+  waitForZhilianNativeQuickSearchInventory,
+  resolveZhilianNativeQuickSearchCandidate,
+  verifyZhilianSavedSearchTarget,
 } from './zhilian/actions/search-actions.js';
 import {
   openZhilianDirectSearch,
@@ -55,6 +66,14 @@ export const zhilianTestExports = {
   parseZhilianVueCandidateSnapshots,
   clearZhilianUnviewedFilter,
   hasAppliedZhilianQuickSearchKeyword,
+  hasExactlyAppliedZhilianQuickSearchKeyword,
+  parseExactlyAppliedZhilianQuickSearchKeyword,
+  zhilianQuickSearchSummaryHasExactKeyword,
+  fingerprintZhilianNativeQuickSearchConditions,
+  parseZhilianNativeQuickSearchSnapshots,
+  readZhilianNativeQuickSearchInventory,
+  waitForZhilianNativeQuickSearchInventory,
+  resolveZhilianNativeQuickSearchCandidate,
   isZhilianQuickSearchApplied,
   listVisibleZhilianQuickSearchTags,
   prepareZhilianDirectSearchConditionPage,
@@ -76,6 +95,14 @@ export const zhilianAdapter: PlatformAdapter = {
   openAuthenticatedHome: openZhilianAuthenticatedHome,
   assertAuthenticated: assertZhilianAuthenticated,
   openSubscribeSearch: openZhilianSubscribeSearch,
+  openBoundSavedSearch: async (page, target, options) => {
+    if (!('targetKind' in target) || target.targetKind !== 'zhilian-native-condition') {
+      throw new Error('Zhilian requires a native-condition saved-search target.');
+    }
+    return openBoundZhilianSavedSearch(page, target, options);
+  },
+  verifySavedSearchTarget: verifyZhilianSavedSearchTarget,
+  inspectExistingSavedSearch: inspectExistingZhilianSavedSearch,
   openDirectSearch: openZhilianDirectSearch,
   prepareSearchConditionPage: prepareZhilianSearchConditionPage,
   discoverSearchFilters: discoverZhilianStaticSearchFilters,

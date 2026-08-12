@@ -16,6 +16,9 @@ owning domain instructions for screens that expose platform, RAG, Boss, or Talen
 - Keep frontend API contracts synchronized with the server read models and task input types. A route
   or response change updates frontend/src/api/contracts.ts, the typed API client, query keys, and
   affected screen tests in the same work item.
+- Job list/detail views render the server's exact job name and authority separately from jobKey,
+  compatibility keyword, JD title, saved-search name, page keyword, and native position ID. Display
+  code must not infer or overwrite these facts, and forms must not submit private execution plans.
 - Search and capture mode labels/effects are loaded from `GET /api/operation-modes?surface=manual` or
   `surface=schedule`; the typed client parses the unknown response with the requested surface before
   pages consume it, and directory failure disables only dependent search/capture creation controls.

@@ -3,12 +3,16 @@ import type { SearchFilterCatalog, SearchFilterDiscoveryRunOptions } from '../se
 import type {
   CandidateListItem,
   CandidateResume,
+  CoreSavedSearchTarget,
+  PlatformSavedSearchOpenEvidence,
+  PlatformSavedSearchTarget,
   SavedSearchReference,
   SearchCondition,
   SearchConditionApplyResult,
   SearchConditionPlan,
   SearchConditionPlanExecutionResult,
   SearchConditionSaveResult,
+  PlatformSearchConditionSaveResult,
   SearchSortPolicy,
 } from '../types/job.js';
 import type {
@@ -36,7 +40,38 @@ export interface SearchWaitOptions {
    * next page mutation when it is aborted; they never create their own signal.
    */
   signal?: AbortSignal;
+  /** Internal subscription-save intent used only for verified postconditions. */
+  subscriptionMutationContext?: {
+    expectedKeyword: string;
+    conditionFingerprint: string;
+  };
 }
+
+export interface SavedSearchOpenOptions extends SearchWaitOptions {
+  /** Stable local identity that owns the target; page actions never persist it. */
+  boundJobKey: string;
+}
+
+/** Read-only request used to discover and verify one prospective core saved target. */
+export interface CoreSavedSearchVerificationRequest {
+  platform: '51job' | 'liepin' | 'zhilian';
+  boundJobKey: string;
+  bindingRevision: number;
+  name: string;
+  expectedKeyword: string;
+}
+
+export type ExistingSavedSearchInspection =
+  | {
+    status: 'absent';
+    page: Page;
+  }
+  | {
+    status: 'matched';
+    page: Page;
+    target: CoreSavedSearchTarget;
+    evidence: PlatformSavedSearchOpenEvidence;
+  };
 
 export interface CandidatePostOpenActions {
   liepinForwardContact?: string;
@@ -75,6 +110,24 @@ export interface PlatformAdapter {
   openSubscribeSearch(page: Page, keyword: string, options?: SearchWaitOptions): Promise<Page>;
   /** Platform-native saved-search selection. Callers pass complete business identity. */
   openSavedSearch?(page: Page, target: SavedSearchReference, options?: SearchWaitOptions): Promise<Page>;
+  /** Strict saved-search entry that returns fresh, per-run page evidence. */
+  openBoundSavedSearch?(
+    page: Page,
+    target: PlatformSavedSearchTarget,
+    options: SavedSearchOpenOptions,
+  ): Promise<{ page: Page; evidence: PlatformSavedSearchOpenEvidence }>;
+  /** Read-only discovery/verification that returns the prospective executable target. */
+  verifySavedSearchTarget?(
+    page: Page,
+    request: CoreSavedSearchVerificationRequest,
+    options: SavedSearchOpenOptions,
+  ): Promise<{ page: Page; target: CoreSavedSearchTarget; evidence: PlatformSavedSearchOpenEvidence }>;
+  /** Read-only existing-state reconciliation used before a core save mutation. */
+  inspectExistingSavedSearch?(
+    page: Page,
+    request: CoreSavedSearchVerificationRequest,
+    options: SavedSearchOpenOptions,
+  ): Promise<ExistingSavedSearchInspection>;
   /**
    * Optional platform-owned estimate for one whole search budget. The caller
    * creates the one absolute deadline shared by search entry and extraction.
@@ -98,7 +151,7 @@ export interface PlatformAdapter {
     resultTotal: number;
     resultTotalSource: 'page' | 'api';
   }>;
-  saveSearchCondition?(page: Page, savedSearchName: string, options?: SearchWaitOptions): Promise<void | SearchConditionSaveResult>;
+  saveSearchCondition?(page: Page, savedSearchName: string, options?: SearchWaitOptions): Promise<void | PlatformSearchConditionSaveResult>;
   extractCandidateList(page: Page, options?: SearchWaitOptions): Promise<{ candidates: CandidateListItem[] }>;
   /** Platform-owned estimate; orchestration creates one absolute deadline for the whole detail lifecycle. */
   estimateCandidateDetailBudget?(): CandidateDetailBudgetEstimate;

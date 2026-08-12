@@ -84,6 +84,34 @@ export async function syncBossPositions(
       const sourceHash = hashBossJd(detail.rawJd);
       const existing = await store.findBossJobRecordByPositionId(position.bossJobId);
       if (existing?.bossPosition?.sourceHash === sourceHash && hasCurrentBossNormalization(existing)) {
+        const expectedIdentity = {
+          version: 1 as const,
+          expectedJobName: position.name,
+          nameAuthority: 'platform-sync' as const,
+          nativePositionId: position.bossJobId,
+        };
+        const identityMatches = existing.jobIdentity?.version === 1
+          && existing.jobIdentity.expectedJobName === expectedIdentity.expectedJobName
+          && existing.jobIdentity.nameAuthority === expectedIdentity.nameAuthority
+          && existing.jobIdentity.nativePositionId === expectedIdentity.nativePositionId;
+        if (!identityMatches) {
+          const updated = await store.updateJobIdentityIfRevision(
+            'boss',
+            existing.jobKey,
+            existing.revision ?? 1,
+            expectedIdentity,
+            { authority: 'boss-position-sync' },
+          );
+          items.push({
+            bossJobId: position.bossJobId,
+            name: position.name,
+            status: position.status,
+            jobKey: updated.jobKey,
+            sourceHash,
+            outcome: 'updated',
+          });
+          continue;
+        }
         items.push({
           bossJobId: position.bossJobId,
           name: position.name,
@@ -107,6 +135,12 @@ export async function syncBossPositions(
         jobKey,
         platform: 'boss',
         searchKeyword: position.name,
+        jobIdentity: {
+          version: 1,
+          expectedJobName: position.name,
+          nameAuthority: 'platform-sync',
+          nativePositionId: position.bossJobId,
+        },
         rawText: detail.rawJd,
         normalizedJob,
         bossPosition: {
@@ -117,7 +151,7 @@ export async function syncBossPositions(
           normalization: BOSS_PAGE_RULES_NORMALIZATION,
         },
       };
-      await store.saveJobRecord('boss', record);
+      await store.saveJobRecord('boss', record, { identityWriteAuthority: 'boss-position-sync' });
       items.push({
         bossJobId: position.bossJobId,
         name: position.name,

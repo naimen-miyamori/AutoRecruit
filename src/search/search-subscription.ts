@@ -15,9 +15,21 @@ import type {
   SearchConditionApplyResult,
   SearchConditionPlan,
   SearchConditionSaveResult,
+  PlatformSavedSearchOpenEvidence,
+  PlatformSearchConditionSaveResult,
   SearchSubscriptionFailureSummary,
   SearchSubscriptionSummary,
 } from '../types/job.js';
+import {
+  buildSubscriptionManagementEvidence,
+  hashSubscriptionMutationValue,
+  type SubscriptionMutationAttemptStore,
+} from './subscription-mutation-store.js';
+import {
+  assertCoreSavedSearchTarget,
+  assertPlatformSavedSearchOpenEvidence,
+  isZhilianNativeSavedSearchOpenEvidence,
+} from './saved-search-target.js';
 
 interface LoadSearchConditionPlanFileOptions {
   platform?: SupportedPlatform;
@@ -30,6 +42,7 @@ interface RunSearchSubscriptionWorkflowOptions extends SearchWaitOptions {
   save: boolean;
   savedSearchName?: string;
   onWorkPageResolved?: (page: Page) => Promise<void>;
+  mutationAttempts?: SubscriptionMutationAttemptStore;
 }
 
 export class SearchSubscriptionRunError extends Error {
@@ -424,6 +437,108 @@ export async function runSearchSubscriptionWorkflow(
   const effectiveOptions = adapter.platform === 'boss' && options.sortPolicy === undefined
     ? { ...options, sortPolicy: 'match-priority' as const }
     : options;
+  const savedSearchName = options.savedSearchName ?? plan.savedSearchName;
+  const conditionFingerprint = options.save
+    ? hashSubscriptionMutationValue({
+      version: 1,
+      keyword: plan.keyword,
+      conditions: plan.conditions,
+    })
+    : undefined;
+  if (options.save) {
+    if (!savedSearchName) {
+      throw new Error('Saving a search subscription requires savedSearchName in the file or --search-subscription-name');
+    }
+    if (!options.mutationAttempts) {
+      throw new Error('Saving a search subscription requires a durable mutation-attempt store.');
+    }
+  }
+
+  if (options.save
+    && savedSearchName
+    && conditionFingerprint
+    && plan.conditions.length === 0
+    && adapter.inspectExistingSavedSearch) {
+    if (adapter.platform === 'boss') {
+      throw new Error('Boss must not use the core existing-subscription inspector.');
+    }
+    const boundJobKey = `subscription-management:${conditionFingerprint}`;
+    const request = {
+      platform: adapter.platform,
+      boundJobKey,
+      bindingRevision: 1,
+      name: savedSearchName,
+      expectedKeyword: plan.keyword,
+    } as const;
+    const inspection = await adapter.inspectExistingSavedSearch(page, request, {
+      ...effectiveOptions,
+      boundJobKey,
+    });
+    if (inspection.status === 'matched') {
+      const target = assertCoreSavedSearchTarget(inspection.target, {
+        platform: adapter.platform,
+        boundJobKey,
+        label: 'existing subscription inspection target',
+      });
+      const openEvidence = assertPlatformSavedSearchOpenEvidence(inspection.evidence);
+      if (openEvidence.platform !== adapter.platform
+        || target.targetKind !== 'core-exact-name-keyword'
+        || target.name !== savedSearchName
+        || target.expectedKeyword !== plan.keyword
+        || openEvidence.boundJobKey !== boundJobKey
+        || openEvidence.targetFingerprint !== target.targetFingerprint
+        || !('observedName' in openEvidence)
+        || openEvidence.observedName !== savedSearchName
+        || openEvidence.observedKeyword !== plan.keyword
+        || openEvidence.uniqueness !== 'unique-exact-match'
+        || openEvidence.postcondition !== 'opened-and-verified') {
+        throw new Error(`Existing saved-search inspection on ${adapter.platform} returned evidence for another target.`);
+      }
+      if (!adapter.readSearchConditionResultTotal) {
+        throw new Error(`Platform ${adapter.platform} cannot read a reconciled saved-search result total.`);
+      }
+      await effectiveOptions.onWorkPageResolved?.(inspection.page);
+      const total = await adapter.readSearchConditionResultTotal(inspection.page, effectiveOptions);
+      const managementEvidence = buildSubscriptionManagementEvidence({
+        platform: adapter.platform,
+        savedSearchName,
+        expectedKeyword: plan.keyword,
+        conditionFingerprint,
+        postcondition: 'already-satisfied',
+      });
+      const intent = {
+        platform: adapter.platform,
+        savedSearchName,
+        expectedKeyword: plan.keyword,
+        conditionFingerprint,
+      };
+      let attempt = await options.mutationAttempts!.find(intent)
+        ?? await options.mutationAttempts!.prepare(intent);
+      if (attempt.status !== 'confirmed' && attempt.status !== 'already-satisfied') {
+        attempt = await options.mutationAttempts!.confirm(attempt, managementEvidence, 'already-satisfied');
+      }
+      const mutationAttemptStatus = attempt.status === 'confirmed' ? 'confirmed' : 'already-satisfied';
+      const durableEvidence = attempt.evidence ?? managementEvidence;
+      return {
+        platform: adapter.platform,
+        keyword: plan.keyword,
+        savedSearchName,
+        resultTotal: total.resultTotal,
+        resultTotalSource: total.resultTotalSource,
+        saveRequested: true,
+        saved: true,
+        allConditionsApplied: true,
+        conditionStatusCounts: { applied: 0, skipped: 0, failed: 0 },
+        conditionResults: [],
+        saveOutcome: 'already-saved',
+        mutationAttemptId: attempt.attemptId,
+        mutationAttemptStatus,
+        managementEvidenceHash: durableEvidence.evidenceHash,
+        ...(effectiveOptions.sortPolicy ? { sortPolicy: effectiveOptions.sortPolicy } : {}),
+      };
+    }
+  }
+
   let searchPage: Page;
   let conditionResults: SearchConditionApplyResult[];
   let resultTotal: number;
@@ -450,37 +565,172 @@ export async function runSearchSubscriptionWorkflow(
   const conditionStatusCounts = countConditionStatuses(conditionResults);
   const allConditionsApplied = conditionStatusCounts.skipped === 0 && conditionStatusCounts.failed === 0;
   await options.onWorkPageResolved?.(searchPage);
-  const savedSearchName = options.savedSearchName ?? plan.savedSearchName;
   let saved = false;
   let saveOutcome: SearchSubscriptionSummary['saveOutcome'];
   let savedSearch: SearchSubscriptionSummary['savedSearch'];
 
   if (options.save) {
-    if (!savedSearchName) {
-      throw new Error('Saving a search subscription requires savedSearchName in the file or --search-subscription-name');
-    }
     if (!allConditionsApplied) {
       throw new Error('Refusing to save search subscription because not all search conditions were applied.');
     }
-
-    const saveResult = await adapter.saveSearchCondition!(searchPage, savedSearchName, effectiveOptions);
+    const mutationAttempts = options.mutationAttempts!;
+    const resolvedSavedSearchName = savedSearchName!;
+    const resolvedConditionFingerprint = conditionFingerprint!;
+    let attempt = await mutationAttempts.prepare({
+      platform: adapter.platform,
+      savedSearchName: resolvedSavedSearchName,
+      expectedKeyword: plan.keyword,
+      conditionFingerprint: resolvedConditionFingerprint,
+    });
+    if (attempt.status === 'confirmed' || attempt.status === 'already-satisfied') {
+      saved = true;
+      saveOutcome = 'already-saved';
+      savedSearch = attempt.evidence?.savedSearch;
+      return {
+        platform: adapter.platform,
+        keyword: plan.keyword,
+        savedSearchName,
+        resultTotal,
+        resultTotalSource,
+        saveRequested: true,
+        saved: true,
+        allConditionsApplied,
+        conditionStatusCounts,
+        conditionResults,
+        saveOutcome,
+        mutationAttemptId: attempt.attemptId,
+        mutationAttemptStatus: attempt.status,
+        ...(attempt.evidence ? { managementEvidenceHash: attempt.evidence.evidenceHash } : {}),
+        ...(savedSearch ? { savedSearch } : {}),
+        ...(effectiveOptions.sortPolicy ? { sortPolicy: effectiveOptions.sortPolicy } : {}),
+      };
+    }
+    attempt = await mutationAttempts.markDispatching(attempt);
+    let saveResult: void | PlatformSearchConditionSaveResult;
+    try {
+      saveResult = await adapter.saveSearchCondition!(searchPage, resolvedSavedSearchName, {
+        ...effectiveOptions,
+        subscriptionMutationContext: {
+          expectedKeyword: plan.keyword,
+          conditionFingerprint: resolvedConditionFingerprint,
+        },
+      });
+    } catch (error) {
+      await mutationAttempts.markAmbiguous(
+        attempt,
+        error instanceof Error ? error.message : String(error),
+      );
+      throw error;
+    }
+    const typedResult = saveResult && typeof saveResult === 'object' && 'outcome' in saveResult
+      ? saveResult as PlatformSearchConditionSaveResult
+      : undefined;
+    const typedSavedSearch = typedResult && 'savedSearch' in typedResult
+      ? typedResult.savedSearch
+      : undefined;
+    const rawOpenEvidence = typedResult && 'openEvidence' in typedResult
+      ? typedResult.openEvidence
+      : undefined;
+    let openEvidence: PlatformSavedSearchOpenEvidence | undefined;
+    if (rawOpenEvidence) {
+      try {
+        openEvidence = assertPlatformSavedSearchOpenEvidence(rawOpenEvidence);
+      } catch (error) {
+        const issue = error instanceof Error ? error.message : String(error);
+        await mutationAttempts.markAmbiguous(
+          attempt,
+          `save action returned malformed open evidence: ${issue}`,
+        );
+        throw new Error(
+          `Search subscription save on ${adapter.platform} returned malformed open evidence; the remote outcome is ambiguous and must be reconciled before retrying.`,
+          { cause: error },
+        );
+      }
+    }
+    const openEvidenceMismatch = openEvidence
+      ? openEvidence.platform !== adapter.platform
+        || openEvidence.observedKeyword !== plan.keyword
+        || openEvidence.postcondition !== 'opened-and-verified'
+        || (isZhilianNativeSavedSearchOpenEvidence(openEvidence)
+          ? adapter.platform !== 'zhilian'
+            || openEvidence.uniqueness !== 'unique-native-condition-match'
+          : openEvidence.observedName !== resolvedSavedSearchName
+            || openEvidence.uniqueness !== 'unique-exact-match')
+      : false;
+    if (openEvidenceMismatch) {
+      await mutationAttempts.markAmbiguous(
+        attempt,
+        'save action returned mismatched open evidence',
+      );
+      throw new Error(`Search subscription save on ${adapter.platform} returned evidence for another target.`);
+    }
+    const managementEvidence = typedResult?.managementEvidence
+      ?? (openEvidence
+        ? buildSubscriptionManagementEvidence({
+          platform: adapter.platform,
+          savedSearchName: resolvedSavedSearchName,
+          expectedKeyword: openEvidence.observedKeyword,
+          conditionFingerprint: resolvedConditionFingerprint,
+          postcondition: typedResult?.outcome === 'already-saved' ? 'already-satisfied' : 'saved-and-verified',
+          openEvidence,
+        })
+        : undefined)
+      ?? (typedSavedSearch
+        ? buildSubscriptionManagementEvidence({
+          platform: adapter.platform,
+          savedSearchName: resolvedSavedSearchName,
+          expectedKeyword: plan.keyword,
+          conditionFingerprint: resolvedConditionFingerprint,
+          postcondition: typedResult?.outcome === 'already-saved' ? 'already-satisfied' : 'saved-and-verified',
+          savedSearch: typedSavedSearch,
+        })
+        : undefined);
+    if (!managementEvidence) {
+      await mutationAttempts.markAmbiguous(
+        attempt,
+        'save action returned without a verified postcondition',
+      );
+      throw new Error(`Search subscription save on ${adapter.platform} is ambiguous: the click may have succeeded, but no verified postcondition was returned. Reconcile before retrying.`);
+    }
+    attempt = await mutationAttempts.confirm(
+      attempt,
+      managementEvidence,
+      typedResult?.outcome === 'already-saved' ? 'already-satisfied' : 'confirmed',
+    );
+    if (typedResult && 'workPage' in typedResult && typedResult.workPage) {
+      await effectiveOptions.onWorkPageResolved?.(typedResult.workPage);
+    }
     if (adapter.platform === 'boss') {
-      if (!saveResult || typeof saveResult !== 'object' || !('outcome' in saveResult) || !('savedSearch' in saveResult)) {
+      if (!typedResult || !typedSavedSearch) {
         throw new Error('Boss saveSearchCondition must return a complete saved-search reference and typed outcome.');
       }
-      const typedResult = saveResult as SearchConditionSaveResult;
-      if (!typedResult.savedSearch) {
-        throw new Error('Boss saveSearchCondition returned no saved-search reference.');
-      }
       saveOutcome = typedResult.outcome;
-      savedSearch = typedResult.savedSearch;
-    } else if (saveResult && typeof saveResult === 'object' && 'outcome' in saveResult) {
-      saveOutcome = saveResult.outcome;
-      savedSearch = saveResult.savedSearch;
+      savedSearch = typedSavedSearch;
+    } else if (typedResult) {
+      saveOutcome = typedResult.outcome;
+      savedSearch = typedSavedSearch;
     } else {
-      saveOutcome = 'saved';
+      throw new Error('Verified subscription save result unexpectedly disappeared after confirmation.');
     }
     saved = true;
+    return {
+      platform: adapter.platform,
+      keyword: plan.keyword,
+      savedSearchName,
+      resultTotal,
+      resultTotalSource,
+      saveRequested: true,
+      saved,
+      allConditionsApplied,
+      conditionStatusCounts,
+      conditionResults,
+      ...(savedSearch ? { savedSearch } : {}),
+      ...(saveOutcome ? { saveOutcome } : {}),
+      mutationAttemptId: attempt.attemptId,
+      mutationAttemptStatus: typedResult?.outcome === 'already-saved' ? 'already-satisfied' : 'confirmed',
+      managementEvidenceHash: managementEvidence.evidenceHash,
+      ...(effectiveOptions.sortPolicy ? { sortPolicy: effectiveOptions.sortPolicy } : {}),
+    };
   }
 
   return {

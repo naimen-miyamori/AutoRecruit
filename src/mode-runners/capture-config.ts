@@ -11,6 +11,7 @@ import {
 } from '../scoring/boss-screening.js';
 import { buildApplicationFilterConditions, loadApplicationFilterInputFile } from '../search/search-subscription.js';
 import { SearchConditionSetService } from '../search/search-condition-sets.js';
+import { buildCoreSavedSearchTarget } from '../search/saved-search-target.js';
 import { sendJobReportEmailRef } from '../scripts/send-job-report-email.js';
 import type { JobStore } from '../storage/job-store.js';
 import type {
@@ -69,12 +70,16 @@ export function buildSinglePlatformInput(input: RunnableJobInput, platform: Supp
 async function resolveResumeCaptureSearchSettings(
   input: SinglePlatformCliInput,
   existingJobRecord?: JobRecord,
+  dependencies: {
+    searchConditionSets?: Pick<SearchConditionSetService, 'resolve'>;
+  } = {},
 ): Promise<NonNullable<JobRecord['searchSettings']>> {
   if (input.searchConditionSetRef) {
     if (input.searchConditionSetRef.platform !== input.platform) {
       throw new Error(`Search condition set ${input.searchConditionSetRef.conditionSetId} belongs to ${input.searchConditionSetRef.platform}, not ${input.platform}`);
     }
-    const resolved = await new SearchConditionSetService().resolve(input.searchConditionSetRef);
+    const resolved = await (dependencies.searchConditionSets ?? new SearchConditionSetService())
+      .resolve(input.searchConditionSetRef);
     return {
       source: 'direct',
       applicationFilterInput: resolved.applicationFilterInput,
@@ -115,6 +120,16 @@ async function resolveResumeCaptureSearchSettings(
     return existingJobRecord.searchSettings;
   }
 
+
+  if (input.searchSourceExplicit
+    && input.searchSource === 'saved'
+    && existingJobRecord?.searchSettings?.source === 'saved') {
+    return {
+      ...existingJobRecord.searchSettings,
+      source: 'saved',
+    };
+  }
+
   return {
     source: input.searchSource,
     conditions: [],
@@ -129,15 +144,55 @@ async function resolveResumeCaptureSearchSettings(
 export async function resolveResumeCaptureContext(
   input: SinglePlatformCliInput,
   store: JobStore,
+  dependencies: {
+    searchConditionSets?: Pick<SearchConditionSetService, 'resolve'>;
+  } = {},
 ): Promise<ResolvedResumeCaptureContext> {
   if (input.platform !== 'boss') {
     const jobKey = buildJobKey(input.searchKeyword, '');
     const existingJobRecord = await store.readJobRecordIfExists(input.platform, jobKey);
+    const resolvedSearchSettings = await resolveResumeCaptureSearchSettings(input, existingJobRecord, dependencies);
+    const pageKeyword = resolvedSearchSettings.pageKeyword
+      ?? resolvedSearchSettings.coreSavedSearchTarget?.expectedKeyword
+      ?? input.searchKeyword;
+    const prospectiveTarget = !existingJobRecord
+      && resolvedSearchSettings.source === 'saved'
+      && input.platform !== 'zhilian'
+      ? buildCoreSavedSearchTarget({
+        platform: input.platform,
+        boundJobKey: jobKey,
+        bindingRevision: 1,
+        name: input.searchKeyword,
+        expectedKeyword: pageKeyword,
+      })
+      : undefined;
+    const prospectiveCoreSavedSearchRequest = !existingJobRecord
+      && resolvedSearchSettings.source === 'saved'
+      && input.platform === 'zhilian'
+      ? {
+        platform: 'zhilian' as const,
+        boundJobKey: jobKey,
+        bindingRevision: 1,
+        name: input.searchKeyword,
+        expectedKeyword: pageKeyword,
+      }
+      : undefined;
+    const searchSettings: NonNullable<JobRecord['searchSettings']> = {
+      ...resolvedSearchSettings,
+      pageKeyword,
+      ...(prospectiveTarget ? { coreSavedSearchTarget: prospectiveTarget } : {}),
+    };
+    if (existingJobRecord?.jobIdentity
+      && searchSettings.source === 'saved'
+      && !searchSettings.coreSavedSearchTarget) {
+      throw new Error(`Stored ${input.platform}/${jobKey} has strict job identity but no bound saved-search target. Verify and bind the subscription before capture.`);
+    }
     return {
       jobKey,
       ...(existingJobRecord ? { existingJobRecord } : {}),
-      searchSettings: await resolveResumeCaptureSearchSettings(input, existingJobRecord),
-      pageKeyword: input.searchKeyword,
+      searchSettings,
+      pageKeyword,
+      ...(prospectiveCoreSavedSearchRequest ? { prospectiveCoreSavedSearchRequest } : {}),
     };
   }
 
@@ -195,7 +250,7 @@ export async function resolveResumeCaptureContext(
   }
 
   const explicitSearchSettings = input.applicationFilterInputFilePath
-    ? await resolveResumeCaptureSearchSettings(input)
+    ? await resolveResumeCaptureSearchSettings(input, undefined, dependencies)
     : undefined;
   const plan = await resolveBossCapturePlan({
     jobName: input.searchKeyword,

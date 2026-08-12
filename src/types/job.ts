@@ -39,6 +39,17 @@ export interface ReportDeliveryOptions {
 
 export type JobSearchSource = 'saved' | 'direct';
 
+/**
+ * Versioned exact position-name fact stored inside one platform-scoped
+ * JobRecord. The stable local identity remains (platform, jobKey).
+ */
+export interface PlatformJobIdentity {
+  version: 1;
+  expectedJobName: string;
+  nameAuthority: 'user-confirmed' | 'platform-sync';
+  nativePositionId?: string;
+}
+
 /** Canonical hydrated condition identity for a platform-native saved search. */
 export interface SavedSearchConditionIdentity {
   jobScope: string;
@@ -65,6 +76,75 @@ export interface SavedSearchReference {
   conditionFingerprint: string;
   selectedFieldsFingerprint?: string;
 }
+
+/** Persisted exact-name target for platforms that expose a stable saved-search name. */
+export interface CoreExactNameSavedSearchTarget {
+  version: 1;
+  targetKind: 'core-exact-name-keyword';
+  platform: '51job' | 'liepin';
+  boundJobKey: string;
+  bindingRevision: number;
+  name: string;
+  expectedKeyword: string;
+  targetFingerprint: string;
+}
+
+/**
+ * Persisted Zhilian quick-search identity. `name` is a user-confirmed local
+ * label; the remote page does not expose it and open evidence never claims
+ * that it was observed.
+ */
+export interface ZhilianNativeSavedSearchTarget {
+  version: 1;
+  targetKind: 'zhilian-native-condition';
+  platform: 'zhilian';
+  boundJobKey: string;
+  bindingRevision: number;
+  name: string;
+  nativeConditionId: string;
+  expectedKeyword: string;
+  conditionFingerprint: string;
+  targetFingerprint: string;
+}
+
+/** Persisted executable target for 51job, Liepin, or Zhilian saved searches. */
+export type CoreSavedSearchTarget = CoreExactNameSavedSearchTarget | ZhilianNativeSavedSearchTarget;
+
+export type PlatformSavedSearchTarget = CoreSavedSearchTarget | SavedSearchReference;
+
+interface SavedSearchOpenEvidenceBase {
+  version: 1;
+  platform: SupportedPlatform;
+  boundJobKey: string;
+  targetFingerprint: string;
+  observedKeyword: string;
+  postcondition: 'opened-and-verified';
+  verifiedAt: string;
+  evidenceHash: string;
+}
+
+/** Exact-name observation retained for 51job, Liepin, and Boss. */
+export interface ExactNameSavedSearchOpenEvidence extends SavedSearchOpenEvidenceBase {
+  /** Omitted on historical evidence; absence has the same exact-name meaning. */
+  identityKind?: 'exact-name-keyword';
+  observedName: string;
+  uniqueness: 'unique-exact-match';
+  observedConditionFingerprint?: string;
+}
+
+/** Zhilian observation based only on native condition identity and complete condition state. */
+export interface ZhilianNativeSavedSearchOpenEvidence extends SavedSearchOpenEvidenceBase {
+  identityKind: 'zhilian-native-condition';
+  platform: 'zhilian';
+  observedNativeConditionId: string;
+  observedConditionFingerprint: string;
+  uniqueness: 'unique-native-condition-match';
+}
+
+/** Per-run observation returned only after a saved-search page action verifies its postcondition. */
+export type PlatformSavedSearchOpenEvidence =
+  | ExactNameSavedSearchOpenEvidence
+  | ZhilianNativeSavedSearchOpenEvidence;
 
 export type SearchSortPolicy = 'platform-default' | 'match-priority';
 
@@ -191,6 +271,7 @@ export interface BossCaptureCanonicalPatch {
   conditionSetRef?: SearchConditionSetReference | null;
   selectedFieldsFingerprint?: string | null;
   savedSearch?: SavedSearchReference | null;
+  coreSavedSearchTarget?: CoreSavedSearchTarget | null;
 }
 
 /** Field-level JobRecord patch applied with a source revision/CAS check. */
@@ -493,7 +574,49 @@ export interface SearchConditionPlanExecutionResult {
 export interface SearchConditionSaveResult {
   outcome: 'already-saved' | 'saved' | 'renamed';
   savedSearch: SavedSearchReference;
+  managementEvidence?: SubscriptionManagementEvidence;
 }
+
+export interface CoreSearchConditionSaveResult {
+  outcome: 'already-saved' | 'saved' | 'renamed';
+  managementEvidence?: SubscriptionManagementEvidence;
+  openEvidence?: PlatformSavedSearchOpenEvidence;
+  workPage?: import('playwright').Page;
+}
+
+export type PlatformSearchConditionSaveResult = SearchConditionSaveResult | CoreSearchConditionSaveResult;
+
+interface SubscriptionManagementEvidenceBase {
+  version: 1;
+  platform: SupportedPlatform;
+  savedSearchName: string;
+  expectedKeyword: string;
+  conditionFingerprint: string;
+  postcondition: 'saved-and-verified' | 'already-satisfied';
+  verifiedAt: string;
+  evidenceHash: string;
+  savedSearch?: SavedSearchReference;
+}
+
+/** Mutation receipt for platforms whose saved-search name is directly observable. */
+export interface ExactSubscriptionManagementEvidence extends SubscriptionManagementEvidenceBase {
+  identityKind?: 'exact-name-keyword';
+  uniqueness: 'unique-exact-match';
+}
+
+/** Mutation receipt for Zhilian, where the user label is not a remotely observable name. */
+export interface ZhilianNativeSubscriptionManagementEvidence extends SubscriptionManagementEvidenceBase {
+  platform: 'zhilian';
+  identityKind: 'zhilian-native-condition';
+  uniqueness: 'unique-native-condition-match';
+  observedNativeConditionId: string;
+  observedConditionFingerprint: string;
+  openEvidenceHash: string;
+}
+
+export type SubscriptionManagementEvidence =
+  | ExactSubscriptionManagementEvidence
+  | ZhilianNativeSubscriptionManagementEvidence;
 
 export interface SearchConditionApplyResult {
   platform: SupportedPlatform;
@@ -515,6 +638,9 @@ export interface SearchSubscriptionSummary {
   conditionResults: SearchConditionApplyResult[];
   savedSearch?: SavedSearchReference;
   saveOutcome?: SearchConditionSaveResult['outcome'];
+  mutationAttemptId?: string;
+  mutationAttemptStatus?: 'confirmed' | 'already-satisfied';
+  managementEvidenceHash?: string;
   sortPolicy?: SearchSortPolicy;
 }
 
@@ -552,6 +678,8 @@ export interface JobRecord {
   platform: SupportedPlatform;
   /** Monotonic revision for field-level configuration CAS. Legacy records normalize to 1. */
   revision?: number;
+  /** Exact position-name fact. Missing historical records use a read-only legacy-derived view. */
+  jobIdentity?: PlatformJobIdentity;
   searchKeyword: string;
   recipientEmail?: string;
   ccEmails?: string[];
@@ -572,6 +700,8 @@ export interface JobRecord {
     };
     /** Complete native subscription identity required when source is saved. */
     savedSearch?: SavedSearchReference;
+    /** Exact saved/quick-search target for 51job, Liepin, and Zhilian. */
+    coreSavedSearchTarget?: CoreSavedSearchTarget;
     /** Runtime ordering overlay; never included in savedSearch.conditionFingerprint. */
     sortPolicy?: SearchSortPolicy;
   };
@@ -801,6 +931,8 @@ export interface RunResult {
     selectedFieldsFingerprint?: string;
     includeViewedCandidates: boolean;
     savedSearch?: SavedSearchReference;
+    coreSavedSearchTarget?: CoreSavedSearchTarget;
+    savedSearchOpenEvidence?: PlatformSavedSearchOpenEvidence;
     sortPolicy?: SearchSortPolicy;
   };
 }
@@ -1055,8 +1187,13 @@ export interface JobResultsMarkdownCandidate {
 export interface JobResultsMarkdownExport {
   jobKey: string;
   platform: SupportedPlatform;
+  expectedJobName: string;
+  jobIdentityKind: 'persisted' | 'legacy-derived';
+  nameAuthority?: PlatformJobIdentity['nameAuthority'];
   jobTitle: string;
   searchKeyword: string;
+  savedSearchName?: string;
+  pageKeyword?: string;
   generatedAt: string;
   summary: JobResultsMarkdownSummary;
   candidates: JobResultsMarkdownCandidate[];

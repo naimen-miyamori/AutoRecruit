@@ -4,6 +4,7 @@ import type {
   JobResultsMarkdownCandidate,
   JobResultsMarkdownExport,
 } from '../types/job.js';
+import { resolvePlatformJobIdentityView } from '../storage/job-identity.js';
 
 interface AggregateJobResultsParams {
   jobRecord: JobRecord;
@@ -54,6 +55,7 @@ export function aggregateJobResults({
   scoreArtifacts,
   generatedAt = new Date().toISOString(),
 }: AggregateJobResultsParams): JobResultsMarkdownExport {
+  const identity = resolvePlatformJobIdentityView(jobRecord);
   const candidates = selectNewestArtifactsByCandidateId(scoreArtifacts)
     .map<JobResultsMarkdownCandidate>((artifact) => {
       if (artifact.status === 'success') {
@@ -84,8 +86,22 @@ export function aggregateJobResults({
   return {
     jobKey: jobRecord.jobKey,
     platform: jobRecord.platform,
+    expectedJobName: identity.expectedJobName,
+    jobIdentityKind: identity.kind,
+    ...(identity.kind === 'persisted' ? { nameAuthority: identity.nameAuthority } : {}),
     jobTitle: jobRecord.normalizedJob.title,
     searchKeyword: jobRecord.searchKeyword,
+    ...(jobRecord.searchSettings?.coreSavedSearchTarget?.name || jobRecord.searchSettings?.savedSearch?.name ? {
+      savedSearchName: jobRecord.searchSettings?.coreSavedSearchTarget?.name
+        ?? jobRecord.searchSettings?.savedSearch?.name,
+    } : {}),
+    ...(jobRecord.searchSettings?.pageKeyword
+      || jobRecord.searchSettings?.coreSavedSearchTarget?.expectedKeyword
+      || jobRecord.searchSettings?.savedSearch?.expectedKeyword ? {
+        pageKeyword: jobRecord.searchSettings?.pageKeyword
+          ?? jobRecord.searchSettings?.coreSavedSearchTarget?.expectedKeyword
+          ?? jobRecord.searchSettings?.savedSearch?.expectedKeyword,
+      } : {}),
     generatedAt,
     summary: {
       candidateCount: candidates.length,
@@ -174,11 +190,16 @@ export function renderJobResultsMarkdown(
   const failedCandidates = exportData.candidates.filter((candidate) => candidate.status === 'failed');
 
   const sections: string[] = [
-    `# ${exportData.jobTitle} 评分结果`,
+    `# ${exportData.jobIdentityKind === 'persisted' ? exportData.expectedJobName : exportData.jobTitle} 评分结果`,
     '',
     `- 平台来源: ${exportData.platform}`,
     `- 岗位标识: ${exportData.jobKey}`,
-    `- 搜索关键词: ${exportData.searchKeyword}`,
+    `- 精确岗位名: ${exportData.expectedJobName}`,
+    `- 名称权威: ${exportData.nameAuthority ?? exportData.jobIdentityKind}`,
+    `- JD 解析标题: ${exportData.jobTitle}`,
+    `- 兼容关键词: ${exportData.searchKeyword}`,
+    ...(exportData.savedSearchName ? [`- 订阅名: ${exportData.savedSearchName}`] : []),
+    ...(exportData.pageKeyword ? [`- 页面关键词: ${exportData.pageKeyword}`] : []),
     `- 生成时间: ${exportData.generatedAt}`,
     '',
     '## 汇总',

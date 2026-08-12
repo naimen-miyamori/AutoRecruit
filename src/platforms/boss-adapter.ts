@@ -32,6 +32,7 @@ import {
 } from './boss/actions/subscription-actions.js';
 import { parseBossResumeDetail } from './boss/actions/resume-detail-actions.js';
 import { parseBossResumeData } from './boss/actions/resume-actions.js';
+import { buildSavedSearchOpenEvidence } from '../search/saved-search-target.js';
 
 export {
   closeBossResumeDetail,
@@ -60,6 +61,21 @@ export const bossAdapter: PlatformAdapter = {
   assertAuthenticated: assertBossAuthenticated,
   openSubscribeSearch: openBossSubscribeSearch,
   openSavedSearch: openBossSavedSubscriptionSearch,
+  openBoundSavedSearch: async (page, target, options) => {
+    if (!('conditionIdentity' in target)) {
+      throw new Error('Boss requires a complete native saved-search reference, not a core target.');
+    }
+    const searchPage = await bossAdapter.openSavedSearch!(page, target, options);
+    return {
+      page: searchPage,
+      evidence: buildSavedSearchOpenEvidence(target, {
+        boundJobKey: options.boundJobKey,
+        observedName: target.name,
+        observedKeyword: target.expectedKeyword,
+        observedConditionFingerprint: target.conditionFingerprint,
+      }),
+    };
+  },
   prepareSearchConditionPage: prepareBossSearchConditionPage,
   executeSearchConditionPlan: executeBossSearchConditionPlan,
   discoverSearchFilters: discoverBossSearchFilters,

@@ -1,4 +1,4 @@
-import type { Frame, Locator, Page } from 'playwright';
+import type { Frame, Locator, Page, Request } from 'playwright';
 import { typeBossLocatorSequentially } from '../../../browser/pacing.js';
 import { config } from '../../../config.js';
 import type { SearchCondition } from '../../../types/job.js';
@@ -169,6 +169,100 @@ export async function readBossSearchKeyword(page: Page, deadline: number): Promi
   }).catch(() => '')));
 }
 
+type BossSearchKeywordApplicationState = {
+  inputValue: string;
+  applicationValue?: string;
+  applicationEvidence: 'vue-search-part' | 'unavailable';
+  issue?: string;
+};
+
+async function readBossSearchKeywordApplicationState(frame: Frame): Promise<BossSearchKeywordApplicationState> {
+  return frame.evaluate(() => {
+    type SearchPartComponent = {
+      $options?: { name?: unknown };
+      searchText?: unknown;
+    };
+    const normalize = (value: unknown): string => String(value ?? '').replace(/\s+/g, ' ').trim();
+    const visibleInputs = [...document.querySelectorAll<HTMLInputElement>('input.search-input')]
+      .filter((input) => {
+        const style = window.getComputedStyle(input);
+        const rect = input.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      });
+    if (visibleInputs.length !== 1) {
+      return {
+        inputValue: '',
+        applicationEvidence: 'unavailable' as const,
+        issue: `expected one visible keyword input, found ${visibleInputs.length}`,
+      };
+    }
+
+    const input = visibleInputs[0]!;
+    const components: SearchPartComponent[] = [];
+    const seen = new Set<SearchPartComponent>();
+    let current: Element | null = input;
+    while (current) {
+      const component = (current as Element & { __vue__?: SearchPartComponent }).__vue__;
+      const name = component?.$options?.name;
+      if (component && typeof name === 'string' && /^SearchPart(?:\d+)?$/u.test(name) && !seen.has(component)) {
+        seen.add(component);
+        components.push(component);
+      }
+      current = current.parentElement;
+    }
+    if (components.length > 1) {
+      return {
+        inputValue: normalize(input.value),
+        applicationEvidence: 'unavailable' as const,
+        issue: `found ${components.length} SearchPart component states for one keyword input`,
+      };
+    }
+    if (components.length === 0) {
+      return {
+        inputValue: normalize(input.value),
+        applicationEvidence: 'unavailable' as const,
+      };
+    }
+    if (typeof components[0]!.searchText !== 'string') {
+      return {
+        inputValue: normalize(input.value),
+        applicationEvidence: 'unavailable' as const,
+        issue: 'SearchPart searchText is not a string',
+      };
+    }
+    return {
+      inputValue: normalize(input.value),
+      applicationValue: normalize(components[0]!.searchText),
+      applicationEvidence: 'vue-search-part' as const,
+    };
+  });
+}
+
+function bossSearchKeywordStateMatches(
+  state: BossSearchKeywordApplicationState,
+  expectedKeyword: string,
+): boolean {
+  return !state.issue
+    && state.inputValue === expectedKeyword
+    && (state.applicationEvidence === 'unavailable' || state.applicationValue === expectedKeyword);
+}
+
+async function assertBossSearchKeywordReadyForSubmit(
+  frame: Frame,
+  expectedKeyword: string,
+): Promise<void> {
+  const state = await readBossSearchKeywordApplicationState(frame);
+  if (state.issue) {
+    throw new Error(`Boss search keyword state is invalid before final submit: ${state.issue}.`);
+  }
+  if (state.inputValue !== expectedKeyword) {
+    throw new Error(`Boss search keyword input changed before final submit: expected ${expectedKeyword}, observed ${state.inputValue || '(empty)'}.`);
+  }
+  if (state.applicationEvidence === 'vue-search-part' && state.applicationValue !== expectedKeyword) {
+    throw new Error(`Boss search application keyword changed before final submit: expected ${expectedKeyword}, observed ${state.applicationValue || '(empty)'}.`);
+  }
+}
+
 export async function waitForBossSearchResults(frame: Frame, deadline: number): Promise<void> {
   await frame.waitForFunction(
     () => {
@@ -190,46 +284,225 @@ export async function waitForBossSearchResults(frame: Frame, deadline: number): 
   }
 }
 
-export async function applyBossSearchKeyword(page: Page, keyword: string, deadline: number): Promise<void> {
+export interface BossSearchKeywordApplyResult {
+  changed: boolean;
+  applicationStateVerified: boolean;
+}
+
+export async function applyBossSearchKeyword(
+  page: Page,
+  keyword: string,
+  deadline: number,
+): Promise<BossSearchKeywordApplyResult> {
   const normalizedKeyword = normalizeText(keyword);
   const frame = await waitForBossSearchFrame(page, deadline);
-  const currentKeyword = await readBossSearchKeyword(page, deadline);
-  if (currentKeyword === normalizedKeyword) {
-    return;
+  const initialState = await readBossSearchKeywordApplicationState(frame);
+  if (initialState.issue) {
+    throw new Error(`Boss search keyword state is invalid before input: ${initialState.issue}.`);
+  }
+  if (bossSearchKeywordStateMatches(initialState, normalizedKeyword)) {
+    return {
+      changed: false,
+      applicationStateVerified: initialState.applicationEvidence === 'vue-search-part',
+    };
   }
 
   const keywordInput = frame.locator('input.search-input, .search-input').first();
+  if (initialState.inputValue === normalizedKeyword
+    && initialState.applicationEvidence === 'vue-search-part'
+    && initialState.applicationValue !== normalizedKeyword) {
+    if (normalizedKeyword) {
+      await typeBossLocatorSequentially(keywordInput, page, '', remainingTime(deadline), {
+        replaceExisting: true,
+      });
+    } else {
+      await typeBossLocatorSequentially(keywordInput, page, 'x', remainingTime(deadline), {
+        replaceExisting: true,
+      });
+    }
+  }
   await typeBossLocatorSequentially(keywordInput, page, normalizedKeyword, remainingTime(deadline), {
     replaceExisting: true,
   });
 
-  await frame.waitForFunction(
-    (expectedKeyword) => {
-      const input = document.querySelector<HTMLInputElement>('input.search-input, .search-input');
-      const inputValue = (input?.value ?? input?.textContent ?? '').replace(/\s+/g, ' ').trim();
-      return inputValue === expectedKeyword;
-    },
-    normalizedKeyword,
-    { timeout: remainingTime(deadline), polling: 250 },
-  );
+  try {
+    await frame.waitForFunction(
+      (expectedKeyword) => {
+        type SearchPartComponent = {
+          $options?: { name?: unknown };
+          searchText?: unknown;
+        };
+        const normalize = (value: unknown): string => String(value ?? '').replace(/\s+/g, ' ').trim();
+        const input = document.querySelector<HTMLInputElement>('input.search-input');
+        if (!input || normalize(input.value) !== expectedKeyword) return false;
+        const components: SearchPartComponent[] = [];
+        const seen = new Set<SearchPartComponent>();
+        let current: Element | null = input;
+        while (current) {
+          const component = (current as Element & { __vue__?: SearchPartComponent }).__vue__;
+          const name = component?.$options?.name;
+          if (component && typeof name === 'string' && /^SearchPart(?:\d+)?$/u.test(name) && !seen.has(component)) {
+            seen.add(component);
+            components.push(component);
+          }
+          current = current.parentElement;
+        }
+        return components.length === 0
+          || (components.length === 1 && typeof components[0]!.searchText === 'string'
+            && normalize(components[0]!.searchText) === expectedKeyword);
+      },
+      normalizedKeyword,
+      { timeout: remainingTime(deadline), polling: 100 },
+    );
+  } catch {
+    const finalState = await readBossSearchKeywordApplicationState(frame).catch(() => undefined);
+    throw new Error(
+      `Boss search keyword did not synchronize with the page application state: expected ${normalizedKeyword || '(empty)'}, input ${finalState?.inputValue || '(empty)'}, application ${finalState?.applicationValue || '(empty)'}.`,
+    );
+  }
+  const finalState = await readBossSearchKeywordApplicationState(frame);
+  return {
+    changed: true,
+    applicationStateVerified: finalState.applicationEvidence === 'vue-search-part',
+  };
 }
 
-export type BossSearchSubmissionEvidence = 'result-mutation' | 'loading-cycle' | 'search-resource';
+export type BossSearchSubmissionEvidence = 'result-mutation' | 'loading-cycle';
 
 export interface BossSearchSubmissionReceipt {
   submitted: true;
   evidence: BossSearchSubmissionEvidence;
+  keyword: string;
+  requestPath: '/wapi/zpitem/web/boss/search/geeks.json';
+  responseStatus: number;
 }
 
 type BossSearchSubmissionObserverState = {
   token: string;
   target: Element;
   clickedAt: number;
+  requestObservedAt: number;
   resultMutation: boolean;
   loadingSeen: boolean;
   observer: MutationObserver;
   clickHandler: (event: Event) => void;
 };
+
+const bossSearchRequestPath = '/wapi/zpitem/web/boss/search/geeks.json' as const;
+
+type BossSearchRequestInspection =
+  | { kind: 'unrelated' }
+  | { kind: 'candidate'; keyword: string; issue?: string };
+
+function inspectBossSearchRequest(request: Request): BossSearchRequestInspection {
+  let url: URL;
+  try {
+    url = new URL(request.url());
+  } catch {
+    return { kind: 'unrelated' };
+  }
+  if (url.pathname !== bossSearchRequestPath) return { kind: 'unrelated' };
+  if (url.origin !== 'https://www.zhipin.com') {
+    return { kind: 'candidate', keyword: '', issue: 'unexpected request origin' };
+  }
+  if (request.method() !== 'GET') {
+    return { kind: 'candidate', keyword: '', issue: `unexpected ${request.method()} method` };
+  }
+  const keywords = url.searchParams.getAll('keywords');
+  if (keywords.length !== 1) {
+    return {
+      kind: 'candidate',
+      keyword: keywords.map((value) => normalizeText(value)).filter(Boolean).join(' | '),
+      issue: `expected one keywords parameter, found ${keywords.length}`,
+    };
+  }
+  return { kind: 'candidate', keyword: normalizeText(keywords[0]!) };
+}
+
+type BossSearchRequestOutcome =
+  | { status: 'matched'; request: Request; keyword: string }
+  | { status: 'mismatch'; keyword: string; issue?: string };
+
+type BossSearchRequestObserver = {
+  markClickDispatch(): void;
+  outcome: Promise<BossSearchRequestOutcome>;
+  dispose(): void;
+};
+
+function armBossSearchRequestObserver(
+  page: Page,
+  frame: Frame,
+  expectedKeyword: string,
+): BossSearchRequestObserver {
+  let clickDispatched = false;
+  let settled = false;
+  let resolveOutcome!: (outcome: BossSearchRequestOutcome) => void;
+  const outcome = new Promise<BossSearchRequestOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
+  const handleRequest = (request: Request): void => {
+    if (!clickDispatched || settled) return;
+    let belongsToSearchFrame = false;
+    try {
+      belongsToSearchFrame = request.frame() === frame;
+    } catch {
+      return;
+    }
+    if (!belongsToSearchFrame) return;
+    const inspection = inspectBossSearchRequest(request);
+    if (inspection.kind === 'unrelated') return;
+    settled = true;
+    if (!inspection.issue && inspection.keyword === expectedKeyword) {
+      resolveOutcome({ status: 'matched', request, keyword: inspection.keyword });
+      return;
+    }
+    resolveOutcome({
+      status: 'mismatch',
+      keyword: inspection.keyword,
+      ...(inspection.issue ? { issue: inspection.issue } : {}),
+    });
+  };
+  page.on('request', handleRequest);
+  return {
+    markClickDispatch: () => {
+      clickDispatched = true;
+    },
+    outcome,
+    dispose: () => {
+      page.off('request', handleRequest);
+    },
+  };
+}
+
+async function waitForBossPromiseWithinDeadline<T>(
+  promise: Promise<T>,
+  deadline: number,
+  timeoutMessage: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error('Boss search condition application was cancelled.');
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', handleAbort);
+      callback();
+    };
+    const handleAbort = (): void => finish(() => reject(
+      signal?.reason instanceof Error ? signal.reason : new Error('Boss search condition application was cancelled.'),
+    ));
+    const timer = setTimeout(() => finish(() => reject(new Error(timeoutMessage))), remainingTime(deadline));
+    signal?.addEventListener('abort', handleAbort, { once: true });
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
 
 function bossSearchSubmissionToken(): string {
   return `boss-search-submit-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -343,6 +616,7 @@ async function armBossSearchSubmissionObserver(control: Locator, token: string):
     state.token = expectedToken;
     state.target = element;
     state.clickedAt = 0;
+    state.requestObservedAt = 0;
     state.resultMutation = false;
     state.loadingSeen = false;
     state.clickHandler = (event: Event) => {
@@ -353,7 +627,7 @@ async function armBossSearchSubmissionObserver(control: Locator, token: string):
       state.clickedAt = performance.now();
     };
     state.observer = new MutationObserver((mutations) => {
-      if (!state.clickedAt) return;
+      if (!state.clickedAt || !state.requestObservedAt) return;
       if (isLoadingText(resultText())) {
         state.loadingSeen = true;
       }
@@ -376,6 +650,21 @@ async function armBossSearchSubmissionObserver(control: Locator, token: string):
   }, token);
 }
 
+async function markBossSearchSubmissionRequest(frame: Frame, token: string): Promise<void> {
+  await frame.evaluate((expectedToken) => {
+    type ObserverState = BossSearchSubmissionObserverState;
+    const host = window as Window & { __autorecruitBossSearchSubmission?: ObserverState };
+    const state = host.__autorecruitBossSearchSubmission;
+    if (!state || state.token !== expectedToken || !state.clickedAt) {
+      throw new Error('Boss search request could not be linked to the dispatched final click.');
+    }
+    const bodyText = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim();
+    state.requestObservedAt = performance.now();
+    state.resultMutation = false;
+    state.loadingSeen = /(?:加载中|正在加载|加载资料)/.test(bodyText);
+  }, token);
+}
+
 async function clearBossSearchSubmissionObserver(frame: Frame, token: string): Promise<void> {
   await frame.evaluate((expectedToken) => {
     type ObserverState = BossSearchSubmissionObserverState;
@@ -393,6 +682,7 @@ async function assertBossSearchSubmitControlStillCurrent(
   control: Locator,
   marker: string,
   deadline: number,
+  expectedKeyword: string,
 ): Promise<void> {
   const marked = frame.locator(`[data-autorecruit-boss-submit-marker="${marker}"]`);
   if (await marked.count() !== 1) {
@@ -416,24 +706,26 @@ async function assertBossSearchSubmitControlStillCurrent(
   if (!visibleAndEnabled) {
     throw new Error('Boss search submit control is no longer visible and enabled before the final click.');
   }
+  await assertBossSearchKeywordReadyForSubmit(frame, expectedKeyword);
 }
 
 async function waitForBossSearchSubmission(
   frame: Frame,
   token: string,
   deadline: number,
-): Promise<BossSearchSubmissionReceipt> {
+): Promise<BossSearchSubmissionEvidence> {
   try {
     const observed = await frame.waitForFunction((expectedToken) => {
       type ObserverState = {
         token: string;
         clickedAt: number;
+        requestObservedAt: number;
         resultMutation: boolean;
         loadingSeen: boolean;
       };
       const host = window as Window & { __autorecruitBossSearchSubmission?: ObserverState };
       const state = host.__autorecruitBossSearchSubmission;
-      if (!state || state.token !== expectedToken || !state.clickedAt) return undefined;
+      if (!state || state.token !== expectedToken || !state.clickedAt || !state.requestObservedAt) return undefined;
 
       const bodyText = (document.body?.innerText ?? '').replace(/\s+/g, ' ').trim();
       if (/数据加载异常/.test(bodyText)) {
@@ -445,13 +737,8 @@ async function waitForBossSearchSubmission(
       const hasExplicitEmpty = /暂无|没有|未找到|无相关|搜索使用方法/.test(bodyText) && !isLoading;
       if ((!hasCards && !hasExplicitEmpty) || isLoading) return undefined;
 
-      const hasSearchResource = performance.getEntriesByType('resource').some((entry) => (
-        entry.startTime >= state.clickedAt
-        && /\/(?:wapi|api)\/.*(?:search|geek)/i.test(entry.name)
-      ));
       if (state.resultMutation) return { status: 'ready', evidence: 'result-mutation' };
       if (state.loadingSeen) return { status: 'ready', evidence: 'loading-cycle' };
-      if (hasSearchResource) return { status: 'ready', evidence: 'search-resource' };
       return undefined;
     }, token, { timeout: remainingTime(deadline), polling: 100 });
     const result = await observed.jsonValue() as { status: 'ready' | 'error'; evidence?: BossSearchSubmissionEvidence; message?: string };
@@ -461,7 +748,7 @@ async function waitForBossSearchSubmission(
     if (!result.evidence) {
       throw new Error('Boss search submit produced no result-cycle evidence.');
     }
-    return { submitted: true, evidence: result.evidence };
+    return result.evidence;
   } catch (error) {
     if (error instanceof Error && /data-loading error after the explicit search submit|no result-cycle evidence/.test(error.message)) {
       throw error;
@@ -474,10 +761,13 @@ async function waitForBossSearchSubmission(
 
 export async function submitBossPreparedSearch(
   page: Page,
+  keyword: string,
   deadline: number,
   signal?: AbortSignal,
 ): Promise<BossSearchSubmissionReceipt> {
   throwIfBossSearchAborted(signal);
+  assertBossSubmittableSearchKeyword(keyword);
+  const expectedKeyword = normalizeText(keyword);
   const frame = await waitForBossSearchFrame(page, deadline);
   const control = await locateBossSearchSubmitControl(frame, deadline);
   const token = bossSearchSubmissionToken();
@@ -485,20 +775,59 @@ export async function submitBossPreparedSearch(
   await control.evaluate((element, expectedMarker) => {
     element.setAttribute('data-autorecruit-boss-submit-marker', expectedMarker);
   }, marker);
+  const requestObserver = armBossSearchRequestObserver(page, frame, expectedKeyword);
   try {
     await armBossSearchSubmissionObserver(control, token);
-    await assertBossSearchSubmitControlStillCurrent(frame, control, marker, deadline);
+    await assertBossSearchSubmitControlStillCurrent(frame, control, marker, deadline, expectedKeyword);
     throwIfBossSearchAborted(signal);
     await clickBossControlNatively(page, control, remainingTime(deadline), {
       pace: false,
-      beforeClick: () => assertBossSearchSubmitControlStillCurrent(frame, control, marker, deadline),
+      beforeClick: async () => {
+        await assertBossSearchSubmitControlStillCurrent(frame, control, marker, deadline, expectedKeyword);
+        requestObserver.markClickDispatch();
+      },
     });
     throwIfBossSearchAborted(signal);
-    return await waitForBossSearchSubmission(frame, token, deadline);
+    const requestOutcome = await waitForBossPromiseWithinDeadline(
+      requestObserver.outcome,
+      deadline,
+      'Boss final search click did not dispatch a trusted Boss search request before the search deadline.',
+      signal,
+    );
+    if (requestOutcome.status === 'mismatch') {
+      throw new Error(
+        `Boss search request keyword mismatch: expected ${expectedKeyword}, observed ${requestOutcome.keyword || '(empty)'}${requestOutcome.issue ? ` (${requestOutcome.issue})` : ''}.`,
+      );
+    }
+    await markBossSearchSubmissionRequest(frame, token);
+    const response = await waitForBossPromiseWithinDeadline(
+      requestOutcome.request.response(),
+      deadline,
+      'Boss exact-keyword search request produced no response before the search deadline.',
+      signal,
+    );
+    const requestFailure = await waitForBossPromiseWithinDeadline(
+      response?.finished() ?? Promise.resolve(new Error('Boss exact-keyword search request produced no response.')),
+      deadline,
+      'Boss exact-keyword search request did not finish before the search deadline.',
+      signal,
+    );
+    if (!response || requestFailure || !response.ok()) {
+      throw new Error(`Boss exact-keyword search request did not complete successfully${response ? ` (HTTP ${response.status()})` : ''}.`);
+    }
+    const evidence = await waitForBossSearchSubmission(frame, token, deadline);
+    return {
+      submitted: true,
+      evidence,
+      keyword: requestOutcome.keyword,
+      requestPath: bossSearchRequestPath,
+      responseStatus: response.status(),
+    };
   } catch (error) {
     await clearBossSearchSubmissionObserver(frame, token);
     throw error;
   } finally {
+    requestObserver.dispose();
     await control.evaluate((element, expectedMarker) => {
       if (element.getAttribute('data-autorecruit-boss-submit-marker') === expectedMarker) {
         element.removeAttribute('data-autorecruit-boss-submit-marker');

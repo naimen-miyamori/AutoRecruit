@@ -13,6 +13,7 @@ import type {
   SavedSearchReference,
   SearchSubscriptionFailureSummary,
 } from '../types/job.js';
+import type { CaptureExecutionEnvelope } from '../mode-runners/capture-targets.js';
 import type {
   BossChatOperationInput,
   BossChatOperationResult,
@@ -497,6 +498,8 @@ export interface TaskRecord {
   finishedAt?: string;
   input: TaskInput;
   inputSummary: Record<string, unknown>;
+  /** Server-created private execution authority; omitted from TaskDetail/API views. */
+  executionEnvelope?: CaptureExecutionEnvelope;
   output?: TaskOutput;
   outputSummary?: Record<string, unknown>;
   error?: string;
@@ -553,6 +556,13 @@ export interface JobSummary {
   platform: SupportedPlatform;
   jobKey: string;
   searchKeyword?: string;
+  expectedJobName?: string;
+  jobIdentityKind?: 'persisted' | 'legacy-derived';
+  nameAuthority?: 'user-confirmed' | 'platform-sync';
+  nativePositionId?: string;
+  jdTitle?: string;
+  savedSearchName?: string;
+  pageKeyword?: string;
   title?: string;
   location?: string;
   createdAt?: string;

@@ -1,7 +1,13 @@
 import type { Locator, Page } from 'playwright';
 import { parseSearchResultTotalFromText } from '../../../search/page-actions.js';
 import type { SearchCondition } from '../../../types/job.js';
-import type { SearchWaitOptions } from '../../types.js';
+import type { CoreSavedSearchTarget, PlatformSavedSearchOpenEvidence } from '../../../types/job.js';
+import { buildCoreSavedSearchTarget, buildSavedSearchOpenEvidence } from '../../../search/saved-search-target.js';
+import type {
+  CoreSavedSearchVerificationRequest,
+  ExistingSavedSearchInspection,
+  SearchWaitOptions,
+} from '../../types.js';
 import {
   attachLiepinSearchResumesApiObserver,
   clearObservedLiepinSearchResumesApiBeforeNextAction,
@@ -21,7 +27,7 @@ import { applyLiepinSearchCondition } from './filter-actions.js';
 import {
   openLiepinRecruiterSearchPage,
 } from './navigation-actions.js';
-import { closeLiepinBlockingOverlays } from './overlay-actions.js';
+import { closeLiepinBlockingOverlays, hasVisibleLiepinBlockingOverlay } from './overlay-actions.js';
 import { waitForLiepinPageReady } from './readiness.js';
 
 export { isLiepinSearchUrl } from './navigation-actions.js';
@@ -150,29 +156,53 @@ async function clickLiepinPrimarySearchButton(page: Page, timeoutMs = 1000): Pro
   return false;
 }
 
-async function saveLiepinSearchCondition(page: Page, savedSearchName: string): Promise<void> {
-  const timeoutMs = 1000;
-  const didOpenSaveDialog = await clickFirstVisibleLiepinText(page, ['订阅', '保存搜索条件', '保存条件', '保存搜索', '保存'], timeoutMs);
-  if (!didOpenSaveDialog) {
-    throw new Error('Search subscription on liepin could not find the save search condition action.');
+async function uniqueVisibleLiepinLocator(locator: Locator, label: string): Promise<Locator> {
+  const visibleIndexes: number[] = [];
+  for (let index = 0; index < await locator.count(); index += 1) {
+    if (await locator.nth(index).isVisible().catch(() => false)) visibleIndexes.push(index);
+  }
+  if (visibleIndexes.length !== 1) {
+    throw new Error(`Liepin ${label} requires one visible control; found ${visibleIndexes.length}.`);
+  }
+  return locator.nth(visibleIndexes[0]!);
+}
+
+async function saveLiepinSearchCondition(page: Page, savedSearchName: string, deadline: number): Promise<void> {
+  const openSave = await uniqueVisibleLiepinLocator(
+    page.getByText(/^(?:订阅|保存搜索条件|保存条件|保存搜索|保存)$/u),
+    'save-search action',
+  );
+  await clickLiepinLocator(openSave, page, remainingTime(deadline));
+
+  const dialog = await uniqueVisibleLiepinLocator(
+    page.locator('.ant-modal-wrap').filter({ hasText: /保存新的搜索条件|搜索条件命名/u }),
+    'save-search dialog',
+  );
+  let nameInputs = dialog.locator('input.ant-input.input-text-v3[type="text"]');
+  const primaryVisibleCount = await nameInputs.count().then(async (count) => {
+    let visible = 0;
+    for (let index = 0; index < count; index += 1) {
+      if (await nameInputs.nth(index).isVisible().catch(() => false)) visible += 1;
+    }
+    return visible;
+  });
+  if (primaryVisibleCount === 0) nameInputs = dialog.locator('input[type="text"]');
+  const nameInput = await uniqueVisibleLiepinLocator(nameInputs, 'save-search name input');
+  await fillLiepinLocator(nameInput, page, savedSearchName, remainingTime(deadline));
+  const observedName = (await nameInput.inputValue({
+    timeout: Math.min(1000, remainingTime(deadline)),
+  })).normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const expectedName = savedSearchName.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  if (observedName !== expectedName) {
+    throw new Error(`Liepin save-search name postcondition mismatch: expected "${expectedName}", observed "${observedName || '(empty)'}".`);
   }
 
-  const didFillSaveName = await fillFirstVisibleLiepinInput(page, savedSearchName, [
-    'input[placeholder*="订阅名称"]',
-    'input[placeholder*="名称"]',
-    'input[placeholder*="搜索"]',
-    'input[placeholder*="条件"]',
-    'input[type="text"]',
-  ], timeoutMs);
-
-  if (!didFillSaveName) {
-    throw new Error('Search subscription on liepin could not fill the saved search name.');
-  }
-
-  const didConfirm = await clickFirstVisibleLiepinText(page, ['确定', '保存', '确认'], timeoutMs);
-  if (!didConfirm) {
-    throw new Error('Search subscription on liepin could not confirm saving the search condition.');
-  }
+  const confirm = await uniqueVisibleLiepinLocator(
+    dialog.getByRole('button', { name: /^\s*确\s*定\s*$/u }),
+    'save-search confirmation',
+  );
+  await clickLiepinLocator(confirm, page, remainingTime(deadline));
+  await dialog.waitFor({ state: 'hidden', timeout: remainingTime(deadline) });
 }
 
 
@@ -251,15 +281,42 @@ export async function readLiepinSearchConditionResultTotal(page: Page): Promise<
 }
 
 
-async function clickLiepinQuickSearchTag(page: Page, keyword: string, deadline: number): Promise<void> {
+async function clickLiepinQuickSearchTag(
+  page: Page,
+  keyword: string,
+  deadline: number,
+  options: { requireUniqueExact?: boolean } = {},
+): Promise<string | undefined> {
   const getByText = (page as Partial<Pick<Page, 'getByText'>>).getByText?.bind(page);
   if (!getByText) {
-    return;
+    return undefined;
   }
 
-  const tag = getByText(keyword, { exact: true }).first();
+  const tags = getByText(keyword, { exact: true });
+  if (options.requireUniqueExact) {
+    const visibleIndexes: number[] = [];
+    const count = await tags.count();
+    for (let index = 0; index < count; index += 1) {
+      if (await tags.nth(index).isVisible().catch(() => false)) visibleIndexes.push(index);
+    }
+    if (visibleIndexes.length !== 1) {
+      throw new Error(`Liepin saved search "${keyword}" requires one visible exact match; found ${visibleIndexes.length}.`);
+    }
+    const exactTag = tags.nth(visibleIndexes[0]!);
+    const observedName = (await exactTag.innerText({
+      timeout: Math.min(1000, remainingTime(deadline)),
+    })).normalize('NFKC').replace(/\s+/gu, ' ').trim();
+    const normalizedExpected = keyword.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+    if (observedName !== normalizedExpected) {
+      throw new Error(`Liepin saved-search tag changed before opening. Expected "${normalizedExpected}", observed "${observedName || '(missing)'}".`);
+    }
+    await clickLiepinLocator(exactTag, page, remainingTime(deadline));
+    return observedName;
+  }
+  const tag = tags.first();
   await tag.waitFor({ state: 'visible', timeout: remainingTime(deadline) });
   await clickLiepinLocator(tag, page, remainingTime(deadline));
+  return undefined;
 }
 
 type LiepinHideViewedState = {
@@ -578,10 +635,139 @@ export async function openLiepinSubscribeSearch(
   return page;
 }
 
+export function parseLiepinAppliedSearchKeyword(bodyText: string): string | undefined {
+  const normalizedBody = bodyText.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  const match = normalizedBody.match(/关键词[:：]\s*(.*?)(?=\s+(?:学历|经验|年龄|薪资|城市|行业|公司|更多|清空|隐藏已查看|搜索)|$)/u);
+  return (match?.[1] ?? '').trim() || undefined;
+}
+
+export async function readLiepinAppliedSearchKeyword(page: Page): Promise<string | undefined> {
+  const scopedInputs = await page.locator([
+    '.search-area .search-auto-complete-box input.ant-select-selection-search-input',
+    '.search-top-bar .search-auto-complete-box input.ant-select-selection-search-input',
+  ].join(', ')).evaluateAll((elements) => elements.flatMap((element) => {
+    if (!(element instanceof HTMLInputElement)) return [];
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0) return [];
+    return [element.value.normalize('NFKC').replace(/\s+/gu, ' ').trim()];
+  }));
+  const populatedInputs = scopedInputs.filter(Boolean);
+  if (populatedInputs.length > 1) {
+    throw new Error(`Liepin keyword evidence is ambiguous: found ${populatedInputs.length} populated scoped inputs.`);
+  }
+  if (populatedInputs.length === 1) return populatedInputs[0];
+  if (scopedInputs.length > 0) return '';
+  return parseLiepinAppliedSearchKeyword(await page.locator('body').innerText().catch(() => ''));
+}
+
+async function waitForExactLiepinKeyword(page: Page, expectedKeyword: string, deadline: number): Promise<string> {
+  const normalizedExpected = expectedKeyword.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  let latestObserved: string | undefined;
+  while (Date.now() <= deadline) {
+    latestObserved = await readLiepinAppliedSearchKeyword(page);
+    if (latestObserved === normalizedExpected) return latestObserved;
+    await page.waitForTimeout(Math.min(100, remainingTime(deadline))).catch(() => undefined);
+  }
+  throw new Error(`Liepin saved search did not prove exact page keyword "${expectedKeyword}". Observed: "${latestObserved ?? '(missing)'}".`);
+}
+
+async function countVisibleExactLiepinQuickSearchTags(page: Page, name: string): Promise<number> {
+  const getByText = (page as Partial<Pick<Page, 'getByText'>>).getByText?.bind(page);
+  if (!getByText) return 0;
+  const tags = getByText(name, { exact: true });
+  let visible = 0;
+  for (let index = 0; index < await tags.count(); index += 1) {
+    if (await tags.nth(index).isVisible().catch(() => false)) visible += 1;
+  }
+  return visible;
+}
+
+export async function inspectExistingLiepinSavedSearch(
+  page: Page,
+  request: CoreSavedSearchVerificationRequest,
+  options: SearchWaitOptions & { boundJobKey: string },
+): Promise<ExistingSavedSearchInspection> {
+  if (request.platform !== 'liepin' || request.boundJobKey !== options.boundJobKey) {
+    throw new Error('Liepin saved-search inspection target does not belong to this platform and job.');
+  }
+  const target = buildCoreSavedSearchTarget({
+    platform: 'liepin',
+    boundJobKey: request.boundJobKey,
+    bindingRevision: request.bindingRevision,
+    name: request.name,
+    expectedKeyword: request.expectedKeyword,
+  });
+  const deadline = createSearchDeadline(options);
+  if (await hasVisibleLiepinBlockingOverlay(page)) {
+    await closeLiepinBlockingOverlays(page, Math.min(3000, remainingTime(deadline)));
+    if (await hasVisibleLiepinBlockingOverlay(page)) {
+      throw new Error('Liepin saved-search inspection could not clear the existing blocking overlay.');
+    }
+  }
+  await openLiepinRecruiterSearchPage(page, deadline);
+  await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+  const exactCount = await countVisibleExactLiepinQuickSearchTags(page, target.name);
+  if (exactCount === 0) return { status: 'absent', page };
+  if (exactCount !== 1) {
+    throw new Error(`Liepin saved search "${target.name}" requires one visible exact match; found ${exactCount}.`);
+  }
+  const opened = await openBoundLiepinSavedSearch(page, target, { ...options, deadline });
+  return { status: 'matched', page: opened.page, target, evidence: opened.evidence };
+}
+
+export async function openBoundLiepinSavedSearch(
+  page: Page,
+  rawTarget: CoreSavedSearchTarget,
+  options: SearchWaitOptions & { boundJobKey: string },
+): Promise<{ page: Page; evidence: PlatformSavedSearchOpenEvidence }> {
+  const target = rawTarget;
+  if (target.platform !== 'liepin' || target.boundJobKey !== options.boundJobKey) {
+    throw new Error('Liepin saved-search target does not belong to this platform and job.');
+  }
+  const deadline = createSearchDeadline(options);
+  resetObservedLiepinSearchResumesApi(page);
+  attachLiepinSearchResumesApiObserver(page);
+  await openLiepinRecruiterSearchPage(page, deadline);
+  await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+  clearObservedLiepinSearchResumesApiBeforeNextAction(page);
+  const observedName = await clickLiepinQuickSearchTag(page, target.name, deadline, { requireUniqueExact: true });
+  if (!observedName) throw new Error(`Liepin saved search "${target.name}" did not yield an observed exact tag name.`);
+  await waitForLiepinQuickSearchResults(page, deadline);
+  await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+  await waitForExactLiepinKeyword(page, target.expectedKeyword, deadline);
+  await applyLiepinViewedFilterForExtraction(page, deadline, options.includeViewedCandidates);
+  const observedKeyword = await waitForExactLiepinKeyword(page, target.expectedKeyword, deadline);
+  return {
+    page,
+    evidence: buildSavedSearchOpenEvidence(target, {
+      boundJobKey: options.boundJobKey,
+      observedName,
+      observedKeyword,
+    }),
+  };
+}
+
 export async function savePreparedLiepinSearchCondition(
   page: Page,
   savedSearchName: string,
-): Promise<void> {
-  await saveLiepinSearchCondition(page, savedSearchName);
-  await waitForLiepinPageReady(page, { requireSearchPage: true });
+  options?: SearchWaitOptions,
+): Promise<Awaited<ReturnType<NonNullable<import('../../types.js').PlatformAdapter['saveSearchCondition']>>>> {
+  const deadline = createSearchDeadline(options);
+  await saveLiepinSearchCondition(page, savedSearchName, deadline);
+  await waitForLiepinPageReady(page, { deadline, requireSearchPage: true });
+  const context = options?.subscriptionMutationContext;
+  if (!context) return undefined;
+  const target = buildCoreSavedSearchTarget({
+    platform: 'liepin',
+    boundJobKey: `subscription-management:${context.conditionFingerprint}`,
+    bindingRevision: 1,
+    name: savedSearchName,
+    expectedKeyword: context.expectedKeyword,
+  });
+  const opened = await openBoundLiepinSavedSearch(page, target, {
+    ...options, deadline,
+    boundJobKey: target.boundJobKey,
+  });
+  return { outcome: 'saved', openEvidence: opened.evidence, workPage: opened.page };
 }

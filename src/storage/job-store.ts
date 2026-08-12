@@ -4,6 +4,8 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { config } from '../config.js';
 import type { SupportedPlatform } from '../platforms/types.js';
+import { assertCoreSavedSearchTarget } from '../search/saved-search-target.js';
+import { assertPlatformJobIdentity } from './job-identity.js';
 import { normalizeBossScreeningSettings, normalizePostScoreRoutingSettings } from '../scoring/boss-screening.js';
 import type { SearchFilterCatalog } from '../search/filter-catalog.js';
 import type { BossJobSyncRun, BossPositionSummary } from '../types/boss.js';
@@ -22,6 +24,7 @@ import {
   PostScoreRoutingWorkItem,
   CandidateScoreArtifact,
   JobRecord,
+  PlatformJobIdentity,
   ResumeDomSnapshot,
   RunResult,
 } from '../types/job.js';
@@ -30,6 +33,12 @@ interface JobRecordNormalizationOptions {
   /** Migration-only compatibility; ordinary reads fail closed on legacy fields. */
   allowLegacyBossScreening?: boolean;
 }
+
+export type JobIdentityWriteAuthority =
+  | 'new-capture'
+  | 'core-maintenance'
+  | 'boss-position-sync'
+  | 'migration-backfill';
 
 const MAX_BOSS_REJECTION_EMAIL_ATTEMPTS = 2;
 
@@ -359,8 +368,15 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord, options: JobRecordNormal
     bossScreening,
     postScoreRouting,
     searchSettings,
+    jobIdentity,
     ...rest
   } = jobRecord;
+  const platform = jobRecord.platform ?? '51job';
+  const normalizedJobIdentity = assertPlatformJobIdentity(jobIdentity, {
+    platform,
+    bossPositionId: jobRecord.bossPosition?.bossJobId,
+    label: `${platform}/${jobRecord.jobKey} jobIdentity`,
+  });
   const normalizedRecipientEmail = recipientEmail?.trim();
   const normalizedCcEmails = ccEmails
     ? [...new Set(ccEmails.map((email) => email.trim()).filter(Boolean))]
@@ -386,10 +402,18 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord, options: JobRecordNormal
     ?.normalize('NFKC')
     .replace(/\s+/gu, ' ')
     .trim();
+  const normalizedCoreSavedSearchTarget = searchSettings?.coreSavedSearchTarget === undefined
+    ? undefined
+    : assertCoreSavedSearchTarget(searchSettings.coreSavedSearchTarget, {
+      platform,
+      boundJobKey: jobRecord.jobKey,
+      label: `${platform}/${jobRecord.jobKey} core saved-search target`,
+    });
   const normalizedSearchSettings = searchSettings
     ? {
       ...searchSettings,
       ...(normalizedPageKeyword ? { pageKeyword: normalizedPageKeyword } : {}),
+      ...(normalizedCoreSavedSearchTarget ? { coreSavedSearchTarget: normalizedCoreSavedSearchTarget } : {}),
     }
     : undefined;
   if (normalizedSearchSettings && !normalizedPageKeyword) {
@@ -398,17 +422,65 @@ function normalizeJobRecord(jobRecord: LegacyJobRecord, options: JobRecordNormal
 
   return {
     ...rest,
-    platform: jobRecord.platform ?? '51job',
+    platform,
     revision: Number.isSafeInteger(jobRecord.revision) && (jobRecord.revision as number) > 0
       ? jobRecord.revision
       : 1,
     ...(normalizedRecipientEmail ? { recipientEmail: normalizedRecipientEmail } : {}),
     ...(normalizedCcEmails ? { ccEmails: normalizedCcEmails } : {}),
     ...(normalizedSearchSettings ? { searchSettings: normalizedSearchSettings } : {}),
+    ...(normalizedJobIdentity ? { jobIdentity: normalizedJobIdentity } : {}),
     ...(normalizedBossForwarding ? { bossForwarding: normalizedBossForwarding } : {}),
     ...(normalizedBossScreening ? { bossScreening: normalizedBossScreening } : {}),
     ...(normalizedPostScoreRouting ? { postScoreRouting: normalizedPostScoreRouting } : {}),
   };
+}
+
+function assertJobIdentityWriteAuthority(
+  platform: SupportedPlatform,
+  jobKey: string,
+  current: PlatformJobIdentity | undefined,
+  next: PlatformJobIdentity | undefined,
+  authority: JobIdentityWriteAuthority | undefined,
+): void {
+  if (isDeepStrictEqual(current, next)) return;
+  if (!next) {
+    throw new Error(`Job identity for ${platform}/${jobKey} cannot be cleared.`);
+  }
+  if (!authority) {
+    throw new Error(`Changing job identity for ${platform}/${jobKey} requires an explicit identity write authority.`);
+  }
+
+  if (authority === 'core-maintenance') {
+    if (platform === 'boss') {
+      throw new Error('core-maintenance may update only 51job, liepin, or zhilian job identity.');
+    }
+    if (next.nameAuthority !== 'user-confirmed') {
+      throw new Error('core-maintenance requires a user-confirmed job identity.');
+    }
+    return;
+  }
+
+  if (authority === 'new-capture') {
+    if (platform === 'boss' || current !== undefined || next.nameAuthority !== 'user-confirmed') {
+      throw new Error('new-capture may initialize only a new core-platform user-confirmed job identity.');
+    }
+    return;
+  }
+
+  if (authority === 'boss-position-sync') {
+    if (platform !== 'boss' || next.nameAuthority !== 'platform-sync' || !next.nativePositionId) {
+      throw new Error('boss-position-sync requires a Boss platform-sync identity with nativePositionId.');
+    }
+    return;
+  }
+
+  if (authority === 'migration-backfill') {
+    if (current !== undefined && !isDeepStrictEqual(current, next)) {
+      throw new Error(`migration-backfill cannot replace an existing job identity for ${platform}/${jobKey}.`);
+    }
+    return;
+  }
 }
 
 function normalizeRunResult(runResult: LegacyRunResult): RunResult {
@@ -511,9 +583,24 @@ export class JobStore {
   async saveJobRecord(
     platform: SupportedPlatform,
     jobRecord: JobRecord,
-    options: { expectedRevision?: number } & JobRecordNormalizationOptions = {},
+    options: {
+      expectedRevision?: number;
+      identityWriteAuthority?: JobIdentityWriteAuthority;
+    } & JobRecordNormalizationOptions = {},
   ): Promise<void> {
+    const normalizedJobIdentity = assertPlatformJobIdentity(jobRecord.jobIdentity, {
+      platform,
+      bossPositionId: jobRecord.bossPosition?.bossJobId,
+      label: `${platform}/${jobRecord.jobKey} jobIdentity`,
+    });
     const current = await this.readJobRecordIfExists(platform, jobRecord.jobKey, options);
+    assertJobIdentityWriteAuthority(
+      platform,
+      jobRecord.jobKey,
+      current?.jobIdentity,
+      normalizedJobIdentity,
+      options.identityWriteAuthority,
+    );
     const currentRevision = current?.revision ?? 1;
     if (options.expectedRevision !== undefined && currentRevision !== options.expectedRevision) {
       throw new JobConfigConflictError(platform, jobRecord.jobKey, options.expectedRevision, currentRevision);
@@ -526,10 +613,18 @@ export class JobStore {
       ?.normalize('NFKC')
       .replace(/\s+/gu, ' ')
       .trim();
+    const normalizedCoreSavedSearchTarget = jobRecord.searchSettings?.coreSavedSearchTarget === undefined
+      ? undefined
+      : assertCoreSavedSearchTarget(jobRecord.searchSettings.coreSavedSearchTarget, {
+        platform,
+        boundJobKey: jobRecord.jobKey,
+        label: `${platform}/${jobRecord.jobKey} core saved-search target`,
+      });
     const searchSettings = jobRecord.searchSettings
       ? {
         ...jobRecord.searchSettings,
         ...(normalizedPageKeyword ? { pageKeyword: normalizedPageKeyword } : {}),
+        ...(normalizedCoreSavedSearchTarget ? { coreSavedSearchTarget: normalizedCoreSavedSearchTarget } : {}),
       }
       : undefined;
     if (searchSettings && !normalizedPageKeyword) {
@@ -548,6 +643,7 @@ export class JobStore {
       platform,
       revision: jobRecord.revision ?? currentRevision,
       ...(searchSettings ? { searchSettings } : {}),
+      ...(normalizedJobIdentity ? { jobIdentity: normalizedJobIdentity } : {}),
       recipientEmail: jobRecord.recipientEmail?.trim() || undefined,
       ccEmails: jobRecord.ccEmails
         ? [...new Set(jobRecord.ccEmails.map((email) => email.trim()).filter(Boolean))]
@@ -563,6 +659,45 @@ export class JobStore {
         : undefined,
       bossScreening,
       postScoreRouting,
+    });
+  }
+
+  async updateJobIdentityIfRevision(
+    platform: SupportedPlatform,
+    jobKey: string,
+    expectedRevision: number,
+    identity: PlatformJobIdentity,
+    options: { authority: JobIdentityWriteAuthority },
+  ): Promise<JobRecord> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision <= 0) {
+      throw new Error('expectedRevision must be a positive integer');
+    }
+    return this.withConfigLock(platform, jobKey, async () => {
+      const current = await this.readJobRecordIfExists(platform, jobKey);
+      if (!current) throw new Error(`Missing job record for job key ${jobKey}`);
+      const currentRevision = current.revision ?? 1;
+      if (currentRevision !== expectedRevision) {
+        throw new JobConfigConflictError(platform, jobKey, expectedRevision, currentRevision);
+      }
+      const normalizedIdentity = assertPlatformJobIdentity(identity, {
+        platform,
+        bossPositionId: current.bossPosition?.bossJobId,
+        label: `${platform}/${jobKey} jobIdentity patch`,
+      });
+      if (!normalizedIdentity) throw new Error(`${platform}/${jobKey} job identity patch is missing.`);
+      assertJobIdentityWriteAuthority(platform, jobKey, current.jobIdentity, normalizedIdentity, options.authority);
+      if (isDeepStrictEqual(current.jobIdentity, normalizedIdentity)) return current;
+
+      const next: JobRecord = {
+        ...current,
+        revision: currentRevision + 1,
+        jobIdentity: normalizedIdentity,
+      };
+      await this.saveJobRecord(platform, next, {
+        expectedRevision: currentRevision,
+        identityWriteAuthority: options.authority,
+      });
+      return this.readJobRecord(platform, jobKey);
     });
   }
 
@@ -625,7 +760,8 @@ export class JobStore {
         || patch.conditions !== undefined
         || patch.conditionSetRef !== undefined
         || patch.selectedFieldsFingerprint !== undefined
-        || patch.savedSearch !== undefined) {
+        || patch.savedSearch !== undefined
+        || patch.coreSavedSearchTarget !== undefined) {
         const existing = next.searchSettings ?? { source: patch.searchSource ?? 'saved', conditions: [] };
         const searchSettings: NonNullable<JobRecord['searchSettings']> = {
           ...existing,
@@ -646,12 +782,29 @@ export class JobStore {
           ...(patch.savedSearch === null
             ? {}
             : patch.savedSearch !== undefined ? { savedSearch: patch.savedSearch } : {}),
+          ...(patch.coreSavedSearchTarget === null
+            ? {}
+            : patch.coreSavedSearchTarget !== undefined
+              ? {
+                coreSavedSearchTarget: assertCoreSavedSearchTarget(patch.coreSavedSearchTarget, {
+                  platform,
+                  boundJobKey: jobKey,
+                  label: `${platform}/${jobKey} core saved-search target patch`,
+                }),
+              }
+              : {}),
         };
         if (patch.pageKeyword === null) delete searchSettings.pageKeyword;
         if (patch.applicationFilterInput === null) delete searchSettings.applicationFilterInput;
         if (patch.conditionSetRef === null) delete searchSettings.conditionSetRef;
         if (patch.selectedFieldsFingerprint === null) delete searchSettings.resolution;
         if (patch.savedSearch === null) delete searchSettings.savedSearch;
+        if (patch.coreSavedSearchTarget === null) delete searchSettings.coreSavedSearchTarget;
+        if (patch.searchSource === 'direct') {
+          delete searchSettings.savedSearch;
+          delete searchSettings.coreSavedSearchTarget;
+          delete searchSettings.sortPolicy;
+        }
         next.searchSettings = searchSettings;
       }
 
@@ -705,13 +858,7 @@ export class JobStore {
       throw error;
     }
 
-    const records = await Promise.all(jobDirs.map(async (jobKey) => {
-      try {
-        return await this.readJobRecordIfExists(platform, jobKey);
-      } catch {
-        return undefined;
-      }
-    }));
+    const records = await Promise.all(jobDirs.map((jobKey) => this.readJobRecordIfExists(platform, jobKey)));
     return records.filter((record): record is JobRecord => Boolean(record));
   }
 
@@ -723,7 +870,8 @@ export class JobStore {
   async findBossJobRecordsByName(jobName: string): Promise<JobRecord[]> {
     const normalizedName = jobName.replace(/\s+/g, ' ').trim().toLocaleLowerCase('zh-CN');
     const records = await this.listJobRecords('boss');
-    return records.filter((record) => [record.searchKeyword, record.normalizedJob.title]
+    return records.filter((record) => [record.jobIdentity?.expectedJobName, record.searchKeyword, record.normalizedJob.title]
+      .filter((value): value is string => Boolean(value))
       .some((value) => value.replace(/\s+/g, ' ').trim().toLocaleLowerCase('zh-CN') === normalizedName));
   }
 

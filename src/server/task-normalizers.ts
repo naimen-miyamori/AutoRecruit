@@ -38,6 +38,7 @@ import type {
   TaskInput,
 } from './types.js';
 import type { BossChatOperation, BossTalentSource } from '../types/boss.js';
+import { assertBossCaptureTaskSnapshotHash } from '../platforms/boss/capture-snapshot.js';
 import type { AskRagQuestionOptions, IngestConversationOptions } from '../rag/service.js';
 import type { RagConversationTurn, RagSpeaker } from '../rag/types.js';
 
@@ -160,23 +161,7 @@ export function normalizeBossCaptureTaskSnapshot(value: unknown): BossCaptureTas
   cloned.searchPlan.source = source;
   cloned.searchPlan.pageKeyword = pageKeyword;
   cloned.searchPlan.keywordSource = keywordSource;
-  const { snapshotHash: suppliedHash, resolvedAt: _resolvedAt, ...behavior } = cloned;
-  const canonicalize = (nested: unknown): unknown => {
-    if (Array.isArray(nested)) return nested.map(canonicalize);
-    if (nested && typeof nested === 'object') {
-      return Object.fromEntries(Object.entries(nested as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, child]) => [key, canonicalize(child)]));
-    }
-    return nested;
-  };
-  const expectedHash = crypto.createHash('sha256')
-    .update(JSON.stringify(canonicalize(behavior)))
-    .digest('hex');
-  if (suppliedHash !== expectedHash) {
-    throw new Error('bossCaptureTaskSnapshot hash does not match its canonical content');
-  }
-  return cloned;
+  return assertBossCaptureTaskSnapshotHash(cloned);
 }
 
 export function getOptionalString(item: JsonObject, fieldName: string): string | undefined {

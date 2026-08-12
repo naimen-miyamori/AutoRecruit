@@ -17,8 +17,12 @@ src/browser/AGENTS.md first.
 ## Search and Result Boundaries
 
 - Login begins at the recruiter login flow and talent search uses the recruiter search page.
-  Saved search reselects the exact quick-search tag on reusable runs, then confirms visible raw
-  keyword state; only an already-confirmed keyword state may substitute for an unavailable tag.
+  Strict saved search reads exactly one trusted quick-search component, requires component and
+  visible-card order/cardinality to agree, and reselects by stable native condition ID only after
+  the complete canonical condition fingerprint matches. It then confirms the exact visible raw
+  keyword. The user-provided subscription label is local metadata because this page does not expose
+  a remote name; summary text, prefix matching, DOM order alone, and an already-active keyword never
+  substitute for native identity.
 - Direct normal capture never invokes a saved tag. It clears stale conditions when possible,
   supplies the keyword, confirms visible keyword state, applies requested filters, then establishes
   viewed state.
@@ -46,7 +50,9 @@ src/browser/AGENTS.md first.
   Missing link evidence is a `forward` failure, while parsing waits on the remaining lifecycle
   deadline rather than a fixed one-second window.
 - Subscription mode uses the verified saved quick-search state rather than replacing it with a raw
-  box search. An explicit no-result state is successful.
+  box search. Existing native conditions with the requested keyword are never reported absent merely
+  because their remote name is unavailable, so save cannot create a duplicate. An explicit no-result
+  state is successful.
 - Filter discovery stays in the verified search condition panel and opens the platform's additional
   controls precisely; it must not use broad text actions that can target navigation or
   recommendations. Replay supports only the persisted catalog schema and confirms every requested

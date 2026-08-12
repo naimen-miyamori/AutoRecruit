@@ -16,6 +16,328 @@ import {
 const bossResumePayloadCache = new WeakMap<Page, Map<string, BossResumeApiPayload>>();
 const bossLegacyResumeFrameSelector = 'iframe[src*="/web/frame/c-resume/"]';
 const bossNativeResumeRootSelector = '.dialog-lib-resume .resume-detail-wrap';
+const bossNativeResumeDomAncestorDepth = 6;
+const bossNativeResumeComponentParentDepth = 8;
+
+export type BossNativeResumePendingReason =
+  | 'native-root-unavailable'
+  | 'root-not-current'
+  | 'detail-not-visible'
+  | 'payload-source-unavailable'
+  | 'root-changed-before-payload'
+  | 'detail-not-visible-before-payload'
+  | 'resume-state-loading-before-payload'
+  | 'resume-state-replaced-before-payload'
+  | 'resume-identity-missing-before-payload'
+  | 'resume-state-loading-after-payload'
+  | 'resume-state-replaced-after-payload'
+  | 'resume-identity-missing-after-payload'
+  | 'resume-identity-drift-after-payload'
+  | 'root-replaced-after-payload'
+  | 'detail-not-visible-after-payload';
+
+type BossNativeResumePendingObservation = {
+  status: 'pending';
+  reason: BossNativeResumePendingReason;
+};
+type BossNativeResumeAmbiguousObservation = {
+  status: 'ambiguous';
+  source: 'roots' | 'payloads';
+  count: number;
+};
+type BossNativeResumeReadinessObservation =
+  | BossNativeResumePendingObservation
+  | BossNativeResumeAmbiguousObservation
+  | { status: 'ready' };
+type BossNativeResumePayloadObservation =
+  | BossNativeResumePendingObservation
+  | BossNativeResumeAmbiguousObservation
+  | { status: 'ready'; payload: BossResumeApiPayload };
+export type BossNativeResumeObservationMode = 'readiness' | 'payload';
+
+type BossNativeResumeObservationDiagnostics = {
+  observedPendingReasons: BossNativeResumePendingReason[];
+  pendingReasonCounts: Partial<Record<BossNativeResumePendingReason, number>>;
+  lastPendingReason?: BossNativeResumePendingReason;
+};
+
+export type BossNativeResumeObservationTimeoutCode =
+  | 'boss-resume-readiness-timeout'
+  | 'boss-native-payload-unavailable-before-deadline';
+
+/**
+ * Redacted native-detail timeout evidence. Only stable state-transition codes
+ * and counts are exposed; candidate IDs, resume fields, and page text never
+ * enter this error.
+ */
+export class BossNativeResumeObservationTimeoutError extends Error {
+  readonly code: BossNativeResumeObservationTimeoutCode;
+  readonly observationMode: BossNativeResumeObservationMode;
+  readonly observedPendingReasons: readonly BossNativeResumePendingReason[];
+  readonly pendingReasonCounts: Readonly<Partial<Record<BossNativeResumePendingReason, number>>>;
+  readonly lastPendingReason?: BossNativeResumePendingReason;
+
+  constructor(input: {
+    code: BossNativeResumeObservationTimeoutCode;
+    observationMode: BossNativeResumeObservationMode;
+    message: string;
+    diagnostics: BossNativeResumeObservationDiagnostics;
+  }) {
+    const observed = [...input.diagnostics.observedPendingReasons];
+    super(`${input.message}${observed.length > 0
+      ? ` Observed native pending reasons: ${observed.join(', ')}.`
+      : ''}`);
+    this.name = 'BossNativeResumeObservationTimeoutError';
+    this.code = input.code;
+    this.observationMode = input.observationMode;
+    this.observedPendingReasons = Object.freeze(observed);
+    this.pendingReasonCounts = Object.freeze({ ...input.diagnostics.pendingReasonCounts });
+    this.lastPendingReason = input.diagnostics.lastPendingReason;
+  }
+}
+
+function createBossNativeResumeObservationDiagnostics(): BossNativeResumeObservationDiagnostics {
+  return {
+    observedPendingReasons: [],
+    pendingReasonCounts: {},
+  };
+}
+
+function recordBossNativeResumePendingReason(
+  diagnostics: BossNativeResumeObservationDiagnostics,
+  reason: BossNativeResumePendingReason,
+): void {
+  if (diagnostics.pendingReasonCounts[reason] === undefined) {
+    diagnostics.observedPendingReasons.push(reason);
+  }
+  diagnostics.pendingReasonCounts[reason] = (diagnostics.pendingReasonCounts[reason] ?? 0) + 1;
+  diagnostics.lastPendingReason = reason;
+}
+
+type BossNativeResumeObservationResult<TMode extends BossNativeResumeObservationMode> =
+  TMode extends 'readiness'
+    ? BossNativeResumeReadinessObservation
+    : BossNativeResumePayloadObservation;
+
+function observeBossNativeResume<TMode extends BossNativeResumeObservationMode>(
+  root: Locator,
+  mode: TMode,
+): Promise<BossNativeResumeObservationResult<TMode>> {
+  return root.evaluate((candidateRoot, input) => {
+    const limits = input.limits;
+    const observationMode = input.mode;
+    const isVisible = (element: Element | null): element is HTMLElement => {
+      if (!(element instanceof HTMLElement)) return false;
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    type VueResumeComponent = {
+      $options?: { name?: string };
+      $props?: { resumeInfo?: Record<string, unknown> };
+      $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+      $parent?: VueResumeComponent;
+    };
+    type NativeObservation =
+      | { status: 'pending'; reason: BossNativeResumePendingReason }
+      | { status: 'ambiguous'; source: 'roots' | 'payloads'; count: number }
+      | { status: 'ready' }
+      | { status: 'ready'; payload: BossResumeApiPayload };
+    type PayloadSource = {
+      component: VueResumeComponent;
+      resumeInfo: Record<string, unknown>;
+    };
+
+    const currentVisibleRoots = (): HTMLElement[] =>
+      [...document.querySelectorAll('.dialog-wrap.active .dialog-lib-resume .resume-detail-wrap')]
+        .filter(isVisible);
+
+    const rootsBefore = currentVisibleRoots();
+    if (rootsBefore.length > 1) {
+      return { status: 'ambiguous', source: 'roots', count: rootsBefore.length } satisfies NativeObservation;
+    }
+    if (!candidateRoot.isConnected
+      || (rootsBefore.length === 1 && rootsBefore[0] !== candidateRoot)) {
+      return { status: 'pending', reason: 'root-not-current' } satisfies NativeObservation;
+    }
+    // The visible base-info section is opening/readiness evidence, not payload
+    // identity evidence. Boss may geometrically collapse or replace that top
+    // section after the detail has already hydrated. Payload reads instead
+    // rely on the unique visible root plus stable state and identity below.
+    if (!isVisible(candidateRoot)
+      || (observationMode === 'readiness'
+        && !isVisible(candidateRoot.querySelector('.geek-base-info-wrap')))) {
+      return { status: 'pending', reason: 'detail-not-visible' } satisfies NativeObservation;
+    }
+    if (rootsBefore.length !== 1) {
+      return { status: 'pending', reason: 'root-not-current' } satisfies NativeObservation;
+    }
+
+    const visitedStarts = new Set<VueResumeComponent>();
+    const selectedComponents = new Set<VueResumeComponent>();
+    const payloadSources: PayloadSource[] = [];
+    let host: HTMLElement | null = candidateRoot;
+    for (let domDepth = 0;
+      host && domDepth <= limits.domAncestorDepth;
+      domDepth += 1, host = host.parentElement) {
+      const component = Object.prototype.hasOwnProperty.call(host, '__vue__')
+        ? (host as HTMLElement & { __vue__?: VueResumeComponent }).__vue__
+        : undefined;
+      if (!component || visitedStarts.has(component)) continue;
+      visitedStarts.add(component);
+
+      const visitedChain = new Set<VueResumeComponent>();
+      const validChainSources: PayloadSource[] = [];
+      let current: VueResumeComponent | undefined = component;
+      for (let componentDepth = 0;
+        current && componentDepth < limits.componentParentDepth && !visitedChain.has(current);
+        componentDepth += 1, current = current.$parent) {
+        visitedChain.add(current);
+        const currentResumeInfo = current.$data?.resumeInfo ?? current.$props?.resumeInfo;
+        if (currentResumeInfo
+          && current.$data?.loading !== true
+          && currentResumeInfo.expectId !== undefined
+          && currentResumeInfo.expectId !== null
+          && String(currentResumeInfo.expectId).trim()) {
+          validChainSources.push({ component: current, resumeInfo: currentResumeInfo });
+          if (current.$options?.name === 'ResumeRoot') break;
+        }
+      }
+      if (validChainSources.length === 0) continue;
+
+      const chainIdentities = new Set(validChainSources.map((source) => String(source.resumeInfo.expectId).trim()));
+      if (chainIdentities.size > 1) {
+        return {
+          status: 'ambiguous',
+          source: 'payloads',
+          count: validChainSources.length,
+        } satisfies NativeObservation;
+      }
+
+      const selected = validChainSources.find((source) => source.component.$options?.name === 'ResumeRoot')
+        ?? validChainSources[validChainSources.length - 1]!;
+      if (!selectedComponents.has(selected.component)) {
+        selectedComponents.add(selected.component);
+        payloadSources.push(selected);
+      }
+    }
+    if (payloadSources.length > 1) {
+      return { status: 'ambiguous', source: 'payloads', count: payloadSources.length } satisfies NativeObservation;
+    }
+    if (payloadSources.length === 0) {
+      return { status: 'pending', reason: 'payload-source-unavailable' } satisfies NativeObservation;
+    }
+
+    const currentRoots = currentVisibleRoots();
+    if (currentRoots.length > 1) {
+      return { status: 'ambiguous', source: 'roots', count: currentRoots.length } satisfies NativeObservation;
+    }
+    if (!candidateRoot.isConnected
+      || (currentRoots.length === 1 && currentRoots[0] !== candidateRoot)) {
+      return { status: 'pending', reason: 'root-changed-before-payload' } satisfies NativeObservation;
+    }
+    if (!isVisible(candidateRoot)
+      || (observationMode === 'readiness'
+        && !isVisible(candidateRoot.querySelector('.geek-base-info-wrap')))) {
+      return { status: 'pending', reason: 'detail-not-visible-before-payload' } satisfies NativeObservation;
+    }
+    if (currentRoots.length !== 1) {
+      return { status: 'pending', reason: 'root-changed-before-payload' } satisfies NativeObservation;
+    }
+
+    const selectedSource = payloadSources[0]!;
+    const currentResumeInfo = selectedSource.component.$data?.resumeInfo
+      ?? selectedSource.component.$props?.resumeInfo;
+    if (selectedSource.component.$data?.loading === true) {
+      return { status: 'pending', reason: 'resume-state-loading-before-payload' } satisfies NativeObservation;
+    }
+    if (currentResumeInfo !== selectedSource.resumeInfo) {
+      return { status: 'pending', reason: 'resume-state-replaced-before-payload' } satisfies NativeObservation;
+    }
+    if (currentResumeInfo.expectId === undefined
+      || currentResumeInfo.expectId === null
+      || !String(currentResumeInfo.expectId).trim()) {
+      return { status: 'pending', reason: 'resume-identity-missing-before-payload' } satisfies NativeObservation;
+    }
+    if (observationMode === 'readiness') {
+      return { status: 'ready' } satisfies NativeObservation;
+    }
+
+    const resumeInfo = currentResumeInfo;
+    const expectId = resumeInfo.expectId;
+    const expectedIdentity = String(expectId).trim();
+
+    const detailKeys = [
+      'geekBaseInfo',
+      'geekExpectList',
+      'highestEduExp',
+      'geekCertificationList',
+      'certList',
+      'professionalSkill',
+      'resumeSummary',
+      'showExpectPosition',
+      'geekWorkExpList',
+      'geekProjExpList',
+      'geekEduExpList',
+    ];
+    const geekDetail: Record<string, unknown> = {};
+    let showExpectPosition: unknown;
+    for (const key of detailKeys) {
+      const value = resumeInfo[key];
+      if (key === 'showExpectPosition') showExpectPosition = value;
+      if (value !== undefined) geekDetail[key] = value;
+    }
+    const payload = JSON.parse(JSON.stringify({
+      code: 0,
+      zpData: {
+        expectId,
+        geekDetail,
+        ...(showExpectPosition === undefined
+          ? {}
+          : { showExpectPosition }),
+      },
+    })) as BossResumeApiPayload;
+
+    const finalResumeInfo = selectedSource.component.$data?.resumeInfo
+      ?? selectedSource.component.$props?.resumeInfo;
+    const finalLoading = Reflect.get(selectedSource.component.$data ?? {}, 'loading') as unknown;
+    const rootsAfter = currentVisibleRoots();
+    if (rootsAfter.length > 1) {
+      return { status: 'ambiguous', source: 'roots', count: rootsAfter.length } satisfies NativeObservation;
+    }
+    if (finalLoading === true) {
+      return { status: 'pending', reason: 'resume-state-loading-after-payload' } satisfies NativeObservation;
+    }
+    if (finalResumeInfo !== resumeInfo) {
+      return { status: 'pending', reason: 'resume-state-replaced-after-payload' } satisfies NativeObservation;
+    }
+    if (finalResumeInfo.expectId === undefined
+      || finalResumeInfo.expectId === null
+      || !String(finalResumeInfo.expectId).trim()) {
+      return { status: 'pending', reason: 'resume-identity-missing-after-payload' } satisfies NativeObservation;
+    }
+    if (String(finalResumeInfo.expectId).trim() !== expectedIdentity) {
+      return { status: 'pending', reason: 'resume-identity-drift-after-payload' } satisfies NativeObservation;
+    }
+    if (!candidateRoot.isConnected
+      || (rootsAfter.length === 1 && rootsAfter[0] !== candidateRoot)) {
+      return { status: 'pending', reason: 'root-replaced-after-payload' } satisfies NativeObservation;
+    }
+    if (!isVisible(candidateRoot)) {
+      return { status: 'pending', reason: 'detail-not-visible-after-payload' } satisfies NativeObservation;
+    }
+    if (rootsAfter.length !== 1) {
+      return { status: 'pending', reason: 'root-replaced-after-payload' } satisfies NativeObservation;
+    }
+    return { status: 'ready', payload } satisfies NativeObservation;
+  }, {
+    mode,
+    limits: {
+      domAncestorDepth: bossNativeResumeDomAncestorDepth,
+      componentParentDepth: bossNativeResumeComponentParentDepth,
+    },
+  }) as Promise<BossNativeResumeObservationResult<TMode>>;
+}
 
 function bossResumeDetailDialogs(page: Page): Locator {
   return page.locator([
@@ -26,6 +348,15 @@ function bossResumeDetailDialogs(page: Page): Locator {
 
 function bossNativeResumeRoots(page: Page): Locator {
   return page.locator(`.dialog-wrap.active:visible ${bossNativeResumeRootSelector}:visible`);
+}
+
+function throwBossNativeResumeAmbiguity(
+  observation: BossNativeResumeAmbiguousObservation,
+): never {
+  if (observation.source === 'roots') {
+    throw new Error(`Expected at most one hydrated Boss native resume root, found ${observation.count}.`);
+  }
+  throw new Error(`Expected one Boss native resume payload source, found ${observation.count}.`);
 }
 
 /** Returns whether exactly one legacy or native Boss resume detail is visible. */
@@ -162,6 +493,7 @@ export async function closeExistingBossResumeDialog(
 }
 
 export async function waitForBossResumeDetailReady(page: Page, deadline: number, cleanupReserveMs = 0): Promise<void> {
+  const diagnostics = createBossNativeResumeObservationDiagnostics();
   while (remainingTimeWithReserve(deadline, cleanupReserveMs) > 1) {
     const nativeRoots = bossNativeResumeRoots(page);
     const nativeCount = await nativeRoots.count().catch(() => 0);
@@ -169,35 +501,14 @@ export async function waitForBossResumeDetailReady(page: Page, deadline: number,
       throw new Error(`Expected at most one hydrated Boss native resume root, found ${nativeCount}.`);
     }
     if (nativeCount === 1) {
-      const nativeReady = await nativeRoots.first().evaluate((root) => {
-        const isVisible = (element: Element | null): element is HTMLElement => {
-          if (!(element instanceof HTMLElement)) return false;
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-        };
-        if (!isVisible(root) || !isVisible(root.querySelector('.geek-base-info-wrap'))) return false;
-        type VueResumeComponent = {
-          $options?: { name?: string };
-          $props?: { resumeInfo?: Record<string, unknown> };
-          $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
-          $parent?: VueResumeComponent;
-        };
-        let component = (root as HTMLElement & { __vue__?: VueResumeComponent }).__vue__;
-        for (let depth = 0; component && depth < 8; depth += 1, component = component.$parent) {
-          const resumeInfo = component.$data?.resumeInfo ?? component.$props?.resumeInfo;
-          const expectId = resumeInfo?.expectId;
-          if ((component.$options?.name === 'ResumeRoot' || resumeInfo)
-            && component.$data?.loading !== true
-            && expectId !== undefined
-            && expectId !== null
-            && String(expectId).trim()) {
-            return true;
-          }
-        }
-        return false;
-      }).catch(() => false);
-      if (nativeReady) return;
+      const observation = await observeBossNativeResume(nativeRoots.first(), 'readiness');
+      if (observation.status === 'ambiguous') {
+        throwBossNativeResumeAmbiguity(observation);
+      }
+      if (observation.status === 'ready') return;
+      recordBossNativeResumePendingReason(diagnostics, observation.reason);
+    } else {
+      recordBossNativeResumePendingReason(diagnostics, 'native-root-unavailable');
     }
 
     const detailFrames = page.frames().filter((frame) => /\/web\/frame\/c-resume\//.test(frame.url()));
@@ -210,7 +521,12 @@ export async function waitForBossResumeDetailReady(page: Page, deadline: number,
     }
     await page.waitForTimeout(Math.min(100, remainingTimeWithReserve(deadline, cleanupReserveMs))).catch(() => undefined);
   }
-  throw new Error('Boss resume detail did not hydrate through either the native DOM or legacy canvas path before the deadline.');
+  throw new BossNativeResumeObservationTimeoutError({
+    code: 'boss-resume-readiness-timeout',
+    observationMode: 'readiness',
+    message: 'Boss resume detail did not hydrate through either the native DOM or legacy canvas path before the deadline.',
+    diagnostics,
+  });
 }
 
 async function raiseUnexpectedContactDialog(
@@ -294,90 +610,62 @@ async function readBossResumePayload(
   deadline: number,
   cleanupReserveMs = 0,
 ): Promise<BossResumeApiPayload> {
-  await waitForBossResumeDetailReady(page, deadline, cleanupReserveMs);
-  const nativeRoots = bossNativeResumeRoots(page);
-  const nativeCount = await nativeRoots.count().catch(() => 0);
-  if (nativeCount > 1) {
-    throw new Error(`Expected at most one hydrated Boss native resume root, found ${nativeCount}.`);
-  }
-  if (nativeCount === 1) {
-    return nativeRoots.first().evaluate((root) => {
-      type VueResumeComponent = {
-        $options?: { name?: string };
-        $props?: { resumeInfo?: Record<string, unknown> };
-        $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
-        $parent?: VueResumeComponent;
-      };
-      let component = (root as HTMLElement & { __vue__?: VueResumeComponent }).__vue__;
-      let resumeInfo: Record<string, unknown> | undefined;
-      for (let depth = 0; component && depth < 8; depth += 1, component = component.$parent) {
-        const currentResumeInfo = component.$data?.resumeInfo ?? component.$props?.resumeInfo;
-        if (currentResumeInfo
-          && component.$data?.loading !== true
-          && currentResumeInfo.expectId !== undefined
-          && currentResumeInfo.expectId !== null
-          && String(currentResumeInfo.expectId).trim()) {
-          resumeInfo = currentResumeInfo;
-          if (component.$options?.name === 'ResumeRoot') break;
+  const diagnostics = createBossNativeResumeObservationDiagnostics();
+  while (remainingTimeWithReserve(deadline, cleanupReserveMs) > 1) {
+    const nativeRoots = bossNativeResumeRoots(page);
+    const nativeCount = await nativeRoots.count().catch(() => 0);
+    if (nativeCount > 1) {
+      throw new Error(`Expected at most one hydrated Boss native resume root, found ${nativeCount}.`);
+    }
+    if (nativeCount === 1) {
+      const observation = await observeBossNativeResume(nativeRoots.first(), 'payload');
+      if (observation.status === 'ambiguous') {
+        throwBossNativeResumeAmbiguity(observation);
+      }
+      if (observation.status === 'ready') return observation.payload;
+      recordBossNativeResumePendingReason(diagnostics, observation.reason);
+      await page.waitForTimeout(Math.min(100, remainingTimeWithReserve(deadline, cleanupReserveMs))).catch(() => undefined);
+      continue;
+    }
+    recordBossNativeResumePendingReason(diagnostics, 'native-root-unavailable');
+
+    const detailFrames = page.frames().filter((frame) => /\/web\/frame\/c-resume\//.test(frame.url()));
+    if (detailFrames.length > 1) {
+      throw new Error(`Expected at most one Boss resume detail frame, found ${detailFrames.length}.`);
+    }
+    if (detailFrames.length === 1
+      && await detailFrames[0]!.locator('canvas#resume, #resume canvas').first().isVisible().catch(() => false)) {
+      const detailFrame = detailFrames[0]!;
+      await detailFrame.waitForFunction(
+        () => performance.getEntriesByType('resource')
+          .some((entry) => /\/wapi\/(?:zpitem\/web\/boss\/search\/geek\/info|zpjob\/view\/geek\/info\/v2)\?/.test(entry.name)),
+        undefined,
+        { timeout: remainingTimeWithReserve(deadline, cleanupReserveMs), polling: 100 },
+      );
+      return detailFrame.evaluate(async () => {
+        const apiUrl = performance.getEntriesByType('resource')
+          .map((entry) => entry.name)
+          .reverse()
+          .find((url) => /\/wapi\/(?:zpitem\/web\/boss\/search\/geek\/info|zpjob\/view\/geek\/info\/v2)\?/.test(url));
+        if (!apiUrl) {
+          throw new Error('Boss resume detail API resource was not found in the legacy detail frame.');
         }
-      }
-      if (!resumeInfo) {
-        throw new Error('Boss native resume state was not hydrated for parsing.');
-      }
-      const detailKeys = [
-        'geekBaseInfo',
-        'geekExpectList',
-        'highestEduExp',
-        'geekCertificationList',
-        'certList',
-        'professionalSkill',
-        'resumeSummary',
-        'showExpectPosition',
-        'geekWorkExpList',
-        'geekProjExpList',
-        'geekEduExpList',
-      ];
-      const geekDetail = Object.fromEntries(detailKeys
-        .filter((key) => resumeInfo![key] !== undefined)
-        .map((key) => [key, resumeInfo![key]]));
-      return JSON.parse(JSON.stringify({
-        code: 0,
-        zpData: {
-          expectId: resumeInfo.expectId,
-          geekDetail,
-          ...(resumeInfo.showExpectPosition === undefined
-            ? {}
-            : { showExpectPosition: resumeInfo.showExpectPosition }),
-        },
-      })) as BossResumeApiPayload;
-    });
+        const response = await fetch(apiUrl, { credentials: 'include' });
+        if (!response.ok) {
+          throw new Error(`Boss resume detail API returned HTTP ${response.status}.`);
+        }
+        return response.json();
+      }) as Promise<BossResumeApiPayload>;
+    }
+    await page.waitForTimeout(Math.min(100, remainingTimeWithReserve(deadline, cleanupReserveMs))).catch(() => undefined);
   }
 
-  const detailFrames = page.frames().filter((frame) => /\/web\/frame\/c-resume\//.test(frame.url()));
-  if (detailFrames.length !== 1) {
-    throw new Error(`Expected one Boss legacy resume detail frame for parsing, found ${detailFrames.length}.`);
-  }
-  const detailFrame = detailFrames[0]!;
-  await detailFrame.waitForFunction(
-    () => performance.getEntriesByType('resource')
-      .some((entry) => /\/wapi\/(?:zpitem\/web\/boss\/search\/geek\/info|zpjob\/view\/geek\/info\/v2)\?/.test(entry.name)),
-    undefined,
-    { timeout: remainingTimeWithReserve(deadline, cleanupReserveMs), polling: 100 },
-  );
-  return detailFrame.evaluate(async () => {
-    const apiUrl = performance.getEntriesByType('resource')
-      .map((entry) => entry.name)
-      .reverse()
-      .find((url) => /\/wapi\/(?:zpitem\/web\/boss\/search\/geek\/info|zpjob\/view\/geek\/info\/v2)\?/.test(url));
-    if (!apiUrl) {
-      throw new Error('Boss resume detail API resource was not found in the legacy detail frame.');
-    }
-    const response = await fetch(apiUrl, { credentials: 'include' });
-    if (!response.ok) {
-      throw new Error(`Boss resume detail API returned HTTP ${response.status}.`);
-    }
-    return response.json();
-  }) as Promise<BossResumeApiPayload>;
+  throw new BossNativeResumeObservationTimeoutError({
+    code: 'boss-native-payload-unavailable-before-deadline',
+    observationMode: 'payload',
+    message: 'Boss resume detail did not expose one atomically hydrated native payload or ready legacy frame before the deadline.',
+    diagnostics,
+  });
 }
 
 function cacheBossResumePayload(page: Page, candidateId: string, payload: BossResumeApiPayload): void {

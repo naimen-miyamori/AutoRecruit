@@ -6,6 +6,7 @@ import {
 } from '../search/search-subscription.js';
 import { SearchConditionSetService } from '../search/search-condition-sets.js';
 import type { SearchConditionPlan, SearchSubscriptionSummary } from '../types/job.js';
+import type { SubscriptionMutationAttemptStore } from '../search/subscription-mutation-store.js';
 import type { SearchSubscriptionCliInput } from './types.js';
 
 export interface SearchSubscriptionRunnerDependencies {
@@ -18,11 +19,12 @@ export interface SearchSubscriptionRunnerDependencies {
     adapter: PlatformAdapter,
     page: BrowserSession['page'],
     plan: SearchConditionPlan,
-    options: { save: boolean; savedSearchName?: string; sortPolicy?: 'match-priority'; onWorkPageResolved?: (page: BrowserSession['page']) => Promise<void> },
+    options: { save: boolean; savedSearchName?: string; sortPolicy?: 'match-priority'; onWorkPageResolved?: (page: BrowserSession['page']) => Promise<void>; mutationAttempts?: SubscriptionMutationAttemptStore },
   ) => Promise<SearchSubscriptionSummary>;
   report: (result: SearchSubscriptionSummary | SearchSubscriptionSummary[] | undefined) => void;
   reportFailure: (summary: unknown) => void;
   preflightRuntimes?: (platforms: readonly SupportedPlatform[]) => Promise<void>;
+  createMutationAttemptStore?: () => SubscriptionMutationAttemptStore;
 }
 
 export async function runSearchSubscriptionMode(
@@ -59,6 +61,7 @@ export async function runSearchSubscriptionMode(
       stageSummary = await dependencies.runWorkflow(adapter, session.page, resolvedPlan, {
         save: input.save,
         savedSearchName: input.savedSearchName,
+        ...(input.save ? { mutationAttempts: dependencies.createMutationAttemptStore?.() } : {}),
         ...(platform === 'boss' ? { sortPolicy: 'match-priority' as const } : {}),
         ...(session.runtimeLease && dependencies.handoffWorkPage ? {
           onWorkPageResolved: async (resolvedPage) => {

@@ -33,8 +33,9 @@ export interface BossCaptureSearchPlan {
 }
 
 /**
- * Browser-independent capture input. jobName is the expected Boss position
- * name; it is never silently replaced by the page search keyword.
+ * Browser-independent capture input. jobName remains the legacy lookup/input
+ * value. When bossJobId resolves an existing record, that record owns the
+ * exact Boss position name.
  */
 export interface ResolveBossCapturePlanInput {
   jobName: string;
@@ -99,8 +100,13 @@ function normalizedNameKey(value: string): string {
 
 function storedJobMatchesName(record: JobRecord, expectedJobName: string): boolean {
   const expected = normalizedNameKey(expectedJobName);
-  return [record.searchKeyword, record.normalizedJob.title]
+  return [record.jobIdentity?.expectedJobName, record.searchKeyword, record.normalizedJob.title]
+    .filter((value): value is string => Boolean(value))
     .some((value) => normalizedNameKey(value) === expected);
+}
+
+function storedExpectedJobName(record: JobRecord): string {
+  return normalizeNonEmptyText(record.jobIdentity?.expectedJobName ?? record.searchKeyword, 'stored Boss expected job name')!;
 }
 
 function cloneSearchSettings(settings: NonNullable<JobRecord['searchSettings']>): NonNullable<JobRecord['searchSettings']> {
@@ -144,20 +150,22 @@ function assertSavedSearchReference(reference: SavedSearchReference, expectedJob
 async function resolveStoredBossJob(
   input: ResolveBossCapturePlanInput,
   store: BossCapturePlanStore,
-): Promise<{ jobRecord?: JobRecord; bossJobId?: string; jobKey: string }> {
+): Promise<{ jobRecord?: JobRecord; bossJobId?: string; jobKey: string; expectedJobName: string }> {
   const bossJobId = normalizeNonEmptyText(input.bossJobId, 'bossJobId');
   if (bossJobId) {
     const record = await store.findBossJobRecordByPositionId(bossJobId);
     if (!record) {
       throw new Error(`Missing stored Boss JD for job ${input.jobName} (Boss ID ${bossJobId}). Synchronize positions first.`);
     }
-    if (!storedJobMatchesName(record, input.jobName)) {
-      throw new Error(`Boss ID ${bossJobId} belongs to stored job ${record.searchKeyword}, not expected job ${input.jobName}.`);
-    }
     if (record.bossPosition?.bossJobId !== bossJobId) {
       throw new Error(`Stored Boss job ${record.jobKey} does not retain expected Boss ID ${bossJobId}.`);
     }
-    return { jobRecord: record, bossJobId, jobKey: record.jobKey };
+    return {
+      jobRecord: record,
+      bossJobId,
+      jobKey: record.jobKey,
+      expectedJobName: storedExpectedJobName(record),
+    };
   }
 
   const matches = await store.findBossJobRecordsByName(input.jobName);
@@ -170,10 +178,11 @@ async function resolveStoredBossJob(
       jobRecord: record,
       ...(record.bossPosition?.bossJobId ? { bossJobId: record.bossPosition.bossJobId } : {}),
       jobKey: record.jobKey,
+      expectedJobName: storedExpectedJobName(record),
     };
   }
 
-  return { jobKey: buildJobKey(input.jobName, '') };
+  return { jobKey: buildJobKey(input.jobName, ''), expectedJobName: input.jobName };
 }
 
 function pageKeywordFrom(
@@ -206,8 +215,8 @@ export async function resolveBossCapturePlan(
   input: ResolveBossCapturePlanInput,
   options: BossCapturePlanOptions = {},
 ): Promise<ResolvedBossCapturePlan> {
-  const expectedJobName = normalizeNonEmptyText(input.jobName, 'jobName');
-  if (!expectedJobName) {
+  const requestedJobName = normalizeNonEmptyText(input.jobName, 'jobName');
+  if (!requestedJobName) {
     throw new Error('jobName must be non-empty.');
   }
   if (input.searchConditionSetRef && input.explicitSearchSettings?.applicationFilterInput) {
@@ -218,7 +227,8 @@ export async function resolveBossCapturePlan(
   }
 
   const store = options.store ?? new JobStore();
-  const target = await resolveStoredBossJob({ ...input, jobName: expectedJobName }, store);
+  const target = await resolveStoredBossJob({ ...input, jobName: requestedJobName }, store);
+  const expectedJobName = target.expectedJobName;
   const explicitPageKeyword = normalizeNonEmptyText(input.bossSearchKeyword, 'bossSearchKeyword');
   const reuseStoredSettings = !input.searchSourceExplicit
     && !input.searchConditionSetRef

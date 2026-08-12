@@ -13,6 +13,7 @@ import {
   exportJobResultsRef,
   extractCandidateListRef,
   openSubscribeSearchRef,
+  preflightPlatformRuntimeManifestsRef,
   sendJobReportRef,
 } from '../index.js';
 import { JobStore } from '../storage/job-store.js';
@@ -30,6 +31,7 @@ import { sendBossRoutedReports, sendJobReport, sendJobReportEmailRef, sendPostSc
 
 let tempDir: string;
 let originalDataDir: string;
+const originalPreflightPlatformRuntimeManifests = preflightPlatformRuntimeManifestsRef.fn;
 
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-send-report-'));
@@ -43,6 +45,7 @@ afterEach(async () => {
     throw new Error('unexpected browser session setup');
   };
   closeBrowserSessionRef.fn = async () => undefined;
+  preflightPlatformRuntimeManifestsRef.fn = originalPreflightPlatformRuntimeManifests;
   exportJobResultsRef.fn = async () => {
     throw new Error('unexpected export');
   };
@@ -711,6 +714,7 @@ describe('sendJobReport', () => {
       context: {} as never,
       page: {} as never,
     });
+    preflightPlatformRuntimeManifestsRef.fn = async () => undefined;
     openSubscribeSearchRef.fn = async () => ({}) as never;
     closeBrowserSessionRef.fn = async () => undefined;
     extractCandidateListRef.fn = async () => ({

@@ -18,6 +18,7 @@ import {
   validateScheduleTemplates,
 } from './schedule-template-validation.js';
 import { preflightTaskSearchConditionSets } from './search-condition-set-preflight.js';
+import { buildServerCaptureExecutionEnvelope } from './capture-execution-envelope.js';
 import { resolveNextEligibleStart, getWindowState } from './schedule-time.js';
 import {
   ScheduleLeaseOwnershipLostError,
@@ -644,10 +645,17 @@ export class TaskScheduler {
           }
           : baseTask;
       await preflightTaskSearchConditionSets(task.input, this.searchConditionSetService);
+      const executionEnvelope = task.kind === 'resume-capture' || task.kind === 'batch'
+        ? await buildServerCaptureExecutionEnvelope(task.kind, task.input as ResumeCaptureTaskInput | BatchTaskInput, {
+          dataDir: this.dataDir,
+          searchConditionSets: this.searchConditionSetService,
+        })
+        : undefined;
       return {
         kind: task.kind,
         input: task.input,
         inputSummary: task.inputSummary,
+        executionEnvelope,
         argv: task.argv,
         schedule: {
           scheduleId: schedule.scheduleId,

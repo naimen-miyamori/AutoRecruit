@@ -42,12 +42,21 @@ import {
   closeExistingBossResumeDialog,
   closeBossResumeDetailStrict,
   forwardBossResumeAction,
+  isBossResumeDetailVisible,
   parseBossResumeDetail,
   readBossColleagueCommunicationFlag,
 } from '../platforms/boss/actions/resume-detail-actions.js';
 
 type SearchFixtureOptions = {
   body: string;
+  searchResponseStatus?: number;
+};
+
+type SearchBodyOptions = {
+  dispatchRequest?: boolean;
+  submittedKeyword?: string;
+  clearInputAfterDispatch?: boolean;
+  mutateResultAfterDispatch?: boolean;
 };
 
 async function createSearchFixture(options: SearchFixtureOptions): Promise<{ browser: Browser; page: Page }> {
@@ -62,6 +71,16 @@ async function createSearchFixture(options: SearchFixtureOptions): Promise<{ bro
   });
   await page.route('https://www.zhipin.com/web/frame/search/', async (route) => {
     await route.fulfill({ contentType: 'text/html; charset=utf-8', body: options.body });
+  });
+  await page.route('https://www.zhipin.com/wapi/zpitem/web/boss/search/geeks.json**', async (route) => {
+    // Keep the mocked response asynchronous so the action can establish the
+    // exact-request boundary before the page consumes and renders the body.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await route.fulfill({
+      status: options.searchResponseStatus ?? 200,
+      contentType: 'application/json; charset=utf-8',
+      body: JSON.stringify({ code: 0, zpData: { geeks: [] } }),
+    });
   });
   await page.route('https://www.zhipin.com/web/frame/c-resume/', async (route) => {
     await route.fulfill({
@@ -80,7 +99,13 @@ async function createSearchFixture(options: SearchFixtureOptions): Promise<{ bro
   return { browser, page };
 }
 
-function searchBody(content: string): string {
+function searchBody(content: string, options: SearchBodyOptions = {}): string {
+  const dispatchRequest = options.dispatchRequest !== false;
+  const submittedKeyword = options.submittedKeyword === undefined
+    ? 'undefined'
+    : JSON.stringify(options.submittedKeyword);
+  const clearInputAfterDispatch = options.clearInputAfterDispatch === true;
+  const mutateResultAfterDispatch = options.mutateResultAfterDispatch !== false;
   return `<!doctype html><html><body>
     <div class="search-job-list-C"><span class="search-current-job">不限职位</span></div>
     <input class="search-input" value="测试关键词" />
@@ -89,12 +114,32 @@ function searchBody(content: string): string {
     <script>
       window.__bossSearchClicks = 0;
       window.__bossSearchEnterPresses = 0;
+      window.__bossSubmittedKeywords = [];
       const bossSearchSubmitButton = document.querySelector('.search-btn');
       document.querySelector('.search-input')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') window.__bossSearchEnterPresses += 1; });
+      window.__issueBossSearchRequest = (keyword, mutateResult = true) => {
+        window.__bossSubmittedKeywords.push(keyword);
+        const query = new URLSearchParams({ keywords: keyword, page: '1' });
+        return fetch('/wapi/zpitem/web/boss/search/geeks.json?' + query.toString()).then(() => {
+          if (!mutateResult) return;
+          const epoch = document.querySelector('#boss-search-submit-epoch');
+          if (epoch) epoch.setAttribute('data-boss-search-result-version', String(Number(epoch.getAttribute('data-boss-search-result-version') || '0') + 1));
+        });
+      };
       bossSearchSubmitButton?.addEventListener('click', () => {
         window.__bossSearchClicks += 1;
-        const epoch = document.querySelector('#boss-search-submit-epoch');
-        if (epoch) epoch.setAttribute('data-boss-search-result-version', String(Number(epoch.getAttribute('data-boss-search-result-version') || '0') + 1));
+        const keywordInput = document.querySelector('.search-input');
+        const configuredKeyword = ${submittedKeyword};
+        const requestKeyword = configuredKeyword === undefined ? (keywordInput?.value || '') : configuredKeyword;
+        const completion = ${dispatchRequest}
+          ? window.__issueBossSearchRequest(requestKeyword, false)
+          : Promise.resolve();
+        ${clearInputAfterDispatch ? "if (keywordInput) keywordInput.value = '';" : ''}
+        void completion.then(() => {
+          if (!${mutateResultAfterDispatch}) return;
+          const epoch = document.querySelector('#boss-search-submit-epoch');
+          if (epoch) epoch.setAttribute('data-boss-search-result-version', String(Number(epoch.getAttribute('data-boss-search-result-version') || '0') + 1));
+        });
       });
     </script>
     <script>
@@ -103,6 +148,77 @@ function searchBody(content: string): string {
       }
     </script>
     ${content}
+  </body></html>`;
+}
+
+function vueBoundSearchBody(input: {
+  domKeyword: string;
+  applicationKeyword: string;
+  synchronizeInput: boolean;
+}): string {
+  return searchBody('<div class="geek-info-card">candidate card</div>', {
+    dispatchRequest: false,
+    mutateResultAfterDispatch: false,
+  })
+    .replace(
+      '<input class="search-input" value="测试关键词" />\n    <button type="button" class="search-btn" aria-label="搜索">搜索</button>',
+      `<div class="search-part-container"><input class="search-input" value="${input.domKeyword}" /><button type="button" class="search-btn" aria-label="搜索">搜索</button></div>`,
+    )
+    .replace('</body>', `<script>
+      const searchPartRoot = document.querySelector('.search-part-container');
+      const searchPartState = {
+        $options: { name: 'SearchPart' },
+        searchText: ${JSON.stringify(input.applicationKeyword)},
+      };
+      searchPartRoot.__vue__ = searchPartState;
+      window.__bossVueInputEvents = 0;
+      const vueKeywordInput = searchPartRoot.querySelector('.search-input');
+      vueKeywordInput.addEventListener('input', () => {
+        window.__bossVueInputEvents += 1;
+        if (${input.synchronizeInput}) searchPartState.searchText = vueKeywordInput.value.trim();
+      });
+      searchPartRoot.querySelector('.search-btn').addEventListener('click', () => {
+        void window.__issueBossSearchRequest(searchPartState.searchText, true);
+      });
+    </script></body>`);
+}
+
+function jobScopeSearchBody(input: {
+  selectedSummary: string;
+  options: Array<{
+    label: string;
+    active?: boolean;
+    disabled?: boolean;
+    value?: string;
+  }>;
+}): string {
+  const options = input.options.map((option) => `<li
+    class="${[option.active ? 'active' : '', option.disabled ? 'disabled' : ''].filter(Boolean).join(' ')}"
+    ${option.value ? `data-value="${option.value}"` : ''}
+    onclick="window.__jobScopeOptionClicks += 1"
+  >${option.label}</li>`).join('');
+  return `<!doctype html><html><body>
+    <div class="search-job-list-C">
+      <div class="ui-dropmenu">
+        <div class="ui-dropmenu-label"><span class="search-current-job">${input.selectedSummary}</span></div>
+        <ul class="ui-dropmenu-list">${options}</ul>
+      </div>
+    </div>
+    <input class="search-input" value="测试关键词" />
+    <button type="button" class="search-btn">搜索</button>
+    <div class="search-result-list" data-boss-search-result-version="0"></div>
+    <div class="degree-ui"><span class="degree-item active">不限</span></div>
+    <div class="school-ui"><span class="degree-item active">不限</span></div>
+    <div class="experience-select"><span class="exp-item active">不限</span></div>
+    <div class="age-select"><span class="age-item active">不限</span></div>
+    <div class="more-filter-container"></div>
+    <div class="geek-info-card">candidate card</div>
+    <script>
+      window.__jobScopeOptionClicks = 0;
+      document.querySelector('.search-btn')?.addEventListener('click', () => {
+        document.querySelector('.search-result-list')?.setAttribute('data-boss-search-result-version', String(Date.now()));
+      });
+    </script>
   </body></html>`;
 }
 
@@ -177,6 +293,7 @@ async function installForwardReceiptFixture(page: Page, mode: 'success' | 'uncer
 async function installNativeBossResumeFactory(page: Page, options: {
   communicationState?: 'present' | 'delayed-present' | 'stale-then-empty' | 'empty';
   communicationInitiallySelected?: boolean;
+  trackPayloadReads?: boolean;
 } = {}): Promise<void> {
   await page.evaluate((factoryOptions) => {
     const host = window as unknown as {
@@ -184,12 +301,14 @@ async function installNativeBossResumeFactory(page: Page, options: {
       __nativeResumeReportClicks: number;
       __nativeResumeConfirmClicks: number;
       __nativeCommunicationTabClicks: number;
+      __nativeResumePayloadFieldReads: number;
       __openNativeResume: (candidateId: string) => void;
     };
     host.__nativeResumeShareClicks = 0;
     host.__nativeResumeReportClicks = 0;
     host.__nativeResumeConfirmClicks = 0;
     host.__nativeCommunicationTabClicks = 0;
+    host.__nativeResumePayloadFieldReads = 0;
     host.__openNativeResume = (candidateId: string) => {
       const detail = document.createElement('div');
       detail.className = 'dialog-wrap active';
@@ -236,12 +355,27 @@ async function installNativeBossResumeFactory(page: Page, options: {
       const resumeRoot = detail.querySelector<HTMLElement>('.resume-detail-wrap')! as HTMLElement & {
         __vue__?: unknown;
       };
+      const createResumeInfo = (): Record<string, unknown> => {
+        if (!factoryOptions.trackPayloadReads) {
+          return { expectId: candidateId, geekBaseInfo: {} };
+        }
+        const resumeInfo: Record<string, unknown> = { expectId: candidateId };
+        Object.defineProperty(resumeInfo, 'geekBaseInfo', {
+          configurable: true,
+          enumerable: true,
+          get() {
+            host.__nativeResumePayloadFieldReads += 1;
+            return {};
+          },
+        });
+        return resumeInfo;
+      };
       resumeRoot.__vue__ = {
         $options: { name: 'LibStandardResume' },
-        $props: { resumeInfo: { expectId: candidateId, geekBaseInfo: {} } },
+        $props: { resumeInfo: createResumeInfo() },
         $parent: {
           $options: { name: 'ResumeRoot' },
-          $data: { loading: false, resumeInfo: { expectId: candidateId, geekBaseInfo: {} } },
+          $data: { loading: false, resumeInfo: createResumeInfo() },
         },
       };
       detail.querySelector('.boss-popup__close')?.addEventListener('click', () => detail.remove());
@@ -358,6 +492,492 @@ describe('Boss normal-search actions', () => {
     } finally {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('keeps Boss detail-open readiness lightweight and reads native payload fields only during parsing', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card"><a ka="search_click_open_resume" data-expect="boss-candidate-light-ready" href="#resume" onclick="parent.__openNativeResume(\'boss-candidate-light-ready\'); return false"><div class="geek-info-detail" style="display:block;width:120px;height:80px">候选人轻量就绪</div></a></div>'),
+    });
+    try {
+      await installNativeBossResumeFactory(page, { trackPayloadReads: true });
+      const { candidates } = await extractBossCandidateList(page, { deadline: Date.now() + 3_000 });
+      assert.equal(candidates.length, 1);
+
+      // Production starts the detail lifecycle budget only after candidate-list extraction.
+      const deadline = Date.now() + 10_000;
+      await openBossResumeDetail(page.context(), page, candidates[0]!, { deadline });
+      assert.equal(await page.evaluate(() =>
+        (window as unknown as { __nativeResumePayloadFieldReads: number }).__nativeResumePayloadFieldReads), 0);
+
+      const resume = await parseBossResumeDetail(page, candidates[0]!, { deadline });
+      assert.equal(resume.candidateId, 'boss-candidate-light-ready');
+      assert.equal(await page.evaluate(() =>
+        (window as unknown as { __nativeResumePayloadFieldReads: number }).__nativeResumePayloadFieldReads), 1);
+      await closeBossResumeDetailStrict(page, deadline, { pace: false });
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('parses a stable native Boss payload after the already-verified base-info section becomes geometrically hidden', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card"><a ka="search_click_open_resume" data-expect="boss-candidate-hidden-base" href="#resume" onclick="parent.__openNativeResume(\'boss-candidate-hidden-base\'); return false"><div class="geek-info-detail" style="display:block;width:120px;height:80px">候选人顶部切换</div></a></div>'),
+    });
+    try {
+      await installNativeBossResumeFactory(page, { trackPayloadReads: true });
+      const { candidates } = await extractBossCandidateList(page, { deadline: Date.now() + 3_000 });
+      const openDeadline = Date.now() + 3_000;
+      await openBossResumeDetail(page.context(), page, candidates[0]!, { deadline: openDeadline });
+      await page.locator('.geek-base-info-wrap').evaluate((element) => {
+        (element as HTMLElement).style.display = 'none';
+      });
+      assert.equal(await isBossResumeDetailVisible(page), true);
+
+      const resume = await parseBossResumeDetail(
+        page,
+        candidates[0]!,
+        { deadline: Date.now() + 350 },
+      );
+      assert.equal(resume.candidateId, 'boss-candidate-hidden-base');
+      assert.equal(await page.evaluate(() =>
+        (window as unknown as { __nativeResumePayloadFieldReads: number }).__nativeResumePayloadFieldReads), 1);
+      await closeBossResumeDetailStrict(page, Date.now() + 3_000, { pace: false });
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('reads a native Boss resume when its unique Vue 2 payload source is mounted on a bounded DOM ancestor', async () => {
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-ancestor-vue'));
+      await page.evaluate(() => {
+        type VueResumeComponent = {
+          $options?: { name?: string };
+          $props?: { resumeInfo?: Record<string, unknown> };
+          $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+          $parent?: VueResumeComponent;
+        };
+        type VueHost = HTMLElement & { __vue__?: VueResumeComponent };
+        const root = document.querySelector<VueHost>('.resume-detail-wrap');
+        const host = root?.closest<VueHost>('.dialog-wrap');
+        if (!root?.__vue__ || !host) throw new Error('fixture native resume root is missing');
+        delete root.__vue__;
+        host.__vue__ = {
+          $options: { name: 'ResumeLayout' },
+          $props: {
+            resumeInfo: { expectId: 'boss-candidate-ancestor-vue', geekBaseInfo: {} },
+          },
+          $parent: {
+            $options: { name: 'ResumeRoot' },
+            $data: {
+              loading: false,
+              resumeInfo: { expectId: 'boss-candidate-ancestor-vue', geekBaseInfo: {} },
+            },
+          },
+        };
+      });
+
+      const resume = await parseBossResumeDetail(
+        page,
+        { candidateId: 'boss-candidate-ancestor-vue' },
+        { deadline: Date.now() + 3_000 },
+      );
+      assert.equal(resume.candidateId, 'boss-candidate-ancestor-vue');
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('fails closed when one native Boss detail exposes two distinct hydrated Vue 2 payload sources', async () => {
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-ambiguous-vue'));
+      await page.evaluate(() => {
+        type VueResumeComponent = {
+          $options?: { name?: string };
+          $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+        };
+        type VueHost = HTMLElement & { __vue__?: VueResumeComponent };
+        const host = document.querySelector<VueHost>('.resume-layout-wrap');
+        if (!host) throw new Error('fixture native resume layout is missing');
+        host.__vue__ = {
+          $options: { name: 'ResumeRoot' },
+          $data: {
+            loading: false,
+            resumeInfo: {
+              expectId: 'boss-candidate-ambiguous-vue',
+              geekBaseInfo: {},
+              resumeSummary: 'conflicting fixture payload',
+            },
+          },
+        };
+      });
+
+      await assert.rejects(() => parseBossResumeDetail(
+        page,
+        { candidateId: 'boss-candidate-ambiguous-vue' },
+        { deadline: Date.now() + 3_000 },
+      ), /Expected one Boss native resume payload source, found 2/);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('deduplicates bounded DOM markers that converge on the same hydrated Boss ResumeRoot instance', async () => {
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-shared-vue'));
+      await page.evaluate(() => {
+        type VueResumeComponent = {
+          $options?: { name?: string };
+          $props?: { resumeInfo?: Record<string, unknown> };
+          $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+          $parent?: VueResumeComponent;
+        };
+        type VueHost = HTMLElement & { __vue__?: VueResumeComponent };
+        const root = document.querySelector<VueHost>('.resume-detail-wrap');
+        const layout = document.querySelector<VueHost>('.resume-layout-wrap');
+        const sharedResumeRoot = root?.__vue__?.$parent;
+        if (!layout || !sharedResumeRoot) throw new Error('fixture shared ResumeRoot is missing');
+        layout.__vue__ = {
+          $options: { name: 'ResumeLayout' },
+          $props: {
+            resumeInfo: { expectId: 'boss-candidate-shared-vue', geekBaseInfo: {} },
+          },
+          $parent: sharedResumeRoot,
+        };
+      });
+
+      const resume = await parseBossResumeDetail(
+        page,
+        { candidateId: 'boss-candidate-shared-vue' },
+        { deadline: Date.now() + 3_000 },
+      );
+      assert.equal(resume.candidateId, 'boss-candidate-shared-vue');
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('does not search beyond the bounded native Boss DOM ancestor depth', async () => {
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-deep-vue'));
+      await page.evaluate(() => {
+        type VueResumeComponent = {
+          $options?: { name?: string };
+          $props?: { resumeInfo?: Record<string, unknown> };
+          $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+          $parent?: VueResumeComponent;
+        };
+        type VueHost = HTMLElement & { __vue__?: VueResumeComponent };
+        const root = document.querySelector<VueHost>('.resume-detail-wrap');
+        const dialog = root?.closest<VueHost>('.dialog-wrap');
+        if (!root?.__vue__ || !dialog) throw new Error('fixture native resume root is missing');
+        const component = root.__vue__;
+        delete root.__vue__;
+        let current: HTMLElement = root;
+        for (let index = 0; index < 7; index += 1) {
+          const parent = current.parentElement;
+          if (!parent) throw new Error('fixture native resume parent is missing');
+          const wrapper = document.createElement('div');
+          wrapper.className = `deep-resume-wrapper-${index}`;
+          parent.insertBefore(wrapper, current);
+          wrapper.appendChild(current);
+          current = wrapper;
+        }
+        dialog.__vue__ = component;
+      });
+
+      await assert.rejects(() => parseBossResumeDetail(
+        page,
+        { candidateId: 'boss-candidate-deep-vue' },
+        { deadline: Date.now() + 350 },
+      ), /did not expose one atomically hydrated native payload.*before the deadline/i);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('re-observes a native Boss resume when its hydrated root is redrawn before payload parsing', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card"><a ka="search_click_open_resume" data-expect="boss-candidate-redraw" href="#resume" onclick="parent.__openNativeResume(\'boss-candidate-redraw\'); return false"><div class="geek-info-detail" style="display:block;width:120px;height:80px">候选人重绘</div></a></div>'),
+    });
+    try {
+      await installNativeBossResumeFactory(page);
+      const { candidates } = await extractBossCandidateList(page, { deadline: Date.now() + 3_000 });
+      const deadline = Date.now() + 10_000;
+      await openBossResumeDetail(page.context(), page, candidates[0]!, { deadline });
+      await page.evaluate(() => {
+        type VueResumeComponent = {
+          $options?: { name?: string };
+          $props?: { resumeInfo?: Record<string, unknown> };
+          $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+          $parent?: VueResumeComponent;
+        };
+        type VueResumeRoot = HTMLElement & { __vue__?: VueResumeComponent };
+        const root = document.querySelector<VueResumeRoot>('.resume-detail-wrap');
+        if (!root?.__vue__) throw new Error('fixture native resume root is missing');
+        const hydratedComponent = root.__vue__;
+        let redrawn = false;
+        Object.defineProperty(root, '__vue__', {
+          configurable: true,
+          get() {
+            if (!redrawn) {
+              redrawn = true;
+              const replacement = root.cloneNode(true) as VueResumeRoot;
+              replacement.__vue__ = {};
+              root.replaceWith(replacement);
+              window.setTimeout(() => {
+                replacement.__vue__ = hydratedComponent;
+              }, 100);
+            }
+            return hydratedComponent;
+          },
+        });
+      });
+
+      const resume = await parseBossResumeDetail(page, candidates[0]!, { deadline });
+      assert.equal(resume.candidateId, 'boss-candidate-redraw');
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails within the caller deadline when the current native Boss resume never hydrates', async () => {
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-never-hydrates'));
+      await page.evaluate(() => {
+        const root = document.querySelector<HTMLElement>('.resume-detail-wrap') as HTMLElement & { __vue__?: unknown };
+        root.__vue__ = {};
+      });
+
+      await assert.rejects(() => parseBossResumeDetail(
+        page,
+        { candidateId: 'boss-candidate-never-hydrates' },
+        { deadline: Date.now() + 350 },
+      ), /did not expose one atomically hydrated native payload.*before the deadline/i);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('classifies native Boss payload instability without exposing candidate values', async () => {
+    const cases = [
+      ['state-replaced', 'resume-state-replaced-after-payload'],
+      ['loading', 'resume-state-loading-after-payload'],
+      ['identity-drift', 'resume-identity-drift-after-payload'],
+      ['root-replaced', 'root-replaced-after-payload'],
+      ['visibility-changed', 'detail-not-visible-after-payload'],
+    ] as const;
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      for (const [mutation, expectedReason] of cases) {
+        const candidateId = `boss-candidate-pending-${mutation}`;
+        await page.locator('.dialog-wrap.active').evaluateAll((dialogs) => dialogs.forEach((dialog) => dialog.remove()));
+        await page.evaluate((input) => {
+          type VueResumeComponent = {
+            $props?: { resumeInfo?: Record<string, unknown> };
+            $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+            $parent?: VueResumeComponent;
+          };
+          type VueResumeRoot = HTMLElement & { __vue__?: VueResumeComponent };
+          (window as unknown as { __openNativeResume: (candidateId: string) => void })
+            .__openNativeResume(input.candidateId);
+          const root = document.querySelector<VueResumeRoot>('.resume-detail-wrap');
+          const component = root?.__vue__?.$parent;
+          if (!root?.__vue__ || !component?.$data?.resumeInfo) {
+            throw new Error('fixture native ResumeRoot payload is missing');
+          }
+
+          const installPayloadGetter = (
+            resumeInfo: Record<string, unknown>,
+            onRead: () => void,
+          ): void => {
+            Object.defineProperty(resumeInfo, 'geekBaseInfo', {
+              configurable: true,
+              get() {
+                onRead();
+                return {};
+              },
+            });
+          };
+
+          if (input.mutation === 'state-replaced') {
+            const makeResumeInfo = (): Record<string, unknown> => {
+              const resumeInfo: Record<string, unknown> = { expectId: input.candidateId };
+              installPayloadGetter(resumeInfo, () => {
+                component.$data!.resumeInfo = makeResumeInfo();
+              });
+              return resumeInfo;
+            };
+            component.$data.resumeInfo = makeResumeInfo();
+            return;
+          }
+
+          const resumeInfo = component.$data.resumeInfo;
+          installPayloadGetter(resumeInfo, () => {
+            if (input.mutation === 'loading') {
+              component.$data!.loading = true;
+              root.__vue__!.$data ??= {};
+              root.__vue__!.$data.loading = true;
+              return;
+            }
+            if (input.mutation === 'identity-drift') {
+              const nextIdentity = resumeInfo.expectId === input.candidateId
+                ? `${input.candidateId}-changed`
+                : input.candidateId;
+              resumeInfo.expectId = nextIdentity;
+              if (root.__vue__?.$props?.resumeInfo) {
+                root.__vue__.$props.resumeInfo.expectId = nextIdentity;
+              }
+              return;
+            }
+            if (input.mutation === 'root-replaced') {
+              const currentRoot = document.querySelector<VueResumeRoot>('.resume-detail-wrap');
+              if (!currentRoot?.__vue__) throw new Error('fixture current root is missing');
+              const replacement = currentRoot.cloneNode(true) as VueResumeRoot;
+              replacement.__vue__ = currentRoot.__vue__;
+              currentRoot.replaceWith(replacement);
+              return;
+            }
+            const currentRoot = document.querySelector<HTMLElement>('.resume-detail-wrap');
+            if (!currentRoot) throw new Error('fixture current root is missing');
+            currentRoot.style.display = 'none';
+          });
+        }, { mutation, candidateId });
+
+        await assert.rejects(() => parseBossResumeDetail(
+          page,
+          { candidateId },
+          { deadline: Date.now() + 350 },
+        ), (error: unknown) => {
+          assert.ok(error instanceof Error);
+          const diagnostic = error as Error & {
+            code?: string;
+            observedPendingReasons?: string[];
+            pendingReasonCounts?: Record<string, number>;
+          };
+          assert.equal(diagnostic.name, 'BossNativeResumeObservationTimeoutError', mutation);
+          assert.equal(diagnostic.code, 'boss-native-payload-unavailable-before-deadline', mutation);
+          assert.ok(diagnostic.observedPendingReasons?.includes(expectedReason), mutation);
+          assert.ok((diagnostic.pendingReasonCounts?.[expectedReason] ?? 0) > 0, mutation);
+          assert.doesNotMatch(JSON.stringify({
+            message: diagnostic.message,
+            observedPendingReasons: diagnostic.observedPendingReasons,
+            pendingReasonCounts: diagnostic.pendingReasonCounts,
+          }), new RegExp(candidateId));
+          return true;
+        }, `expected ${mutation} payload instability to remain pending`);
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('rejects identity drift when a redrawn native Boss resume hydrates as another candidate', async () => {
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-before-redraw'));
+      await page.evaluate(() => {
+        type VueResumeComponent = {
+          $options?: { name?: string };
+          $props?: { resumeInfo?: Record<string, unknown> };
+          $data?: { loading?: boolean; resumeInfo?: Record<string, unknown> };
+          $parent?: VueResumeComponent;
+        };
+        type VueResumeRoot = HTMLElement & { __vue__?: VueResumeComponent };
+        const root = document.querySelector<VueResumeRoot>('.resume-detail-wrap');
+        if (!root?.__vue__) throw new Error('fixture native resume root is missing');
+        const initialComponent = root.__vue__;
+        let redrawn = false;
+        Object.defineProperty(root, '__vue__', {
+          configurable: true,
+          get() {
+            if (!redrawn) {
+              redrawn = true;
+              const replacement = root.cloneNode(true) as VueResumeRoot;
+              replacement.__vue__ = {};
+              root.replaceWith(replacement);
+              window.setTimeout(() => {
+                replacement.__vue__ = {
+                  $options: { name: 'ResumeRoot' },
+                  $data: {
+                    loading: false,
+                    resumeInfo: { expectId: 'boss-candidate-after-redraw', geekBaseInfo: {} },
+                  },
+                };
+              }, 100);
+            }
+            return initialComponent;
+          },
+        });
+      });
+
+      await assert.rejects(() => parseBossResumeDetail(
+        page,
+        { candidateId: 'boss-candidate-before-redraw' },
+        { deadline: Date.now() + 3_000 },
+      ), /identity boss-candidate-after-redraw does not match requested candidate boss-candidate-before-redraw/i);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it('fails closed when more than one current native Boss resume root is visible', async () => {
+    const { browser, page } = await createSearchFixture({ body: recentViewedSearchBody() });
+    try {
+      await installNativeBossResumeFactory(page);
+      await page.evaluate(() => (window as unknown as { __openNativeResume: (candidateId: string) => void })
+        .__openNativeResume('boss-candidate-ambiguous-root'));
+      await page.evaluate(() => {
+        const root = document.querySelector<HTMLElement>('.resume-detail-wrap');
+        const parent = root?.parentElement;
+        if (!root || !parent) throw new Error('fixture native resume root is missing');
+        parent.appendChild(root.cloneNode(true));
+      });
+
+      await assert.rejects(() => parseBossResumeDetail(
+        page,
+        { candidateId: 'boss-candidate-ambiguous-root' },
+        { deadline: Date.now() + 3_000 },
+      ), /Expected at most one hydrated Boss native resume root, found 2/);
+    } finally {
       await browser.close();
     }
   });
@@ -929,6 +1549,195 @@ describe('Boss normal-search actions', () => {
     }
   });
 
+  it('repairs a DOM/Vue keyword split before the one final Boss submit', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const keyword = '铝镁合金 拉杆箱';
+    const { browser, page } = await createSearchFixture({
+      body: vueBoundSearchBody({
+        domKeyword: keyword,
+        applicationKeyword: '',
+        synchronizeInput: true,
+      }),
+    });
+    try {
+      const result = await applyBossDirectSearch(page, keyword, [], { deadline: Date.now() + 5_000 });
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(result.submission?.keyword, keyword);
+      assert.equal(result.submission?.requestPath, '/wapi/zpitem/web/boss/search/geeks.json');
+      assert.ok(result.changedFields?.includes('keyword'));
+      assert.deepEqual(
+        await frame.evaluate(() => (window as unknown as { __bossSubmittedKeywords: string[] }).__bossSubmittedKeywords),
+        [keyword],
+      );
+      assert.ok(await frame.evaluate(() => (window as unknown as { __bossVueInputEvents: number }).__bossVueInputEvents) >= 2);
+      assert.equal(await frame.evaluate(() => (window as unknown as { __bossSearchClicks: number }).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails before final submit when the DOM keyword cannot synchronize to Boss application state', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const keyword = '铝镁合金';
+    const { browser, page } = await createSearchFixture({
+      body: vueBoundSearchBody({
+        domKeyword: keyword,
+        applicationKeyword: '',
+        synchronizeInput: false,
+      }),
+    });
+    try {
+      await assert.rejects(
+        () => applyBossSearchKeyword(page, keyword, Date.now() + 2_000),
+        /did not synchronize with the page application state/i,
+      );
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as { __bossSearchClicks: number }).__bossSearchClicks), 0);
+      assert.deepEqual(
+        await frame.evaluate(() => (window as unknown as { __bossSubmittedKeywords: string[] }).__bossSubmittedKeywords),
+        [],
+      );
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('rejects a final Boss request whose keyword is shorter than the exact prepared keyword', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const keyword = '铝镁合金 拉杆箱';
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card">candidate card</div>', {
+        submittedKeyword: '铝镁合金',
+      }),
+    });
+    try {
+      await assert.rejects(
+        () => applyBossDirectSearch(page, keyword, [], { deadline: Date.now() + 5_000 }),
+        /request keyword mismatch.*expected 铝镁合金 拉杆箱.*observed 铝镁合金/i,
+      );
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as { __bossSearchClicks: number }).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('does not accept an unrelated result mutation when the final click dispatches no Boss search request', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card">candidate card</div>', { dispatchRequest: false }),
+    });
+    try {
+      await assert.rejects(
+        () => applyBossDirectSearch(page, '测试关键词', [], { deadline: Date.now() + 900 }),
+        /trusted Boss search request/i,
+      );
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as { __bossSearchClicks: number }).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('rejects an exact-keyword Boss search request whose response fails', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card">candidate card</div>'),
+      searchResponseStatus: 503,
+    });
+    try {
+      await assert.rejects(
+        () => applyBossDirectSearch(page, '测试关键词', [], { deadline: Date.now() + 5_000 }),
+        /exact-keyword search request did not complete successfully \(HTTP 503\)/i,
+      );
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as { __bossSearchClicks: number }).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('uses the exact completed search request as keyword evidence when Boss clears the input after dispatch', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const keyword = '铝镁合金 拉杆箱';
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="geek-info-card">candidate card</div>', { clearInputAfterDispatch: true }),
+    });
+    try {
+      const result = await applyBossDirectSearch(page, keyword, [], { deadline: Date.now() + 5_000 });
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.locator('.search-input').inputValue(), '');
+      const keywordVerification = result.verification.conditions.find((entry) => entry.fieldId === 'keyword');
+      assert.equal(keywordVerification?.verified, true);
+      assert.equal(keywordVerification?.actual, keyword);
+      assert.equal(keywordVerification?.evidence, 'exact-search-request');
+      assert.equal(result.submission?.keyword, keyword);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('rechecks match-priority inside the browser after the exact final submit', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: searchBody('<div class="sort-controls"><span class="search-label active">匹配度优先</span></div><div class="geek-info-card">candidate card</div>'),
+    });
+    try {
+      const result = await applyBossDirectSearch(page, '测试关键词', [], {
+        deadline: Date.now() + 5_000,
+        sortPolicy: 'match-priority',
+      });
+      assert.equal(result.submission?.keyword, '测试关键词');
+      assert.ok(result.alreadySatisfiedFields?.includes('sort_policy'));
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as { __bossSearchClicks: number }).__bossSearchClicks), 1);
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
   it('rejects an explicit empty saved-search keyword before page mutation or final submit', async () => {
     const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
     const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
@@ -1184,8 +1993,7 @@ describe('Boss normal-search actions', () => {
       document.body.prepend(container);
       icon.addEventListener('click', () => {
         window.__bossSearchClicks += 1;
-        const epoch = document.querySelector('#boss-search-submit-epoch');
-        epoch.setAttribute('data-boss-search-result-version', String(Number(epoch.getAttribute('data-boss-search-result-version') || '0') + 1));
+        void window.__issueBossSearchRequest(document.querySelector('.search-input')?.value || '', true);
       });
     </script>`);
     const { browser, page } = await createSearchFixture({ body });
@@ -2337,7 +3145,12 @@ describe('Boss normal-search actions', () => {
       body: `<!doctype html><html><body>
         <div class="search-job-list-C"><div class="ui-dropmenu"><div class="ui-dropmenu-label"><span class="search-current-job">不限职位</span></div><ul class="ui-dropmenu-list"><li class="active" data-value="all" onclick="selectJob(this)">不限职位</li><li data-value="target" onclick="selectJob(this)">职位B</li></ul></div></div>
         <input class="search-input" value="测试关键词" /><button type="button" class="search-btn">搜索</button><div class="search-result-list" data-boss-search-result-version="0"></div><div class="degree-ui"><span class="degree-item active">不限</span></div><div class="school-ui"><span class="degree-item active">不限</span></div><div class="experience-select"><span class="exp-item active">不限</span></div><div class="age-select"><span class="age-item active">不限</span></div><div class="more-filter-container"></div><div class="geek-info-card">candidate card</div>
-        <script>document.querySelector('.search-btn')?.addEventListener('click', () => document.querySelector('.search-result-list')?.setAttribute('data-boss-search-result-version', String(Date.now())));</script>
+        <script>document.querySelector('.search-btn')?.addEventListener('click', () => {
+          const keywords = document.querySelector('.search-input')?.value || '';
+          void fetch('/wapi/zpitem/web/boss/search/geeks.json?' + new URLSearchParams({ keywords }).toString()).then(() => {
+            document.querySelector('.search-result-list')?.setAttribute('data-boss-search-result-version', String(Date.now()));
+          });
+        });</script>
         <script>function selectJob(item) { document.querySelectorAll('.ui-dropmenu-list li').forEach((entry) => entry.classList.remove('active')); item.classList.add('active'); }</script>
       </body></html>`,
     });
@@ -2359,6 +3172,121 @@ describe('Boss normal-search actions', () => {
       config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
       config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
       await browser.close();
+    }
+  });
+
+  it('accepts one active composite job-scope display only when the selected summary exactly identifies the job', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const { browser, page } = await createSearchFixture({
+      body: jobScopeSearchBody({
+        selectedSummary: '全铝箱包设计',
+        options: [
+          { label: '不限职位' },
+          { label: '全铝箱包设计 肇庆 大专 10年以上 20-30K', active: true },
+        ],
+      }),
+    });
+    try {
+      const condition = {
+        kind: 'applicationFilter' as const,
+        fieldId: 'job_scope',
+        label: '职位范围',
+        fieldKind: 'singleSelect' as const,
+        value: '全铝箱包设计',
+      };
+      const result = await applyBossSearchCondition(page, condition, Date.now() + 10_000);
+      assert.equal(result.status, 'applied', result.message);
+      const frame = page.frame({ name: 'searchFrame' });
+      assert.ok(frame);
+      assert.equal(await frame.evaluate(() => (window as unknown as { __jobScopeOptionClicks: number }).__jobScopeOptionClicks), 0);
+      assert.equal(await frame.locator('.ui-dropmenu-list li.active').innerText(), '全铝箱包设计 肇庆 大专 10年以上 20-30K');
+
+      const verification = await readBossDirectSearchVerificationSummary(
+        page,
+        '测试关键词',
+        [condition],
+        Date.now() + 3_000,
+      );
+      assert.equal(verification.conditions.find((entry) => entry.fieldId === 'job_scope')?.verified, true);
+      assert.equal(verification.conditions.find((entry) => entry.fieldId === 'job_scope')?.actual, '全铝箱包设计');
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
+      await browser.close();
+    }
+  });
+
+  it('fails closed for prefix-similar, ambiguous-active, and disabled composite job-scope evidence', async () => {
+    const originalMin = config.playwright.actionDelayMinMsByPlatform.boss;
+    const originalMax = config.playwright.actionDelayMaxMsByPlatform.boss;
+    config.playwright.actionDelayMinMsByPlatform.boss = 0;
+    config.playwright.actionDelayMaxMsByPlatform.boss = 0;
+    const cases = [
+      {
+        name: 'prefix-similar',
+        selectedSummary: '全铝箱包设计师',
+        options: [{ label: '全铝箱包设计师 肇庆 大专 10年以上 20-30K', active: true }],
+      },
+      {
+        name: 'ambiguous-active',
+        selectedSummary: '全铝箱包设计',
+        options: [
+          { label: '全铝箱包设计 肇庆 大专 10年以上 20-30K', active: true },
+          { label: '全铝箱包设计 佛山 本科 5年以上 20-30K', active: true },
+        ],
+      },
+      {
+        name: 'disabled',
+        selectedSummary: '全铝箱包设计',
+        options: [{ label: '全铝箱包设计 肇庆 大专 10年以上 20-30K', active: true, disabled: true }],
+      },
+    ] as const;
+    try {
+      for (const testCase of cases) {
+        const { browser, page } = await createSearchFixture({
+          body: jobScopeSearchBody({
+            selectedSummary: testCase.selectedSummary,
+            options: [...testCase.options],
+          }),
+        });
+        try {
+          const condition = {
+            kind: 'applicationFilter' as const,
+            fieldId: 'job_scope',
+            label: '职位范围',
+            fieldKind: 'singleSelect' as const,
+            value: '全铝箱包设计',
+          };
+          const result = await applyBossSearchCondition(page, condition, Date.now() + 10_000);
+          assert.equal(result.status, 'failed', `${testCase.name}: ${result.message ?? 'unexpected success'}`);
+          const frame = page.frame({ name: 'searchFrame' });
+          assert.ok(frame);
+          assert.equal(
+            await frame.evaluate(() => (window as unknown as { __jobScopeOptionClicks: number }).__jobScopeOptionClicks),
+            0,
+            testCase.name,
+          );
+          const verification = await readBossDirectSearchVerificationSummary(
+            page,
+            '测试关键词',
+            [condition],
+            Date.now() + 3_000,
+          );
+          assert.equal(
+            verification.conditions.find((entry) => entry.fieldId === 'job_scope')?.verified,
+            false,
+            testCase.name,
+          );
+        } finally {
+          await browser.close();
+        }
+      }
+    } finally {
+      config.playwright.actionDelayMinMsByPlatform.boss = originalMin;
+      config.playwright.actionDelayMaxMsByPlatform.boss = originalMax;
     }
   });
 

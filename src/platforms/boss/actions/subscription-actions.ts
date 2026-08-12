@@ -20,6 +20,7 @@ import {
 import {
   prepareBossSearchConditionPage,
   submitBossPreparedSearch,
+  type BossSearchSubmissionReceipt,
   waitForBossSearchFrame,
 } from './search-actions.js';
 import { clickBossControlNatively, waitBossActionPaceWithinDeadline } from './context.js';
@@ -558,9 +559,11 @@ function assertSavedRuntimeIdentity(
   expectedIdentity: SavedSearchConditionIdentity,
   includeViewedCandidates: boolean | undefined,
   stage: 'before-submit' | 'after-submit',
+  submission?: BossSearchSubmissionReceipt,
 ): void {
   const actualIdentity = bossSavedConditionIdentityFromState(actual);
-  if (normalizeText(actual.keyword) !== normalizeText(target.expectedKeyword)
+  const actualKeyword = submission?.keyword ?? normalizeText(actual.keyword);
+  if (actualKeyword !== normalizeText(target.expectedKeyword)
     || !sameIdentityExceptViewed(actualIdentity, expectedIdentity)) {
     throw new Error(`Boss ${stage === 'before-submit' ? 'subscription-hydration' : 'search-submit-postcondition'}-failed: saved condition identity changed ${stage === 'before-submit' ? 'before' : 'after'} final submit.`);
   }
@@ -601,9 +604,21 @@ export async function openBossSavedSubscriptionSearch(
   await assertSavedSearchSortPolicy(searchPage, sortPolicy, deadline);
 
   await waitBossActionPaceWithinDeadline(searchPage, deadline);
-  await submitBossPreparedSearch(searchPage, deadline, options?.signal);
+  const submission = await submitBossPreparedSearch(
+    searchPage,
+    target.expectedKeyword,
+    deadline,
+    options?.signal,
+  );
   const afterSubmit = await snapshotBossSearchFilterState(searchPage, deadline);
-  assertSavedRuntimeIdentity(afterSubmit, target, expectedFinalIdentity, options?.includeViewedCandidates, 'after-submit');
+  assertSavedRuntimeIdentity(
+    afterSubmit,
+    target,
+    expectedFinalIdentity,
+    options?.includeViewedCandidates,
+    'after-submit',
+    submission,
+  );
   await assertSavedSearchSortPolicy(searchPage, sortPolicy, deadline);
   return searchPage;
 }

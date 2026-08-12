@@ -1,5 +1,6 @@
 import { isCliSearchModeId, type CliSearchModeId } from '../operation-modes.js';
 import { main } from '../index.js';
+import { runBrowserCliMain } from '../browser/cli-lifecycle.js';
 
 export function readRequiredModeId(argv: readonly string[]): CliSearchModeId {
   const modeIdIndexes = argv
@@ -27,8 +28,5 @@ export async function runSearchOperation(
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runSearchOperation(process.argv.slice(2)).catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  });
+  void runBrowserCliMain(() => runSearchOperation(process.argv.slice(2)));
 }

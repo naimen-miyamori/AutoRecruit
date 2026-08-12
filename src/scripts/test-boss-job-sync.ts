@@ -206,11 +206,21 @@ describe('Boss job/JD synchronization', () => {
       };
       let normalizationCalls = 0;
       let saveCalls = 0;
+      let identityUpdateCalls = 0;
       const runs: BossJobSyncRun[] = [];
       const fakeStore = {
         saveBossPositionSnapshot: async (_positions: readonly BossPositionSummary[]) => 'positions.json',
         findBossJobRecordByPositionId: async () => existing,
         saveJobRecord: async () => { saveCalls += 1; },
+        updateJobIdentityIfRevision: async (
+          _platform: 'boss',
+          _jobKey: string,
+          _revision: number,
+          identity: NonNullable<JobRecord['jobIdentity']>,
+        ) => {
+          identityUpdateCalls += 1;
+          return { ...existing, revision: 2, jobIdentity: identity };
+        },
         saveBossJobSyncRun: async (run: BossJobSyncRun) => {
           runs.push(run);
           return 'run.json';
@@ -227,7 +237,8 @@ describe('Boss job/JD synchronization', () => {
       });
       assert.equal(normalizationCalls, 0);
       assert.equal(saveCalls, 0);
-      assert.equal(run.unchanged, 1);
+      assert.equal(identityUpdateCalls, 1);
+      assert.equal(run.updated, 1);
       assert.equal(run.resultPath, 'run.json');
       assert.equal(runs.length, 1);
     } finally {

@@ -271,6 +271,13 @@ npm run web:dev
 普通抓取中，用户可见名称“订阅搜索”对应内部 `--search-source saved`，“直接搜索”对应
 `--search-source direct`。订阅搜索使用平台已保存的订阅/快捷搜索入口；直接搜索必须显式指定 `direct`。如使用应用筛选输入文件，所有请求条件都必须成功应用，否则本轮停止，避免从部分筛选条件下误抓取：
 
+岗位身份、JD 标题、订阅名和页面关键词是四个独立事实。岗位记录仍由平台作用域内的
+`(platform, jobKey)` 稳定定位；`jobIdentity.expectedJobName` 保存精确岗位名，
+`normalizedJob.title` 只表示 JD 解析标题，保存搜索 target 保存订阅名，`pageKeyword` 只决定页面查询。
+它们可以不同，系统不会再用包含、近义词或同名订阅互相覆盖。核心三平台的 saved 抓取要求绑定到同一
+JobRecord 的精确 target，并在每次打开时重新取得“唯一精确命中 + 页面词一致”的证据；Boss 继续要求完整原生
+订阅引用和条件指纹。
+
 对话助手把三者作为独立业务模式：`订阅搜索` 是普通候选抓取，`直接搜索` 是带本次筛选的普通候选抓取，`订阅管理` 是只应用条件并读取结果数的独立 `search-subscription` 模式。确认前会显示模式和副作用；发送新消息后旧草稿立即失效，模式冲突、未知模式或多个模式名称同时出现时不会保留确认入口或入队。Boss 普通抓取还会提示可能复用岗位已保存的转发、报告邮件和模型分流设置，并要求再次接受该风险。
 
 ```bash
@@ -312,7 +319,8 @@ npm run dev -- \
   --boss-job-id boss-job-id-123
 ```
 
-`--keyword` 是预期岗位名和 legacy 输入；它不再强制等于 Boss 人才页的查询词。复用保存的 direct 条件集时，
+`--keyword` 是核心平台 jobKey 的兼容选择词和 legacy 输入；提供精确 `--boss-job-id` 后，它不再要求等于
+Boss 的岗位名，也不会重命名 Boss。Boss 精确岗位名来自职位同步记录，且不强制等于人才页查询词。复用保存的 direct 条件集时，
 页面搜索词依次采用显式 `--boss-search-keyword`、岗位保存的 `pageKeyword`、固定 revision 的
 `defaultKeyword`、岗位名。例如岗位可使用条件集中的细分品类词，而简历、seen、评分和报告仍写入带 Boss ID
 的稳定 jobKey。Boss ID 与岗位名不匹配、同名岗位不唯一、固定 revision 失效或条件校验失败都会在浏览器前
@@ -413,7 +421,7 @@ Boss 阶段复用 `data/boss/`、独立登录态和本地 `seen-ids.json`。普�
 
 Boss 开启评分后分流时，每位候选人的正常路径只打开一次详情：完成身份校验、解析、持久化和 pending-score/seen 后，在该详情保持打开的状态下从本地简历等待模型，等待期间不执行页面动作。模型返回后会建立新的有界页面动作预算并重新核对仍是同一候选人；qualified/review 在原详情内继续检测和转发，rejected 或评分失败直接严格关闭，不会为评分、检测或转发二次打开。只有后续运行恢复已持久化的可重试转发 outbox 时，才会按稳定候选 ID 独立打开一次详情。页面动作会在用户式节奏前为关闭预留预算，并在指针移动后再次核对候选人和控件身份。详情卡片或转发操作若意外打开“购买搜索畅聊卡”，会关闭弹窗后立即终止当前页面会话，不继续下一张卡片。转发只有在 click event 已派发且出现新的可见成功提示时才记为 `sent`；点击前失败可重试，点击已派发但无成功证据记为 `uncertain`，不会自动重发。
 
-Boss 搜索简历详情兼容旧 iframe/canvas 和当前父页面原生 Vue 布局。新布局直接使用当前详情实例的身份与简历数据，避免复用父页面里可能属于上一位候选人的旧请求；详情自身的“搜索畅聊卡”不会被当作购买弹窗。当前转发按钮是详情顶部收藏、不合适、举报、转发一行中最右侧的“转发牛人”，程序会在移动指针后再次验证它仍唯一且最右。无关闭按钮的新转发框通过已验证的遮罩空白点清理，不使用会误关底层详情的 Escape。
+Boss 搜索简历详情兼容旧 iframe/canvas 和父页面原生 Vue 2 布局。打开阶段的 readiness 只在一次页面观察中，从当前唯一详情根开始对有限祖先和组件父链查找唯一 hydrated `resumeInfo.expectId` 来源并复核根、状态对象和身份仍稳定，不读取或序列化简历字段。随后需要 payload 的解析/身份动作会重新定位同一类唯一来源，在一次独立页面观察中只序列化一份完整快照并在序列化后再次复核；正常的“打开后解析”不会在 readiness 阶段提前复制一次 payload。顶部基础信息区域的几何可见性只用于证明详情首次打开；Boss 在 hydration 后折叠或替换该区域时，payload 读取改以仍唯一可见的详情根、稳定状态对象和前后一致的候选身份为依据，不把顶部布局状态误当成身份。当前 `ResumeLayout → ResumeRoot` 的祖先挂载形态已受支持。多个独立 payload 来源、越界来源、长期未就绪、多根节点、重绘后的身份漂移均失败关闭；根节点重绘只会在原详情 deadline 内重新观察，不会重开详情、读取可见正文猜测简历，或复用父页面里可能属于上一位候选人的旧请求。原生观察超时时只附带固定 pending 原因枚举、出现顺序和计数，用于区分来源未就绪、状态/loading/身份变化、根替换和可见性变化；诊断不包含候选 ID、简历字段值或页面正文。详情自身的“搜索畅聊卡”不会被当作购买弹窗。当前转发按钮是详情顶部收藏、不合适、举报、转发一行中最右侧的“转发牛人”，程序会在移动指针后再次验证它仍唯一且最右。无关闭按钮的新转发框通过已验证的遮罩空白点清理，不使用会误关底层详情的 Escape。
 
 只有详情身份验证通过、解析后的候选人 ID 与详情目标一致、简历文件成功落盘并回读通过，才会进入成功抓取历史和
 `seen-ids.json`。详情打开、身份、解析或落盘失败只写入可重试的阶段失败事实；新运行使用 `capturedCandidateIds`，
@@ -548,6 +556,32 @@ npm run migrate:boss-rejection-email -- \
   --dry-run true
 ```
 
+历史 JobRecord 的精确岗位身份使用独立的三阶段维护命令。`preview` 完全只读；`prepare` 只保存不可变清单；
+`commit` 必须再次提供同一 manifest ID 和 plan hash，并以 revision/hash CAS 逐条提交和回读。身份提交、浏览器订阅验证、
+订阅绑定和真实抓取是四个独立确认边界：
+
+```bash
+npm run migrate:job-identity -- --phase preview --mapping ./docs/plan/<mapping>.json
+npm run migrate:job-identity -- --phase prepare --mapping ./docs/plan/<mapping>.json --confirm-plan-hash <sha256>
+npm run migrate:job-identity -- --phase commit --manifest-id <manifest-id> --confirm-plan-hash <sha256>
+```
+
+身份提交后，核心平台订阅也分两步维护。`verify` 只连接已发布的 login-owned 浏览器并保存本次打开证据，
+不修改 JobRecord 或读取候选详情；51job、Liepin 按唯一精确订阅名和完整页面关键词验证，智联按原生条件 ID、
+完整条件指纹和完整页面关键词验证。智联的 `--name` 是本地用户标签，不能作为页面观察到的远端名称。
+`bind` 使用输出的 evidence hash 和最新 JobRecord revision，且必须显式确认：
+
+```bash
+npm run manage:core-saved-search -- --phase verify --platform 51job --job-key "铝镁合金" \
+  --expected-revision <revision> --name "铝镁合金" --expected-keyword "铝镁合金"
+npm run manage:core-saved-search -- --phase bind --platform 51job --job-key "铝镁合金" \
+  --expected-revision <revision> --name "铝镁合金" --expected-keyword "铝镁合金" \
+  --evidence-hash <sha256> --confirmed true
+
+npm run manage:core-saved-search -- --phase verify --platform zhilian --job-key "铝镁合金" \
+  --expected-revision <revision> --name "铝镁合金" --expected-keyword "铝镁合金 拉杆箱"
+```
+
 历史一致性审计是只读操作，不会删除 seen、重评、转发或发送邮件：
 
 ```bash
@@ -678,7 +712,8 @@ npm run dev -- \
 
 Boss 保存成功会返回 `savedSearch` 完整引用和 `saveOutcome`（`saved`、`already-saved` 或 `renamed`）。例如订阅名称“铝镁合金”、
 职位“全铝箱包设计”和页面关键词“铝镁合金 拉杆箱”是三个独立字段；保存/改名会改变 Boss“我的订阅”状态，因此前端和助手
-会单独提示这一外部变更。任务结果还显示条件应用状态、排序策略、native ID 和条件指纹，但不会显示候选资料。
+会单独提示这一外部变更。智联快捷条件页不展示订阅名称；保存后的确认使用原生条件 ID、完整条件指纹和页面关键词，回执不会
+虚构 `observedName`。任务结果还显示条件应用状态、排序策略、native ID 和条件指纹，但不会显示候选资料。
 全平台任务若在某个平台失败仍保持 fail-fast；失败任务会另外保留已经完成的平台结果和明确的停止平台，便于确认此前已经发生的
 原生订阅保存或改名，不会自动回滚这些外部变更。
 

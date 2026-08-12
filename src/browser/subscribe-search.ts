@@ -2,9 +2,12 @@ import { Locator, Page } from 'playwright';
 import { config } from '../config.js';
 import { registerTemporaryRuntimePageForContext } from './runtime-page-registry.js';
 import { apply51jobViewedCandidatePolicy as apply51jobViewedCandidatePolicyAction } from '../platforms/51job/actions/result-actions.js';
+import { read51jobAppliedSearchKeyword } from '../platforms/51job/actions/search-actions.js';
 import { clickPlatformLocator, gotoPlatformPage, moveMouseThroughWaypoints } from './pacing.js';
 import { openAuthenticatedHome as openAuthenticatedSubscribePage } from './session.js';
 import type { SearchWaitOptions, SupportedPlatform } from '../platforms/types.js';
+import type { CoreSavedSearchTarget, PlatformSavedSearchOpenEvidence } from '../types/job.js';
+import { buildSavedSearchOpenEvidence } from '../search/saved-search-target.js';
 
 const searchButtonSelector = 'button.to-talent-search-button';
 const searchLinkSelector = 'a.to-talent-search-button, a[href*="/Revision/talent/search"]';
@@ -62,17 +65,6 @@ export const apply51jobViewedCandidatePolicyRef = {
 
 function normalizeText(value: string | null | undefined): string {
   return (value ?? '').replace(/\s+/g, '').trim().toLowerCase();
-}
-
-function hasSearchKeywordCondition(pageText: string, searchKeyword: string): boolean {
-  const normalizedText = normalizeText(pageText);
-  const normalizedKeyword = normalizeText(searchKeyword);
-  if (!normalizedText || !normalizedKeyword) {
-    return false;
-  }
-
-  return normalizedText.includes(`关键词:${normalizedKeyword}`)
-    || normalizedText.includes(`关键词：${normalizedKeyword}`);
 }
 
 function getRemainingTimeout(deadline: number): number {
@@ -404,42 +396,13 @@ async function movePointerThroughActiveSubscriptionPanel(
   }
 }
 
-async function readSearchPageText(page: Page, deadline: number): Promise<string> {
-  const timeout = Math.min(1000, getRemainingTimeout(deadline));
-  const locators = [
-    page.locator('#app'),
-    page.locator('body'),
-  ];
-  const chunks: string[] = [];
-
-  for (const locator of locators) {
-    const readableLocator = 'first' in locator && typeof locator.first === 'function'
-      ? locator.first()
-      : locator;
-    const readable = readableLocator as Partial<Pick<Locator, 'textContent' | 'innerText'>>;
-    const [textContent, innerText] = await Promise.all([
-      readable.textContent?.({ timeout }).catch(() => '') ?? Promise.resolve(''),
-      readable.innerText?.({ timeout }).catch(() => '') ?? Promise.resolve(''),
-    ]);
-    if (textContent) {
-      chunks.push(textContent);
-    }
-    if (innerText) {
-      chunks.push(innerText);
-    }
-  }
-
-  return chunks.join('\n');
-}
-
-async function waitFor51jobSearchKeywordCondition(page: Page, searchKeyword: string, deadline: number): Promise<void> {
-  let latestText = '';
+async function waitFor51jobSearchKeywordCondition(page: Page, searchKeyword: string, deadline: number): Promise<string> {
+  const normalizedExpected = searchKeyword.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  let latestObserved: string | undefined;
 
   while (Date.now() < deadline) {
-    latestText = await readSearchPageText(page, deadline);
-    if (hasSearchKeywordCondition(latestText, searchKeyword)) {
-      return;
-    }
+    latestObserved = await read51jobAppliedSearchKeyword(page, deadline);
+    if (latestObserved === normalizedExpected) return latestObserved;
 
     const waitMs = Math.min(searchConditionPollMs, getRemainingTimeout(deadline));
     if (waitMs <= 1) {
@@ -449,7 +412,7 @@ async function waitFor51jobSearchKeywordCondition(page: Page, searchKeyword: str
     await page.waitForTimeout(waitMs).catch(() => undefined);
   }
 
-  throw new Error(`51job talent search page did not confirm saved search keyword "${searchKeyword}". The shared search deadline elapsed before confirmation. URL: ${page.url()}.`);
+  throw new Error(`51job talent search page did not confirm saved search keyword "${searchKeyword}". Exact match required; observed "${latestObserved ?? '(missing)'}". The shared search deadline elapsed before confirmation. URL: ${page.url()}.`);
 }
 
 async function clickSearchTrigger(page: Page, searchTrigger: Locator, options?: SearchTriggerClickOptions): Promise<void> {
@@ -492,7 +455,12 @@ export async function ensure51jobViewedFilterChecked(page: Page, options?: Searc
   });
 }
 
-async function findSubscriptionCard(page: Page, searchKeyword: string, options?: SearchWaitOptions): Promise<Locator> {
+async function findSubscriptionCard(
+  page: Page,
+  searchKeyword: string,
+  options?: SearchWaitOptions,
+  selection: { exactOnly?: boolean } = {},
+): Promise<Locator> {
   const deadline = resolveSearchDeadline(options);
   await waitForAuthenticatedSubscribeReadyRef.fn(page, { deadline });
 
@@ -535,6 +503,11 @@ async function findSubscriptionCard(page: Page, searchKeyword: string, options?:
     throw new Error(`Found multiple saved searches that exactly match "${searchKeyword}".`);
   }
 
+  if (selection.exactOnly) {
+    const visibleTitles = await listVisibleCardTitles(page);
+    throw new Error(`Could not find one exact saved search "${searchKeyword}" on the subscribe page. Visible titles: ${visibleTitles.join(' | ') || '(none)'}`);
+  }
+
   if (prefixMatches.length === 1) {
     return cards.nth(prefixMatches[0]);
   }
@@ -560,16 +533,30 @@ export async function assertAuthenticatedPage(page: Page): Promise<void> {
   await waitForAuthenticatedSubscribeReadyRef.fn(page);
 }
 
-export async function openSubscribeSearch(page: Page, searchKeyword: string, options?: SearchWaitOptions): Promise<Page> {
+async function openSubscribeSearchByNameAndKeyword(
+  page: Page,
+  savedSearchName: string,
+  expectedKeyword: string,
+  options?: SearchWaitOptions,
+  selection: { exactOnly?: boolean } = {},
+): Promise<{ page: Page; observedName: string; observedKeyword: string }> {
   const deadline = resolveSearchDeadline(options);
   await openAuthenticatedSubscribePageRef.fn(page, '51job', { deadline });
 
-  const card = await findSubscriptionCardRef.fn(page, searchKeyword, { deadline });
+  const card = await findSubscriptionCardRef.fn(page, savedSearchName, { deadline }, selection);
+  const observedName = selection.exactOnly
+    ? (await card.locator(titleSelector).first().textContent({
+      timeout: Math.min(1000, getRemainingTimeout(deadline)),
+    }).catch(() => '') ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim()
+    : savedSearchName.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+  if (selection.exactOnly && normalizeText(observedName) !== normalizeText(savedSearchName)) {
+    throw new Error(`51job saved-search card changed before opening. Expected "${savedSearchName}", observed "${observedName || '(missing)'}".`);
+  }
   await card.scrollIntoViewIfNeeded();
   await clickPlatformLocator(card, page, platform, getRemainingTimeout(deadline)).catch(() => undefined);
-  await reactivateSubscriptionCardHover(page, card, searchKeyword, deadline);
+  await reactivateSubscriptionCardHover(page, card, savedSearchName, deadline);
 
-  const { searchTrigger, activePanel } = await resolveSearchTrigger(page, card, searchKeyword, deadline);
+  const { searchTrigger, activePanel } = await resolveSearchTrigger(page, card, savedSearchName, deadline);
 
   if (activePanel) {
     await waitForSearchTriggerReadyRef.fn(page, searchTrigger, { deadline });
@@ -578,7 +565,7 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
       card,
       activePanel,
       searchTrigger,
-      searchKeyword,
+      savedSearchName,
       deadline,
     );
   }
@@ -599,38 +586,67 @@ export async function openSubscribeSearch(page: Page, searchKeyword: string, opt
 
   if (openOutcome) {
     await openOutcome.page.waitForLoadState('domcontentloaded', { timeout: getRemainingTimeout(deadline) });
-    await waitFor51jobSearchKeywordCondition(openOutcome.page, searchKeyword, deadline);
+    await waitFor51jobSearchKeywordCondition(openOutcome.page, expectedKeyword, deadline);
     if (options?.includeViewedCandidates) {
       await clear51jobViewedFilter(openOutcome.page, { deadline, signal: options?.signal });
     } else {
       await ensure51jobViewedFilterChecked(openOutcome.page, { deadline, signal: options?.signal });
     }
-    await waitFor51jobSearchKeywordCondition(openOutcome.page, searchKeyword, deadline);
+    const observedKeyword = await waitFor51jobSearchKeywordCondition(openOutcome.page, expectedKeyword, deadline);
     if (openOutcome.page !== page) {
       registerTemporaryRuntimePageForContext(page.context(), openOutcome.page, {
         purpose: 'search-page-handoff',
-        identity: searchKeyword,
+        identity: savedSearchName,
         cleanupPolicy: 'close',
       });
     } else {
       await closeExtra51jobSubscribePages(openOutcome.page);
     }
-    return openOutcome.page;
+    return { page: openOutcome.page, observedName, observedKeyword };
   }
 
   const searchLinkHref = await searchTrigger.getAttribute('href').catch(() => null);
   if (searchLinkHref) {
     await gotoPlatformPage(page, platform, searchLinkHref, { waitUntil: 'domcontentloaded', timeout: getRemainingTimeout(deadline) });
-    await waitFor51jobSearchKeywordCondition(page, searchKeyword, deadline);
+    await waitFor51jobSearchKeywordCondition(page, expectedKeyword, deadline);
     if (options?.includeViewedCandidates) {
       await clear51jobViewedFilter(page, { deadline, signal: options?.signal });
     } else {
       await ensure51jobViewedFilterChecked(page, { deadline, signal: options?.signal });
     }
-    await waitFor51jobSearchKeywordCondition(page, searchKeyword, deadline);
+    const observedKeyword = await waitFor51jobSearchKeywordCondition(page, expectedKeyword, deadline);
     await closeExtra51jobSubscribePages(page);
-    return page;
+    return { page, observedName, observedKeyword };
   }
 
   throw new Error('Talent search did not open a popup or navigate the current page before the shared search deadline.');
+}
+
+export async function openSubscribeSearch(page: Page, searchKeyword: string, options?: SearchWaitOptions): Promise<Page> {
+  return (await openSubscribeSearchByNameAndKeyword(page, searchKeyword, searchKeyword, options)).page;
+}
+
+export async function openBound51jobSavedSearch(
+  page: Page,
+  target: CoreSavedSearchTarget,
+  options: SearchWaitOptions & { boundJobKey: string },
+): Promise<{ page: Page; evidence: PlatformSavedSearchOpenEvidence }> {
+  if (target.platform !== '51job' || target.boundJobKey !== options.boundJobKey) {
+    throw new Error('51job saved-search target does not belong to this platform and job.');
+  }
+  const opened = await openSubscribeSearchByNameAndKeyword(
+    page,
+    target.name,
+    target.expectedKeyword,
+    options,
+    { exactOnly: true },
+  );
+  return {
+    page: opened.page,
+    evidence: buildSavedSearchOpenEvidence(target, {
+      boundJobKey: options.boundJobKey,
+      observedName: opened.observedName,
+      observedKeyword: opened.observedKeyword,
+    }),
+  };
 }

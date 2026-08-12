@@ -139,7 +139,7 @@ describe('Boss saved capture plan resolver', () => {
     });
   });
 
-  it('requires a matching name for an explicit Boss ID and never falls back to a same-name record', async () => {
+  it('uses the stored exact job identity for an explicit Boss ID even when the cross-platform keyword differs', async () => {
     const record = storedJob();
     let nameLookups = 0;
     const store: BossCapturePlanStore = {
@@ -150,13 +150,14 @@ describe('Boss saved capture plan resolver', () => {
       },
     };
 
-    await assert.rejects(
-      () => resolveBossCapturePlan({
-        jobName: '其他职位',
-        bossJobId: record.bossPosition!.bossJobId,
-      }, { store, searchConditionSets: conditionSetService() }),
-      /belongs to stored job 全铝箱包设计, not expected job 其他职位/,
-    );
+    const plan = await resolveBossCapturePlan({
+      jobName: '铝镁合金',
+      bossJobId: record.bossPosition!.bossJobId,
+    }, { store, searchConditionSets: conditionSetService() });
+
+    assert.equal(plan.jobKey, record.jobKey);
+    assert.equal(plan.expectedJobName, '全铝箱包设计');
+    assert.equal(plan.search.pageKeyword, '铝');
     assert.equal(nameLookups, 0);
   });
 

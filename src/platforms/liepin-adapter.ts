@@ -27,6 +27,8 @@ import {
 } from './liepin/actions/resume-actions.js';
 import {
   isLiepinSearchUrl,
+  inspectExistingLiepinSavedSearch,
+  openBoundLiepinSavedSearch,
   openLiepinDirectSearch,
   openLiepinSubscribeSearch,
   prepareLiepinSearchConditionPage,
@@ -52,6 +54,13 @@ export const liepinAdapter: PlatformAdapter = {
   openAuthenticatedHome: openLiepinAuthenticatedHome,
   assertAuthenticated: assertLiepinAuthenticated,
   openSubscribeSearch: openLiepinSubscribeSearch,
+  openBoundSavedSearch: async (page, target, options) => {
+    if (!('targetKind' in target) || target.targetKind !== 'core-exact-name-keyword') {
+      throw new Error('Liepin requires a core exact-name saved-search target.');
+    }
+    return openBoundLiepinSavedSearch(page, target, options);
+  },
+  inspectExistingSavedSearch: inspectExistingLiepinSavedSearch,
   openDirectSearch: openLiepinDirectSearch,
   prepareSearchConditionPage: prepareLiepinSearchConditionPage,
   discoverSearchFilters: discoverLiepinSearchFilters,

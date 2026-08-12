@@ -20,6 +20,12 @@ import {
   visitBossSeenCandidateDetail,
 } from './platforms/boss/actions/candidate-detail-actions.js';
 import {
+  assertCoreSavedSearchTarget,
+  assertPlatformSavedSearchOpenEvidence,
+  isZhilianNativeSavedSearchOpenEvidence,
+  isZhilianNativeSavedSearchTarget,
+} from './search/saved-search-target.js';
+import {
   bossActionPaceUpperBoundMs,
   waitBossActionPaceWithinDeadline,
 } from './platforms/boss/actions/context.js';
@@ -29,6 +35,7 @@ import type {
   CandidatePostOpenActions,
   CandidatePostOpenResult,
   CandidateProfileDetailOptions,
+  CoreSavedSearchVerificationRequest,
   PlatformAdapter,
   SupportedPlatform,
 } from './platforms/types.js';
@@ -74,6 +81,8 @@ import type {
   CodexSessionFailureDiagnostic,
   ResumeDomSnapshot,
   JobSearchSource,
+  CoreSavedSearchTarget,
+  PlatformSavedSearchOpenEvidence,
   NormalizedJob,
   ReportDeliveryOptions,
   RunResult,
@@ -193,6 +202,19 @@ type BossScreeningPreparationResult =
 
 const extractionBoundary = createProductionExtractionBoundary();
 const openSubscribeSearchRef = { fn: fiftyOneJobAdapter.openSubscribeSearch };
+const openBoundSavedSearchRef = {
+  fn: async (
+    adapter: PlatformAdapter,
+    page: Page,
+    target: Parameters<NonNullable<PlatformAdapter['openBoundSavedSearch']>>[1],
+    options: Parameters<NonNullable<PlatformAdapter['openBoundSavedSearch']>>[2],
+  ) => {
+    if (!adapter.openBoundSavedSearch) {
+      throw new Error(`Platform ${adapter.platform} does not register strict saved-search opening.`);
+    }
+    return adapter.openBoundSavedSearch(page, target, options);
+  },
+};
 const openDirectSearchRef = { fn: fiftyOneJobAdapter.openDirectSearch };
 const openResumeDetailRef = { fn: fiftyOneJobAdapter.openResumeDetail };
 const visitBossSeenCandidateDetailRef = { fn: visitBossSeenCandidateDetail };
@@ -1626,11 +1648,17 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
   searchSource?: JobSearchSource;
   searchConditions?: SearchCondition[];
   savedSearch?: SavedSearchReference;
+  coreSavedSearchTarget?: CoreSavedSearchTarget;
+  coreSavedSearchVerificationRequest?: CoreSavedSearchVerificationRequest;
   sortPolicy?: SearchSortPolicy;
   /** Immutable report targets captured before the run; used by routed replay. */
   reportDelivery?: ReportDeliveryOptions;
   secondaryReportDelivery?: ReportDeliveryOptions;
   searchExecution?: Omit<NonNullable<RunResult['searchExecution']>, 'includeViewedCandidates'>;
+  onSavedSearchOpenEvidence?: (
+    evidence: PlatformSavedSearchOpenEvidence,
+    target?: CoreSavedSearchTarget,
+  ) => Promise<void>;
   /** Releases the platform runtime after the last detail cleanup and before offline scoring/report work. */
   releaseBrowserPhase?: () => Promise<void>;
 } = {}): Promise<{ candidates: CandidateListItem[]; newCandidates: CandidateListItem[]; capturedCandidateIds: string[]; runResult: RunResult; resultPath: string }> {
@@ -1755,6 +1783,8 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
     includeViewedCandidates: options.includeViewedCandidates,
     sortPolicy: options.sortPolicy,
   };
+  let savedSearchOpenEvidence: PlatformSavedSearchOpenEvidence | undefined;
+  let verifiedCoreSavedSearchTarget: CoreSavedSearchTarget | undefined;
   const searchPage = searchSource === 'direct'
     ? await (async () => {
       if (!platformAdapter.openDirectSearch) {
@@ -1765,12 +1795,79 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
     })()
     : platform === 'boss'
       ? await (async () => {
-        if (!options.savedSearch || !platformAdapter.openSavedSearch) {
+        if (!options.savedSearch || !platformAdapter.openSavedSearch || !platformAdapter.openBoundSavedSearch) {
           throw new Error('Boss saved-reference-required: native saved-search action is not registered; refusing the legacy saved-search fallback.');
         }
-        return platformAdapter.openSavedSearch(session.page, options.savedSearch, searchOptions);
+        const opened = await openBoundSavedSearchRef.fn(platformAdapter, session.page, options.savedSearch, {
+          ...searchOptions,
+          boundJobKey: jobKey,
+        });
+        savedSearchOpenEvidence = opened.evidence;
+        return opened.page;
       })()
-      : await platformAdapter.openSubscribeSearch(session.page, pageKeyword, searchOptions);
+      : options.coreSavedSearchTarget
+        ? await (async () => {
+          if (!platformAdapter.openBoundSavedSearch) {
+            throw new Error(`Platform ${platform} does not register strict saved-search opening for bound target ${options.coreSavedSearchTarget!.name}.`);
+          }
+          const opened = await openBoundSavedSearchRef.fn(platformAdapter, session.page, options.coreSavedSearchTarget!, {
+            ...searchOptions,
+            boundJobKey: jobKey,
+          });
+          savedSearchOpenEvidence = opened.evidence;
+          verifiedCoreSavedSearchTarget = options.coreSavedSearchTarget;
+          return opened.page;
+        })()
+        : options.coreSavedSearchVerificationRequest
+          ? await (async () => {
+            const request = options.coreSavedSearchVerificationRequest!;
+            if (platform !== 'zhilian'
+              || request.platform !== platform
+              || request.boundJobKey !== jobKey
+              || request.expectedKeyword !== pageKeyword
+              || !platformAdapter.verifySavedSearchTarget) {
+              throw new Error('Prospective core saved-search verification request is invalid or unsupported.');
+            }
+            const opened = await platformAdapter.verifySavedSearchTarget(session.page, request, {
+              ...searchOptions,
+              boundJobKey: jobKey,
+            });
+            savedSearchOpenEvidence = opened.evidence;
+            verifiedCoreSavedSearchTarget = opened.target;
+            return opened.page;
+          })()
+        : await platformAdapter.openSubscribeSearch(session.page, pageKeyword, searchOptions);
+  if (savedSearchOpenEvidence) {
+    if (platform !== 'boss') {
+      if (!verifiedCoreSavedSearchTarget) {
+        throw new Error(`Platform ${platform} returned saved-search evidence without an executable core target.`);
+      }
+      verifiedCoreSavedSearchTarget = assertCoreSavedSearchTarget(verifiedCoreSavedSearchTarget, {
+        platform,
+        boundJobKey: jobKey,
+        label: 'capture saved-search target',
+      });
+      savedSearchOpenEvidence = assertPlatformSavedSearchOpenEvidence(
+        savedSearchOpenEvidence,
+        'capture saved-search open evidence',
+      );
+      const commonMismatch = savedSearchOpenEvidence.platform !== platform
+        || savedSearchOpenEvidence.boundJobKey !== jobKey
+        || savedSearchOpenEvidence.targetFingerprint !== verifiedCoreSavedSearchTarget.targetFingerprint
+        || savedSearchOpenEvidence.observedKeyword !== verifiedCoreSavedSearchTarget.expectedKeyword
+        || savedSearchOpenEvidence.postcondition !== 'opened-and-verified';
+      const identityMismatch = isZhilianNativeSavedSearchTarget(verifiedCoreSavedSearchTarget)
+        ? !isZhilianNativeSavedSearchOpenEvidence(savedSearchOpenEvidence)
+          || savedSearchOpenEvidence.observedNativeConditionId !== verifiedCoreSavedSearchTarget.nativeConditionId
+          || savedSearchOpenEvidence.observedConditionFingerprint !== verifiedCoreSavedSearchTarget.conditionFingerprint
+        : isZhilianNativeSavedSearchOpenEvidence(savedSearchOpenEvidence)
+          || savedSearchOpenEvidence.observedName !== verifiedCoreSavedSearchTarget.name;
+      if (commonMismatch || identityMismatch) {
+        throw new Error(`Platform ${platform} returned saved-search evidence for another capture target.`);
+      }
+    }
+    await options.onSavedSearchOpenEvidence?.(savedSearchOpenEvidence, verifiedCoreSavedSearchTarget);
+  }
   if (session.runtimeLease && searchPage !== session.page) {
     await handoffPlatformWorkPage(session, session.page, searchPage);
   }
@@ -2569,6 +2666,8 @@ async function runResumeCaptureFlow(platform: SupportedPlatform, jobKey: string,
       searchExecution: {
         ...options.searchExecution,
         includeViewedCandidates: options.includeViewedCandidates ?? false,
+        ...(options.coreSavedSearchTarget ? { coreSavedSearchTarget: options.coreSavedSearchTarget } : {}),
+        ...(savedSearchOpenEvidence ? { savedSearchOpenEvidence } : {}),
       },
     } : {}),
   };
@@ -2587,6 +2686,7 @@ return {
   formatResumeSnapshot,
   forwardBossResumeRef,
   openDirectSearchRef,
+  openBoundSavedSearchRef,
   openResumeDetailRef,
   openSubscribeSearchRef,
   readBossColleagueCommunicationFlagRef,

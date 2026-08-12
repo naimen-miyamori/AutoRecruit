@@ -30,6 +30,7 @@ import type {
 import { answerCandidateQuestionFromJd, toJdRagSources } from './rag/jd-question-answering.js';
 import { answerQuestionWithRag } from './rag/service.js';
 import { runSearchSubscriptionWorkflow } from './search/search-subscription.js';
+import { SubscriptionMutationAttemptStore } from './search/subscription-mutation-store.js';
 import {
   type SearchConditionSetReference,
 } from './search/search-condition-sets.js';
@@ -115,6 +116,7 @@ export const {
   extractResumeFromPageRef,
   forwardBossResumeRef,
   openDirectSearchRef,
+  openBoundSavedSearchRef,
   openResumeDetailRef,
   openSubscribeSearchRef,
   readBossColleagueCommunicationFlagRef,
@@ -132,6 +134,7 @@ import {
   runSinglePlatformCapture,
   type CaptureRunnerDependencies,
 } from './mode-runners/capture-runner.js';
+import { assertCaptureExecutionEnvelope } from './mode-runners/capture-targets.js';
 import {
   assertBossScreeningPreflight,
   assertPostScoreRoutingPreflight,
@@ -167,6 +170,8 @@ export type MainResult = MainRunSummary
 
 export interface MainOptions {
   reportSearchMode?: (message: string) => void;
+  /** Server-created private queue authority; public argv cannot provide it. */
+  captureExecutionEnvelope?: import('./mode-runners/capture-targets.js').CaptureExecutionEnvelope;
 }
 
 export const parseJobDescriptionRef = { fn: parseJobDescription };
@@ -1201,11 +1206,21 @@ export async function main(argv: readonly string[] = process.argv.slice(2), opti
       listSelectedPlatforms: listSelectedCapturePlatforms,
     }),
     listPlatforms: listSelectedCapturePlatforms,
-    preflight: (jobs, platforms) => preflightCaptureRun(jobs, platforms, {
-      ...captureRunnerDependencies,
-      buildSinglePlatformInput,
-      preflightRuntimes: preflightPlatformRuntimeManifestsRef.fn,
-    }),
+    preflight: async (jobs, platforms) => {
+      const plans = await preflightCaptureRun(jobs, platforms, {
+        ...captureRunnerDependencies,
+        buildSinglePlatformInput,
+        preflightRuntimes: preflightPlatformRuntimeManifestsRef.fn,
+      });
+      if (options.captureExecutionEnvelope) {
+        const expected = assertCaptureExecutionEnvelope(options.captureExecutionEnvelope);
+        if (expected.plans.length !== plans.length
+          || expected.plans.some((plan, index) => plan.planHash !== plans[index]?.planHash)) {
+          throw new Error('Queued capture execution envelope no longer matches the current resolved targets. Refresh and confirm the task again.');
+        }
+      }
+      return plans;
+    },
     warnBossOptIn: warnBossCaptureOptIn,
     buildSinglePlatformInput,
     runSinglePlatform: (platformInput, runOptions) => runSinglePlatformCapture(
@@ -1296,6 +1311,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2), opti
       closeSession: (session) => closeBrowserSessionRef.fn(session),
       handoffWorkPage: handoffPlatformWorkPage,
       preflightRuntimes: preflightPlatformRuntimeManifests,
+      createMutationAttemptStore: () => new SubscriptionMutationAttemptStore(),
       runWorkflow: (adapter, page, plan, workflowOptions) => runSearchSubscriptionWorkflowRef.fn(adapter, page, plan, workflowOptions),
       report: (result) => console.log(JSON.stringify(result, null, 2)),
       reportFailure: (summary) => console.error(JSON.stringify(summary, null, 2)),
@@ -1324,6 +1340,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2), opti
   if (input.platform === 'all') {
     return runAllPlatformsCaptureMode(input, captureDispatchDependencies);
   }
+
+  await captureDispatchDependencies.preflight([input], [input.platform]);
 
   return runSinglePlatformCapture(
     buildSinglePlatformInput(input, input.platform),

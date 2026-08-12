@@ -14,6 +14,11 @@ root `AGENTS.md` and every owning domain document used by a runner.
 - Runners compose typed domain workflows and platform actions, enforce orchestration order, and
   return typed results. They do not own selectors, raw DOM mechanics, TaskQueue persistence, HTTP
   request parsing, or frontend authorization.
+- Capture runners resolve every selected platform locally before the first browser session. Core
+  targets pin identity, record revision/hash, source and complete search plan; Zhilian may carry a
+  prospective native verification request only for a new saved job, while an existing saved job
+  requires its already-bound native target. The Boss target only nests the validated v4 snapshot.
+  Raw public input cannot inject execution conditions or targets.
 - Keep irreversible boundaries explicit. Queue admission is not evidence that an external mutation
   completed; preserve identity, confirmation, receipt/outbox, and ambiguous-no-retry contracts.
 - Login-owned platform runtime leases cover only the browser phase. Release the legacy Boss search

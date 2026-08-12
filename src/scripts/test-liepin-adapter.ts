@@ -12,6 +12,13 @@ import {
   readLiepinCurrentCandidateBatch,
 } from '../platforms/liepin/actions/candidate-actions.js';
 import { readLiepinCandidateProfileDetail } from '../platforms/liepin/actions/resume-actions.js';
+import { chromium } from 'playwright';
+import {
+  inspectExistingLiepinSavedSearch,
+  parseLiepinAppliedSearchKeyword,
+  readLiepinAppliedSearchKeyword,
+  savePreparedLiepinSearchCondition,
+} from '../platforms/liepin/actions/search-actions.js';
 
 const originalDataDir = config.dataDir;
 const testTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-liepin-adapter-'));
@@ -32,6 +39,7 @@ test('liepin adapter wires Mapping batch and read-only detail contracts to domai
   assert.equal(liepinAdapter.readCurrentCandidateBatch, readLiepinCurrentCandidateBatch);
   assert.equal(liepinAdapter.advanceToNextCandidateBatch, advanceLiepinToNextCandidateBatch);
   assert.equal(liepinAdapter.readCandidateProfileDetail, readLiepinCandidateProfileDetail);
+  assert.equal(liepinAdapter.inspectExistingSavedSearch, inspectExistingLiepinSavedSearch);
 });
 
 test('liepin adapter defaults every action and candidate pace delay to 2-4 seconds', () => {
@@ -43,6 +51,76 @@ test('liepin adapter defaults every action and candidate pace delay to 2-4 secon
   for (let index = 0; index < 20; index += 1) {
     const delayMs = getLiepinCandidatePaceDelayMs();
     assert.ok(delayMs >= 2000 && delayMs <= 4000);
+  }
+});
+
+test('liepin saved-search observation preserves the full keyword and rejects prefix equivalence', () => {
+  const observed = parseLiepinAppliedSearchKeyword(
+    '快捷搜索 关键词：铝镁合金 拉杆箱 学历：大专 隐藏已查看',
+  );
+  assert.equal(observed, '铝镁合金 拉杆箱');
+  assert.notEqual(observed, '铝镁合金');
+});
+
+test('liepin saved-search observation reads the scoped Ant input when the body has no keyword label', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <input class="ant-select-selection-search-input" value="无关筛选">
+      <div class="search-area">
+        <div class="search-auto-complete-box">
+          <input class="ant-select-selection-search-input" value="">
+          <input class="ant-select-selection-search-input" value="铝镁合金 拉杆箱">
+        </div>
+      </div>
+      <div>快捷搜索：铝镁合金 订阅</div>
+    `);
+    assert.equal(await readLiepinAppliedSearchKeyword(page), '铝镁合金 拉杆箱');
+    await page.locator('.search-area input').first().fill('冲突关键词');
+    await assert.rejects(
+      () => readLiepinAppliedSearchKeyword(page),
+      /keyword evidence is ambiguous.*2 populated scoped inputs/i,
+    );
+  } finally {
+    await browser.close();
+  }
+});
+
+test('liepin save scopes the unlabelled name input to the visible save dialog', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const originalMin = config.playwright.actionDelayMinMsByPlatform.liepin;
+  const originalMax = config.playwright.actionDelayMaxMsByPlatform.liepin;
+  config.playwright.actionDelayMinMsByPlatform.liepin = 0;
+  config.playwright.actionDelayMaxMsByPlatform.liepin = 0;
+  try {
+    await page.route('https://h.liepin.com/search/getConditionItem', (route) => route.fulfill({
+      contentType: 'text/html; charset=utf-8',
+      body: '<html><body></body></html>',
+    }));
+    await page.goto('https://h.liepin.com/search/getConditionItem');
+    await page.setContent(`
+        <html><body>
+          <div>搜简历 搜索条件 人才搜索 快捷搜索</div>
+          <input id="hidden-page-input" type="text" style="display:none">
+          <button id="open-save" type="button" onclick="document.querySelector('.ant-modal-wrap').style.display='block'">订阅</button>
+          <div class="ant-modal-wrap" style="display:none">
+            <div>保存新的搜索条件</div>
+            <div>搜索条件命名</div>
+            <input class="ant-input input-text-v3" type="text">
+            <label><input type="checkbox">订阅简历</label>
+            <button type="button" onclick="window.__savedName=document.querySelector('.input-text-v3').value;document.querySelector('.ant-modal-wrap').style.display='none'">确 定</button>
+          </div>
+        </body></html>
+    `);
+    await savePreparedLiepinSearchCondition(page, '铝镁合金', { deadline: Date.now() + 10_000 });
+    assert.equal(await page.evaluate(() => (window as unknown as { __savedName?: string }).__savedName), '铝镁合金');
+    assert.equal(await page.locator('#hidden-page-input').inputValue(), '');
+  } finally {
+    config.playwright.actionDelayMinMsByPlatform.liepin = originalMin;
+    config.playwright.actionDelayMaxMsByPlatform.liepin = originalMax;
+    await browser.close();
   }
 });
 

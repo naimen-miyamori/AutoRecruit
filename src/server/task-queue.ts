@@ -47,6 +47,7 @@ export interface QueueTaskDefinition {
   kind: TaskKind;
   input: TaskInput;
   inputSummary: Record<string, unknown>;
+  executionEnvelope?: TaskRecord['executionEnvelope'];
   argv: string[];
   schedule: ScheduledTaskMetadata;
 }
@@ -146,6 +147,7 @@ function groupFingerprint(
       kind: task.kind,
       input: task.input,
       inputSummary: task.inputSummary,
+      executionEnvelope: task.executionEnvelope,
       argv: task.argv,
       schedule: task.schedule,
     })),
@@ -481,8 +483,9 @@ export class TaskQueue {
   constructor(options: TaskQueueOptions = {}) {
     this.taskDir = options.taskDir ?? path.join(config.dataDir, 'runtime', 'tasks');
     this.taskGroupDir = path.join(path.dirname(this.taskDir), 'task-groups');
-    this.runner = options.runner ?? ((argv) => runCliMain(argv, {
+    this.runner = options.runner ?? ((argv, task) => runCliMain(argv, {
       reportSearchMode: (message) => console.log(message),
+      captureExecutionEnvelope: task.executionEnvelope,
     }));
     this.ragOpsRunner = options.ragOpsRunner ?? runRagOpsTask;
     this.talentMappingClassificationRunner = options.talentMappingClassificationRunner
@@ -511,6 +514,7 @@ export class TaskQueue {
     kind: TaskKind;
     input: TaskInput;
     inputSummary: Record<string, unknown>;
+    executionEnvelope?: TaskRecord['executionEnvelope'];
     argv: string[];
   }): Promise<TaskDetail> {
     await this.loading;
@@ -720,6 +724,7 @@ export class TaskQueue {
           kind: task.kind,
           input: task.input,
           inputSummary: task.inputSummary,
+          executionEnvelope: task.executionEnvelope,
           argv: task.argv,
           schedule: task.schedule,
         } satisfies QueueTaskDefinition];
@@ -839,6 +844,7 @@ export class TaskQueue {
     kind: TaskKind;
     input: TaskInput;
     inputSummary: Record<string, unknown>;
+    executionEnvelope?: TaskRecord['executionEnvelope'];
     argv: string[];
     schedule?: ScheduledTaskMetadata;
   }): TaskRecord {
@@ -851,6 +857,7 @@ export class TaskQueue {
       updatedAt: now,
       input: options.input,
       inputSummary: options.inputSummary,
+      executionEnvelope: options.executionEnvelope,
       argv: options.argv,
       logs: [{
         at: now,

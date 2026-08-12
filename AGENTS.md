@@ -149,12 +149,22 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
 - Job-scoped reusable inputs share data/<platform>/jobs/<jobKey>/jd.json: JD, report delivery,
   search source, normalized direct-search conditions, original application-filter input, and Boss
   forwarding settings.
+- `(platform, jobKey)` is the stable local identity. Exact job name, compatibility searchKeyword,
+  normalized JD title, saved-search name, and pageKeyword are separate facts. Core job/search labels
+  are user-confirmed: 51job and Liepin use observable exact saved-search names, while Zhilian keeps
+  the label local and separately binds the platform native condition ID plus complete condition
+  fingerprint. Boss names with native IDs are position-sync-owned.
 - Explicit CLI values replace saved canonical values; omitted values reuse them. Do not append
   duplicate history or rewrite an unchanged job record.
 - Search-source selection is field-level: explicitly selecting `saved` may reuse the complete
   `savedSearch` reference only when the same authoritative JobRecord is currently `source=saved`
   and the reference passes identity/fingerprint validation; it must never carry a stale reference
   from a direct job. Explicit `direct` continues to drop saved-only reference/sort state.
+- A strict core saved capture requires a target bound to that same JobRecord and fresh evidence on
+  every open. 51job and Liepin require a unique exact-name/page-keyword postcondition; Zhilian
+  requires the same native condition ID, complete condition fingerprint, exact page keyword, and
+  unique component-to-DOM mapping. Subscription-management evidence does not update a JobRecord;
+  only a separately confirmed revision/evidence-hash CAS binding may do so.
 
 ### Standalone Modes
 
@@ -225,6 +235,9 @@ above is the inner loop. Existing schedules and tasks without `includeBoss` rema
 
 - Local job data is platform-scoped under data/<platform>/jobs/<jobKey>/; never reuse a job record
   across platforms solely because a keyword matches.
+- Persisted identity fields are strictly normalized. A wholly absent identity may use an explicit
+  legacy-derived read view, but a present malformed identity fails closed and is never repaired by
+  ordinary reads. Multi-record identity maintenance uses preview/prepare/commit manifests and CAS.
 - Explicit empty results are successful zero-candidate runs, not extraction failures.
 - Only successfully captured resumes become seen. Detail-open, forwarding, or extraction failures
   stay retryable. Mark successful captures seen before scoring.

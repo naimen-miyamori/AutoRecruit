@@ -27,11 +27,18 @@ scheduled work.
   callers that reuse them) must finish entering and verifying its conditions, then click one
   unique visible/enabled global search control. This click is mandatory even when every condition
   was already satisfied. Keyword input and filter auto-refreshes are preparation only; Enter and
-  intermediate search fallbacks must not submit early. Candidate extraction waits for a new
-  post-click result cycle (cards or explicit empty state) and fails closed when the cycle is not
-  observable; after a click with uncertain outcome the action never clicks again. Preparation,
-  discovery, single-condition, reset, and restore actions remain non-submitting.
-- Direct search applies the keyword once, after job scope, filters, and viewed policy are stable.
+  intermediate search fallbacks must not submit early. Immediately before dispatch, require the
+  visible input and any available owning application state to contain the exact keyword. After the
+  click, require the exact native Boss search request from the current search frame, one exact
+  keyword parameter, a successful completed response, and a new result mutation/loading cycle.
+  A generic resource entry or DOM mutation without that request never proves submission. The
+  completed request receipt remains keyword evidence if Boss clears the draft input afterward;
+  every other condition is reread from the page. Candidate extraction fails closed when this cycle
+  is not observable; after a click with uncertain outcome the action never clicks again.
+  Preparation, discovery, single-condition, reset, and restore actions remain non-submitting.
+- Direct search applies the keyword on the normal path once, after job scope, filters, and viewed
+  policy are stable; a proven DOM/application-state split is repaired through real input events
+  before the final click.
   The unique final search control may be an icon only when it shares the keyword input's nearest
   search-input wrapper; an unrelated global search icon is never a fallback.
 - Saved Boss search selects the native “我的订阅” card by typed identity evidence: name, page
@@ -103,6 +110,10 @@ scheduled work.
   configuration revision. Explicit patches use JobStore CAS before browser work; a revision
   conflict fails closed. RunResult routing facts own report recipients and CC, so manual replay
   cannot be retargeted by later job edits.
+- Boss task v4 is the sole Boss identity/search/config authority inside a generic all-platform plan.
+  Wrappers store and verify the nested snapshot/hash but do not copy Boss job name, job ID, search
+  plan, source revision, or canonicalPatch into a competing execution authority. A public keyword
+  may differ from the exact synchronized Boss name when bossJobId selects the record.
 - Explicit `searchSource=saved` is a source selection, not permission to discard its dependent
   identity: when the same authoritative JobRecord is currently saved, the capture-plan resolver
   may reuse and revalidate its complete native saved-search reference. A direct JobRecord's stale
@@ -124,10 +135,23 @@ scheduled work.
   RunResult v2 records `capturedCandidateIds` and stage-specific retryable failures; legacy v1
   `newCandidateIds` remain read-only attempt history and are never inferred to be captured.
 - Boss search details support both the legacy `/web/frame/c-resume/` canvas and the current parent-
-  page `.dialog-lib-resume` Vue detail. Native readiness and parsing use the currently hydrated
-  `resumeInfo.expectId` and resume fields from that exact detail instance; parent-page performance
-  history is not identity evidence because it may refer to an earlier candidate. A native detail's
-  own “搜索畅聊卡” footer never classifies the detail as a purchase dialog.
+  page `.dialog-lib-resume` Vue 2 detail. Native readiness atomically searches only the exact unique
+  detail root plus a bounded DOM-ancestor/component-parent graph for one hydrated
+  `resumeInfo.expectId` source, then revalidates the same connected root, state object, and identity;
+  it must not read or serialize resume payload fields. A payload consumer repeats that bounded source
+  selection, serializes one full snapshot inside its own atomic observation, and revalidates after
+  serialization. Normal detail open followed by parse must therefore perform no full payload read in
+  readiness and exactly one in parsing. The base-info section's geometric visibility is opening-readiness
+  evidence only; after readiness, payload authority comes from the still-unique visible root, stable state
+  object, and matching identity because Boss may collapse or replace that top section during hydration.
+  Distinct valid sources, out-of-bound sources, redraw drift, hidden/replaced roots, or multiple roots fail
+  closed; parent-page performance history is not identity evidence because it may refer to an earlier
+  candidate. A native detail's own “搜索畅聊卡” footer never classifies the detail as a purchase dialog.
+- Native readiness/payload timeouts expose only stable pending-reason enums, their first-observed order,
+  counts, and the last reason. The diagnostic may distinguish source hydration, state/loading/identity
+  changes, root replacement, and visibility changes, but must never include candidate IDs, resume field
+  values, page text, or serialized payload fragments. Preserve all observed reasons instead of replacing
+  an earlier post-serialization transition with a later generic unavailable state.
 - Opening or confirming forwarding must move the shared pointer and then use a freshly resolved
   native locator click, never a stale coordinate that can land on `联系Ta`. Detect a visible search-
   chat-card purchase dialog before and after opening forwarding, close its unique safe close control,

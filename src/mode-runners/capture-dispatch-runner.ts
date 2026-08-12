@@ -6,11 +6,12 @@ import type {
   SinglePlatformCliInput,
 } from './types.js';
 import type { AllPlatformsRunSummary, BatchJobRunSummary, MainRunSummary } from './run-summary.js';
+import type { CaptureExecutionPlan } from './capture-targets.js';
 
 export interface CaptureDispatchRunnerDependencies {
   loadBatchJobs: (input: BatchCliInput) => Promise<BatchRunnableJobInput[]>;
   listPlatforms: (selection: SingleJobCliInput['platform'], includeBoss: boolean) => SupportedPlatform[];
-  preflight: (jobs: Array<SingleJobCliInput | BatchRunnableJobInput>, platforms: SupportedPlatform[]) => Promise<void>;
+  preflight: (jobs: Array<SingleJobCliInput | BatchRunnableJobInput>, platforms: SupportedPlatform[]) => Promise<CaptureExecutionPlan[]>;
   warnBossOptIn: () => void;
   buildSinglePlatformInput: (
     input: SingleJobCliInput | BatchRunnableJobInput,

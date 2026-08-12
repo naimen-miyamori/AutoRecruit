@@ -221,6 +221,20 @@ describe('migrated platform action boundaries', () => {
     );
   });
 
+  it('builds core saved-search evidence from page observations instead of target echoes', async () => {
+    const sources = await Promise.all([
+      readSource('browser/subscribe-search.ts'),
+      readSource('platforms/liepin/actions/search-actions.ts'),
+      readSource('platforms/zhilian/actions/search-actions.ts'),
+    ]);
+    for (const source of sources) {
+      assert.doesNotMatch(source, /observedKeyword:\s*target\.expectedKeyword/);
+      assert.doesNotMatch(source, /observedName:\s*target\.name/);
+      assert.match(source, /observedKeyword/);
+      assert.match(source, /observedName/);
+    }
+  });
+
   it('keeps Liepin page behavior in concrete domain action owners', async () => {
     const [authenticationSource, navigationSource, searchSource, filterSource, candidateSource, resumeSource, forwardingSource] = await Promise.all([
       readSource('platforms/liepin/actions/authentication.ts'),

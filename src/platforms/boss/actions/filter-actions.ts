@@ -35,7 +35,6 @@ import {
   assertBossSubmittableSearchKeyword,
   estimateBossDirectSearchTimeoutMs,
   prepareBossSearchConditionPage,
-  readBossSearchKeyword,
   readBossSelectedJob,
   selectBossUnrestrictedJob,
   submitBossPreparedSearch,
@@ -118,27 +117,49 @@ function remainingTime(deadline: number): number {
 type BossActiveJobScopeOption = {
   label: string;
   value: string;
+  disabled: boolean;
 };
 
-async function readBossActiveJobScopeOption(frame: Frame): Promise<BossActiveJobScopeOption | undefined> {
+async function readBossActiveJobScopeOptions(frame: Frame): Promise<BossActiveJobScopeOption[]> {
   return frame.locator('.search-job-list-C .ui-dropmenu-list li').evaluateAll((options) => {
-    const active = options.find((element) => /\bactive\b/.test(element.className));
-    if (!active) return undefined;
     const normalize = (value: string | null | undefined): string => (value ?? '').replace(/\s+/g, ' ').trim();
-    const label = normalize(active.textContent);
-    const value = normalize(active.getAttribute('data-id'))
-      || normalize(active.getAttribute('data-value'))
-      || normalize(active.getAttribute('ka'))
-      || label;
-    return label ? { label, value } : undefined;
+    return options.flatMap((element) => {
+      if (!/\bactive\b/.test(element.className)) return [];
+      const label = normalize(element.textContent);
+      const value = normalize(element.getAttribute('data-id'))
+        || normalize(element.getAttribute('data-value'))
+        || normalize(element.getAttribute('ka'))
+        || label;
+      return label ? [{ label, value, disabled: /\bdisabled\b/.test(element.className) }] : [];
+    });
   });
 }
 
-function bossActiveJobScopeMatchesValue(
-  active: BossActiveJobScopeOption | undefined,
+function bossJobScopeSelectionMatchesExpected(
+  selectedSummary: string,
+  activeOptions: readonly BossActiveJobScopeOption[],
   expected: string,
 ): boolean {
-  return Boolean(active && (active.label === expected || active.value === expected));
+  if (activeOptions.length !== 1 || activeOptions[0]!.disabled) return false;
+  const active = activeOptions[0]!;
+  // The closed summary is the semantic job name; a dropdown label may append
+  // city, education, experience, and salary. Every accepted identity path is
+  // exact—never infer the job from a flattened label prefix or substring.
+  return selectedSummary === expected || active.label === expected || active.value === expected;
+}
+
+function requireUniqueEnabledBossActiveJobScopeOption(
+  activeOptions: readonly BossActiveJobScopeOption[],
+  expected: string,
+): BossActiveJobScopeOption {
+  if (activeOptions.length !== 1) {
+    throw new Error(`Boss job scope ${expected} requires exactly one active option; found ${activeOptions.length}.`);
+  }
+  const active = activeOptions[0]!;
+  if (active.disabled) {
+    throw new Error(`Boss job scope is disabled: ${expected}`);
+  }
+  return active;
 }
 
 export interface BossDirectSearchApplyResult {
@@ -284,13 +305,9 @@ export async function applyBossDirectSearch(
   // keyword only after every other filter is stable so one write is both the
   // first input and the final value submitted by the mandatory search click.
   throwIfBossSearchAborted(options?.signal);
-  const keywordBeforeSubmit = await readBossSearchKeyword(searchPage, deadline);
-  if (keywordBeforeSubmit === normalizeText(keyword)) {
-    alreadySatisfiedFields.push('keyword');
-  } else {
-    await applyBossSearchKeyword(searchPage, keyword, deadline);
-    changedFields.push('keyword');
-  }
+  const keywordApply = await applyBossSearchKeyword(searchPage, keyword, deadline);
+  if (keywordApply.changed) changedFields.push('keyword');
+  else alreadySatisfiedFields.push('keyword');
 
   if (options?.sortPolicy) {
     const sortResult = await applyBossSearchSortPolicy(searchPage, options.sortPolicy, deadline);
@@ -312,12 +329,12 @@ export async function applyBossDirectSearch(
   if (preSubmissionFailure) {
     throw new Error(preSubmissionFailure.message ?? `Boss direct-search condition was not ready before submit for ${preSubmissionFailure.fieldId}.`);
   }
-  const submission = await submitBossPreparedSearch(searchPage, deadline, options?.signal);
+  const submission = await submitBossPreparedSearch(searchPage, keyword, deadline, options?.signal);
   if (options?.sortPolicy === 'match-priority') {
     const finalSortFrame = await waitForBossSearchFrame(searchPage, deadline);
     const activeSortLabels = await finalSortFrame.locator('.search-label').evaluateAll((elements) => elements
       .filter((element) => /\bactive\b|\bselected\b/.test(element.className))
-      .map((element) => normalizeText(element.textContent ?? '')));
+      .map((element) => (element.textContent ?? '').replace(/\s+/g, ' ').trim()));
     if (activeSortLabels.length !== 1 || activeSortLabels[0] !== '匹配度优先') {
       throw new Error('Boss sort-postcondition-failed: match-priority was not retained after the final search cycle.');
     }
@@ -328,6 +345,7 @@ export async function applyBossDirectSearch(
     effectiveConditions,
     deadline,
     resolvedViewedPolicy.desiredChecked,
+    submission,
   );
 
   return {
@@ -2066,6 +2084,11 @@ async function applyBossJobScopeApplicationFilter(
   deadline: number,
 ): Promise<void> {
   const current = await readBossSelectedJob(page, deadline).catch(() => '');
+  const initialActiveOptions = await readBossActiveJobScopeOptions(frame);
+  if (current === value) {
+    requireUniqueEnabledBossActiveJobScopeOption(initialActiveOptions, value);
+    return;
+  }
   const selector = frame.locator('.search-job-list-C .ui-dropmenu-label, .search-job-list-C .search-current-job').first();
   await clickBossLocator(selector, page, Math.min(remainingTime(deadline), 5000));
   const options = frame.locator('.search-job-list-C .ui-dropmenu-list li');
@@ -2090,9 +2113,11 @@ async function applyBossJobScopeApplicationFilter(
   } else {
     await runBossPageAction(page, () => page.keyboard.press('Escape')).catch(() => undefined);
   }
-  const selected = await options.nth(target.index).evaluate((element) => /\bactive\b/.test(element.className));
-  if (!selected) {
-    throw new Error('Boss job scope target option did not become selected.');
+  const selectedSummary = await readBossSelectedJob(page, deadline).catch(() => '');
+  const activeOptions = await readBossActiveJobScopeOptions(frame);
+  requireUniqueEnabledBossActiveJobScopeOption(activeOptions, value);
+  if (!bossJobScopeSelectionMatchesExpected(selectedSummary, activeOptions, value)) {
+    throw new Error(`Boss job scope target option did not become selected: expected ${value}, observed ${selectedSummary || activeOptions[0]?.label || '(empty)'}.`);
   }
 }
 
@@ -3201,8 +3226,9 @@ async function isBossApplicationFilterSatisfied(
 ): Promise<boolean> {
   if (condition.fieldId === 'job_scope') {
     const frame = await waitForBossSearchFrame(page, deadline);
-    return bossActiveJobScopeMatchesValue(
-      await readBossActiveJobScopeOption(frame),
+    return bossJobScopeSelectionMatchesExpected(
+      state.jobScope,
+      await readBossActiveJobScopeOptions(frame),
       readBossApplicationFilterSingleValue(condition),
     );
   }
@@ -3323,7 +3349,7 @@ export interface BossSearchConditionVerification {
   expected: unknown;
   actual: unknown;
   verified: boolean;
-  evidence: 'keyword-input' | 'active-job-option' | 'selected-city-options' | 'custom-slider' | 'selected-option' | 'age-range' | 'toggle' | 'text-input' | 'unselected';
+  evidence: 'keyword-input' | 'exact-search-request' | 'active-job-option' | 'selected-city-options' | 'custom-slider' | 'selected-option' | 'age-range' | 'toggle' | 'text-input' | 'unselected';
   message?: string;
 }
 
@@ -3368,14 +3394,15 @@ export async function readBossDirectSearchVerificationSummary(
   conditions: SearchCondition[],
   deadline: number,
   expectedRecentViewed?: boolean,
-  options: { includeResult?: boolean } = {},
+  options: { includeResult?: boolean; submission?: BossSearchSubmissionReceipt } = {},
 ): Promise<BossDirectSearchVerificationSummary> {
   const state = await snapshotBossSearchFilterState(page, deadline);
   const entries: BossSearchConditionVerification[] = [];
   const expectedKeyword = normalizeText(keyword);
+  const actualKeyword = options.submission?.keyword ?? state.keyword;
   entries.push(verificationEntry(
-    'keyword', expectedKeyword, state.keyword, 'keyword-input',
-    `Boss direct search postcondition mismatch for keyword: expected ${expectedKeyword}, observed ${state.keyword || '(empty)'}.`,
+    'keyword', expectedKeyword, actualKeyword, options.submission ? 'exact-search-request' : 'keyword-input',
+    `Boss direct search postcondition mismatch for keyword: expected ${expectedKeyword}, observed ${actualKeyword || '(empty)'}.`,
   ));
   if (expectedRecentViewed !== undefined && state.toggles.filter_recent_viewed !== expectedRecentViewed) {
     entries.push(verificationEntry(
@@ -3399,19 +3426,13 @@ export async function readBossDirectSearchVerificationSummary(
 
     if (condition.fieldId === 'job_scope') {
       const expected = readBossApplicationFilterSingleValue(condition);
-      const active = await frame.locator('.search-job-list-C .ui-dropmenu-list li').evaluateAll((options) => {
-        const option = options.find((element) => /\bactive\b/.test(element.className));
-        if (!option) return undefined;
-        const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
-        return {
-          label: normalize(option.textContent),
-          value: normalize(option.getAttribute('data-id')) || normalize(option.getAttribute('data-value')) || normalize(option.getAttribute('ka')),
-        };
-      });
-      const actual = active && (expected === active.value ? active.value : active.label);
+      const activeOptions = await readBossActiveJobScopeOptions(frame);
+      const matched = bossJobScopeSelectionMatchesExpected(state.jobScope, activeOptions, expected);
+      const activeLabels = activeOptions.map((option) => option.label);
+      const actual = matched ? expected : activeLabels[0];
       entries.push(verificationEntry(
         condition.fieldId, expected, actual, 'active-job-option',
-        `Boss direct search postcondition mismatch for job_scope: expected ${expected}, observed ${active?.label ?? '(empty)'}.`,
+        `Boss direct search postcondition mismatch for job_scope: expected ${expected}, observed summary ${state.jobScope || '(empty)'} with ${activeOptions.length} active option(s): ${activeLabels.join(' | ') || '(none)'}.`,
       ));
       continue;
     }
@@ -3532,6 +3553,7 @@ async function assertBossDirectSearchPostcondition(
   conditions: SearchCondition[],
   deadline: number,
   expectedRecentViewed?: boolean,
+  submission?: BossSearchSubmissionReceipt,
 ): Promise<BossDirectSearchVerificationSummary> {
   const summary = await readBossDirectSearchVerificationSummary(
     page,
@@ -3539,6 +3561,7 @@ async function assertBossDirectSearchPostcondition(
     conditions,
     deadline,
     expectedRecentViewed,
+    { submission },
   );
   const failed = summary.conditions.find((entry) => !entry.verified);
   if (failed) {

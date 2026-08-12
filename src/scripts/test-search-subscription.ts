@@ -6,12 +6,23 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, it } from 'node:test';
 import type { BrowserContext, Page } from 'playwright';
 
-import type { PlatformAdapter } from '../platforms/types.js';
+import type { CoreSavedSearchVerificationRequest, PlatformAdapter } from '../platforms/types.js';
 import {
   buildApplicationFilterConditions,
   loadSearchConditionPlanFile,
   runSearchSubscriptionWorkflow,
 } from '../search/search-subscription.js';
+import {
+  buildSubscriptionManagementEvidence,
+  hashSubscriptionMutationValue,
+  SubscriptionMutationAttemptStore,
+} from '../search/subscription-mutation-store.js';
+import {
+  buildCoreSavedSearchTarget,
+  buildSavedSearchOpenEvidence,
+  buildZhilianNativeSavedSearchOpenEvidence,
+  buildZhilianNativeSavedSearchTarget,
+} from '../search/saved-search-target.js';
 
 function buildAdapter(overrides: Partial<PlatformAdapter>): PlatformAdapter {
   return {
@@ -119,6 +130,8 @@ describe('search subscription workflow', () => {
     const calls: string[] = [];
     const rootPage = { id: 'root-page' } as unknown as Page;
     const searchPage = { id: 'search-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-subscription-attempt-'));
+    const mutationAttempts = new SubscriptionMutationAttemptStore({ dataDir: tempDir });
     const adapter = buildAdapter({
       prepareSearchConditionPage: async (_page, keyword) => {
         calls.push(`prepare:${keyword}`);
@@ -128,8 +141,32 @@ describe('search subscription workflow', () => {
         calls.push('read-total');
         return { resultTotal: 8, resultTotalSource: 'page' };
       },
-      saveSearchCondition: async (_page, savedSearchName) => {
+      saveSearchCondition: async (_page, savedSearchName, options) => {
         calls.push(`save:${savedSearchName}`);
+        const conditionFingerprint = hashSubscriptionMutationValue({
+          version: 1,
+          keyword: '优衣库',
+          conditions: [],
+        });
+        assert.deepEqual(options?.subscriptionMutationContext, {
+          expectedKeyword: '优衣库',
+          conditionFingerprint,
+        });
+        const target = buildCoreSavedSearchTarget({
+          platform: '51job',
+          boundJobKey: `subscription-management:${conditionFingerprint}`,
+          bindingRevision: 1,
+          name: savedSearchName,
+          expectedKeyword: '优衣库',
+        });
+        return {
+          outcome: 'saved',
+          openEvidence: buildSavedSearchOpenEvidence(target, {
+            boundJobKey: target.boundJobKey,
+            observedName: savedSearchName,
+            observedKeyword: '优衣库',
+          }),
+        };
       },
     });
 
@@ -139,6 +176,7 @@ describe('search subscription workflow', () => {
       conditions: [],
     }, {
       save: true,
+      mutationAttempts,
     });
 
     assert.deepStrictEqual(calls, ['prepare:优衣库', 'read-total', 'save:优衣库订阅']);
@@ -146,9 +184,388 @@ describe('search subscription workflow', () => {
     assert.equal(summary.savedSearchName, '优衣库订阅');
   });
 
+  it('marks a dispatched save ambiguous when the platform returns malformed open evidence', async () => {
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-subscription-malformed-evidence-'));
+    const mutationAttempts = new SubscriptionMutationAttemptStore({ dataDir: tempDir });
+    const keyword = '铝镁合金 拉杆箱';
+    const savedSearchName = '铝镁合金';
+    const conditionFingerprint = hashSubscriptionMutationValue({ version: 1, keyword, conditions: [] });
+    const adapter = buildAdapter({
+      prepareSearchConditionPage: async () => rootPage,
+      readSearchConditionResultTotal: async () => ({ resultTotal: 8, resultTotalSource: 'page' }),
+      saveSearchCondition: async () => ({
+        outcome: 'saved',
+        openEvidence: { version: 1 },
+      } as never),
+    });
+
+    await assert.rejects(
+      () => runSearchSubscriptionWorkflow(adapter, rootPage, {
+        keyword,
+        savedSearchName,
+        conditions: [],
+      }, { save: true, mutationAttempts }),
+      /malformed open evidence.*ambiguous/i,
+    );
+
+    const attempt = await mutationAttempts.find({
+      platform: '51job',
+      savedSearchName,
+      expectedKeyword: keyword,
+      conditionFingerprint,
+    });
+    assert.equal(attempt?.status, 'ambiguous');
+    assert.match(attempt?.issue ?? '', /malformed open evidence/i);
+  });
+
+  it('records Zhilian save confirmation as native-condition evidence without claiming an exact remote name', async () => {
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-subscription-zhilian-native-'));
+    const mutationAttempts = new SubscriptionMutationAttemptStore({ dataDir: tempDir });
+    const keyword = '铝镁合金 拉杆箱';
+    const savedSearchName = '铝镁合金';
+    const conditionFingerprint = hashSubscriptionMutationValue({ version: 1, keyword, conditions: [] });
+    const target = buildZhilianNativeSavedSearchTarget({
+      boundJobKey: `subscription-management:${conditionFingerprint}`,
+      bindingRevision: 1,
+      name: savedSearchName,
+      nativeConditionId: '44303402',
+      expectedKeyword: keyword,
+      conditionFingerprint: 'b'.repeat(64),
+    });
+    const adapter = Object.assign(buildAdapter({
+      prepareSearchConditionPage: async () => rootPage,
+      readSearchConditionResultTotal: async () => ({ resultTotal: 8, resultTotalSource: 'page' }),
+      saveSearchCondition: async () => ({
+        outcome: 'saved',
+        openEvidence: buildZhilianNativeSavedSearchOpenEvidence(target, {
+          boundJobKey: target.boundJobKey,
+          observedNativeConditionId: target.nativeConditionId,
+          observedConditionFingerprint: target.conditionFingerprint,
+          observedKeyword: keyword,
+        }),
+      }),
+    }), { platform: 'zhilian' as const, displayName: 'Zhilian' }) as PlatformAdapter;
+
+    await runSearchSubscriptionWorkflow(adapter, rootPage, {
+      keyword,
+      savedSearchName,
+      conditions: [],
+    }, { save: true, mutationAttempts });
+
+    const attempt = await mutationAttempts.find({
+      platform: 'zhilian',
+      savedSearchName,
+      expectedKeyword: keyword,
+      conditionFingerprint,
+    });
+    assert.equal(attempt?.status, 'confirmed');
+    assert.equal(attempt?.evidence?.uniqueness, 'unique-native-condition-match');
+    assert.equal(attempt?.evidence?.identityKind, 'zhilian-native-condition');
+    assert.equal('observedName' in (attempt?.evidence ?? {}), false);
+    if (attempt?.evidence?.identityKind !== 'zhilian-native-condition') {
+      assert.fail('Expected Zhilian native-condition management evidence.');
+    }
+    assert.equal(attempt.evidence.observedNativeConditionId, '44303402');
+    assert.equal(attempt.evidence.observedConditionFingerprint, 'b'.repeat(64));
+  });
+
+  it('reconciles an ambiguous core subscription from a fresh exact open without dispatching another save', async () => {
+    const calls: string[] = [];
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const existingPage = { id: 'existing-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-subscription-existing-'));
+    const mutationAttempts = new SubscriptionMutationAttemptStore({ dataDir: tempDir });
+    const keyword = '铝镁合金 拉杆箱';
+    const savedSearchName = '铝镁合金';
+    const conditionFingerprint = hashSubscriptionMutationValue({
+      version: 1,
+      keyword,
+      conditions: [],
+    });
+    let attempt = await mutationAttempts.prepare({
+      platform: '51job',
+      savedSearchName,
+      expectedKeyword: keyword,
+      conditionFingerprint,
+    });
+    attempt = await mutationAttempts.markDispatching(attempt);
+    await mutationAttempts.markAmbiguous(attempt, 'prior dialog outcome was not canonical');
+    const target = buildCoreSavedSearchTarget({
+      platform: '51job',
+      boundJobKey: `subscription-management:${conditionFingerprint}`,
+      bindingRevision: 1,
+      name: savedSearchName,
+      expectedKeyword: keyword,
+    });
+    const adapter = Object.assign(buildAdapter({
+      prepareSearchConditionPage: async () => {
+        calls.push('prepare');
+        return rootPage;
+      },
+      readSearchConditionResultTotal: async (page) => {
+        assert.equal(page, existingPage);
+        calls.push('read-total');
+        return { resultTotal: 6, resultTotalSource: 'page' };
+      },
+      saveSearchCondition: async () => {
+        calls.push('save');
+        throw new Error('save must not be called');
+      },
+    }), {
+      inspectExistingSavedSearch: async (_page: Page, request: CoreSavedSearchVerificationRequest) => {
+        calls.push('inspect-existing');
+        assert.deepEqual(request, {
+          platform: '51job',
+          boundJobKey: target.boundJobKey,
+          bindingRevision: 1,
+          name: savedSearchName,
+          expectedKeyword: keyword,
+        });
+        return {
+          status: 'matched' as const,
+          page: existingPage,
+          target,
+          evidence: buildSavedSearchOpenEvidence(target, {
+            boundJobKey: target.boundJobKey,
+            observedName: savedSearchName,
+            observedKeyword: keyword,
+          }),
+        };
+      },
+    }) as PlatformAdapter;
+
+    const summary = await runSearchSubscriptionWorkflow(adapter, rootPage, {
+      keyword,
+      savedSearchName,
+      conditions: [],
+    }, {
+      save: true,
+      mutationAttempts,
+    });
+
+    assert.deepEqual(calls, ['inspect-existing', 'read-total']);
+    assert.equal(summary.saved, true);
+    assert.equal(summary.saveOutcome, 'already-saved');
+    assert.equal(summary.mutationAttemptStatus, 'already-satisfied');
+    assert.equal((await mutationAttempts.read(attempt.attemptId)).status, 'already-satisfied');
+  });
+
+  it('preserves an ambiguous attempt when exact existing-subscription inspection fails', async () => {
+    const calls: string[] = [];
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-subscription-existing-failed-'));
+    const mutationAttempts = new SubscriptionMutationAttemptStore({ dataDir: tempDir });
+    const keyword = '铝镁合金 拉杆箱';
+    const savedSearchName = '铝镁合金';
+    const conditionFingerprint = hashSubscriptionMutationValue({ version: 1, keyword, conditions: [] });
+    let attempt = await mutationAttempts.prepare({
+      platform: '51job', savedSearchName, expectedKeyword: keyword, conditionFingerprint,
+    });
+    attempt = await mutationAttempts.markDispatching(attempt);
+    attempt = await mutationAttempts.markAmbiguous(attempt, 'prior outcome unknown');
+    const adapter = Object.assign(buildAdapter({
+      prepareSearchConditionPage: async () => {
+        calls.push('prepare');
+        return rootPage;
+      },
+      readSearchConditionResultTotal: async () => ({ resultTotal: 0, resultTotalSource: 'page' }),
+      saveSearchCondition: async () => {
+        calls.push('save');
+      },
+    }), {
+      inspectExistingSavedSearch: async () => {
+        calls.push('inspect-existing');
+        throw new Error('exact existing subscription keyword mismatch');
+      },
+    }) as PlatformAdapter;
+
+    await assert.rejects(
+      () => runSearchSubscriptionWorkflow(adapter, rootPage, {
+        keyword, savedSearchName, conditions: [],
+      }, { save: true, mutationAttempts }),
+      /exact existing subscription keyword mismatch/i,
+    );
+    assert.deepEqual(calls, ['inspect-existing']);
+    assert.equal((await mutationAttempts.read(attempt.attemptId)).status, 'ambiguous');
+  });
+
+  it('rejects existing-subscription evidence for another target before reading totals or writing an attempt', async () => {
+    const calls: string[] = [];
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const existingPage = { id: 'existing-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-subscription-wrong-evidence-'));
+    const mutationAttempts = new SubscriptionMutationAttemptStore({ dataDir: tempDir });
+    const keyword = '铝镁合金 拉杆箱';
+    const savedSearchName = '铝镁合金';
+    const conditionFingerprint = hashSubscriptionMutationValue({ version: 1, keyword, conditions: [] });
+    const wrongTarget = buildCoreSavedSearchTarget({
+      platform: '51job',
+      boundJobKey: `subscription-management:${conditionFingerprint}`,
+      bindingRevision: 1,
+      name: savedSearchName,
+      expectedKeyword: '铝镁合金',
+    });
+    const requestedTarget = buildCoreSavedSearchTarget({
+      platform: '51job',
+      boundJobKey: `subscription-management:${conditionFingerprint}`,
+      bindingRevision: 1,
+      name: savedSearchName,
+      expectedKeyword: keyword,
+    });
+    const adapter = Object.assign(buildAdapter({
+      prepareSearchConditionPage: async () => {
+        calls.push('prepare');
+        return rootPage;
+      },
+      readSearchConditionResultTotal: async () => {
+        calls.push('read-total');
+        return { resultTotal: 0, resultTotalSource: 'page' };
+      },
+      saveSearchCondition: async () => {
+        calls.push('save');
+      },
+    }), {
+      inspectExistingSavedSearch: async () => {
+        calls.push('inspect-existing');
+        return {
+          status: 'matched' as const,
+          page: existingPage,
+          target: requestedTarget,
+          evidence: buildSavedSearchOpenEvidence(wrongTarget, {
+            boundJobKey: wrongTarget.boundJobKey,
+            observedName: savedSearchName,
+            observedKeyword: wrongTarget.expectedKeyword,
+          }),
+        };
+      },
+    }) as PlatformAdapter;
+
+    await assert.rejects(
+      () => runSearchSubscriptionWorkflow(adapter, rootPage, {
+        keyword, savedSearchName, conditions: [],
+      }, { save: true, mutationAttempts }),
+      /evidence for another target/i,
+    );
+    assert.deepEqual(calls, ['inspect-existing']);
+    await assert.rejects(
+      () => fs.access(path.join(tempDir, 'maintenance', 'subscription-mutations')),
+      (error: NodeJS.ErrnoException) => error.code === 'ENOENT',
+    );
+  });
+
+  it('preserves a durable confirmed status when a fresh existing-subscription read remains exact', async () => {
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const existingPage = { id: 'existing-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-subscription-confirmed-'));
+    const mutationAttempts = new SubscriptionMutationAttemptStore({ dataDir: tempDir });
+    const keyword = '铝镁合金 拉杆箱';
+    const savedSearchName = '铝镁合金';
+    const conditionFingerprint = hashSubscriptionMutationValue({ version: 1, keyword, conditions: [] });
+    let attempt = await mutationAttempts.prepare({
+      platform: '51job', savedSearchName, expectedKeyword: keyword, conditionFingerprint,
+    });
+    attempt = await mutationAttempts.markDispatching(attempt);
+    attempt = await mutationAttempts.confirm(attempt, buildSubscriptionManagementEvidence({
+      platform: '51job',
+      savedSearchName,
+      expectedKeyword: keyword,
+      conditionFingerprint,
+      postcondition: 'saved-and-verified',
+    }));
+    const target = buildCoreSavedSearchTarget({
+      platform: '51job',
+      boundJobKey: `subscription-management:${conditionFingerprint}`,
+      bindingRevision: 1,
+      name: savedSearchName,
+      expectedKeyword: keyword,
+    });
+    const adapter = Object.assign(buildAdapter({
+      prepareSearchConditionPage: async () => rootPage,
+      readSearchConditionResultTotal: async () => ({ resultTotal: 0, resultTotalSource: 'page' }),
+      saveSearchCondition: async () => {
+        throw new Error('save must not be called');
+      },
+    }), {
+      inspectExistingSavedSearch: async () => ({
+        status: 'matched' as const,
+        page: existingPage,
+        target,
+        evidence: buildSavedSearchOpenEvidence(target, {
+          boundJobKey: target.boundJobKey,
+          observedName: savedSearchName,
+          observedKeyword: keyword,
+        }),
+      }),
+    }) as PlatformAdapter;
+
+    const summary = await runSearchSubscriptionWorkflow(adapter, rootPage, {
+      keyword, savedSearchName, conditions: [],
+    }, { save: true, mutationAttempts });
+
+    assert.equal(summary.mutationAttemptStatus, 'confirmed');
+    assert.equal((await mutationAttempts.read(attempt.attemptId)).status, 'confirmed');
+  });
+
+  it('keeps the normal save path when exact existing-subscription inspection proves absence', async () => {
+    const calls: string[] = [];
+    const rootPage = { id: 'root-page' } as unknown as Page;
+    const searchPage = { id: 'search-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-subscription-existing-absent-'));
+    const keyword = '新关键词';
+    const savedSearchName = '新订阅';
+    const conditionFingerprint = hashSubscriptionMutationValue({ version: 1, keyword, conditions: [] });
+    const target = buildCoreSavedSearchTarget({
+      platform: '51job',
+      boundJobKey: `subscription-management:${conditionFingerprint}`,
+      bindingRevision: 1,
+      name: savedSearchName,
+      expectedKeyword: keyword,
+    });
+    const adapter = Object.assign(buildAdapter({
+      prepareSearchConditionPage: async () => {
+        calls.push('prepare');
+        return searchPage;
+      },
+      readSearchConditionResultTotal: async () => {
+        calls.push('read-total');
+        return { resultTotal: 2, resultTotalSource: 'page' };
+      },
+      saveSearchCondition: async () => {
+        calls.push('save');
+        return {
+          outcome: 'saved' as const,
+          openEvidence: buildSavedSearchOpenEvidence(target, {
+            boundJobKey: target.boundJobKey,
+            observedName: savedSearchName,
+            observedKeyword: keyword,
+          }),
+        };
+      },
+    }), {
+      inspectExistingSavedSearch: async () => {
+        calls.push('inspect-existing');
+        return { status: 'absent' as const, page: rootPage };
+      },
+    }) as PlatformAdapter;
+
+    const summary = await runSearchSubscriptionWorkflow(adapter, rootPage, {
+      keyword, savedSearchName, conditions: [],
+    }, {
+      save: true,
+      mutationAttempts: new SubscriptionMutationAttemptStore({ dataDir: tempDir }),
+    });
+
+    assert.deepEqual(calls, ['inspect-existing', 'prepare', 'read-total', 'save']);
+    assert.equal(summary.saveOutcome, 'saved');
+    assert.equal(summary.mutationAttemptStatus, 'confirmed');
+  });
+
   it('retains the complete Boss saved-search reference returned by saveSearchCondition', async () => {
     const rootPage = { id: 'root-page' } as unknown as Page;
     const searchPage = { id: 'search-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-boss-subscription-attempt-'));
     const savedSearch = {
       version: 1,
       platform: 'boss',
@@ -175,7 +592,10 @@ describe('search subscription workflow', () => {
       keyword: savedSearch.expectedKeyword,
       savedSearchName: savedSearch.name,
       conditions: [],
-    }, { save: true });
+    }, {
+      save: true,
+      mutationAttempts: new SubscriptionMutationAttemptStore({ dataDir: tempDir }),
+    });
 
     assert.deepEqual((summary as unknown as { savedSearch?: unknown }).savedSearch, savedSearch);
   });
@@ -184,6 +604,7 @@ describe('search subscription workflow', () => {
     const calls: string[] = [];
     const rootPage = { id: 'root-page' } as unknown as Page;
     const searchPage = { id: 'search-page' } as unknown as Page;
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-subscription-not-applied-'));
     const adapter = buildAdapter({
       prepareSearchConditionPage: async () => {
         calls.push('prepare');
@@ -205,6 +626,7 @@ describe('search subscription workflow', () => {
         conditions: [{ kind: 'education', value: '本科' }],
       }, {
         save: true,
+        mutationAttempts: new SubscriptionMutationAttemptStore({ dataDir: tempDir }),
       }),
       /not all search conditions were applied/i,
     );

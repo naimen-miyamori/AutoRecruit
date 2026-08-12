@@ -17,6 +17,7 @@ import {
 } from './51job/actions/navigation-actions.js';
 import {
   estimate51jobSearchTimeoutMs,
+  openBound51jobSavedSearch,
   open51jobDirectSearch,
   open51jobSubscribeSearch,
   prepare51jobSearchCondition,
@@ -39,6 +40,7 @@ export const fiftyOneJobAdapter: PlatformAdapter = {
   openAuthenticatedHome: open51jobAuthenticatedHome,
   assertAuthenticated: assert51jobAuthenticated,
   openSubscribeSearch: open51jobSubscribeSearch,
+  openBoundSavedSearch: openBound51jobSavedSearch,
   estimateSearchTimeoutMs: estimate51jobSearchTimeoutMs,
   openDirectSearch: open51jobDirectSearch,
   prepareSearchConditionPage: prepare51jobSearchCondition,

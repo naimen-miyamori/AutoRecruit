@@ -1,6 +1,10 @@
 import type { BrowserSession } from '../browser/session.js';
 import type { JobStore } from '../storage/job-store.js';
-import type { PlatformAdapter, SupportedPlatform } from '../platforms/types.js';
+import type {
+  CoreSavedSearchVerificationRequest,
+  PlatformAdapter,
+  SupportedPlatform,
+} from '../platforms/types.js';
 import type { ExportJobResultsSummary } from '../scripts/export-job-results.js';
 import type {
   SendBossRoutedReportsSummary,
@@ -14,6 +18,7 @@ import type {
   JobRecord,
   NormalizedJob,
   PostScoreRoutingSettings,
+  PlatformSavedSearchOpenEvidence,
   ReportDeliveryOptions,
   RunResult,
 } from '../types/job.js';
@@ -24,12 +29,20 @@ import {
   type MainRunSummary,
 } from './run-summary.js';
 import { preflightPlatformRuntimeManifests } from '../browser/platform-runtime.js';
+import {
+  buildCaptureExecutionPlan,
+  buildPlatformCaptureTargetRequest,
+  resolvePlatformCaptureTarget,
+  type ResolvedPlatformCaptureTarget,
+  type CaptureExecutionPlan,
+} from './capture-targets.js';
 
 export interface ResolvedResumeCaptureContext {
   jobKey: string;
   existingJobRecord?: JobRecord;
   searchSettings: NonNullable<JobRecord['searchSettings']>;
   pageKeyword: string;
+  prospectiveCoreSavedSearchRequest?: CoreSavedSearchVerificationRequest;
   bossJobId?: string;
   searchExecution?: Omit<NonNullable<RunResult['searchExecution']>, 'includeViewedCandidates'>;
 }
@@ -90,10 +103,16 @@ export interface CaptureRunnerDependencies {
       searchSource?: SinglePlatformCliInput['searchSource'];
       searchConditions?: NonNullable<JobRecord['searchSettings']>['conditions'];
       savedSearch?: NonNullable<JobRecord['searchSettings']>['savedSearch'];
+      coreSavedSearchTarget?: NonNullable<JobRecord['searchSettings']>['coreSavedSearchTarget'];
+      coreSavedSearchVerificationRequest?: CoreSavedSearchVerificationRequest;
       sortPolicy?: NonNullable<JobRecord['searchSettings']>['sortPolicy'];
       reportDelivery?: ReportDeliveryOptions;
       secondaryReportDelivery?: ReportDeliveryOptions;
       searchExecution?: ResolvedResumeCaptureContext['searchExecution'];
+      onSavedSearchOpenEvidence?: (
+        evidence: PlatformSavedSearchOpenEvidence,
+        target?: NonNullable<JobRecord['searchSettings']>['coreSavedSearchTarget'],
+      ) => Promise<void>;
       releaseBrowserPhase?: () => Promise<void>;
     },
   ) => Promise<CaptureFlowResult>;
@@ -122,10 +141,9 @@ export async function preflightCaptureRun(
       buildSinglePlatformInput: (input: RunnableJobInput, platform: SupportedPlatform) => SinglePlatformCliInput;
       preflightRuntimes?: (platforms: readonly SupportedPlatform[]) => Promise<void>;
     },
-): Promise<void> {
-  await (dependencies.preflightRuntimes ?? preflightPlatformRuntimeManifests)(platforms);
+): Promise<CaptureExecutionPlan[]> {
   const store = dependencies.createStore();
-  const checks = inputs.flatMap((input) => platforms.map(async (platform) => {
+  const checks = inputs.flatMap((input, inputIndex) => platforms.map(async (platform) => {
     try {
       const platformInput = dependencies.buildSinglePlatformInput(input, platform);
       const context = await dependencies.resolveContext(platformInput, store);
@@ -148,16 +166,25 @@ export async function preflightCaptureRun(
       const delivery = resolveReportDelivery(storedDelivery, platformInput);
       dependencies.assertScreeningPreflight(platform, forwarding, delivery, screening);
       dependencies.assertRoutingPreflight(platform, delivery, routing);
-      return undefined;
+      const target = platform !== 'boss' || platformInput.bossCaptureTaskSnapshot
+        ? resolvePlatformCaptureTarget({
+          request: buildPlatformCaptureTargetRequest(input, platformInput),
+          platformInput,
+          context,
+        })
+        : undefined;
+      return { inputIndex, platform, target };
     } catch (error) {
-      return { keyword: input.searchKeyword, platform, error };
+      return { inputIndex, keyword: input.searchKeyword, platform, error };
     }
   }));
-  const failures = (await Promise.all(checks)).filter((failure): failure is {
+  const checkResults = await Promise.all(checks);
+  const failures = checkResults.filter((failure): failure is {
+    inputIndex: number;
     keyword: string;
     platform: SupportedPlatform;
     error: unknown;
-  } => failure !== undefined);
+  } => 'error' in failure);
 
   if (failures.length > 0) {
     const details = failures.map(({ keyword, platform, error }) => {
@@ -166,6 +193,23 @@ export async function preflightCaptureRun(
     });
     throw new Error(`Capture preflight failed before opening a browser:\n${details.join('\n')}`);
   }
+
+  const plans: CaptureExecutionPlan[] = [];
+  for (let inputIndex = 0; inputIndex < inputs.length; inputIndex += 1) {
+    const targets = checkResults
+      .filter((result): result is { inputIndex: number; platform: SupportedPlatform; target: ResolvedPlatformCaptureTarget } =>
+        !('error' in result) && result.inputIndex === inputIndex && result.target !== undefined)
+      .map((result) => result.target);
+    if (targets.length === platforms.length) {
+      plans.push(buildCaptureExecutionPlan({
+        displayLabel: inputs[inputIndex]!.searchKeyword,
+        platformOrder: platforms,
+        targets,
+      }));
+    }
+  }
+  await (dependencies.preflightRuntimes ?? preflightPlatformRuntimeManifests)(platforms);
+  return plans;
 }
 
 export async function runSinglePlatformCapture(
@@ -228,6 +272,13 @@ export async function runSinglePlatformCapture(
     : {
       jobKey,
       platform: input.platform,
+      ...(input.platform === 'boss' ? {} : {
+        jobIdentity: {
+          version: 1 as const,
+          expectedJobName: input.searchKeyword.normalize('NFKC').replace(/\s+/gu, ' ').trim(),
+          nameAuthority: 'user-confirmed' as const,
+        },
+      }),
       searchKeyword: input.searchKeyword,
       recipientEmail: input.recipientEmail,
       ccEmails: input.ccEmails,
@@ -252,7 +303,7 @@ export async function runSinglePlatformCapture(
     ? storedDelivery
     : delivery;
 
-  const jobRecord: JobRecord = {
+  let jobRecord: JobRecord = {
     ...effectiveJobRecord,
     recipientEmail: persistedDelivery.recipientEmail,
     ccEmails: persistedDelivery.ccEmails,
@@ -262,7 +313,21 @@ export async function runSinglePlatformCapture(
   dependencies.assertRoutingPreflight(input.platform, delivery, postScoreRouting);
 
   if (!input.bossCaptureTaskSnapshot || !existingJobRecord) {
-    await store.saveJobRecord(input.platform, jobRecord);
+    const recordToPersist = !existingJobRecord
+      && input.platform !== 'boss'
+      && jobRecord.searchSettings?.coreSavedSearchTarget
+      ? {
+        ...jobRecord,
+        searchSettings: {
+          ...jobRecord.searchSettings,
+          coreSavedSearchTarget: undefined,
+        },
+      }
+      : jobRecord;
+    await store.saveJobRecord(input.platform, recordToPersist, !existingJobRecord && input.platform !== 'boss'
+      ? { identityWriteAuthority: 'new-capture' }
+      : {});
+    jobRecord = recordToPersist;
   }
 
   if (!dependencies.isExtractionAdapterAvailable()) {
@@ -310,10 +375,37 @@ export async function runSinglePlatformCapture(
         searchSource: searchSettings.source,
         searchConditions: searchSettings.conditions,
         ...(searchSettings.savedSearch ? { savedSearch: searchSettings.savedSearch } : {}),
+        ...(searchSettings.coreSavedSearchTarget
+          ? { coreSavedSearchTarget: searchSettings.coreSavedSearchTarget }
+          : {}),
+        ...(captureContext.prospectiveCoreSavedSearchRequest
+          ? { coreSavedSearchVerificationRequest: captureContext.prospectiveCoreSavedSearchRequest }
+          : {}),
         ...(searchSettings.sortPolicy ? { sortPolicy: searchSettings.sortPolicy } : {}),
         reportDelivery: delivery,
         secondaryReportDelivery: bossScreening?.secondaryDelivery ?? postScoreRouting?.secondaryDelivery,
         searchExecution: captureContext.searchExecution,
+        ...(!existingJobRecord
+          && (searchSettings.coreSavedSearchTarget || captureContext.prospectiveCoreSavedSearchRequest) ? {
+          onSavedSearchOpenEvidence: async (
+            evidence: PlatformSavedSearchOpenEvidence,
+            discoveredTarget?: NonNullable<JobRecord['searchSettings']>['coreSavedSearchTarget'],
+          ) => {
+            const target = searchSettings.coreSavedSearchTarget ?? discoveredTarget;
+            if (!target) {
+              throw new Error('Prospective saved-search verification did not return an executable target.');
+            }
+            if (evidence.targetFingerprint !== target.targetFingerprint) {
+              throw new Error('Prospective saved-search evidence fingerprint does not match the planned target.');
+            }
+            jobRecord = await store.applyJobConfigPatch(
+              input.platform,
+              jobKey,
+              jobRecord.revision ?? 1,
+              { coreSavedSearchTarget: target },
+            );
+          },
+        } : {}),
         releaseBrowserPhase,
       },
     );

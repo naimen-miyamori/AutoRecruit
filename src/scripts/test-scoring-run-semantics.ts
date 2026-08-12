@@ -26,6 +26,12 @@ import { buildBossSyncedJobKey } from '../platforms/boss-jobs.js';
 import { fingerprintSavedSearchConditionIdentity } from '../platforms/boss/saved-search-identity.js';
 import { zhilianAdapter } from '../platforms/zhilian-adapter.js';
 import { SearchConditionSetService } from '../search/search-condition-sets.js';
+import {
+  buildCoreSavedSearchTarget,
+  buildSavedSearchOpenEvidence,
+  buildZhilianNativeSavedSearchOpenEvidence,
+  buildZhilianNativeSavedSearchTarget,
+} from '../search/saved-search-target.js';
 import { hashBossScreeningPolicy } from '../scoring/boss-screening.js';
 import { extractCandidateScoreFromTextResponse } from '../scoring/score-resume.js';
 import { openResumeByUrl } from './capture-resume-dom-snapshot.js';
@@ -903,6 +909,28 @@ function stubSuccessfulRun(indexModule: Awaited<ReturnType<typeof loadIndexModul
     candidates: [{ candidateId: adapter.platform === 'boss' ? 'boss-cand-1' : 'cand-1' }],
   });
   indexModule.openSubscribeSearchRef.fn = (async () => createSearchPage()) as typeof indexModule.openSubscribeSearchRef.fn;
+  indexModule.openBoundSavedSearchRef.fn = (async (adapter, page, target, options) => {
+    const openedPage = 'targetKind' in target
+      ? await adapter.openSubscribeSearch(page, target.expectedKeyword, options)
+      : await adapter.openSavedSearch!(page, target, options);
+    return {
+      page: openedPage,
+      evidence: 'targetKind' in target && target.targetKind === 'zhilian-native-condition'
+        ? buildZhilianNativeSavedSearchOpenEvidence(target, {
+          boundJobKey: options.boundJobKey,
+          observedNativeConditionId: target.nativeConditionId,
+          observedKeyword: target.expectedKeyword,
+          observedConditionFingerprint: target.conditionFingerprint,
+          verifiedAt: '2026-08-11T00:00:00.000Z',
+        })
+        : buildSavedSearchOpenEvidence(target, {
+          boundJobKey: options.boundJobKey,
+          observedName: target.name,
+          observedKeyword: target.expectedKeyword,
+          verifiedAt: '2026-08-11T00:00:00.000Z',
+        }),
+    };
+  }) as typeof indexModule.openBoundSavedSearchRef.fn;
   indexModule.openDirectSearchRef.fn = (async () => createSearchPage()) as NonNullable<typeof indexModule.openDirectSearchRef.fn>;
   indexModule.openResumeDetailRef.fn = (async () => createDetailPage()) as typeof indexModule.openResumeDetailRef.fn;
   indexModule.extractCandidateListRef.fn = async () => ({
@@ -920,6 +948,27 @@ function stubSuccessfulRun(indexModule: Awaited<ReturnType<typeof loadIndexModul
   });
   liepinAdapter.parseResumeDetail = async () => buildResume('cand-1');
   zhilianAdapter.openSubscribeSearch = (async () => createSearchPage()) as typeof zhilianAdapter.openSubscribeSearch;
+  zhilianAdapter.verifySavedSearchTarget = (async (_page, request) => {
+    const target = buildZhilianNativeSavedSearchTarget({
+      boundJobKey: request.boundJobKey,
+      bindingRevision: request.bindingRevision,
+      name: request.name,
+      nativeConditionId: '44303402',
+      expectedKeyword: request.expectedKeyword,
+      conditionFingerprint: 'd'.repeat(64),
+    });
+    return {
+      page: createSearchPage(),
+      target,
+      evidence: buildZhilianNativeSavedSearchOpenEvidence(target, {
+        boundJobKey: request.boundJobKey,
+        observedNativeConditionId: target.nativeConditionId,
+        observedKeyword: target.expectedKeyword,
+        observedConditionFingerprint: target.conditionFingerprint,
+        verifiedAt: '2026-08-11T00:00:00.000Z',
+      }),
+    };
+  }) as NonNullable<typeof zhilianAdapter.verifySavedSearchTarget>;
   zhilianAdapter.openDirectSearch = (async () => createSearchPage()) as NonNullable<typeof zhilianAdapter.openDirectSearch>;
   zhilianAdapter.openResumeDetail = (async () => createDetailPage()) as typeof zhilianAdapter.openResumeDetail;
   zhilianAdapter.extractCandidateList = async () => ({
@@ -1074,6 +1123,56 @@ describe('candidate list readiness', () => {
       { phase: 'open', deadline: 1000 + config.playwright.searchPageTimeoutMs },
       { phase: 'extract', deadline: 1000 + config.playwright.searchPageTimeoutMs },
     ]);
+  });
+
+  it('rejects mismatched strict saved-search evidence before candidate extraction', async () => {
+    const tempDir = await makeIsolatedTempDir();
+    const indexModule = await loadIndexModule(tempDir);
+    const store = new indexModule.JobStore();
+    const jobKey = 'job-strict-evidence-mismatch';
+    const target = buildCoreSavedSearchTarget({
+      platform: '51job',
+      boundJobKey: jobKey,
+      bindingRevision: 1,
+      name: '铝镁合金',
+      expectedKeyword: '铝镁合金 拉杆箱',
+    });
+    const wrongTarget = buildCoreSavedSearchTarget({
+      platform: '51job',
+      boundJobKey: jobKey,
+      bindingRevision: 1,
+      name: '另一订阅',
+      expectedKeyword: '另一关键词',
+    });
+    let extractCalls = 0;
+    indexModule.openBoundSavedSearchRef.fn = (async () => ({
+      page: createSearchPage(),
+      evidence: buildSavedSearchOpenEvidence(wrongTarget, {
+        boundJobKey: jobKey,
+        observedName: wrongTarget.name,
+        observedKeyword: wrongTarget.expectedKeyword,
+      }),
+    })) as typeof indexModule.openBoundSavedSearchRef.fn;
+    indexModule.extractCandidateListWithAdapterRef.fn = async () => {
+      extractCalls += 1;
+      return { candidates: [] };
+    };
+
+    await assert.rejects(
+      () => indexModule.runResumeCaptureFlow(
+        '51job',
+        jobKey,
+        buildNormalizedJob(),
+        target.expectedKeyword,
+        store,
+        { page: createSearchPage(), context: {} } as never,
+        '2026-08-12T00:00:00.000Z',
+        indexModule.resolvePlatformAdapter('51job'),
+        { searchSource: 'saved', coreSavedSearchTarget: target },
+      ),
+      /evidence for another capture target/i,
+    );
+    assert.equal(extractCalls, 0);
   });
 
   it('uses the 51job adapter candidate action for saved and direct capture and stops before all candidate side effects on a stable-result failure', async () => {
@@ -7760,6 +7859,7 @@ describe('scoring run semantics', () => {
     const storedJob = await new indexModule.JobStore().readJobRecord('51job', buildJobKey(keyword, ''));
     assert.deepStrictEqual(storedJob.searchSettings, {
       source: 'direct',
+      pageKeyword: keyword,
       applicationFilterInput: { education: '本科' },
       conditions: directCalls[1]?.conditions,
     });

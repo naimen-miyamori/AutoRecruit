@@ -35,6 +35,7 @@ import {
   openPageLevelSearchRef,
   open51jobDirectSearch,
   open51jobSubscribeSearch,
+  parse51jobAppliedSearchKeywordText,
   prepare51jobSearchCondition,
   read51jobSearchConditionResultTotal,
   savePrepared51jobSearchCondition,
@@ -130,6 +131,18 @@ describe('51job semantic actions', () => {
       24_000 + 3 * stableWindowMs + 11 * pacingUpperBound,
     ));
     assert.ok(directEstimate > savedEstimate);
+  });
+
+  it('parses the full observed saved-search keyword instead of accepting a shorter prefix', () => {
+    const observed = parse51jobAppliedSearchKeywordText(
+      '已选条件 关键词：铝镁合金 拉杆箱 从事职能：包装设计 隐藏已查看',
+    );
+    assert.equal(observed, '铝镁合金 拉杆箱');
+    assert.notEqual(observed, '铝镁合金');
+    assert.equal(
+      parse51jobAppliedSearchKeywordText('已选条件 关键词：铝镁合金 拉杆箱 100228050 在线简历 工作经历'),
+      '铝镁合金 拉杆箱',
+    );
   });
 
   it('skips non-application conditions before attempting page controls', async () => {

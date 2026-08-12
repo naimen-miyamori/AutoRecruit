@@ -1,4 +1,4 @@
-import type { Page } from 'playwright';
+import type { Locator, Page } from 'playwright';
 import {
   clickFirstVisibleSelector,
   clickFirstVisibleText,
@@ -11,6 +11,7 @@ import { clickPlatformLocator, gotoPlatformPage } from '../../../browser/pacing.
 import { config } from '../../../config.js';
 import type { SearchCondition } from '../../../types/job.js';
 import type { PlatformAdapter, SearchWaitOptions } from '../../types.js';
+import { buildCoreSavedSearchTarget } from '../../../search/saved-search-target.js';
 import { apply51jobSearchCondition } from './filter-actions.js';
 import {
   apply51jobViewedCandidatePolicy,
@@ -22,6 +23,15 @@ type DirectSearchOptions = Parameters<NonNullable<PlatformAdapter['openDirectSea
 const talentSearchPageUrl = 'https://ehire.51job.com/Revision/talent/search';
 const subscribePageUrl = 'https://ehire.51job.com/Revision/talent/subscribe';
 const platform = '51job';
+const appliedKeywordInputSelectors = [
+  '.talent_search_keywords_input input.el-input__inner',
+  '.talent_search_keywords_input .el-input__inner',
+];
+const keywordInputSelectors = [
+  ...appliedKeywordInputSelectors,
+  'input[placeholder*="OR"]',
+  'input[placeholder*="关键词"]',
+];
 
 export const openPageLevelSearchRef = { fn: openPageLevelSearch };
 
@@ -35,6 +45,41 @@ function getRemainingTimeout(deadline: number): number {
     throw new Error('51job direct search exceeded the shared search deadline before the next page action.');
   }
   return remaining;
+}
+
+function normalizeObservedKeyword(value: string | null | undefined): string {
+  return (value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
+}
+
+export function parse51jobAppliedSearchKeywordText(pageText: string): string | undefined {
+  const normalizedText = normalizeObservedKeyword(pageText);
+  const match = normalizedText.match(
+    /(?:^|\s)关键词[:：]\s*(.*?)(?=\s+(?:\d{6,}\s+)?(?:从事职能|学历|工作年限|经验|年龄|薪资|现居住地|户口所在地|行业|公司|在线简历|工作经历|教育经历|清空筛选|隐藏已查看|搜索)(?:[:：]|\s|$)|$)/u,
+  );
+  return normalizeObservedKeyword(match?.[1]) || undefined;
+}
+
+export async function read51jobAppliedSearchKeyword(page: Page, deadline: number): Promise<string | undefined> {
+  for (const selector of appliedKeywordInputSelectors) {
+    const input = page.locator(selector).first();
+    const readInputValue = (input as Partial<Pick<Locator, 'inputValue'>>).inputValue?.bind(input);
+    if (!readInputValue) continue;
+    const value = await readInputValue({
+      timeout: Math.min(1000, getRemainingTimeout(deadline)),
+    }).catch(() => '');
+    const normalized = normalizeObservedKeyword(value);
+    if (normalized) return normalized;
+  }
+
+  const body = page.locator('body').first();
+  const readable = body as Partial<Pick<Locator, 'innerText' | 'textContent'>>;
+  const timeout = Math.min(1000, getRemainingTimeout(deadline));
+  const [innerText, textContent] = await Promise.all([
+    readable.innerText?.({ timeout }).catch(() => '') ?? Promise.resolve(''),
+    readable.textContent?.({ timeout }).catch(() => '') ?? Promise.resolve(''),
+  ]);
+  return parse51jobAppliedSearchKeywordText(innerText)
+    ?? parse51jobAppliedSearchKeywordText(textContent ?? '');
 }
 
 function assertSearchNotAborted(options: SearchWaitOptions | undefined): void {
@@ -77,10 +122,7 @@ export async function fill51jobSearchKeyword(
   const deadline = resolveSearchDeadline(options);
   assertSearchNotAborted(options);
   const didFillKeyword = await fillFirstVisibleInput(page, keyword, [
-    '.talent_search_keywords_input input.el-input__inner',
-    '.talent_search_keywords_input .el-input__inner',
-    'input[placeholder*="OR"]',
-    'input[placeholder*="关键词"]',
+    ...keywordInputSelectors,
     'input[type="search"]',
     'input[type="text"]',
   ], Math.min(5000, getRemainingTimeout(deadline)), platform);
@@ -172,6 +214,16 @@ export async function open51jobSubscribeSearch(
   return openSubscribeSearch(...args);
 }
 
+export async function openBound51jobSavedSearch(
+  ...args: Parameters<NonNullable<PlatformAdapter['openBoundSavedSearch']>>
+): Promise<Awaited<ReturnType<NonNullable<PlatformAdapter['openBoundSavedSearch']>>>> {
+  const { openBound51jobSavedSearch: openBound } = await import('../../../browser/subscribe-search.js');
+  if (!('targetKind' in args[1]) || args[1].targetKind !== 'core-exact-name-keyword') {
+    throw new Error('51job requires a core exact-name saved-search target.');
+  }
+  return openBound(args[0], args[1], args[2]);
+}
+
 export async function prepare51jobSearchCondition(
   ...args: Parameters<NonNullable<PlatformAdapter['prepareSearchConditionPage']>>
 ): Promise<Page> {
@@ -186,8 +238,22 @@ export async function read51jobSearchConditionResultTotal(
 
 export async function savePrepared51jobSearchCondition(
   ...args: Parameters<NonNullable<PlatformAdapter['saveSearchCondition']>>
-): Promise<void> {
+): Promise<Awaited<ReturnType<NonNullable<PlatformAdapter['saveSearchCondition']>>>> {
   await save51jobSearchCondition(args[0], args[1]);
+  const context = args[2]?.subscriptionMutationContext;
+  if (!context) return undefined;
+  const target = buildCoreSavedSearchTarget({
+    platform,
+    boundJobKey: `subscription-management:${context.conditionFingerprint}`,
+    bindingRevision: 1,
+    name: args[1],
+    expectedKeyword: context.expectedKeyword,
+  });
+  const opened = await openBound51jobSavedSearch(args[0], target, {
+    ...args[2],
+    boundJobKey: target.boundJobKey,
+  });
+  return { outcome: 'saved', openEvidence: opened.evidence, workPage: opened.page };
 }
 
 export async function open51jobDirectSearch(

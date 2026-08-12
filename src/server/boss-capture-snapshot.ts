@@ -7,6 +7,8 @@ import {
   type ResolvedBossCapturePlan,
   type ResolveBossCapturePlanInput,
 } from '../platforms/boss/capture-plan.js';
+export { hashBossCaptureTaskSnapshot } from '../platforms/boss/capture-snapshot.js';
+import { hashBossCaptureTaskSnapshot } from '../platforms/boss/capture-snapshot.js';
 import type { SearchConditionSetService } from '../search/search-condition-sets.js';
 import { buildApplicationFilterConditions, loadApplicationFilterInputFile } from '../search/search-subscription.js';
 import { createBossCaptureSettingsSnapshot } from '../scoring/boss-screening.js';
@@ -38,26 +40,6 @@ export interface BossCaptureSnapshotOptions {
 
 function selectsBossStage(input: ResumeCaptureTaskInput): boolean {
   return input.platform === 'boss' || (input.platform === 'all' && input.includeBoss === true);
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, nested]) => [key, canonicalize(nested)]));
-  }
-  return value;
-}
-
-/** Hashes immutable task facts; `resolvedAt` is audit metadata, not behavior. */
-export function hashBossCaptureTaskSnapshot(
-  snapshot: Omit<BossCaptureTaskSnapshot, 'snapshotHash'>,
-): string {
-  const { resolvedAt: _resolvedAt, ...behavior } = snapshot;
-  return createHash('sha256')
-    .update(JSON.stringify(canonicalize(behavior)))
-    .digest('hex');
 }
 
 function clone<T>(value: T): T {

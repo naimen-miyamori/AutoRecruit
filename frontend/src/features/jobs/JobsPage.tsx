@@ -11,7 +11,7 @@ export function JobsPage() {
   const [search, setSearch] = useState('');
   const query = useQuery({ queryKey: queryKeys.jobs(platform), queryFn: ({ signal }) => api.listJobs(platform, signal) });
   const jobs = useMemo(() => (query.data?.jobs ?? []).filter((job) => {
-    const haystack = [job.jobKey, job.searchKeyword, job.title, job.location].filter(Boolean).join(' ').toLowerCase();
+    const haystack = [job.jobKey, job.searchKeyword, job.expectedJobName, job.jdTitle, job.savedSearchName, job.pageKeyword, job.location].filter(Boolean).join(' ').toLowerCase();
     return !search.trim() || haystack.includes(search.trim().toLowerCase());
   }), [query.data, search]);
 
@@ -24,7 +24,7 @@ export function JobsPage() {
       </Section>
       {query.isLoading && <Section><LoadingState /></Section>}
       {!query.isLoading && jobs.length === 0 && <Section><EmptyState title="没有岗位记录" description="新岗位首次运行需要 JD 文本或 JD 文件。" /></Section>}
-      <div className="job-list">{jobs.map((job) => <Link className="job-row" to={`/jobs/${encodeURIComponent(job.platform)}/${encodeURIComponent(job.jobKey)}`} key={`${job.platform}-${job.jobKey}`}><div className="job-identity"><span className={`platform-mark platform-${job.platform}`}>{PLATFORM_LABELS[job.platform]}</span><h3>{job.title ?? job.searchKeyword ?? job.jobKey}</h3><p>{job.jobKey} · {job.location ?? '未设置地点'}</p></div><div className="job-stat"><span>运行</span><strong>{job.runCount}</strong></div><div className="job-stat"><span>候选人</span><strong>{job.candidateCount}</strong></div><div className="job-stat"><span>评分</span><strong>{job.scoreCount}</strong></div><div className="job-stat"><span>最近运行</span><strong>{formatCompactDate(job.latestRunAt)}</strong></div></Link>)}</div>
+      <div className="job-list">{jobs.map((job) => <Link className="job-row" to={`/jobs/${encodeURIComponent(job.platform)}/${encodeURIComponent(job.jobKey)}`} key={`${job.platform}-${job.jobKey}`}><div className="job-identity"><span className={`platform-mark platform-${job.platform}`}>{PLATFORM_LABELS[job.platform]}</span><h3>{job.expectedJobName ?? job.searchKeyword ?? job.jobKey}</h3><p>{job.jobKey} · JD：{job.jdTitle ?? '-'} · {job.location ?? '未设置地点'}</p></div><div className="job-stat"><span>运行</span><strong>{job.runCount}</strong></div><div className="job-stat"><span>候选人</span><strong>{job.candidateCount}</strong></div><div className="job-stat"><span>评分</span><strong>{job.scoreCount}</strong></div><div className="job-stat"><span>最近运行</span><strong>{formatCompactDate(job.latestRunAt)}</strong></div></Link>)}</div>
     </div>
   );
 }

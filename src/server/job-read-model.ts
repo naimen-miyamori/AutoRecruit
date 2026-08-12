@@ -6,6 +6,7 @@ import { SUPPORTED_PLATFORMS, type SupportedPlatform } from '../platforms/types.
 import type { SearchFilterCatalog } from '../search/filter-catalog.js';
 import { normalizeFailureMessage, summarizeFailureMessage } from './failure-summary.js';
 import { getRunCapturedCandidateIds } from '../types/job.js';
+import { resolvePlatformJobIdentityView } from '../storage/job-identity.js';
 import type {
   CandidateResume,
   CandidateScoreArtifact,
@@ -568,11 +569,25 @@ export class JobReadModel {
       listJsonFiles(paths.scoresDir),
     ]);
     const latestRun = latestRunResult(runs);
+    const identity = jobRecord ? resolvePlatformJobIdentityView(jobRecord) : undefined;
+    const savedSearchName = jobRecord?.searchSettings?.coreSavedSearchTarget?.name
+      ?? jobRecord?.searchSettings?.savedSearch?.name;
 
     return {
       platform,
       jobKey,
       searchKeyword: jobRecord?.searchKeyword,
+      expectedJobName: identity?.expectedJobName,
+      jobIdentityKind: identity?.kind,
+      ...(identity?.kind === 'persisted' ? {
+        nameAuthority: identity.nameAuthority,
+        ...(identity.nativePositionId ? { nativePositionId: identity.nativePositionId } : {}),
+      } : {}),
+      jdTitle: jobRecord?.normalizedJob.title,
+      savedSearchName,
+      pageKeyword: jobRecord?.searchSettings?.pageKeyword
+        ?? jobRecord?.searchSettings?.coreSavedSearchTarget?.expectedKeyword
+        ?? jobRecord?.searchSettings?.savedSearch?.expectedKeyword,
       title: jobRecord?.normalizedJob.title,
       location: jobRecord?.normalizedJob.location,
       createdAt: jobRecord?.createdAt,

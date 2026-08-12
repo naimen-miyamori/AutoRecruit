@@ -12,6 +12,7 @@ import {
   assertBossSubmittableSearchKeyword,
   prepareBossSearchPage,
   submitBossPreparedSearch,
+  type BossSearchSubmissionReceipt,
 } from './search-actions.js';
 
 const bossUnrestrictedJobName = '不限职位';
@@ -35,11 +36,13 @@ async function assertBossSavedSearchState(
   keyword: string,
   expectedRecentViewed: boolean | undefined,
   deadline: number,
+  submission?: BossSearchSubmissionReceipt,
 ): Promise<void> {
   const state = await snapshotBossSearchFilterState(page, deadline);
   const expectedKeyword = normalizeText(keyword);
-  if (state.keyword !== expectedKeyword) {
-    throw new Error(`Boss saved search keyword was not ready before submit: expected ${expectedKeyword}, observed ${state.keyword || '(empty)'}.`);
+  const actualKeyword = submission?.keyword ?? state.keyword;
+  if (actualKeyword !== expectedKeyword) {
+    throw new Error(`Boss saved search keyword was not ready before submit: expected ${expectedKeyword}, observed ${actualKeyword || '(empty)'}.`);
   }
   if (state.jobScope !== bossUnrestrictedJobName) {
     throw new Error(`Boss saved search job scope was not ready before submit: expected ${bossUnrestrictedJobName}, observed ${state.jobScope || '(empty)'}.`);
@@ -66,8 +69,8 @@ export async function openBossSubscribeSearch(
     ? undefined
     : !options.includeViewedCandidates;
   await assertBossSavedSearchState(searchPage, keyword, expectedRecentViewed, deadline);
-  await submitBossPreparedSearch(searchPage, deadline, options?.signal);
-  await assertBossSavedSearchState(searchPage, keyword, expectedRecentViewed, deadline);
+  const submission = await submitBossPreparedSearch(searchPage, keyword, deadline, options?.signal);
+  await assertBossSavedSearchState(searchPage, keyword, expectedRecentViewed, deadline, submission);
   return searchPage;
 }
 

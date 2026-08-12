@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { chromium } from 'playwright';
 
 import { config } from '../config.js';
 import { zhilianAdapter, zhilianTestExports } from '../platforms/zhilian-adapter.js';
@@ -11,6 +12,11 @@ import {
   readZhilianCandidateProfileDetail,
   requireExactZhilianResumeModal,
 } from '../platforms/zhilian/actions/resume-actions.js';
+import {
+  inspectExistingZhilianSavedSearch,
+  verifyZhilianSavedSearchTarget,
+} from '../platforms/zhilian/actions/search-actions.js';
+import { buildZhilianNativeSavedSearchTarget } from '../search/saved-search-target.js';
 
 const zhilianShareLinkSelector = [
   'input',
@@ -25,6 +31,235 @@ const zhilianShareLinkSelector = [
 ].join(', ');
 
 const zhilianCanonicalResumeModalSelector = '.km-modal__wrapper.new-shortcut-resume__modal';
+
+test('zhilian adapter wires existing inspection and native verification to search actions', () => {
+  assert.equal(zhilianAdapter.inspectExistingSavedSearch, inspectExistingZhilianSavedSearch);
+  assert.equal(zhilianAdapter.verifySavedSearchTarget, verifyZhilianSavedSearchTarget);
+});
+
+test('zhilian saved-search observation preserves the full keyword and rejects prefix equivalence', () => {
+  const bodyText = '快捷搜索 关键词：铝镁合金 拉杆箱 学历要求：大专 未看过';
+  assert.equal(
+    zhilianTestExports.parseExactlyAppliedZhilianQuickSearchKeyword(bodyText),
+    '铝镁合金 拉杆箱',
+  );
+  assert.equal(zhilianTestExports.hasExactlyAppliedZhilianQuickSearchKeyword(bodyText, '铝镁合金'), false);
+  assert.equal(zhilianTestExports.hasExactlyAppliedZhilianQuickSearchKeyword(bodyText, '铝镁合金 拉杆箱'), true);
+});
+
+test('zhilian condition-summary identity requires one exact full-keyword segment', () => {
+  const summary = '广东 | 铝镁合金 拉杆箱 | 大专及以上 | 35岁-46岁 | 近1个月 | 工业设计';
+  assert.equal(
+    zhilianTestExports.zhilianQuickSearchSummaryHasExactKeyword(summary, '铝镁合金 拉杆箱'),
+    true,
+  );
+  assert.equal(
+    zhilianTestExports.zhilianQuickSearchSummaryHasExactKeyword(summary, '铝镁合金'),
+    false,
+  );
+  assert.equal(
+    zhilianTestExports.zhilianQuickSearchSummaryHasExactKeyword(
+      '广东 | 铝镁合金拉杆箱 | 大专及以上',
+      '铝镁合金 拉杆箱',
+    ),
+    false,
+  );
+});
+
+test('zhilian native quick-search conditions have a canonical complete fingerprint', () => {
+  const left = {
+    keywordTagList: [{ value: '铝镁合金 拉杆箱' }],
+    age: { min: 35, max: 46 },
+    city: ['广东'],
+  };
+  const reordered = {
+    city: ['广东'],
+    age: { max: 46, min: 35 },
+    keywordTagList: [{ value: '铝镁合金 拉杆箱' }],
+  };
+  const drifted = {
+    ...reordered,
+    age: { min: 35, max: 45 },
+  };
+  assert.equal(
+    zhilianTestExports.fingerprintZhilianNativeQuickSearchConditions(left),
+    zhilianTestExports.fingerprintZhilianNativeQuickSearchConditions(reordered),
+  );
+  assert.notEqual(
+    zhilianTestExports.fingerprintZhilianNativeQuickSearchConditions(left),
+    zhilianTestExports.fingerprintZhilianNativeQuickSearchConditions(drifted),
+  );
+});
+
+test('zhilian native quick-search parser requires unique native ids and one exact full keyword', () => {
+  const conditions = {
+    keywordTagList: [{ value: '铝镁合金 拉杆箱' }],
+    city: ['广东'],
+  };
+  const parsed = zhilianTestExports.parseZhilianNativeQuickSearchSnapshots([{
+    nativeConditionId: 44303402,
+    conditions,
+    cardSummary: '广东 | 铝镁合金 拉杆箱 | 大专及以上',
+    componentIndex: 0,
+    domIndex: 0,
+  }]);
+  assert.equal(parsed[0]?.nativeConditionId, '44303402');
+  assert.equal(parsed[0]?.expectedKeyword, '铝镁合金 拉杆箱');
+  assert.equal(parsed[0]?.conditionFingerprint,
+    zhilianTestExports.fingerprintZhilianNativeQuickSearchConditions(conditions));
+
+  assert.throws(() => zhilianTestExports.parseZhilianNativeQuickSearchSnapshots([
+    {
+      nativeConditionId: 44303402,
+      conditions,
+      cardSummary: 'first',
+      componentIndex: 0,
+      domIndex: 0,
+    },
+    {
+      nativeConditionId: '44303402',
+      conditions,
+      cardSummary: 'second',
+      componentIndex: 1,
+      domIndex: 1,
+    },
+  ]), /duplicate native condition id/i);
+  assert.throws(() => zhilianTestExports.parseZhilianNativeQuickSearchSnapshots([{
+    nativeConditionId: 44303402,
+    conditions: { keywordTagList: [{ value: '铝镁合金' }, { value: '拉杆箱' }] },
+    cardSummary: 'ambiguous keywords',
+    componentIndex: 0,
+    domIndex: 0,
+  }]), /exactly one keyword/i);
+});
+
+test('zhilian native target resolution fails before click when complete conditions drift', () => {
+  const conditions = {
+    keywordTagList: [{ value: '铝镁合金 拉杆箱' }],
+    age: { min: 35, max: 46 },
+  };
+  const inventory = zhilianTestExports.parseZhilianNativeQuickSearchSnapshots([{
+    nativeConditionId: 44303402,
+    conditions,
+    cardSummary: '广东 | 铝镁合金 拉杆箱',
+    componentIndex: 0,
+    domIndex: 0,
+  }]);
+  const target = buildZhilianNativeSavedSearchTarget({
+    boundJobKey: '铝镁合金',
+    bindingRevision: 1,
+    name: '铝镁合金',
+    nativeConditionId: '44303402',
+    expectedKeyword: '铝镁合金 拉杆箱',
+    conditionFingerprint: zhilianTestExports.fingerprintZhilianNativeQuickSearchConditions({
+      ...conditions,
+      age: { min: 35, max: 45 },
+    }),
+  });
+  assert.throws(
+    () => zhilianTestExports.resolveZhilianNativeQuickSearchCandidate(inventory, target),
+    /condition fingerprint drifted before opening/i,
+  );
+});
+
+test('zhilian native inventory requires one named component and preserves its DOM order', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <section class="search-quick-search-new">
+        <div class="search-quick-search-new__content-item" style="width:320px;height:40px">广东 | 铝镁合金 拉杆箱 | 大专及以上</div>
+        <div class="search-quick-search-new__content-item" style="width:320px;height:40px">上海 | 工业设计 | 本科</div>
+      </section>
+    `);
+    await page.evaluate(() => {
+      const component = {
+        type: { name: 'SearchQuickSearch' },
+        proxy: {
+          quickSearchConditions: [
+            {
+              id: 44303402,
+              conditionObj: {
+                keywordTagList: [{ value: '铝镁合金 拉杆箱' }],
+                city: ['广东'],
+              },
+            },
+            {
+              id: 44303403,
+              conditionObj: {
+                keywordTagList: [{ value: '工业设计' }],
+                city: ['上海'],
+              },
+            },
+          ],
+        },
+      };
+      for (const element of document.querySelectorAll('.search-quick-search-new__content-item')) {
+        Object.assign(element, {
+          __vueParentComponent: { type: { name: 'QuickSearchCard' }, parent: component },
+        });
+      }
+    });
+
+    const inventory = await zhilianTestExports.readZhilianNativeQuickSearchInventory(page);
+    assert.deepEqual(inventory.map((candidate) => ({
+      nativeConditionId: candidate.nativeConditionId,
+      expectedKeyword: candidate.expectedKeyword,
+      componentIndex: candidate.componentIndex,
+      domIndex: candidate.domIndex,
+    })), [
+      { nativeConditionId: '44303402', expectedKeyword: '铝镁合金 拉杆箱', componentIndex: 0, domIndex: 0 },
+      { nativeConditionId: '44303403', expectedKeyword: '工业设计', componentIndex: 1, domIndex: 1 },
+    ]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('zhilian native inventory waits for async quick-search cards after shell readiness', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<section class="search-quick-search-new"></section>');
+    await page.evaluate(() => {
+      window.setTimeout(() => {
+        const section = document.querySelector('.search-quick-search-new');
+        if (!section) return;
+        const card = document.createElement('div');
+        card.className = 'search-quick-search-new__content-item';
+        card.style.width = '320px';
+        card.style.height = '40px';
+        card.textContent = '广东 | 铝镁合金 拉杆箱 | 大专及以上';
+        const component = {
+          type: { name: 'SearchQuickSearch' },
+          proxy: {
+            quickSearchConditions: [{
+              id: 44303402,
+              conditionObj: {
+                keywordTagList: [{ value: '铝镁合金 拉杆箱' }],
+                city: ['广东'],
+              },
+            }],
+          },
+        };
+        Object.assign(card, {
+          __vueParentComponent: { type: { name: 'QuickSearchCard' }, parent: component },
+        });
+        section.appendChild(card);
+      }, 100);
+    });
+
+    const inventory = await zhilianTestExports.waitForZhilianNativeQuickSearchInventory(
+      page,
+      Date.now() + 2_000,
+    );
+    assert.equal(inventory.length, 1);
+    assert.equal(inventory[0]?.nativeConditionId, '44303402');
+    assert.equal(inventory[0]?.expectedKeyword, '铝镁合金 拉杆箱');
+  } finally {
+    await browser.close();
+  }
+});
 
 function restoreGlobalProperty(propertyName: 'window' | 'navigator' | 'document', originalDescriptor: PropertyDescriptor | undefined): void {
   if (originalDescriptor) {
