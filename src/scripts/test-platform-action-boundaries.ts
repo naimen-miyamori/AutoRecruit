@@ -209,6 +209,38 @@ describe('migrated platform action boundaries', () => {
     assert.doesNotMatch(legacyExtractor, /export async function extractCandidateListFromPage\b/);
   });
 
+  it('keeps 51job resume extraction on the in-process parser boundary', async () => {
+    const removedAdapterName = ['crawl', '4ai'].join('');
+    const forbiddenAdapterPattern = new RegExp(removedAdapterName, 'i');
+    const [resumeDetailSource, productionExtractorSource, captureRunnerSource, indexSource] = await Promise.all([
+      readSource('browser/resume-detail.ts'),
+      readSource('extraction/production-extractor.ts'),
+      readSource('mode-runners/capture-runner.ts'),
+      readSource('index.ts'),
+    ]);
+
+    assert.match(resumeDetailSource, /parseResumeFromSource\(source, candidate, domSnapshot\)/);
+    assert.match(productionExtractorSource, /from ['"]\.\/legacy-extractor\.js['"]/);
+    for (const source of [resumeDetailSource, productionExtractorSource, captureRunnerSource, indexSource]) {
+      assert.doesNotMatch(source, forbiddenAdapterPattern);
+      assert.doesNotMatch(source, /isExtractionAdapterAvailable/);
+    }
+
+    await assert.rejects(
+      readSource(`extraction/${removedAdapterName}-extractor.ts`),
+      /ENOENT/,
+    );
+    await assert.rejects(
+      readSource(`scripts/${removedAdapterName}_resume_adapter.py`),
+      /ENOENT/,
+    );
+
+    const packageJson = JSON.parse(await readFile(path.resolve(sourceRoot, '..', 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    assert.equal(packageJson.scripts?.['validate:resumes'], undefined);
+  });
+
   it('keeps 51job search-subscription controls in the platform action owner', async () => {
     const searchAction = await readSource('platforms/51job/actions/search-actions.ts');
     assert.match(searchAction, /export async function openPageLevelSearch\b/);

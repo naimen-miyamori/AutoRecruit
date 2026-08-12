@@ -79,7 +79,6 @@ export interface CaptureRunnerDependencies {
   ) => void;
   readTextFile: (filePath: string) => Promise<string>;
   parseJobDescription: (text: string) => Promise<NormalizedJob>;
-  isExtractionAdapterAvailable: () => boolean;
   acquireBossSearchLease: () => Promise<ReleaseHandle>;
   openSession: (platform: SupportedPlatform) => Promise<BrowserSession>;
   closeSession: (session: BrowserSession) => Promise<void>;
@@ -121,7 +120,6 @@ export interface CaptureRunnerDependencies {
   sendBossRoutedReports: (jobKey: string) => Promise<SendBossRoutedReportsSummary>;
   sendPostScoreRoutedReports: (platform: SupportedPlatform, jobKey: string) => Promise<SendPostScoreRoutedReportsSummary>;
   report: (summary: MainRunSummary) => void;
-  warn: (message: string) => void;
   reportError: (message: string) => void;
   now: () => string;
 }
@@ -328,10 +326,6 @@ export async function runSinglePlatformCapture(
       ? { identityWriteAuthority: 'new-capture' }
       : {});
     jobRecord = recordToPersist;
-  }
-
-  if (!dependencies.isExtractionAdapterAvailable()) {
-    dependencies.warn('Crawl4AI adapter unavailable at startup; continuing with built-in extraction only.');
   }
 
   let bossSearchLease: ReleaseHandle | undefined;

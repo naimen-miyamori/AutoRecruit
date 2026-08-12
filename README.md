@@ -51,6 +51,9 @@ npm run dev -- --platform 51job --keyword "店长" --jd-file ./jd.txt
 - 用于 JD 解析和候选人评分的 OpenAI 兼容 API，或本机已登录的 Codex/ChatGPT 会话
 - 使用持久化 RAG 时可访问 Qdrant；默认还需要本地 embedding 服务
 
+普通候选抓取和简历解析完全在 Node 进程及各平台解析器内完成，不需要 Python 环境；下文
+`.venv` 仅用于可选的本地 RAG embedding 服务。
+
 安装依赖并创建配置：
 
 ```bash

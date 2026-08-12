@@ -6,7 +6,6 @@ import { JobStore } from './storage/job-store.js';
 import { closeBrowserSession, ensureAuthenticatedBrowserSession } from './browser/session.js';
 import { handoffPlatformWorkPage, preflightPlatformRuntimeManifests } from './browser/platform-runtime.js';
 import { runBrowserCliMain } from './browser/cli-lifecycle.js';
-import { isCrawl4aiAdapterAvailable } from './extraction/crawl4ai-extractor.js';
 import { getPlatformAdapter, listCapturePlatforms, listSearchSubscriptionPlatforms, listSupportedPlatforms, parsePlatformArg } from './platforms/registry.js';
 import { acquireBossSearchLease } from './platforms/boss/search-lease.js';
 import { executeBossChatOperation } from './platforms/boss-operations.js';
@@ -1173,7 +1172,6 @@ function createCaptureRunnerDependencies(): CaptureRunnerDependencies {
     assertRoutingPreflight: assertPostScoreRoutingPreflight,
     readTextFile: (filePath) => readFile(filePath, 'utf8'),
     parseJobDescription: (text) => parseJobDescriptionRef.fn(text),
-    isExtractionAdapterAvailable: isCrawl4aiAdapterAvailable,
     acquireBossSearchLease,
     openSession: (platform) => ensureAuthenticatedBrowserSessionRef.fn(platform),
     closeSession: (session) => closeBrowserSessionRef.fn(session),
@@ -1183,7 +1181,6 @@ function createCaptureRunnerDependencies(): CaptureRunnerDependencies {
     sendBossRoutedReports: (jobKey) => sendBossRoutedReportsRef.fn(jobKey),
     sendPostScoreRoutedReports,
     report: (summary) => console.log(JSON.stringify(summary, null, 2)),
-    warn: (message) => console.warn(message),
     reportError: (message) => console.error(message),
     now: () => new Date().toISOString(),
   };

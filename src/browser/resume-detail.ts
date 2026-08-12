@@ -1,7 +1,6 @@
 import { BrowserContext, Frame, Page } from 'playwright';
 import { CandidateListItem, CandidateResume, EducationExperience, LanguageSkill, ProjectExperience, ResumeDomSnapshot, ResumeDomWorkNode, ResumePageEvidence, WorkExperience } from '../types/job.js';
 import { buildRawPageSource } from '../extraction/page-source.js';
-import { extractResumeFromSource as extractResumeFromCrawl4AiSource } from '../extraction/crawl4ai-extractor.js';
 import { config } from '../config.js';
 import { clickPlatformLocator, gotoPlatformPage, waitPlatformActionPace } from './pacing.js';
 
@@ -1914,9 +1913,8 @@ export async function getResumeDomSnapshot(page: Page): Promise<ResumeDomSnapsho
 export async function parseResumeDetail(page: Page, candidate: CandidateListItem): Promise<{ resume: CandidateResume; domSnapshot?: ResumeDomSnapshot }> {
   const domSnapshot = await getResumeDomSnapshot(page);
   const source = await buildRawPageSource(page);
-  const extracted = await extractResumeFromCrawl4AiSource(source, candidate, domSnapshot);
   return {
-    resume: extracted.resume,
-    domSnapshot: extracted.domSnapshot,
+    resume: parseResumeFromSource(source, candidate, domSnapshot),
+    domSnapshot,
   };
 }

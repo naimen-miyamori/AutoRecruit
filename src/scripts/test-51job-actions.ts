@@ -103,6 +103,58 @@ describe('51job semantic actions', () => {
     assert.equal(fiftyOneJobAdapter.readCandidateProfileDetail, read51jobCandidateProfileDetail);
   });
 
+  it('parses 51job resume details with the in-process parser contract', async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <main>
+          <div>在线简历</div>
+          <div>测试候选</div>
+          <div>31岁 上海 本科</div>
+          <div>个人优势</div>
+          <p>擅长零售门店运营</p>
+          <div>工作经历</div>
+          <section>
+            <div>测试零售有限公司</div>
+            <div>门店经理/店长</div>
+            <div>2020.01-2024.06</div>
+            <p>负责门店运营与团队培训</p>
+          </section>
+          <div>教育经历</div>
+          <section>
+            <div>测试大学</div>
+            <div>本科</div>
+            <div>市场营销</div>
+            <div>2016.09-2020.06</div>
+          </section>
+        </main>
+      `);
+
+      const resume = await parse51jobResumeDetail(page, {
+        candidateId: 'candidate-built-in',
+        name: '测试候选',
+        resumeUrl: 'https://fixture.test/resume/candidate-built-in',
+      });
+
+      assert.equal(resume.candidateId, 'candidate-built-in');
+      assert.equal(resume.age, 31);
+      assert.equal(resume.education, '本科');
+      assert.deepEqual(resume.regions, ['上海']);
+      assert.deepEqual(resume.pr, ['擅长零售门店运营']);
+      assert.deepEqual(resume.workExperiences[0], {
+        company: '测试零售有限公司',
+        title: '门店经理/店长',
+        start: '2020.01',
+        end: '2024.06',
+        duration: undefined,
+        details: ['负责门店运营与团队培训'],
+      });
+    } finally {
+      await browser.close();
+    }
+  });
+
   it('preserves the recruiter subscribe URL for login and saved search entry', () => {
     assert.equal(fiftyOneJobLoginUrl, 'https://ehire.51job.com/Revision/talent/subscribe');
     assert.equal(fiftyOneJobSubscribeSearchUrl, fiftyOneJobLoginUrl);

@@ -43,7 +43,6 @@
     "audit:boss-capture-history": "node --import ./scripts/node-ts-hooks.mjs src/scripts/audit-boss-capture-history.ts",
     "start": "node dist/index.js",
     "reparse:resumes": "node --import ./scripts/node-ts-hooks.mjs src/scripts/reparse-resumes.ts",
-    "validate:resumes": "node --import ./scripts/node-ts-hooks.mjs src/scripts/validate-resume-extraction.ts",
     "capture:resume-dom": "node --import ./scripts/node-ts-hooks.mjs src/scripts/capture-resume-dom-snapshot.ts",
     "login:session": "node --import ./scripts/node-ts-hooks.mjs src/scripts/login-and-save-session.ts",
     "runtime:browser": "node --import ./scripts/node-ts-hooks.mjs src/scripts/manage-browser-runtime.ts",

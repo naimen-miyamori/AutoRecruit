@@ -90,8 +90,9 @@ to the matching src/platforms/<platform>/AGENTS.md.
 - src/browser/resume-detail.ts remains the heuristic-heavy 51job extraction fallback. Preserve
   original field text, require page-structure evidence, and never invent histories by splitting
   same-company multi-role records. Validate changes with stored snapshots and offline reparsing.
-- Crawl4AI is optional. The built-in parser remains usable when the local Python environment or
-  Crawl4AI is unavailable.
+- 51job resume parsing stays in-process through the built-in source/DOM parser. Ordinary capture
+  must not require an external Python HTML preprocessor; platform-owned parsers remain authoritative
+  for Liepin, Zhilian, and Boss.
 
 ## Verification
 

@@ -3,9 +3,9 @@ import { extract51jobCandidateList } from '../platforms/51job/actions/candidate-
 import { ExtractionBoundary } from './extractor.js';
 import {
   extractCandidateListFromSource,
+  extractResumeFromSource,
   extractResumeFromPage,
 } from './legacy-extractor.js';
-import { extractResumeFromSource } from './crawl4ai-extractor.js';
 
 /**
  * A retained compatibility boundary for offline tooling. Ordinary capture

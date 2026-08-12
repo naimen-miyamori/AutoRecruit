@@ -1,4 +1,3 @@
-import { extractResumeFromSource as extractResumeFromCrawl4AiSource } from '../extraction/crawl4ai-extractor.js';
 import { buildResumeSourceFromSnapshot, validateResumeExtraction } from '../extraction/extractor.js';
 import { createLegacyExtractionBoundary } from '../extraction/legacy-extractor.js';
 import { getPlatformAdapter, parsePlatformArg } from '../platforms/registry.js';
@@ -56,7 +55,7 @@ async function main(): Promise<void> {
         domSnapshot: snapshot.domSnapshot,
         source,
       })
-      : await extractResumeFromCrawl4AiSource(source, candidate, snapshot.domSnapshot).catch(() => extractionBoundary.extractResumeFromSource(source, candidate, snapshot.domSnapshot));
+      : await extractionBoundary.extractResumeFromSource(source, candidate, snapshot.domSnapshot);
 
     await store.saveCandidateResume(platform, jobKey, {
       ...reparsed.resume,
