@@ -1,6 +1,8 @@
 .env
 .env.local
-docs/
+docs/plan/
+docs/generated/
+docs/design/stitch-artifacts/
 resume-output/
 .venv/
 node_modules/

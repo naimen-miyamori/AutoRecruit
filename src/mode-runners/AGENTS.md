@@ -3,7 +3,9 @@
 ## Scope and Inheritance
 
 These instructions apply to stable business-mode orchestration under `src/mode-runners/`. Apply the
-root `AGENTS.md` and every owning domain document used by a runner.
+root `AGENTS.md` and every owning domain document used by a runner. As applicable, read
+`src/platforms/AGENTS.md`, `src/browser/AGENTS.md`, `src/server/AGENTS.md`, `src/rag/AGENTS.md`, and
+`src/talent-mapping/AGENTS.md`; their domain contracts remain authoritative inside the runner.
 
 ## Ownership and Boundaries
 
@@ -21,22 +23,23 @@ root `AGENTS.md` and every owning domain document used by a runner.
   Raw public input cannot inject execution conditions or targets.
 - Keep irreversible boundaries explicit. Queue admission is not evidence that an external mutation
   completed; preserve identity, confirmation, receipt/outbox, and ambiguous-no-retry contracts.
-- Login-owned platform runtime leases cover only the browser phase. Release the legacy Boss search
-  lease first and the platform runtime lease second after final page cleanup, before ordinary
-  offline scoring, export, report aggregation, or SMTP. The only SMTP overlap is the browser-free
-  Boss rejection-email dispatcher after that exact rejected detail is strictly closed and its
-  immutable routing/outbox evidence is durably read back; the browser producer only enqueues and
-  never awaits delivery. Release the runtime before dispatcher drain and before aggregate-report
-  SMTP. The documented Boss same-detail model wait remains the only exception that retains an open
-  detail during non-browser work.
+- A runner owns phase ordering, not the underlying browser, Boss, or reporting contract. Follow the
+  root and owning scoped documents for lease order, page cleanup, same-detail model waiting, and the
+  sole browser-free rejection-email overlap. Keep ordinary offline work and aggregate SMTP after
+  runtime release; do not restate a second lifecycle policy in this directory.
 - Shared runner context contains explicit, replaceable dependencies only. Do not hide execution
   authority in mutable globals or duplicate public mode semantics outside `src/operation-modes.ts`.
 
-## Migration and Verification
+## Migration
 
 - Move one stable mode or one shared capture owner at a time. Preserve compatibility exports only as
   narrow facades with an explicit removal condition.
+
+## Verification
+
 - Architecture tests must reject raw argv parsing, TaskQueue entry, platform selectors, and private
-  page-action runtime imports from this directory.
-- Run `src/scripts/test-operation-modes.ts`, the owning domain tests, CLI/run-semantics tests, and
-  `npm run typecheck` for every migration; expand to the full suite and build for shared changes.
+  page-action runtime imports from this directory: `src/scripts/test-mode-runner-boundaries.ts`.
+- Public mode classification and CLI/run semantics: `src/scripts/test-operation-modes.ts` and
+  `src/scripts/test-scoring-run-semantics.ts`, plus the owning domain tests.
+- Run `rtk npm run typecheck` for every migration; expand to `rtk npm run test` and
+  `rtk npm run build` for shared changes.

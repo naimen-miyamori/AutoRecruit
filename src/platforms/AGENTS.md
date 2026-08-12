@@ -103,5 +103,5 @@ Every public page action must:
 - Registry/defaults and capture semantics: src/scripts/test-platform-registry.ts and
   src/scripts/test-scoring-run-semantics.ts.
 - Use the matching platform document for focused adapter, filter, Boss, delivery, or action tests.
-- After shared action contracts change, run npm run typecheck, npm run test, npm run build, and
-  git diff --check.
+- After shared action contracts change, run `rtk npm run typecheck`, `rtk npm run test`,
+  `rtk npm run build`, and `rtk git diff --check`.

@@ -107,5 +107,5 @@ when they are affected.
 - Scheduler persistence, time, order, and task restrictions: src/scripts/test-task-scheduler.ts.
 - Shared execution and CLI isolation: src/scripts/test-scoring-run-semantics.ts and the matching
   Boss/Talent Mapping CLI tests.
-- Run npm run typecheck after server contract changes and expand to npm run test and npm run build
-  for shared API, queue, scheduler, or domain-normalizer changes.
+- Run `rtk npm run typecheck` after server contract changes and expand to `rtk npm run test` and
+  `rtk npm run build` for shared API, queue, scheduler, or domain-normalizer changes.

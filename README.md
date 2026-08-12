@@ -1028,6 +1028,9 @@ JD 是解析、评分、问答和 Boss 会话判断的职位依据。首次保�
 npm run typecheck
 npm run test
 npm run build
+npm run docs:check
+npm run agents:check
+npm run plan:check
 npm run web:typecheck
 npm run test:web
 npm run test:talent-mapping
@@ -1050,5 +1053,6 @@ npm run plan:check
 
 ## 进一步阅读
 
+- [文档中心](./docs/README.md)：共享专题、运维、设计和架构资料的导航及权威边界
 - [项目说明文档](./项目说明文档.md)：完整流程、架构、持久化、失败语义和运维说明
 - [AGENTS.md](./AGENTS.md)：面向代码代理的仓库级约束；目录内还有更具体的 scoped instructions

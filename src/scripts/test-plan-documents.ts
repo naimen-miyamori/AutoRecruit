@@ -37,8 +37,10 @@ describe('plan document conventions', () => {
       ]);
       assert.match(index, /2026-07-29-talent-pipeline-plan\.md/);
       assert.match(template, /状态：计划中/);
+      assert.match(template, /docs\/plan\//);
       assert.match(plan, /^> 状态：计划中。/m);
       assert.match(plan, /^> 最近更新：2026-07-29。提交策略：/m);
+      assert.match(plan, /docs\/plan\//);
 
       const validation = await validatePlanDocuments(rootDir);
       assert.equal(validation.valid, true);

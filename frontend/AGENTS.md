@@ -94,7 +94,8 @@ owning domain instructions for screens that expose platform, RAG, Boss, or Talen
 ## Verification
 
 - Frontend API contracts, mutation inputs, query invalidation, task forms, and safety dialogs:
-  src/scripts/test-frontend-client.ts and npm run test:web.
-- Run npm run web:typecheck and npm run web:build while iterating on frontend types or rendering.
-- Run npm run typecheck, npm run test, and npm run build when changing shared API contracts,
-  TaskQueue presentation, or cross-domain frontend behavior.
+  `src/scripts/test-frontend-client.ts` and `rtk npm run test:web`.
+- Run `rtk npm run web:typecheck` and `rtk npm run web:build` while iterating on frontend types or
+  rendering.
+- Run `rtk npm run typecheck`, `rtk npm run test`, and `rtk npm run build` when changing shared API
+  contracts, TaskQueue presentation, or cross-domain frontend behavior.

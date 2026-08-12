@@ -41,7 +41,8 @@ also preserve these contracts; read src/server/AGENTS.md for HTTP, assistant, an
 ## Verification
 
 - Use the matching src/scripts/test-rag-*.ts tests.
-- Common focused checks: npm run test:rag:offline and the documented rag doctor, eval,
+- Common focused checks: `rtk npm run test:rag:offline` and the documented rag doctor, eval,
   answer-eval, and regression commands.
-- Run npm run typecheck after RAG/server contract changes and expand to npm run test and npm run
-  build when persistence, retrieval, answer, or API behavior changes.
+- Run `rtk npm run typecheck` after RAG/server contract changes and expand to
+  `rtk npm run test` and `rtk npm run build` when persistence, retrieval, answer, or API behavior
+  changes.

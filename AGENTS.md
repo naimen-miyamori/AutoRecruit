@@ -51,6 +51,22 @@ duplicating volatile command catalogs, selector inventories, filter field counts
 listings in them or in AGENTS.md; code, schemas, fixtures, and regression tests are the facts for
 those details.
 
+## Screenshot Inspection Isolation
+
+Any screenshot acquisition or visual inspection—including browser screenshots, UI snapshots,
+attached screenshots, and screenshot files—must be delegated to a subagent. The primary agent must
+not inspect the image itself.
+
+The subagent owns capture/opening and visual analysis. The primary agent must not invoke
+screenshot-capture or image-viewing tools, open screenshot files, or request screenshots, crops,
+data URLs, base64, or image-content blocks in the main conversation. Give the subagent only a
+textual filesystem path or opaque artifact reference in a text-only task context. The subagent must
+return text-only findings and must not send any image payload back to the primary agent.
+
+If no subagent is available, wait or report the screenshot inspection as blocked. Never fall back
+to loading the image in the primary conversation context. Text-only DOM, accessibility-tree, log,
+and source inspection remains allowed in the primary context because it carries no image data.
+
 ## Long-Term Project Memory
 
 项目说明文档.md is the durable current-state memory for product, architecture, data semantics,
@@ -69,6 +85,25 @@ logs, selector inventories, and unimplemented plans. Before finishing a qualifyi
 reconcile documentation with implementation, schemas, package.json, .env.example, and regression
 tests.
 
+## Documentation Governance
+
+`docs/README.md` is the shared documentation index. Current topical guidance, authored design
+references, and architecture explanations under `docs/` are version-controlled project assets.
+Local implementation plans and reproducible generated artifacts remain separate:
+
+- `docs/plan/` is local and ignored by Git. Stable outcomes must be reconciled into README.md,
+  项目说明文档.md, or the owning topical document.
+- `docs/generated/` and `docs/design/stitch-artifacts/` are ignored reproducible outputs. Preserve
+  durable design intent in a tracked source document instead of relying on generated files.
+- Presentation aids and dated design reviews must identify themselves as non-authoritative context;
+  they do not override current behavior or contracts.
+- Run `rtk npm run docs:check` after documentation-governance changes. It validates the shared
+  index, local links, referenced npm scripts, runtime-version anchors, and ignore boundaries.
+- `rtk npm run agents:check` recursively discovers every non-generated `AGENTS.md`; each document
+  must be registered, each scoped document must have one scope parent, and all documents must retain
+  required non-empty sections and satisfy separately declared cross-domain reading and verification
+  references.
+
 ## Planning Document Placement
 
 All new implementation, design, remediation, and rollout plans belong in the local docs/plan/
@@ -82,9 +117,10 @@ Validate local placement and metadata with rtk npm run plan:check.
 - New files use YYYY-MM-DD-<kebab-case-topic>-plan.md and state status, last-updated date, and Git
   submission policy at the top.
 - docs/plan/README.md is the local index; the creation command adds each new plan to it.
-- docs/ remains ignored by Git, so plans, the local index, and the local template are not staged or
-  committed by default. If that policy changes, redesign .gitignore and this section together;
-  never mix tracked and untracked plan conventions ad hoc.
+- docs/plan/ remains ignored by Git, so plans, the local index, and the local template are not staged
+  or committed by default. Other authored documents under docs/ are shared and version-controlled.
+  If that policy changes, redesign .gitignore and this section together; never mix tracked and
+  untracked plan conventions ad hoc.
 - A completed plan records decisions and acceptance evidence only. Update README.md and
   项目说明文档.md with stable current behavior; neither document is a plan archive.
 - Existing historical names in docs/plan/ are grandfathered. Every new plan passes the current
@@ -329,7 +365,9 @@ Run verification in proportion to the change. The critical mappings are:
 | RAG behavior | matching src/scripts/test-rag-*.ts tests |
 | HTTP, assistant, and scheduler behavior | src/scripts/test-server-api.ts and src/scripts/test-task-scheduler.ts |
 | Frontend contracts and safety UI | src/scripts/test-frontend-client.ts |
+| Stable mode-runner classification and ownership | src/scripts/test-mode-runner-boundaries.ts and src/scripts/test-operation-modes.ts |
 | AGENTS routing and structure | src/scripts/test-agent-instructions.ts and npm run agents:check |
+| Shared documentation navigation and consistency | src/scripts/test-documentation.ts and npm run docs:check |
 
 Baseline commands:
 

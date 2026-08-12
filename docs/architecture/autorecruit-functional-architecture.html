@@ -1,0 +1,983 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AutoRecruit 功能架构全景</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --ink-2: #3d4860;
+      --muted: #6f7890;
+      --paper: #f5f6f8;
+      --card: #ffffff;
+      --line: #dfe3eb;
+      --line-strong: #c7cedb;
+      --navy: #10192d;
+      --navy-2: #182541;
+      --blue: #315efb;
+      --blue-soft: #e8edff;
+      --cyan: #20a4a8;
+      --cyan-soft: #ddf5f3;
+      --orange: #e9753d;
+      --orange-soft: #fff0e7;
+      --violet: #7656c8;
+      --violet-soft: #f0ebff;
+      --green: #38856c;
+      --green-soft: #e1f3ec;
+      --red: #b7524f;
+      --red-soft: #fbe9e8;
+      --shadow: 0 18px 50px rgba(18, 31, 55, .08);
+      --radius: 22px;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 5% 6%, rgba(49, 94, 251, .08), transparent 22rem),
+        radial-gradient(circle at 94% 16%, rgba(32, 164, 168, .07), transparent 24rem),
+        var(--paper);
+      font-family: var(--sans);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+    a { color: inherit; }
+
+    .scroll-progress {
+      position: fixed;
+      inset: 0 auto auto 0;
+      width: 0;
+      height: 3px;
+      z-index: 100;
+      background: linear-gradient(90deg, var(--blue), #6c79ff, var(--cyan));
+      transition: width .08s linear;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      min-height: 690px;
+      padding: 26px 0 82px;
+      color: #f7f9ff;
+      background:
+        linear-gradient(rgba(255, 255, 255, .035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, .035) 1px, transparent 1px),
+        radial-gradient(circle at 84% 18%, rgba(77, 224, 206, .20), transparent 28rem),
+        radial-gradient(circle at 14% 88%, rgba(70, 101, 255, .24), transparent 28rem),
+        linear-gradient(135deg, #0c1426 0%, #101c34 58%, #12263d 100%);
+      background-size: 32px 32px, 32px 32px, auto, auto, auto;
+    }
+
+    .hero::before,
+    .hero::after {
+      content: "";
+      position: absolute;
+      border: 1px solid rgba(255, 255, 255, .12);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+
+    .hero::before { width: 430px; height: 430px; right: -170px; top: -150px; }
+    .hero::after { width: 220px; height: 220px; right: 16%; bottom: -130px; }
+
+    .shell { width: min(1180px, calc(100% - 40px)); margin-inline: auto; }
+
+    .topbar {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 750; letter-spacing: -.02em; }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      border-radius: 12px;
+      color: white;
+      background: linear-gradient(145deg, #4168ff, #254bdd);
+      box-shadow: inset 0 1px rgba(255,255,255,.32), 0 10px 24px rgba(30, 70, 220, .28);
+      font-size: 13px;
+    }
+
+    .snapshot {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border: 1px solid rgba(255,255,255,.13);
+      border-radius: 999px;
+      background: rgba(255,255,255,.06);
+      color: #cfd8ef;
+      font-size: 12px;
+      backdrop-filter: blur(14px);
+    }
+
+    .snapshot i { width: 7px; height: 7px; border-radius: 50%; background: #4fe0c6; box-shadow: 0 0 0 4px rgba(79,224,198,.12); }
+
+    .hero-grid {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: minmax(0, 1.26fr) minmax(360px, .74fr);
+      gap: 56px;
+      align-items: center;
+      padding-top: 94px;
+    }
+
+    .kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      color: #8de7d9;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+
+    .kicker::before { content: ""; width: 28px; height: 1px; background: currentColor; }
+    h1 { max-width: 720px; margin: 19px 0 22px; font-size: clamp(46px, 5.2vw, 70px); line-height: 1.04; letter-spacing: -.055em; }
+    .hero-lead { max-width: 680px; margin: 0; color: #bfc9de; font-size: clamp(16px, 1.8vw, 20px); line-height: 1.78; }
+    .hero-lead strong { color: #fff; font-weight: 650; }
+
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 34px; }
+    .hero-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 44px;
+      padding: 0 17px;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 13px;
+      color: #dce5f7;
+      background: rgba(255,255,255,.055);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 700;
+      transition: .2s ease;
+      backdrop-filter: blur(12px);
+    }
+
+    .hero-link.primary { color: #101a30; background: #fff; border-color: #fff; }
+    .hero-link:hover { transform: translateY(-2px); border-color: rgba(255,255,255,.35); }
+    .hero-link span { font-size: 17px; line-height: 1; }
+
+    .hero-panel {
+      position: relative;
+      padding: 24px;
+      border: 1px solid rgba(255,255,255,.13);
+      border-radius: 26px;
+      background: linear-gradient(145deg, rgba(255,255,255,.09), rgba(255,255,255,.035));
+      box-shadow: 0 30px 80px rgba(0,0,0,.24);
+      backdrop-filter: blur(18px);
+    }
+
+    .hero-panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; color: #d8e0f0; font-size: 13px; font-weight: 700; }
+    .hero-panel-head span:last-child { color: #7f8ba4; font-family: var(--mono); font-size: 11px; font-weight: 500; }
+    .signal-flow { display: grid; gap: 11px; }
+    .signal-node {
+      display: grid;
+      grid-template-columns: 42px 1fr auto;
+      align-items: center;
+      gap: 13px;
+      min-height: 66px;
+      padding: 10px 13px;
+      border: 1px solid rgba(255,255,255,.085);
+      border-radius: 16px;
+      background: rgba(8, 15, 29, .34);
+    }
+
+    .signal-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px; font-family: var(--mono); font-size: 12px; font-weight: 800; }
+    .signal-node:nth-child(1) .signal-icon { color: #b8c7ff; background: rgba(82,112,255,.18); }
+    .signal-node:nth-child(2) .signal-icon { color: #8be3d9; background: rgba(38,184,177,.15); }
+    .signal-node:nth-child(3) .signal-icon { color: #ffc29f; background: rgba(235,117,61,.16); }
+    .signal-node:nth-child(4) .signal-icon { color: #d2c3ff; background: rgba(132,99,218,.17); }
+    .signal-node:nth-child(5) .signal-icon { color: #a3e4cb; background: rgba(61,145,112,.17); }
+    .signal-copy strong { display: block; color: #f7f9ff; font-size: 13px; }
+    .signal-copy small { display: block; margin-top: 2px; color: #8f9bb2; font-size: 11px; }
+    .signal-arrow { color: #67738c; font-size: 18px; }
+
+    .stat-strip {
+      position: relative;
+      z-index: 3;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      margin-top: -52px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgba(255,255,255,.93);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .stat { padding: 23px 26px; border-right: 1px solid var(--line); }
+    .stat:last-child { border-right: 0; }
+    .stat strong { display: block; color: var(--navy); font-size: 30px; line-height: 1.1; letter-spacing: -.04em; }
+    .stat span { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; }
+
+    .section { scroll-margin-top: 80px; padding: 96px 0 0; }
+    .section-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 460px); gap: 50px; align-items: end; margin-bottom: 34px; }
+    .eyebrow { margin: 0 0 10px; color: var(--blue); font-size: 11px; font-weight: 850; letter-spacing: .16em; text-transform: uppercase; }
+    h2 { margin: 0; color: var(--navy); font-size: clamp(30px, 4vw, 48px); line-height: 1.14; letter-spacing: -.045em; }
+    .section-intro { margin: 0; color: var(--muted); font-size: 15px; }
+
+    .reading-nav {
+      position: sticky;
+      top: 14px;
+      z-index: 20;
+      display: flex;
+      width: fit-content;
+      max-width: calc(100% - 28px);
+      margin: 20px auto 0;
+      padding: 5px;
+      overflow-x: auto;
+      border: 1px solid rgba(199,206,219,.85);
+      border-radius: 15px;
+      background: rgba(255,255,255,.87);
+      box-shadow: 0 10px 30px rgba(21,32,53,.08);
+      backdrop-filter: blur(16px);
+    }
+
+    .reading-nav a { flex: 0 0 auto; padding: 8px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 700; }
+    .reading-nav a:hover, .reading-nav a.active { color: var(--navy); background: #edf0f7; }
+
+    .architecture-map {
+      position: relative;
+      display: grid;
+      gap: 13px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      background: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .arch-row {
+      display: grid;
+      grid-template-columns: 142px minmax(0, 1fr);
+      gap: 16px;
+      align-items: stretch;
+    }
+
+    .arch-label {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 105px;
+      padding: 18px;
+      border-radius: 18px;
+      color: white;
+      background: var(--navy);
+    }
+
+    .arch-label small { color: #8e9bb4; font-family: var(--mono); font-size: 10px; letter-spacing: .1em; }
+    .arch-label strong { margin-top: 4px; font-size: 15px; }
+    .arch-cells { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+    .arch-cells.six { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .arch-cell {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 105px;
+      padding: 17px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fafbfc;
+      transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+    }
+
+    .arch-cell:hover { transform: translateY(-2px); border-color: var(--line-strong); box-shadow: 0 10px 25px rgba(22,33,54,.07); }
+    .arch-cell::after { content: ""; position: absolute; inset: auto -24px -32px auto; width: 72px; height: 72px; border-radius: 50%; opacity: .6; }
+    .arch-cell.blue::after { background: var(--blue-soft); }
+    .arch-cell.cyan::after { background: var(--cyan-soft); }
+    .arch-cell.orange::after { background: var(--orange-soft); }
+    .arch-cell.violet::after { background: var(--violet-soft); }
+    .arch-cell.green::after { background: var(--green-soft); }
+    .arch-cell strong { position: relative; z-index: 1; font-size: 13px; }
+    .arch-cell small { position: relative; z-index: 1; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .arch-cell code { position: relative; z-index: 1; margin-top: 7px; color: #53607b; font-family: var(--mono); font-size: 9px; }
+    .arch-connector { display: grid; grid-template-columns: 142px 1fr; gap: 16px; height: 18px; }
+    .arch-connector span:last-child { position: relative; }
+    .arch-connector span:last-child::before { content: ""; position: absolute; left: 50%; top: -4px; width: 1px; height: 18px; background: var(--line-strong); }
+    .arch-connector span:last-child::after { content: ""; position: absolute; left: calc(50% - 4px); bottom: 0; width: 7px; height: 7px; border-right: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); transform: rotate(45deg); }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 18px 4px 0; color: var(--muted); font-size: 11px; }
+    .legend span { display: inline-flex; align-items: center; gap: 7px; }
+    .legend i { width: 9px; height: 9px; border-radius: 3px; }
+
+    .domain-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+    .domain-card {
+      grid-column: span 4;
+      position: relative;
+      min-height: 245px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: white;
+      box-shadow: 0 8px 24px rgba(20,31,52,.035);
+    }
+    .domain-card.wide { grid-column: span 6; }
+    .domain-card.hero-domain { grid-column: span 8; color: white; border-color: transparent; background: linear-gradient(145deg, var(--navy), var(--navy-2)); }
+    .domain-number { color: var(--blue); font-family: var(--mono); font-size: 11px; font-weight: 700; }
+    .hero-domain .domain-number { color: #8de7d9; }
+    .domain-card h3 { margin: 14px 0 9px; font-size: 19px; letter-spacing: -.025em; }
+    .domain-card p { margin: 0; color: var(--muted); font-size: 13px; }
+    .hero-domain p { color: #aebad0; }
+    .domain-tags { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 20px; }
+    .domain-tags span { padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; color: #59647a; background: #f8f9fb; font-family: var(--mono); font-size: 9px; }
+    .hero-domain .domain-tags span { color: #bec9dd; border-color: rgba(255,255,255,.12); background: rgba(255,255,255,.055); }
+
+    .flow-wrap { overflow-x: auto; padding: 4px 2px 18px; }
+    .flow { display: grid; grid-template-columns: repeat(9, minmax(145px, 1fr)); min-width: 1380px; align-items: stretch; }
+    .flow-step { position: relative; padding-right: 22px; }
+    .flow-step:not(:last-child)::after { content: ""; position: absolute; right: 3px; top: 33px; width: 17px; height: 1px; background: var(--line-strong); }
+    .flow-step:not(:last-child)::before { content: ""; position: absolute; right: 3px; top: 30px; width: 6px; height: 6px; border-right: 1px solid var(--line-strong); border-top: 1px solid var(--line-strong); transform: rotate(45deg); }
+    .step-card { height: 100%; min-height: 188px; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: white; }
+    .step-index { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 15px; border-radius: 10px; color: white; background: var(--blue); font-family: var(--mono); font-size: 11px; font-weight: 800; }
+    .flow-step:nth-child(3n+2) .step-index { background: var(--cyan); }
+    .flow-step:nth-child(3n+3) .step-index { background: var(--orange); }
+    .step-card strong { display: block; font-size: 13px; }
+    .step-card p { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .step-card code { display: block; margin-top: 12px; color: #66718a; font-family: var(--mono); font-size: 9px; }
+
+    .semantics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+    .semantic { padding: 18px; border-radius: 16px; background: #e9edf5; }
+    .semantic strong { display: block; font-size: 12px; }
+    .semantic p { margin: 6px 0 0; color: var(--ink-2); font-size: 11px; }
+    .semantic.success { background: var(--green-soft); }
+    .semantic.retry { background: var(--orange-soft); }
+    .semantic.fail { background: var(--red-soft); }
+    .semantic.neutral { background: var(--blue-soft); }
+
+    .mode-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: white;
+    }
+    .mode-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+    .filter-btn { padding: 7px 11px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; font-size: 11px; font-weight: 750; }
+    .filter-btn:hover, .filter-btn.active { color: var(--navy); background: #edf0f6; }
+    .mode-count { padding-right: 8px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .mode-count strong { color: var(--navy); }
+    .mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .mode-card { display: flex; flex-direction: column; min-height: 216px; padding: 20px; border: 1px solid var(--line); border-radius: 18px; background: white; transition: .18s ease; }
+    .mode-card:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(23,32,51,.07); }
+    .mode-head { display: flex; justify-content: space-between; gap: 12px; }
+    .mode-group { color: var(--blue); font-size: 10px; font-weight: 800; letter-spacing: .08em; }
+    .mode-source { padding: 3px 7px; border-radius: 7px; color: #53607a; background: #edf0f6; font-family: var(--mono); font-size: 9px; }
+    .mode-card h3 { margin: 10px 0 3px; font-size: 16px; }
+    .mode-id { color: var(--muted); font-family: var(--mono); font-size: 9px; }
+    .mode-card p { flex: 1; margin: 13px 0 15px; color: var(--ink-2); font-size: 11px; }
+    .surface-list { display: flex; flex-wrap: wrap; gap: 5px; }
+    .surface { padding: 4px 7px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: #fafbfc; font-size: 9px; }
+    .surface.schedule { color: #705420; border-color: #f1dfb7; background: #fff7e7; }
+
+    .platform-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 13px; }
+    .platform-card { position: relative; overflow: hidden; min-height: 354px; padding: 23px; border: 1px solid var(--line); border-radius: 22px; background: white; }
+    .platform-card::before { content: ""; position: absolute; inset: 0 0 auto; height: 4px; background: var(--blue); }
+    .platform-card:nth-child(2)::before { background: var(--orange); }
+    .platform-card:nth-child(3)::before { background: var(--cyan); }
+    .platform-card:nth-child(4)::before { background: var(--violet); }
+    .platform-chip { display: inline-flex; padding: 5px 8px; border-radius: 8px; color: var(--blue); background: var(--blue-soft); font-family: var(--mono); font-size: 9px; font-weight: 800; }
+    .platform-card:nth-child(2) .platform-chip { color: var(--orange); background: var(--orange-soft); }
+    .platform-card:nth-child(3) .platform-chip { color: var(--cyan); background: var(--cyan-soft); }
+    .platform-card:nth-child(4) .platform-chip { color: var(--violet); background: var(--violet-soft); }
+    .platform-card h3 { margin: 14px 0 4px; font-size: 20px; }
+    .platform-role { color: var(--muted); font-size: 11px; }
+    .platform-card ul { margin: 19px 0 0; padding: 0; list-style: none; }
+    .platform-card li { position: relative; padding: 9px 0 9px 16px; border-top: 1px solid #edf0f5; color: var(--ink-2); font-size: 11px; }
+    .platform-card li::before { content: ""; position: absolute; left: 0; top: 17px; width: 6px; height: 6px; border-radius: 2px; background: var(--line-strong); }
+    .platform-note { margin-top: 15px; padding: 10px 12px; border-radius: 10px; color: #5b657b; background: #f2f4f8; font-size: 10px; }
+
+    .order-banner { display: grid; grid-template-columns: auto 1fr auto 1fr auto 1fr auto; align-items: center; gap: 13px; margin-bottom: 18px; padding: 17px 20px; border: 1px solid #cfd8fa; border-radius: 17px; background: var(--blue-soft); }
+    .order-node { padding: 7px 10px; border-radius: 9px; color: white; background: var(--blue); font-family: var(--mono); font-size: 10px; font-weight: 800; white-space: nowrap; }
+    .order-node.optional { color: var(--violet); background: white; border: 1px dashed #a996e0; }
+    .order-line { height: 1px; background: #aab8e8; }
+
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .panel { padding: 26px; border: 1px solid var(--line); border-radius: 22px; background: white; }
+    .panel.dark { color: white; border-color: transparent; background: linear-gradient(145deg, var(--navy), #172640); }
+    .panel h3 { margin: 0 0 8px; font-size: 18px; }
+    .panel > p { margin: 0 0 20px; color: var(--muted); font-size: 12px; }
+    .panel.dark > p { color: #9eabc3; }
+    .data-tree { display: grid; gap: 9px; font-family: var(--mono); font-size: 10px; }
+    .tree-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 9px 11px; border-radius: 10px; color: #c4cee1; background: rgba(255,255,255,.05); }
+    .tree-row b { color: #91e2d5; font-weight: 600; }
+    .tree-row small { color: #77849e; font-family: var(--sans); font-size: 9px; }
+    .tree-indent-1 { padding-left: 22px; }
+    .tree-indent-2 { padding-left: 42px; }
+    .source-badge { display: inline-flex; align-items: center; gap: 7px; margin-top: 18px; padding: 7px 10px; border: 1px solid rgba(255,255,255,.1); border-radius: 9px; color: #b9c5da; font-size: 10px; }
+    .source-badge i { width: 7px; height: 7px; border-radius: 50%; background: #4dd0b5; }
+
+    .data-rule { display: grid; grid-template-columns: 38px 1fr; gap: 13px; padding: 14px 0; border-top: 1px solid var(--line); }
+    .data-rule:first-of-type { border-top: 0; }
+    .rule-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; color: var(--blue); background: var(--blue-soft); font-family: var(--mono); font-size: 10px; font-weight: 800; }
+    .data-rule strong { display: block; font-size: 12px; }
+    .data-rule p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+
+    .console-stack { display: grid; grid-template-columns: 1.08fr 32px 1fr 32px 1.08fr; align-items: stretch; }
+    .stack-column { padding: 21px; border: 1px solid var(--line); border-radius: 20px; background: white; }
+    .stack-column h3 { margin: 0 0 14px; font-size: 15px; }
+    .stack-items { display: grid; gap: 7px; }
+    .stack-item { padding: 10px 11px; border-radius: 10px; color: var(--ink-2); background: #f3f5f8; font-size: 10px; }
+    .stack-item code { display: block; margin-top: 3px; color: var(--muted); font-family: var(--mono); font-size: 8px; }
+    .stack-arrow { display: grid; place-items: center; color: var(--line-strong); font-size: 22px; }
+    .queue-note { margin-top: 15px; padding: 13px 15px; border-left: 3px solid var(--cyan); border-radius: 0 11px 11px 0; color: var(--ink-2); background: var(--cyan-soft); font-size: 11px; }
+
+    .audit-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
+    .audit-card { padding: 23px; border: 1px solid var(--line); border-radius: 20px; background: white; }
+    .audit-card.alert { border-color: #f1c4be; background: #fffaf9; }
+    .audit-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; color: var(--green); background: var(--green-soft); font-family: var(--mono); font-size: 11px; font-weight: 800; }
+    .audit-card.debt .audit-mark { color: var(--orange); background: var(--orange-soft); }
+    .audit-card.alert .audit-mark { color: var(--red); background: var(--red-soft); }
+    .audit-card h3 { margin: 14px 0 7px; font-size: 15px; }
+    .audit-card p { margin: 0; color: var(--muted); font-size: 11px; }
+    .audit-card code { display: inline; color: #4f5b74; font-family: var(--mono); font-size: 9px; }
+
+    details.code-index { margin-top: 18px; border: 1px solid var(--line); border-radius: 18px; background: white; }
+    details.code-index summary { padding: 17px 20px; cursor: pointer; font-size: 12px; font-weight: 800; }
+    .code-table { display: grid; grid-template-columns: 1fr 1.5fr 1.4fr; border-top: 1px solid var(--line); }
+    .code-table > div { padding: 12px 16px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--ink-2); font-size: 10px; }
+    .code-table > div:nth-child(3n) { border-right: 0; }
+    .code-table .th { color: var(--muted); background: #f7f8fa; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .code-table code { color: #3e4b66; font-family: var(--mono); font-size: 9px; }
+
+    .footer { margin-top: 100px; padding: 42px 0 55px; color: #9da8bd; background: var(--navy); }
+    .footer-grid { display: grid; grid-template-columns: 1fr auto; gap: 30px; align-items: end; }
+    .footer strong { display: block; color: white; font-size: 17px; }
+    .footer p { max-width: 760px; margin: 8px 0 0; font-size: 11px; }
+    .footer-meta { text-align: right; font-family: var(--mono); font-size: 9px; line-height: 1.8; }
+
+    @media (max-width: 1000px) {
+      .hero-grid { grid-template-columns: 1fr; gap: 42px; padding-top: 70px; }
+      .hero-panel { max-width: 700px; }
+      .section-head { grid-template-columns: 1fr; gap: 18px; }
+      .arch-cells.six { grid-template-columns: repeat(3, 1fr); }
+      .domain-card, .domain-card.wide { grid-column: span 6; }
+      .domain-card.hero-domain { grid-column: span 12; }
+      .mode-grid { grid-template-columns: repeat(2, 1fr); }
+      .platform-grid { grid-template-columns: repeat(2, 1fr); }
+      .semantics-grid { grid-template-columns: repeat(2, 1fr); }
+      .console-stack { grid-template-columns: 1fr; gap: 9px; }
+      .stack-arrow { transform: rotate(90deg); }
+      .audit-grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    @media (max-width: 700px) {
+      .shell { width: min(100% - 26px, 1180px); }
+      .topbar { align-items: flex-start; }
+      .snapshot { max-width: 170px; border-radius: 12px; line-height: 1.4; }
+      .hero { min-height: auto; padding-bottom: 78px; }
+      .hero-grid { padding-top: 58px; }
+      h1 { font-size: 44px; }
+      .hero-panel { padding: 16px; }
+      .stat-strip { grid-template-columns: 1fr 1fr; }
+      .stat:nth-child(2) { border-right: 0; }
+      .stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .stat { padding: 18px; }
+      .section { padding-top: 72px; }
+      .reading-nav { justify-content: flex-start; margin-inline: 13px; max-width: calc(100% - 26px); }
+      .architecture-map { padding: 13px; }
+      .arch-row { grid-template-columns: 1fr; }
+      .arch-label { min-height: auto; }
+      .arch-cells, .arch-cells.six { grid-template-columns: 1fr 1fr; }
+      .arch-connector { grid-template-columns: 1fr; }
+      .arch-connector span:first-child { display: none; }
+      .domain-card, .domain-card.wide, .domain-card.hero-domain { grid-column: span 12; }
+      .mode-toolbar { align-items: flex-start; flex-direction: column; }
+      .mode-grid { grid-template-columns: 1fr; }
+      .platform-grid, .split, .audit-grid { grid-template-columns: 1fr; }
+      .order-banner { grid-template-columns: 1fr; justify-items: start; }
+      .order-line { width: 1px; height: 17px; margin-left: 20px; }
+      .semantics-grid { grid-template-columns: 1fr; }
+      .code-table { grid-template-columns: 1fr; }
+      .code-table > div { border-right: 0; }
+      .code-table .th:not(:first-child) { display: none; }
+      .footer-grid { grid-template-columns: 1fr; }
+      .footer-meta { text-align: left; }
+    }
+
+    @media print {
+      .reading-nav, .scroll-progress, .hero-actions, .mode-toolbar { display: none !important; }
+      .hero { min-height: auto; color: var(--ink); background: white; }
+      .hero-lead, .signal-copy small { color: var(--ink-2); }
+      .hero-panel, .signal-node { color: var(--ink); border-color: var(--line); background: white; box-shadow: none; }
+      .signal-copy strong { color: var(--ink); }
+      .stat-strip, .architecture-map, .domain-card, .panel, .audit-card { box-shadow: none; }
+      .section { break-inside: avoid; padding-top: 42px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="scroll-progress" id="scrollProgress"></div>
+
+  <header class="hero" id="top">
+    <div class="shell">
+      <div class="topbar">
+        <div class="brand"><span class="brand-mark">AR</span><span>AutoRecruit Architecture</span></div>
+        <div class="snapshot"><i></i><span>代码快照 · 2026-08-08</span></div>
+      </div>
+
+      <div class="hero-grid">
+        <div>
+          <div class="kicker">Functional architecture map</div>
+          <h1>招聘自动化，<br>不只是一条抓取链路</h1>
+          <p class="hero-lead">
+            AutoRecruit 是一个 <strong>CLI-first、本地优先</strong> 的招聘运营系统：以统一业务模式为入口，
+            通过证据驱动的状态转换与串行任务队列编排四个平台自动化，并把普通抓取、人才地图、Boss 专属操作与 RAG 知识链路隔离管理。
+          </p>
+          <div class="hero-actions">
+            <a class="hero-link primary" href="#architecture"><span>↓</span> 先看总架构</a>
+            <a class="hero-link" href="#flow">普通抓取链路</a>
+            <a class="hero-link" href="#audit">架构判断</a>
+          </div>
+        </div>
+
+        <div class="hero-panel" aria-label="系统主信号流">
+          <div class="hero-panel-head"><span>主信号流</span><span>LOCAL-FIRST / SERIAL</span></div>
+          <div class="signal-flow">
+            <div class="signal-node"><span class="signal-icon">IN</span><span class="signal-copy"><strong>CLI · 控制台 · 助手 · 调度</strong><small>四类运行入口，共享模式语义</small></span><span class="signal-arrow">↓</span></div>
+            <div class="signal-node"><span class="signal-icon">CTL</span><span class="signal-copy"><strong>规范化 · 预检 · TaskQueue</strong><small>raw / safe / executable、确认、快照与失败策略</small></span><span class="signal-arrow">↓</span></div>
+            <div class="signal-node"><span class="signal-icon">DOM</span><span class="signal-copy"><strong>业务域工作流</strong><small>抓取 / Mapping / Boss / RAG / 订阅管理</small></span><span class="signal-arrow">↓</span></div>
+            <div class="signal-node"><span class="signal-icon">ADP</span><span class="signal-copy"><strong>PlatformAdapter + 语义动作</strong><small>51job · Liepin · Zhilian · Boss</small></span><span class="signal-arrow">↓</span></div>
+            <div class="signal-node"><span class="signal-icon">DAT</span><span class="signal-copy"><strong>JSON / JSONL 权威事实</strong><small>报告、回执、审计与可重建索引</small></span><span class="signal-arrow">✓</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <div class="stat-strip" aria-label="项目架构摘要">
+      <div class="stat"><strong>4</strong><span>招聘平台适配器</span></div>
+      <div class="stat"><strong>14</strong><span>稳定公共业务模式</span></div>
+      <div class="stat"><strong>4</strong><span>运行表面：CLI / 手动 / 助手 / 调度</span></div>
+      <div class="stat"><strong>1×</strong><span>串行任务执行槽，保护浏览器与外部动作</span></div>
+    </div>
+  </div>
+
+  <nav class="reading-nav" aria-label="架构章节导航">
+    <a href="#architecture">总架构</a>
+    <a href="#domains">功能域</a>
+    <a href="#flow">抓取链路</a>
+    <a href="#modes">运行模式</a>
+    <a href="#platforms">平台边界</a>
+    <a href="#data">数据</a>
+    <a href="#console">控制台</a>
+    <a href="#audit">判断</a>
+  </nav>
+
+  <main>
+    <section class="section shell" id="architecture">
+      <div class="section-head">
+        <div><p class="eyebrow">01 · System landscape</p><h2>五层架构，一套运行语义</h2></div>
+        <p class="section-intro">系统的核心不是页面 selector，而是“业务模式 → 受控编排 → 领域工作流 → 平台语义动作 → 权威事实”的分层。每一层都有明确的输入、失败语义和数据责任。</p>
+      </div>
+
+      <div class="architecture-map">
+        <div class="arch-row">
+          <div class="arch-label"><small>LAYER 01</small><strong>入口与体验层</strong></div>
+          <div class="arch-cells">
+            <div class="arch-cell blue"><strong>CLI</strong><small>明确参数与 mode-id，适合脚本化运行</small><code>src/index.ts</code></div>
+            <div class="arch-cell blue"><strong>React 运营台</strong><small>任务、岗位、Mapping、Boss、RAG、诊断</small><code>frontend/</code></div>
+            <div class="arch-cell blue"><strong>智能助手</strong><small>自然语言只生成结构化草稿，确认后入队</small><code>cli-assistant.ts</code></div>
+            <div class="arch-cell blue"><strong>循环调度</strong><small>时间窗、租约、safe read、轮次与停止控制</small><code>task-scheduler.ts</code></div>
+          </div>
+        </div>
+        <div class="arch-connector"><span></span><span></span></div>
+        <div class="arch-row">
+          <div class="arch-label"><small>LAYER 02</small><strong>控制与治理层</strong></div>
+          <div class="arch-cells">
+            <div class="arch-cell cyan"><strong>模式目录</strong><small>公共 ID、标签、task kind、来源与表面</small><code>operation-modes.ts</code></div>
+            <div class="arch-cell cyan"><strong>API / Inspectors</strong><small>unknown 输入、safe read view、可执行模型与条件预检</small><code>server/http.ts · schedule-template-validation.ts</code></div>
+            <div class="arch-cell cyan"><strong>TaskQueue</strong><small>本地持久化、单槽串行、日志、恢复与任务组</small><code>server/task-queue.ts</code></div>
+            <div class="arch-cell cyan"><strong>模式编排</strong><small>稳定 mode runner、平台顺序、抓取事务与交付收口</small><code>src/mode-runners/</code></div>
+          </div>
+        </div>
+        <div class="arch-connector"><span></span><span></span></div>
+        <div class="arch-row">
+          <div class="arch-label"><small>LAYER 03</small><strong>业务领域层</strong></div>
+          <div class="arch-cells six">
+            <div class="arch-cell orange"><strong>普通抓取</strong><small>单岗 / 批量 / 全平台</small></div>
+            <div class="arch-cell orange"><strong>搜索资产</strong><small>筛选发现、条件集、订阅管理</small></div>
+            <div class="arch-cell orange"><strong>Talent Mapping</strong><small>市场扫描、详情补全、审核与变化</small></div>
+            <div class="arch-cell orange"><strong>Boss 专属域</strong><small>人才、会话、自动沟通、岗位同步</small></div>
+            <div class="arch-cell orange"><strong>RAG 知识域</strong><small>事实、检索、回答、评估与运维</small></div>
+            <div class="arch-cell orange"><strong>报告与交付</strong><small>评分、路由、Markdown、DOCX、SMTP</small></div>
+          </div>
+        </div>
+        <div class="arch-connector"><span></span><span></span></div>
+        <div class="arch-row">
+          <div class="arch-label"><small>LAYER 04</small><strong>平台与执行层</strong></div>
+          <div class="arch-cells">
+            <div class="arch-cell violet"><strong>PlatformAdapter</strong><small>跨平台业务合同与能力发现</small><code>platforms/types.ts</code></div>
+            <div class="arch-cell violet"><strong>平台语义动作</strong><small>导航、筛选、候选、详情、交付、会话</small><code>platforms/*/actions</code></div>
+            <div class="arch-cell violet"><strong>浏览器基础设施</strong><small>认证会话、deadline、节奏、连续指针</small><code>browser/</code></div>
+            <div class="arch-cell violet"><strong>模型与外部服务</strong><small>OpenAI 兼容模型、SMTP、可选 Qdrant</small><code>llm/ · reporting/ · rag/</code></div>
+          </div>
+        </div>
+        <div class="arch-connector"><span></span><span></span></div>
+        <div class="arch-row">
+          <div class="arch-label"><small>LAYER 05</small><strong>事实与产物层</strong></div>
+          <div class="arch-cells">
+            <div class="arch-cell green"><strong>平台岗位事实</strong><small>JD、简历、seen、评分、运行与路由</small><code>data/&lt;platform&gt;/jobs</code></div>
+            <div class="arch-cell green"><strong>独立领域事实</strong><small>Mapping observation、Boss 回执与同步运行</small><code>data/talent-mapping · data/boss</code></div>
+            <div class="arch-cell green"><strong>运行态</strong><small>raw 任务/计划、safe view、轮次；重启可审计</small><code>data/runtime</code></div>
+            <div class="arch-cell green"><strong>派生产物</strong><small>报告、导出、邮件结果；向量索引可重建</small><code>exports · Qdrant</code></div>
+          </div>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--blue-soft)"></i> 用户入口</span>
+        <span><i style="background:var(--cyan-soft)"></i> 控制与安全</span>
+        <span><i style="background:var(--orange-soft)"></i> 业务能力</span>
+        <span><i style="background:var(--violet-soft)"></i> 平台执行</span>
+        <span><i style="background:var(--green-soft)"></i> 权威事实 / 产物</span>
+      </div>
+    </section>
+
+    <section class="section shell" id="domains">
+      <div class="section-head">
+        <div><p class="eyebrow">02 · Product domains</p><h2>七个功能域，各有生命周期</h2></div>
+        <p class="section-intro">普通抓取是主干，但不是所有能力的“父流程”。订阅管理、Talent Mapping、RAG 问答和 Boss 独立操作都通过模式隔离，避免把副作用带入不相关的数据域。</p>
+      </div>
+
+      <div class="domain-grid">
+        <article class="domain-card hero-domain">
+          <span class="domain-number">DOMAIN 01 · CORE</span>
+          <h3>普通候选抓取与评分</h3>
+          <p>从岗位/JD 与搜索来源出发，完成平台搜索、候选列表读取、身份核验、简历保存、seen、模型评分、结果路由、报告与邮件。支持单岗、jobs-file 批量以及按固定顺序运行的 all。</p>
+          <div class="domain-tags"><span>resume-capture</span><span>batch</span><span>saved / direct</span><span>score</span><span>report</span><span>email</span></div>
+        </article>
+        <article class="domain-card">
+          <span class="domain-number">DOMAIN 02</span>
+          <h3>搜索资产与订阅管理</h3>
+          <p>维护筛选 catalog、应用层输入和不可变 revision 条件集；订阅管理只验证条件与结果，可显式保存，但不打开候选详情、不写 seen。</p>
+          <div class="domain-tags"><span>filter catalog</span><span>condition set</span><span>subscription.manage</span></div>
+        </article>
+        <article class="domain-card wide">
+          <span class="domain-number">DOMAIN 03 · ISOLATED</span>
+          <h3>Talent Mapping</h3>
+          <p>版本化计划驱动 51job、Liepin、Zhilian 的市场扫描与受控详情补全，写 observation/checkpoint，生成公司岗位矩阵、覆盖、变化与导出；实体关联和模型分类必须人工审核。</p>
+          <div class="domain-tags"><span>plan</span><span>scan</span><span>enrich</span><span>observation</span><span>review</span><span>change report</span></div>
+        </article>
+        <article class="domain-card wide">
+          <span class="domain-number">DOMAIN 04 · BOSS EXTENSION</span>
+          <h3>Boss 直猎邦 Pro</h3>
+          <p>一部分作为普通抓取的显式第 4 阶段，另一部分保持 Boss-only：推荐/深搜、精确打招呼、原子会话、未读自动审查、职位/JD 同步。高层搜索要求非空关键词并只最终提交一次；所有变更动作以稳定 ID、确认和 durable receipt 防止重复执行。</p>
+          <div class="domain-tags"><span>capture opt-in</span><span>exact search</span><span>talent</span><span>greet</span><span>chat receipt</span><span>job sync</span></div>
+        </article>
+        <article class="domain-card">
+          <span class="domain-number">DOMAIN 05</span>
+          <h3>RAG 知识与质量闭环</h3>
+          <p>JD 和经验证的招聘方事实进入本地 JSONL，经过分块、嵌入与混合检索回答问题；证据不足时明确 no-answer。Qdrant 只是可重建加速层。</p>
+          <div class="domain-tags"><span>facts</span><span>hybrid search</span><span>answer logs</span><span>eval</span></div>
+        </article>
+        <article class="domain-card">
+          <span class="domain-number">DOMAIN 06</span>
+          <h3>运营控制台与助手</h3>
+          <p>React 页面读取本地 HTTP API，集中展示健康度、任务、岗位、候选人、Mapping、Boss、自动化与知识运维；助手只产草稿，不执行任意命令。</p>
+          <div class="domain-tags"><span>React</span><span>HTTP API</span><span>read model</span><span>assistant draft</span></div>
+        </article>
+        <article class="domain-card">
+          <span class="domain-number">DOMAIN 07</span>
+          <h3>报告、交付与离线导出</h3>
+          <p>将评分与路由汇总为 Markdown 和邮件；Zhilian 使用本轮分享链接，Liepin/Boss 支持平台内转发。DOCX 是离线维护工具，不进入正常抓取编排。</p>
+          <div class="domain-tags"><span>Markdown</span><span>SMTP</span><span>routing</span><span>DOCX</span></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section shell" id="flow">
+      <div class="section-head">
+        <div><p class="eyebrow">03 · Capture pipeline</p><h2>普通抓取：九步受控流水线</h2></div>
+        <p class="section-intro">这是最完整的写状态链路。关键点不是“抓到了多少”，而是每一步都保留身份、deadline 与落盘证据，失败时明确哪些状态已经成立、哪些仍可重试。</p>
+      </div>
+
+      <div class="flow-wrap" aria-label="普通抓取九步流程">
+        <div class="flow">
+          <div class="flow-step"><div class="step-card"><span class="step-index">01</span><strong>模式与输入解析</strong><p>校验 mode-id、平台、single/batch、JD 与搜索来源组合。</p><code>operation-modes · index</code></div></div>
+          <div class="flow-step"><div class="step-card"><span class="step-index">02</span><strong>岗位事实复用</strong><p>新 jobKey 解析 JD；复跑复用平台隔离的 jd.json 与保存设置。</p><code>parsers · JobStore</code></div></div>
+          <div class="flow-step"><div class="step-card"><span class="step-index">03</span><strong>全局只读预检</strong><p>all 在任何浏览器动作前校验平台岗位、条件集与筛选输入。</p><code>normalizers · preflight</code></div></div>
+          <div class="flow-step"><div class="step-card"><span class="step-index">04</span><strong>会话与认证</strong><p>加载平台 storage state，复用有头浏览器；失效时给出刷新路径。</p><code>browser/session</code></div></div>
+          <div class="flow-step"><div class="step-card"><span class="step-index">05</span><strong>搜索与条件核验</strong><p>saved 精确选择订阅；direct 完整应用条件。Boss 空关键词在页面变更前拒绝，非空条件只最终提交一次。</p><code>search · platform actions</code></div></div>
+          <div class="flow-step"><div class="step-card"><span class="step-index">06</span><strong>候选列表与去重</strong><p>读取稳定列表/明确空态，以本地 seen 过滤已成功捕获候选。</p><code>extractCandidateList</code></div></div>
+          <div class="flow-step"><div class="step-card"><span class="step-index">07</span><strong>详情身份与捕获</strong><p>开详情前后复核身份；完成必要平台交付后保存结构化简历。</p><code>open · verify · parse · close</code></div></div>
+          <div class="flow-step"><div class="step-card"><span class="step-index">08</span><strong>seen、评分与路由</strong><p>成功捕获先写 seen，再评分；评分失败落失败产物且不回滚。</p><code>scores · routing outbox</code></div></div>
+          <div class="flow-step"><div class="step-card"><span class="step-index">09</span><strong>运行、报告与邮件</strong><p>写轻量 RunResult，导出 Markdown，并按显式/保存设置交付。</p><code>results · exports · SMTP</code></div></div>
+        </div>
+      </div>
+
+      <div class="semantics-grid">
+        <div class="semantic success"><strong>明确空结果 = 成功</strong><p>平台给出可验证的 0 候选证据时，本轮成功结束，不伪装成提取失败。</p></div>
+        <div class="semantic retry"><strong>捕获前失败 = 可重试</strong><p>详情打开、身份、转发或解析未完成时，不写 seen，候选保留到下一轮。</p></div>
+        <div class="semantic neutral"><strong>捕获后评分失败 ≠ 回滚</strong><p>简历已成功保存即成为 seen；评分失败单独落失败 artifact。</p></div>
+        <div class="semantic fail"><strong>不明确结果 ≠ 自动重试</strong><p>外部点击已可能派发但结果证据不完整时停止并保留诊断，不用第二次动作猜测第一次是否成功。</p></div>
+      </div>
+    </section>
+
+    <section class="section shell" id="modes">
+      <div class="section-head">
+        <div><p class="eyebrow">04 · Operation modes</p><h2>14 个稳定业务模式</h2></div>
+        <p class="section-intro">模式目录是 CLI、服务端、助手和前端之间的共享语义源。用下方按钮按运行表面筛选；卡片中的 search source 表示该模式是否固定搜索来源。</p>
+      </div>
+
+      <div class="mode-toolbar">
+        <div class="mode-filters" role="group" aria-label="按运行表面筛选">
+          <button class="filter-btn active" type="button" data-surface="all">全部</button>
+          <button class="filter-btn" type="button" data-surface="cli">CLI</button>
+          <button class="filter-btn" type="button" data-surface="manual">手动</button>
+          <button class="filter-btn" type="button" data-surface="assistant">助手</button>
+          <button class="filter-btn" type="button" data-surface="schedule">调度</button>
+        </div>
+        <div class="mode-count">当前显示 <strong id="modeCount">14</strong> 个模式</div>
+      </div>
+      <div class="mode-grid" id="modeGrid" aria-live="polite"></div>
+    </section>
+
+    <section class="section shell" id="platforms">
+      <div class="section-head">
+        <div><p class="eyebrow">05 · Platform boundary</p><h2>三核平台 + 一个显式扩展</h2></div>
+        <p class="section-intro">PlatformAdapter 统一业务输入输出，但不抹平平台差异。每个平台动作自己拥有 selector、兼容 fallback、节奏、就绪判断和后置条件。</p>
+      </div>
+
+      <div class="order-banner" aria-label="全平台顺序">
+        <span class="order-node">01 · 51job</span><span class="order-line"></span>
+        <span class="order-node">02 · Liepin</span><span class="order-line"></span>
+        <span class="order-node">03 · Zhilian</span><span class="order-line"></span>
+        <span class="order-node optional">04 · Boss（includeBoss）</span>
+      </div>
+
+      <div class="platform-grid">
+        <article class="platform-card">
+          <span class="platform-chip">CORE / 01</span><h3>前程无忧</h3><span class="platform-role">51job · 默认主流程</span>
+          <ul><li>订阅卡片或直接人才搜索</li><li>默认按“我已看”策略校准结果</li><li>只读取推荐分界前的主结果列表</li><li>详情通常是独立页面生命周期</li></ul>
+          <div class="platform-note">优势：订阅入口身份和结果 generation 验证较完整。</div>
+        </article>
+        <article class="platform-card">
+          <span class="platform-chip">CORE / 02</span><h3>猎聘</h3><span class="platform-role">liepin · 默认主流程</span>
+          <ul><li>快捷搜索或直接关键词搜索</li><li>始终使用有头浏览器并支持复用</li><li>默认“隐藏已查看”</li><li>新增候选可先转发常用联系人</li></ul>
+          <div class="platform-note">捕获规则：转发失败不解析、不写 seen，详情保留检查。</div>
+        </article>
+        <article class="platform-card">
+          <span class="platform-chip">CORE / 03</span><h3>智联招聘</h3><span class="platform-role">zhilian · 默认主流程</span>
+          <ul><li>快捷搜索标签或直接搜索</li><li>默认“未看过”，不改动“未聊过”</li><li>简历详情位于当前页 modal</li><li>普通抓取独立复制分享链接交付</li></ul>
+          <div class="platform-note">边界：Talent Mapping 只读简历，不触发分享/交付动作。</div>
+        </article>
+        <article class="platform-card">
+          <span class="platform-chip">EXTENSION / 04</span><h3>Boss 直猎邦</h3><span class="platform-role">boss · 显式 opt-in</span>
+          <ul><li>普通抓取/批量/订阅可作为第 4 阶段</li><li>saved 需要完整原生订阅身份</li><li>最终搜索拒绝空关键词并要求一次可观察结果周期</li><li>另有独立人才、会话、自动沟通、职位同步</li></ul>
+          <div class="platform-note">安全：非提交恢复可精确清空关键词；高层空搜索在页面变更前失败。普通 all 不会隐式触发 Boss 专属联系动作。</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section shell" id="data">
+      <div class="section-head">
+        <div><p class="eyebrow">06 · Data architecture</p><h2>本地事实优先，索引只是加速层</h2></div>
+        <p class="section-intro">普通岗位、Talent Mapping、Boss 回执和运行队列各自拥有清晰目录。平台隔离是第一维度；跨平台同名岗位与同名候选都不会自动合并。</p>
+      </div>
+
+      <div class="split">
+        <div class="panel dark">
+          <h3>权威目录树</h3>
+          <p>省略了动态文件名，但保留生命周期边界。</p>
+          <div class="data-tree">
+            <div class="tree-row"><span>▾</span><b>data/</b><small>本地事实根</small></div>
+            <div class="tree-row tree-indent-1"><span>├</span><b>&lt;platform&gt;/jobs/&lt;jobKey&gt;/</b><small>JD · resumes · seen · scores · results · rag</small></div>
+            <div class="tree-row tree-indent-1"><span>├</span><b>&lt;platform&gt;/filter-catalog/</b><small>筛选事实与应用选项</small></div>
+            <div class="tree-row tree-indent-1"><span>├</span><b>talent-mapping/&lt;mappingKey&gt;/</b><small>observations · runs · views · exports</small></div>
+            <div class="tree-row tree-indent-1"><span>├</span><b>boss/chat-review/</b><small>自动审查设置、状态与运行</small></div>
+            <div class="tree-row tree-indent-1"><span>├</span><b>boss/chat-operations/</b><small>intent durable receipts</small></div>
+            <div class="tree-row tree-indent-1"><span>├</span><b>boss/job-sync/</b><small>职位快照与同步运行</small></div>
+            <div class="tree-row tree-indent-1"><span>└</span><b>runtime/</b><small>raw tasks/schedules · safe views · rounds · leases</small></div>
+            <div class="tree-row"><span>•</span><b>storage-state*.json</b><small>平台隔离登录态</small></div>
+          </div>
+          <div class="source-badge"><i></i> JSON / JSONL 是 source of truth</div>
+        </div>
+
+        <div class="panel">
+          <h3>四条数据原则</h3>
+          <p>这些原则决定了失败恢复、审计和后续扩展方式。</p>
+          <div class="data-rule"><span class="rule-icon">P1</span><div><strong>平台隔离优先</strong><p>普通岗位路径从 platform 开始；关键词相同也不能跨平台复用 job record。</p></div></div>
+          <div class="data-rule"><span class="rule-icon">P2</span><div><strong>raw / safe / executable 分离</strong><p>历史或畸形数据保持原始证据；读取投影去敏且可渲染，只有完整校验后才产生可执行模型。</p></div></div>
+          <div class="data-rule"><span class="rule-icon">P3</span><div><strong>写入与副作用有闭合证据</strong><p>seen、outbox、receipt、lease 与 revision 可回溯；身份或外部结果不明确时不自动重复动作。</p></div></div>
+          <div class="data-rule"><span class="rule-icon">P4</span><div><strong>独立事实保留，派生索引可重建</strong><p>Mapping、Boss 与 RAG 保留各自本地权威事实；Qdrant 等外部索引永远不成为唯一副本。</p></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section shell" id="console">
+      <div class="section-head">
+        <div><p class="eyebrow">07 · Console & control plane</p><h2>前端是运营读写面，不是第二套业务内核</h2></div>
+        <p class="section-intro">React 不维护自己的模式语义；它从服务端读取目录，通过 HTTP normalizer 与 TaskQueue 进入同一 CLI 主编排。ReadModel 直接投影本地事实供页面查看。</p>
+      </div>
+
+      <div class="console-stack">
+        <div class="stack-column">
+          <h3>React 页面</h3>
+          <div class="stack-items">
+            <div class="stack-item">控制台健康度<code>DashboardPage</code></div>
+            <div class="stack-item">任务 / 新建任务 / 自动化<code>Tasks · NewTask · Automation</code></div>
+            <div class="stack-item">岗位、候选人与人才地图<code>Jobs · TalentMappings</code></div>
+            <div class="stack-item">Boss 工作台 / 条件集 / 知识<code>Boss · SearchConditionSets · Knowledge</code></div>
+            <div class="stack-item">智能助手 / 设置<code>Assistant · Settings</code></div>
+          </div>
+        </div>
+        <div class="stack-arrow">→</div>
+        <div class="stack-column">
+          <h3>HTTP 控制面</h3>
+          <div class="stack-items">
+            <div class="stack-item">模式与健康<code>/api/operation-modes · /dashboard/health</code></div>
+            <div class="stack-item">任务与计划<code>/api/tasks/* · /api/schedules/*</code></div>
+            <div class="stack-item">助手三段式<code>chat → validate → confirm</code></div>
+            <div class="stack-item">领域 API<code>jobs · talent-mappings · boss · rag</code></div>
+            <div class="stack-item">运营资产<code>filter catalogs · condition sets · artifacts</code></div>
+          </div>
+        </div>
+        <div class="stack-arrow">→</div>
+        <div class="stack-column">
+          <h3>服务与执行</h3>
+          <div class="stack-items">
+            <div class="stack-item">输入 normalizer / preflight<code>task-normalizers · condition-set-preflight</code></div>
+            <div class="stack-item">单槽持久化队列<code>TaskQueue → index.main</code></div>
+            <div class="stack-item">循环调度器<code>TaskScheduler → queued group</code></div>
+            <div class="stack-item">领域 ReadModel<code>Job · Boss · Mapping · Artifact</code></div>
+            <div class="stack-item">本地事实目录<code>data/*</code></div>
+          </div>
+        </div>
+      </div>
+      <div class="queue-note"><strong>运行特征：</strong> TaskQueue 一次只运行一个任务。调度器读取 raw 计划后通过同一 inspector 生成 safe view、稳定 issue 与可执行模板；畸形历史计划保持可读并暂停，不因 GET 被改写。入队前还会重读快照与租约，避免旧进程覆盖外部更新。</div>
+    </section>
+
+    <section class="section shell" id="audit">
+      <div class="section-head">
+        <div><p class="eyebrow">08 · Architecture assessment</p><h2>当前架构：执行所有权已收敛，运营边界仍显式</h2></div>
+        <p class="section-intro">以下判断来自当前代码、模式目录、路由、作用域文档与长期项目说明。它们不是实施计划，而是理解系统演进位置的“架构体检”。</p>
+      </div>
+
+      <div class="audit-grid">
+        <article class="audit-card"><span class="audit-mark">A+</span><h3>产品语义有单一目录</h3><p><code>src/operation-modes.ts</code> 把 ID、标签、task kind、search source 和 surface 统一起来，显著降低 CLI、助手和前端各说各话的风险。</p></article>
+        <article class="audit-card"><span class="audit-mark">A</span><h3>数据恢复与审计能力强</h3><p>本地 JSON/JSONL 权威；raw/safe/executable 分离、原子写、revision、outbox、receipt、lease 和 run artifact 让历史坏数据与“做过什么”都可离线复盘。</p></article>
+        <article class="audit-card"><span class="audit-mark">A</span><h3>危险外部动作受约束</h3><p>身份在动作前重验，Boss 变更使用 intent ID，助手先草稿再确认；外部结果不明确时不自动重复动作，平台 action 继承 caller deadline 与连续指针。</p></article>
+        <article class="audit-card"><span class="audit-mark">✓</span><h3>入口与捕获执行 owner 已分离</h3><p><code>src/index.ts</code> 只保留 CLI 规范化、公共平台选择、依赖装配和显式分派；jobs-file 解释、捕获配置/事务归属 <code>src/mode-runners/</code>，候选生命周期、outbox、评分路由与运行结果归属 <code>src/capture-engine.ts</code>。</p></article>
+        <article class="audit-card"><span class="audit-mark">✓</span><h3>页面动作所有权已收口</h3><p>51job 平台控件已迁出 <code>browser/</code>；Liepin/Zhilian 多域 <code>internal-page-actions</code> 已删除；Boss 普通搜索已分为 navigation、search/submit、filter、search entry、candidate、detail 和 post-open owner，且 search/filter 无双向依赖。</p></article>
+        <article class="audit-card"><span class="audit-mark">✓</span><h3>调度合同与安全读取已收口</h3><p>循环资格由共享 inspector/runtime guard 定义；历史 <code>null</code>、未知或 legacy 模板通过 safe view 保持 list/detail 可读并暂停，GET 只派生诊断不改 raw。创建、恢复、控制和入队前均 fail closed，最终 gate 重读快照。</p></article>
+        <article class="audit-card"><span class="audit-mark">✓</span><h3>领域隔离方向正确</h3><p>Talent Mapping、RAG 与 Boss durable receipt 没有被强塞进普通岗位流水线，各自拥有事实模型与 read model，后续更容易独立演进。</p></article>
+        <article class="audit-card"><span class="audit-mark">✓</span><h3>本地控制台暴露边界已加固</h3><p>loopback 保持本地兼容；非 loopback 必须同时配置 Bearer token 和精确 Origin allowlist，CORS 不再通配且 token 恒定时间比较。它仍明确不是多租户 SaaS/Auth Gateway。</p></article>
+        <article class="audit-card"><span class="audit-mark">→</span><h3>剩余验收边界</h3><p>四平台登录态/只读主页已通过真实 canary，Boss 当前列表完成脱敏解析，空关键词负向 canary 证明前置拒绝且 URL、状态与资源计数不变。候选详情、联系/转发、保存订阅、邮件以及非 loopback 部署仍需独立授权与回滚边界。</p></article>
+      </div>
+
+      <details class="code-index">
+        <summary>展开：架构结论对应的代码锚点</summary>
+        <div class="code-table">
+          <div class="th">领域</div><div class="th">主要代码</div><div class="th">职责</div>
+          <div>入口 / 编排</div><div><code>src/index.ts · src/operation-modes.ts · src/mode-runners/ · src/capture-engine.ts</code></div><div>参数与公共分派、模式语义、平台顺序、捕获事务与候选/评分引擎</div>
+          <div>平台执行</div><div><code>src/platforms/registry.ts · types.ts · */actions/</code></div><div>PlatformAdapter 注册、语义动作与平台解析</div>
+          <div>浏览器</div><div><code>src/browser/session.ts · pacing.ts · platform-action-context.ts</code></div><div>认证会话、复用、deadline、节奏与连续指针</div>
+          <div>搜索资产</div><div><code>src/search/search-subscription.ts · search-condition-sets.ts</code></div><div>订阅管理、筛选应用、条件集生命周期</div>
+          <div>普通数据</div><div><code>src/storage/job-store.ts · src/types/job.ts</code></div><div>岗位、简历、seen、评分、运行、路由与 outbox</div>
+          <div>Talent Mapping</div><div><code>src/talent-mapping/workflow.ts · store.ts · aggregation.ts</code></div><div>计划、扫描/补全、观察、审核、变化与导出</div>
+          <div>RAG</div><div><code>src/rag/service.ts · rag-store.ts · hybrid-search.ts</code></div><div>事实分块、嵌入、检索、回答、日志与质量</div>
+          <div>控制台</div><div><code>src/server/http.ts · schedule-template-validation.ts · task-queue.ts · task-scheduler.ts</code></div><div>HTTP、raw/safe/executable 检查、串行执行、租约、计划与 read model</div>
+          <div>前端</div><div><code>frontend/src/app/router.tsx · frontend/src/features/</code></div><div>内部运营页面、API 投影与安全确认界面</div>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="shell footer-grid">
+      <div>
+        <strong>AutoRecruit 功能架构全景</strong>
+        <p>基于仓库当前代码、AGENTS 约束、README 与《项目说明文档》整理。代码与 schema 是行为事实；本页面是便于理解与讨论的架构快照，不替代运行合同。</p>
+      </div>
+      <div class="footer-meta">generated 2026-08-08<br>single-file · offline-ready</div>
+    </div>
+  </footer>
+
+  <script>
+    const modes = [
+      { id: 'capture.reuse-job-settings', label: '按岗位设置抓取', group: '候选抓取', kind: 'resume-capture', source: 'reuse', surfaces: ['assistant','manual','schedule','cli'], summary: '复用岗位已保存的搜索、筛选与交付设置执行普通抓取；可能写 seen、评分、导出和发送报告。' },
+      { id: 'capture.subscription-search', label: '订阅搜索', group: '候选抓取', kind: 'resume-capture', source: 'saved', surfaces: ['assistant','manual','schedule','cli'], summary: '从平台已保存订阅进入普通抓取，不切换为直接搜索，也不等同于订阅管理。' },
+      { id: 'capture.direct-search', label: '直接搜索', group: '候选抓取', kind: 'resume-capture', source: 'direct', surfaces: ['assistant','manual','schedule','cli'], summary: '完整应用并验证本次搜索条件后抓取；条件有 skipped/failed 时在打开详情前停止。' },
+      { id: 'batch.capture', label: '批量抓取', group: '批量任务', kind: 'batch', source: 'per item', surfaces: ['assistant','manual','schedule','cli'], summary: '以 jobs-file 作为唯一岗位定义源；岗位顺序是外层循环，平台顺序是内层循环。' },
+      { id: 'subscription.manage', label: '订阅管理', group: '搜索资产', kind: 'search-subscription', source: '—', surfaces: ['assistant','manual','schedule','cli'], summary: '应用条件并读取结果；不抓候选、不打开详情、不写 seen、不评分。只有显式开启才保存平台订阅。' },
+      { id: 'talent-mapping.run', label: '人才地图', group: '市场研究', kind: 'talent-mapping', source: 'plan', surfaces: ['assistant','manual','schedule'], summary: '独立市场扫描/详情补全流程，只支持三个核心平台，不进入普通岗位状态。' },
+      { id: 'boss.auto-chat', label: 'Boss 自动沟通', group: 'Boss 专属', kind: 'boss-auto-chat', source: '—', surfaces: ['assistant','manual'], summary: '审查 Boss 未读会话，按已确认策略评分、转发和联系；只可手工或助手确认执行，不能成为循环计划。' },
+      { id: 'boss.talent-search', label: 'Boss 人才发现', group: 'Boss 专属', kind: 'boss-talent-search', source: '—', surfaces: ['assistant'], summary: '读取推荐或深搜候选；默认只读，消耗匹配次数的动作仍需独立确认。' },
+      { id: 'boss.greet', label: 'Boss 打招呼', group: 'Boss 专属', kind: 'boss-greet', source: '—', surfaces: ['assistant'], summary: '按候选人稳定 ID 与预期身份精确定位，只发送一次；已联系时幂等返回。' },
+      { id: 'boss.chat-operation', label: 'Boss 会话操作', group: 'Boss 专属', kind: 'boss-chat-operation', source: '—', surfaces: ['assistant'], summary: '精确读取或修改一个会话；变更要求确认和唯一 intent ID，并写 durable receipt。' },
+      { id: 'boss.job-sync', label: 'Boss 职位同步', group: 'Boss 专属', kind: 'boss-job-sync', source: '—', surfaces: ['assistant','schedule'], summary: '读取职位管理页，按 Boss 职位 ID 同步 JD；hash 未变化不重写，解析失败不覆盖有效版本。' },
+      { id: 'session.login-refresh', label: '登录态刷新', group: '运行保障', kind: 'login-refresh', source: '—', surfaces: ['assistant','manual','schedule'], summary: '通过平台登录流程刷新指定平台的隔离 storage state，供后续自动化复用。' },
+      { id: 'rag.ops', label: 'RAG 运维', group: '知识运营', kind: 'rag-ops', source: '—', surfaces: ['assistant'], summary: '受控执行 doctor、review、metrics、ops 或 rebuild，不接受任意 shell 命令。' },
+      { id: 'rag.answer', label: 'JD / RAG 问答', group: '知识问答', kind: 'rag-answer', source: '—', surfaces: ['assistant','manual'], summary: '只基于岗位与已验证事实回答，不打开浏览器，不抓取、评分、导出或发送邮件。' }
+    ];
+
+    const surfaceLabels = { assistant: '助手', manual: '手动', schedule: '调度', cli: 'CLI' };
+    const modeGrid = document.getElementById('modeGrid');
+    const modeCount = document.getElementById('modeCount');
+
+    function renderModes(surface = 'all') {
+      const visibleModes = surface === 'all' ? modes : modes.filter(mode => mode.surfaces.includes(surface));
+      modeCount.textContent = String(visibleModes.length);
+      modeGrid.innerHTML = visibleModes.map(mode => `
+        <article class="mode-card">
+          <div class="mode-head"><span class="mode-group">${mode.group}</span><span class="mode-source">source: ${mode.source}</span></div>
+          <h3>${mode.label}</h3>
+          <span class="mode-id">${mode.id} → ${mode.kind}</span>
+          <p>${mode.summary}</p>
+          <div class="surface-list">${mode.surfaces.map(item => `<span class="surface ${item}">${surfaceLabels[item]}</span>`).join('')}</div>
+        </article>`).join('');
+    }
+
+    document.querySelectorAll('.filter-btn').forEach(button => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.filter-btn').forEach(item => item.classList.remove('active'));
+        button.classList.add('active');
+        renderModes(button.dataset.surface);
+      });
+    });
+
+    const progress = document.getElementById('scrollProgress');
+    const navLinks = [...document.querySelectorAll('.reading-nav a')];
+    const sections = navLinks.map(link => document.querySelector(link.getAttribute('href'))).filter(Boolean);
+
+    function updateScrollState() {
+      const max = document.documentElement.scrollHeight - window.innerHeight;
+      progress.style.width = `${max > 0 ? (window.scrollY / max) * 100 : 0}%`;
+      let activeId = sections[0]?.id;
+      sections.forEach(section => { if (section.getBoundingClientRect().top <= 150) activeId = section.id; });
+      navLinks.forEach(link => link.classList.toggle('active', link.getAttribute('href') === `#${activeId}`));
+    }
+
+    renderModes();
+    updateScrollState();
+    window.addEventListener('scroll', updateScrollState, { passive: true });
+    window.addEventListener('resize', updateScrollState);
+  </script>
+</body>
+</html>

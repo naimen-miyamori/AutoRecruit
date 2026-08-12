@@ -38,7 +38,7 @@ export const planDocumentTemplate = `# <计划标题>
 
 > 状态：计划中。
 >
-> 最近更新：<YYYY-MM-DD>。提交策略：本地计划归档，受 \`docs/\` 忽略规则保护，不纳入 Git 提交。
+> 最近更新：<YYYY-MM-DD>。提交策略：本地计划归档，受 \`docs/plan/\` 忽略规则保护，不纳入 Git 提交。
 
 ## 1. 背景与目标
 

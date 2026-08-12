@@ -3,9 +3,10 @@
 ## Scope and Inheritance
 
 These instructions apply to the isolated market-research domain under
-src/talent-mapping/. Apply the root AGENTS.md first. Also read the platform scoped document when
-changing a platform action, src/server/AGENTS.md when changing routes, queueing, scheduling, or
-model-task execution, and frontend/AGENTS.md when changing the console.
+src/talent-mapping/. Apply the root AGENTS.md first. Also read `src/platforms/AGENTS.md` and the
+matching platform scoped document when changing a platform action, `src/server/AGENTS.md` when
+changing routes, queueing, scheduling, or model-task execution, and `frontend/AGENTS.md` when
+changing the console.
 
 ## Ownership and Boundaries
 
@@ -66,10 +67,11 @@ model-task execution, and frontend/AGENTS.md when changing the console.
 ## Verification
 
 - Project plan, store, aggregation, export, quality, workflow, CLI, and server behavior:
-  src/scripts/test-talent-mapping-*.ts and npm run test:talent-mapping.
+  `src/scripts/test-talent-mapping-*.ts` and `rtk npm run test:talent-mapping`.
 - Scheduler restrictions and TaskQueue integration: src/scripts/test-task-scheduler.ts and
   src/scripts/test-server-api.ts.
 - Console workflow, review UI, and task presentation: src/scripts/test-frontend-client.ts and
-  npm run test:web.
-- Run npm run typecheck after contract changes; run npm run test and npm run build when a shared
-  type, route, scheduling, persistence, or frontend contract changes.
+  `rtk npm run test:web`.
+- Run `rtk npm run typecheck` after contract changes; run `rtk npm run test` and
+  `rtk npm run build` when a shared type, route, scheduling, persistence, or frontend contract
+  changes.
