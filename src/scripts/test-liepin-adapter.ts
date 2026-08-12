@@ -15,10 +15,12 @@ import { readLiepinCandidateProfileDetail } from '../platforms/liepin/actions/re
 import { chromium } from 'playwright';
 import {
   inspectExistingLiepinSavedSearch,
+  openBoundLiepinSavedSearch,
   parseLiepinAppliedSearchKeyword,
   readLiepinAppliedSearchKeyword,
   savePreparedLiepinSearchCondition,
 } from '../platforms/liepin/actions/search-actions.js';
+import { buildCoreSavedSearchTarget } from '../search/saved-search-target.js';
 
 const originalDataDir = config.dataDir;
 const testTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autorecruit-liepin-adapter-'));
@@ -83,6 +85,64 @@ test('liepin saved-search observation reads the scoped Ant input when the body h
       /keyword evidence is ambiguous.*2 populated scoped inputs/i,
     );
   } finally {
+    await browser.close();
+  }
+});
+
+test('liepin strict saved-search identity ignores exact candidate text outside the quick-search region', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  const originalMin = config.playwright.actionDelayMinMsByPlatform.liepin;
+  const originalMax = config.playwright.actionDelayMaxMsByPlatform.liepin;
+  const originalApiFallbackTimeoutMs = config.playwright.apiFallbackTimeoutMs;
+  config.playwright.actionDelayMinMsByPlatform.liepin = 0;
+  config.playwright.actionDelayMaxMsByPlatform.liepin = 0;
+  config.playwright.apiFallbackTimeoutMs = 1;
+  try {
+    await page.route('https://h.liepin.com/search/getConditionItem', (route) => route.fulfill({
+      contentType: 'text/html; charset=utf-8',
+      body: '<html><body></body></html>',
+    }));
+    await page.goto('https://h.liepin.com/search/getConditionItem');
+    await page.setContent(`
+      <div>搜简历 搜索条件 人才搜索 快捷搜索</div>
+      <div class="quick-search-box clearfix">
+        <ul class="position clearfix">
+          <li class="save"><span class="info">优衣库</span></li>
+        </ul>
+      </div>
+      <div class="search-area">
+        <div class="search-auto-complete-box">
+          <input class="ant-select-selection-search-input" value="优衣库 李宁 无印良品 耐克 阿迪达斯 泡泡玛特 斐乐 名创优品">
+        </div>
+      </div>
+      <label class="hide-view-checkbox"><input type="checkbox" checked>隐藏已查看</label>
+      <div class="candidate-card"><span>优衣库</span><span>候选经历一</span></div>
+      <div class="candidate-card"><span>优衣库</span><span>候选经历二</span></div>
+      <div>共2位人选</div>
+    `);
+
+    const target = buildCoreSavedSearchTarget({
+      platform: 'liepin',
+      boundJobKey: '优衣库',
+      bindingRevision: 1,
+      name: '优衣库',
+      expectedKeyword: '优衣库 李宁 无印良品 耐克 阿迪达斯 泡泡玛特 斐乐 名创优品',
+    });
+    const opened = await openBoundLiepinSavedSearch(page, target, {
+      boundJobKey: '优衣库',
+      deadline: Date.now() + 10_000,
+      includeViewedCandidates: false,
+    });
+
+    assert.ok('observedName' in opened.evidence);
+    assert.equal(opened.evidence.observedName, '优衣库');
+    assert.equal(opened.evidence.observedKeyword, target.expectedKeyword);
+    assert.equal(opened.evidence.postcondition, 'opened-and-verified');
+  } finally {
+    config.playwright.actionDelayMinMsByPlatform.liepin = originalMin;
+    config.playwright.actionDelayMaxMsByPlatform.liepin = originalMax;
+    config.playwright.apiFallbackTimeoutMs = originalApiFallbackTimeoutMs;
     await browser.close();
   }
 });

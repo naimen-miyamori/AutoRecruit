@@ -280,6 +280,19 @@ export async function readLiepinSearchConditionResultTotal(page: Page): Promise<
   };
 }
 
+const liepinQuickSearchRegionSelector = [
+  '.quick-search-box',
+  '[data-testid*="quick-search"]',
+  '[data-test-id*="quick-search"]',
+].join(', ');
+
+function locateExactLiepinQuickSearchTags(page: Page, name: string): Locator | undefined {
+  const quickSearchRegions = page.locator(liepinQuickSearchRegionSelector);
+  const getByText = (quickSearchRegions as Partial<Pick<Locator, 'getByText'>>)
+    .getByText?.bind(quickSearchRegions);
+  return getByText?.(name, { exact: true });
+}
+
 
 async function clickLiepinQuickSearchTag(
   page: Page,
@@ -292,7 +305,12 @@ async function clickLiepinQuickSearchTag(
     return undefined;
   }
 
-  const tags = getByText(keyword, { exact: true });
+  // Candidate cards and other search-page content can repeat the saved-search
+  // name. Identity and the subsequent click must therefore share the same
+  // quick-search-region scope rather than counting exact text across the page.
+  const tags = locateExactLiepinQuickSearchTags(page, keyword)
+    ?? (options.requireUniqueExact ? undefined : getByText(keyword, { exact: true }));
+  if (!tags) return undefined;
   if (options.requireUniqueExact) {
     const visibleIndexes: number[] = [];
     const count = await tags.count();
@@ -673,9 +691,8 @@ async function waitForExactLiepinKeyword(page: Page, expectedKeyword: string, de
 }
 
 async function countVisibleExactLiepinQuickSearchTags(page: Page, name: string): Promise<number> {
-  const getByText = (page as Partial<Pick<Page, 'getByText'>>).getByText?.bind(page);
-  if (!getByText) return 0;
-  const tags = getByText(name, { exact: true });
+  const tags = locateExactLiepinQuickSearchTags(page, name);
+  if (!tags) return 0;
   let visible = 0;
   for (let index = 0; index < await tags.count(); index += 1) {
     if (await tags.nth(index).isVisible().catch(() => false)) visible += 1;
